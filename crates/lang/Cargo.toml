@@ -1,0 +1,9 @@
+[package]
+name = "std-deduce-lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Surface language: lexer, parser, elaborator, module system."
+
+[dependencies]
+std-deduce-kernel = { path = "../kernel" }

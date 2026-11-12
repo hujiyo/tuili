@@ -1,0 +1,72 @@
+-- 示例：刑法第二十条 —— 防卫过当的情形
+--
+-- 与「基本」那份的唯一差别：补上第二款的加重事实。
+-- 预期：
+--   · 防卫过当 乙行为 应被推出；
+--   · 「不负刑事责任 乙行为」应被 unless 阻断，不再成立；
+--   · 「应当负刑事责任 乙行为」应被推出。
+
+sort 人
+sort 侵害
+sort 行为
+
+pred 不法 : 侵害 → Prop
+pred 正在进行 : 侵害 → Prop
+pred 是侵害人 : 人 → 侵害 → Prop
+
+pred 制止 : 行为 → 侵害 → Prop
+pred 造成损害 : 行为 → 人 → Prop
+pred 正当防卫 : 行为 → Prop
+
+pred 超过必要限度 : 行为 → Prop
+pred 重大损害 : 行为 → Prop
+pred 防卫过当 : 行为 → Prop
+
+pred 不负刑事责任 : 行为 → Prop
+pred 应当负刑事责任 : 行为 → Prop
+
+obj 张三 : 人
+obj 李四 : 人
+obj 甲侵害 : 侵害
+obj 乙行为 : 行为
+
+axiom 侵害是不法的 : 不法 甲侵害
+axiom 侵害正在进行 : 正在进行 甲侵害
+axiom 李四是侵害人 : 是侵害人 李四 甲侵害
+axiom 乙是为了制止 : 制止 乙行为 甲侵害
+axiom 乙造成了损害 : 造成损害 乙行为 李四
+
+-- 第二款的加重事实：防卫行为明显超过必要限度、造成重大损害。
+axiom 超过限度 : 超过必要限度 乙行为
+axiom 损害重大 : 重大损害 乙行为
+
+rule 认定正当防卫 :
+  params a : 行为, e : 侵害, x : 人
+  premise 不法 e
+  premise 正在进行 e
+  premise 制止 a e
+  premise 造成损害 a x
+  premise 是侵害人 x e
+  conclude 正当防卫 a
+  source 刑法 第二十条 (version 2020)
+
+rule 正当防卫不负刑责 :
+  params a : 行为
+  premise 正当防卫 a
+  conclude 不负刑事责任 a
+  unless 防卫过当 a
+  source 刑法 第二十条 (version 2020)
+
+rule 认定防卫过当 :
+  params a : 行为
+  premise 正当防卫 a
+  premise 超过必要限度 a
+  premise 重大损害 a
+  conclude 防卫过当 a
+  source 刑法 第二十条 (version 2020)
+
+rule 防卫过当应负刑责 :
+  params a : 行为
+  premise 防卫过当 a
+  conclude 应当负刑事责任 a
+  source 刑法 第二十条 (version 2020)

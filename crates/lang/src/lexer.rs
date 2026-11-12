@@ -1,0 +1,239 @@
+//! Lexer. The surface syntax uses Lean-style keywords and Unicode, but the
+//! operator set is deliberately tiny so that a reader can hold it in their
+//! head.
+
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tok {
+    /// A bare identifier or keyword. `(`/`)` etc. are their own tokens.
+    Ident(String),
+    /// →, in, forall, Pi, lambda are all lowered to `Tok::Ident` keywords so
+    /// the parser does not care whether a user types "->" or "→".
+    Arrow,
+    Colon,
+    Comma,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    /// `:=`
+    Assign,
+    /// `:=` used as a definition separator is the same token; a distinct
+    /// token exists for `:` in lexical rendering of declarations.
+    Eq,
+    /// `∀`
+    Forall,
+    /// `λ`
+    Lambda,
+    /// `_` wildcard.
+    Underscore,
+    Newline,
+    Eof,
+}
+
+impl fmt::Display for Tok {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub tok: Tok,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// Lex a whole program into tokens, discarding whitespace and comments
+/// but keeping newlines (the grammar is line-oriented at the command level).
+pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
+    let mut out = Vec::new();
+    let bytes: Vec<char> = src.chars().collect();
+    let mut i = 0;
+    let mut line = 1;
+    let mut col = 1;
+
+    while i < bytes.len() {
+        let ch = bytes[i];
+        match ch {
+            ' ' | '\t' | '\r' => {
+                i += 1;
+                col += 1;
+            }
+            '\n' => {
+                out.push(Token {
+                    tok: Tok::Newline,
+                    line,
+                    col,
+                });
+                i += 1;
+                line += 1;
+                col = 1;
+            }
+            '-' if i + 1 < bytes.len() && (bytes[i + 1] == '-' || bytes[i + 1] == '>') => {
+                if bytes[i + 1] == '>' {
+                    out.push(Token {
+                        tok: Tok::Arrow,
+                        line,
+                        col,
+                    });
+                    i += 2;
+                    col += 2;
+                } else {
+                    // Line comment: skip to end of line.
+                    while i < bytes.len() && bytes[i] != '\n' {
+                        i += 1;
+                    }
+                }
+            }
+            '→' => {
+                out.push(Token {
+                    tok: Tok::Arrow,
+                    line,
+                    col,
+                });
+                i += 1;
+                col += 1;
+            }
+            ':' if i + 1 < bytes.len() && bytes[i + 1] == '=' => {
+                out.push(Token {
+                    tok: Tok::Assign,
+                    line,
+                    col,
+                });
+                i += 2;
+                col += 2;
+            }
+            ':' => {
+                out.push(Token {
+                    tok: Tok::Colon,
+                    line,
+                    col,
+                });
+                i += 1;
+                col += 1;
+            }
+            ',' => {
+                out.push(Token { tok: Tok::Comma, line, col });
+                i += 1;
+                col += 1;
+            }
+            '(' => {
+                out.push(Token { tok: Tok::LParen, line, col });
+                i += 1;
+                col += 1;
+            }
+            ')' => {
+                out.push(Token { tok: Tok::RParen, line, col });
+                i += 1;
+                col += 1;
+            }
+            '{' => {
+                out.push(Token { tok: Tok::LBrace, line, col });
+                i += 1;
+                col += 1;
+            }
+            '}' => {
+                out.push(Token { tok: Tok::RBrace, line, col });
+                i += 1;
+                col += 1;
+            }
+            '∀' => {
+                out.push(Token { tok: Tok::Forall, line, col });
+                i += 1;
+                col += 1;
+            }
+            'λ' => {
+                out.push(Token { tok: Tok::Lambda, line, col });
+                i += 1;
+                col += 1;
+            }
+            '=' => {
+                out.push(Token { tok: Tok::Eq, line, col });
+                i += 1;
+                col += 1;
+            }
+            '—' | '─' | '"' | '\'' => {
+                // Characters sometimes used to quote legal text; treat as a
+                // comment-ish delimiter and skip until the next newline, so
+                // quoted article text never derails lexing.
+                while i < bytes.len() && bytes[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '#' => {
+                // Command sigil: the *name* after it is the keyword.
+                out.push(Token { tok: Tok::Ident("#".into()), line, col });
+                i += 1;
+                col += 1;
+            }
+            c if c.is_alphanumeric() || c == '_' || is_cjk(c) || c == '\u{0027}' => {
+                let start = i;
+                let start_col = col;
+                while i < bytes.len() {
+                    let d = bytes[i];
+                    if d.is_alphanumeric()
+                        || d == '_'
+                        || is_cjk(d)
+                        || d == '\u{0027}'
+                        || d == '·'
+                        || d == '′'
+                    {
+                        i += 1;
+                        col += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let s: String = bytes[start..i].iter().collect();
+                let tok = match s.as_str() {
+                    "_" => Tok::Underscore,
+                    "forall" | "Pi" | "pi" => Tok::Forall,
+                    "fun" | "lambda" => Tok::Lambda,
+                    _ => Tok::Ident(s),
+                };
+                out.push(Token {
+                    tok,
+                    line,
+                    col: start_col,
+                });
+            }
+            other => {
+                return Err(LexError {
+                    msg: format!("无法识别的字符 `{other}`"),
+                    line,
+                    col,
+                })
+            }
+        }
+    }
+    out.push(Token {
+        tok: Tok::Eof,
+        line,
+        col,
+    });
+    Ok(out)
+}
+
+/// CJK ideographs are identifier characters here. This is the one place the
+/// language is deliberately not ASCII: legal and philosophical terms are
+/// written in Chinese, and forcing pinyin would be a tax with no benefit.
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F)
+}
+
+#[derive(Debug, Clone)]
+pub struct LexError {
+    pub msg: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+impl fmt::Display for LexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "第 {} 行第 {} 列：{}", self.line, self.col, self.msg)
+    }
+}
+impl std::error::Error for LexError {}

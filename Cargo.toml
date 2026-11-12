@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kernel",
+    "crates/lang",
+    "crates/reason",
+    "crates/cli",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[profile.release]
+lto = true

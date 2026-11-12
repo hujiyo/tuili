@@ -1,0 +1,28 @@
+//! The kernel: the single trusted component.
+//!
+//! Contract, kept deliberately small so it can be audited and, if necessary,
+//! replaced:
+//!
+//! * Terms use locally nameless (de Bruijn) indices.
+//! * Sorts form a predicate chain `Sort 0 : Sort 1 : Sort 2 : ...`
+//!   with no `Sort-in-Sort`. `Sort 0` is the sort of propositions.
+//! * The kernel never guesses: no unification, no metavariables, no instance
+//!   search, no implicit arguments. Those live in the elaborator (`lang`).
+//!   This boundary matters: the trusted core only ever answers yes or no.
+//! * The kernel is a checker, not a prover. Given a term and a claimed type
+//!   it accepts or rejects. It has no way to "just trust" a step.
+
+pub mod check;
+pub mod conv;
+pub mod env;
+pub mod error;
+pub mod norm;
+pub mod pretty;
+pub mod term;
+
+pub use env::{Ctx, Decl, DeclKind, Env, RuleDecl};
+pub use error::{Error, Result};
+pub use term::{name, Expr, Level, Name};
+
+pub const PROP: u32 = 0;
+pub const TYPE: u32 = 1;

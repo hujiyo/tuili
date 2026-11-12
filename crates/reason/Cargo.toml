@@ -1,0 +1,12 @@
+[package]
+name = "std-deduce-reason"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The reasoner: defeasible derivations and checkable proof trees."
+
+[dependencies]
+std-deduce-kernel = { path = "../kernel" }
+
+[dev-dependencies]
+std-deduce-lang = { path = "../lang" }

@@ -1,0 +1,11 @@
+[package]
+name = "std-deduce-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The command-line interface."
+
+[dependencies]
+std-deduce-kernel = { path = "../kernel" }
+std-deduce-lang = { path = "../lang" }
+std-deduce-reason = { path = "../reason" }
