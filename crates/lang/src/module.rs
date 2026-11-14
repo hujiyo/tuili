@@ -42,9 +42,7 @@ impl Library {
     /// on the first error the library is left unchanged (we work on a clone
     /// and only commit at the end).
     pub fn load(&mut self, name: &str, src: &str) -> Result<LoadReport, LoadError> {
-        let items = parser::parse(src).map_err(|e| LoadError {
-            msg: e.to_string(),
-        })?;
+        let items = parser::parse(src).map_err(|e| LoadError { msg: e.to_string() })?;
         let mut next = self.clone();
         let mut theory = Theory {
             name: name.to_string(),
@@ -70,7 +68,11 @@ impl Library {
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
-                Item::Obj { name: n, ty, source } => {
+                Item::Obj {
+                    name: n,
+                    ty,
+                    source,
+                } => {
                     // An individual is an axiom-like constant, but its type
                     // must be a *type* (a sort or a term of a sort), never a
                     // proposition. This catches `obj 张三 : 非法搜查 张三 甲宅`.
@@ -100,7 +102,11 @@ impl Library {
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
-                Item::Pred { name: n, ty, source } => {
+                Item::Pred {
+                    name: n,
+                    ty,
+                    source,
+                } => {
                     let ety = elab::elab_top(&next.env, &ty).map_err(|e| LoadError {
                         msg: format!("`pred {n}`：{}", e.msg),
                     })?;
@@ -119,7 +125,11 @@ impl Library {
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
-                Item::Axiom { name: n, ty, source } => {
+                Item::Axiom {
+                    name: n,
+                    ty,
+                    source,
+                } => {
                     let ety = elab::elab_top(&next.env, &ty).map_err(|e| LoadError {
                         msg: format!("`axiom {n}`：{}", e.msg),
                     })?;
@@ -165,6 +175,114 @@ impl Library {
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
+                Item::Contrary {
+                    left,
+                    right,
+                    source,
+                } => {
+                    let l = std_deduce_kernel::name(&left);
+                    let r = std_deduce_kernel::name(&right);
+                    for p in [&l, &r] {
+                        match next.env.get(p) {
+                            Some(d) if matches!(d.kind, std_deduce_kernel::DeclKind::Pred) => {}
+                            Some(_) => {
+                                return Err(LoadError {
+                                    msg: format!(
+                                        "`contrary {left} {right}`：`{p}` 不是谓词（pred）"
+                                    ),
+                                })
+                            }
+                            None => {
+                                return Err(LoadError {
+                                    msg: format!("`contrary {left} {right}`：未知谓词 `{p}`"),
+                                })
+                            }
+                        }
+                    }
+                    let al = pred_arity(&next.env, &l).unwrap_or(0);
+                    let ar = pred_arity(&next.env, &r).unwrap_or(0);
+                    if al != ar {
+                        return Err(LoadError {
+                            msg: format!(
+                                "`contrary {left} {right}`：两个谓词的参数个数不同（{al} vs {ar}）"
+                            ),
+                        });
+                    }
+                    for (a, b) in next.env.contrary_pairs() {
+                        if (a == l && b == r) || (a == r && b == l) {
+                            return Err(LoadError {
+                                msg: format!("`contrary {left} {right}`：这一对已经声明过了"),
+                            });
+                        }
+                    }
+                    let decl = Decl {
+                        name: std_deduce_kernel::name(&format!("contrary:{left}:{right}")),
+                        kind: std_deduce_kernel::DeclKind::Contrary { left: l, right: r },
+                        ty: Expr::Sort(0),
+                        sources: source.into_iter().map(to_source).collect(),
+                        index: 0,
+                    };
+                    next.env
+                        .insert(decl, &std_deduce_kernel::Ctx::new())
+                        .map_err(|e| LoadError {
+                            msg: format!("`contrary {left} {right}`：{e}"),
+                        })?;
+                    theory.decls.push(format!("contrary:{left}:{right}"));
+                    report.declared.push(format!("contrary {left} {right}"));
+                }
+                Item::Unique {
+                    pred,
+                    index,
+                    source,
+                } => {
+                    let p = std_deduce_kernel::name(&pred);
+                    match next.env.get(&p) {
+                        Some(d) if matches!(d.kind, std_deduce_kernel::DeclKind::Pred) => {}
+                        Some(_) => {
+                            return Err(LoadError {
+                                msg: format!("`unique {pred} {index}`：`{p}` 不是谓词（pred）"),
+                            })
+                        }
+                        None => {
+                            return Err(LoadError {
+                                msg: format!("`unique {pred} {index}`：未知谓词 `{p}`"),
+                            })
+                        }
+                    }
+                    let arity = pred_arity(&next.env, &p).unwrap_or(0);
+                    if index == 0 || index > arity {
+                        return Err(LoadError {
+                            msg: format!(
+                                "`unique {pred} {index}`：参数位置超出范围（该谓词有 {arity} 个参数）"
+                            ),
+                        });
+                    }
+                    let pos = index - 1;
+                    for (q, i) in next.env.unique_positions() {
+                        if q == p && i == pos {
+                            return Err(LoadError {
+                                msg: format!("`unique {pred} {index}`：这一条已经声明过了"),
+                            });
+                        }
+                    }
+                    let decl = Decl {
+                        name: std_deduce_kernel::name(&format!("unique:{pred}:{index}")),
+                        kind: std_deduce_kernel::DeclKind::Unique {
+                            pred: p,
+                            index: pos,
+                        },
+                        ty: Expr::Sort(0),
+                        sources: source.into_iter().map(to_source).collect(),
+                        index: 0,
+                    };
+                    next.env
+                        .insert(decl, &std_deduce_kernel::Ctx::new())
+                        .map_err(|e| LoadError {
+                            msg: format!("`unique {pred} {index}`：{e}"),
+                        })?;
+                    theory.decls.push(format!("unique:{pred}:{index}"));
+                    report.declared.push(format!("unique {pred} {index}"));
+                }
                 Item::Rule {
                     name: n,
                     params,
@@ -196,7 +314,8 @@ impl Library {
                         rule_params.push((std_deduce_kernel::name(pn), ty));
                     }
 
-                    let mut rule_premises: Vec<(Option<std_deduce_kernel::Name>, Expr)> = Vec::new();
+                    let mut rule_premises: Vec<(Option<std_deduce_kernel::Name>, Expr)> =
+                        Vec::new();
                     for (i, p) in premises.iter().enumerate() {
                         let ty = elab::elab(&next.env, &binds, &p.ty).map_err(|e| LoadError {
                             msg: format!("`rule {n}` 的前提 {}：{}", i + 1, e.msg),
@@ -212,17 +331,14 @@ impl Library {
                         })?;
                         let bind = p.name.clone().unwrap_or_else(|| format!("_p{i}"));
                         binds.push((bind.clone(), ty.clone()));
-                        rule_premises.push((
-                            p.name.as_ref().map(|x| std_deduce_kernel::name(x)),
-                            ty,
-                        ));
+                        rule_premises
+                            .push((p.name.as_ref().map(|x| std_deduce_kernel::name(x)), ty));
                     }
 
-                    let concl = elab::elab(&next.env, &binds, &conclusion).map_err(|e| {
-                        LoadError {
+                    let concl =
+                        elab::elab(&next.env, &binds, &conclusion).map_err(|e| LoadError {
                             msg: format!("`rule {n}` 的结论：{}", e.msg),
-                        }
-                    })?;
+                        })?;
                     std_deduce_kernel::check::check(
                         &next.env,
                         &elab::ctx_of(&binds),
@@ -239,9 +355,10 @@ impl Library {
                     for d in &defeaters {
                         match d {
                             crate::ast::Defeater::Unless(t) => {
-                                let e = elab::elab(&next.env, &binds, t).map_err(|e| LoadError {
-                                    msg: format!("`rule {n}` 的 unless：{}", e.msg),
-                                })?;
+                                let e =
+                                    elab::elab(&next.env, &binds, t).map_err(|e| LoadError {
+                                        msg: format!("`rule {n}` 的 unless：{}", e.msg),
+                                    })?;
                                 std_deduce_kernel::check::check(
                                     &next.env,
                                     &elab::ctx_of(&binds),
@@ -424,6 +541,27 @@ impl From<Error> for LoadError {
     fn from(e: Error) -> Self {
         LoadError { msg: e.to_string() }
     }
+}
+
+/// Number of arguments a predicate takes, read off its declared type.
+fn pred_arity(env: &Env, name: &std_deduce_kernel::Name) -> Option<usize> {
+    let d = env.get(name)?;
+    if !matches!(d.kind, std_deduce_kernel::DeclKind::Pred) {
+        return None;
+    }
+    let mut ty = d.ty.clone();
+    let mut n = 0;
+    loop {
+        ty = std_deduce_kernel::norm::normalize(env, &std_deduce_kernel::Ctx::new(), &ty).ok()?;
+        match ty {
+            Expr::Pi { codomain, .. } => {
+                n += 1;
+                ty = *codomain;
+            }
+            _ => break,
+        }
+    }
+    Some(n)
 }
 
 fn to_source(s: crate::ast::SourceSpec) -> SourceRef {

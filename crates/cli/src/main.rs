@@ -10,6 +10,15 @@
 //! :given <term>           add an assumption by hand
 //! :quit
 //! ```
+//!
+//! `:why` has three outcomes, and only the first is a success:
+//!
+//! * proved — the tree is printed and independently verified;
+//! * a gap — the missing premises are listed;
+//! * a conflict — both derivations are printed and the process exits non-zero.
+//!
+//! A conclusion caught in an unresolved conflict is kept out of the fact
+//! base, but it is never dropped silently.
 
 use std::io::{self, BufRead, Write};
 
@@ -17,7 +26,16 @@ use std_deduce_kernel::env::{Ctx, DeclKind, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::{elab, Library};
-use std_deduce_reason::{render, verify, Reasoner};
+use std_deduce_reason::{render, verify, Conflict, Provenance, Reasoner, Resolution, Side};
+
+/// How a query ended. Only `Proved` is a success; the other two make the
+/// process exit non-zero, the way a failed `check` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Outcome {
+    Proved,
+    Gap,
+    Unresolved,
+}
 
 struct Session {
     lib: Library,
@@ -25,13 +43,15 @@ struct Session {
 
 impl Session {
     fn new() -> Self {
-        Session { lib: Library::new() }
+        Session {
+            lib: Library::new(),
+        }
     }
 
-    fn handle(&mut self, line: &str, out: &mut impl Write) -> Result<(), String> {
+    fn handle(&mut self, line: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let line = line.trim();
         if line.is_empty() || line.starts_with("--") {
-            return Ok(());
+            return Ok(Outcome::Proved);
         }
         if let Some(rest) = line.strip_prefix(':') {
             let (cmd, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
@@ -40,10 +60,7 @@ impl Session {
                 "load" => {
                     let src = std::fs::read_to_string(arg)
                         .map_err(|e| format!("读取 `{arg}` 失败：{e}"))?;
-                    let report = self
-                        .lib
-                        .load(arg, &src)
-                        .map_err(|e| e.to_string())?;
+                    let report = self.lib.load(arg, &src).map_err(|e| e.to_string())?;
                     writeln!(out, "已加载 `{arg}`。").ok();
                     for d in &report.declared {
                         writeln!(out, "  + {d}").ok();
@@ -54,7 +71,7 @@ impl Session {
                     for s in &report.shown {
                         writeln!(out, "  · {s}").ok();
                     }
-                    Ok(())
+                    Ok(Outcome::Proved)
                 }
                 "inspect" => {
                     for decl in self.lib.env.iter() {
@@ -66,19 +83,15 @@ impl Session {
                             DeclKind::Def { .. } => "def  ",
                             DeclKind::Rule(_) => "rule ",
                             DeclKind::Interpretation(_) => "interp",
+                            DeclKind::Contrary { .. } => "contr ",
+                            DeclKind::Unique { .. } => "uniq  ",
                         };
-                        writeln!(
-                            out,
-                            "  {kind} {} : {}",
-                            decl.name,
-                            print_expr(&decl.ty)
-                        )
-                        .ok();
+                        writeln!(out, "  {kind} {} : {}", decl.name, print_expr(&decl.ty)).ok();
                         for s in &decl.sources {
                             writeln!(out, "       ← {}", s.one_line()).ok();
                         }
                     }
-                    Ok(())
+                    Ok(Outcome::Proved)
                 }
                 "given" => {
                     let t = parse_term(arg)?;
@@ -105,112 +118,242 @@ impl Session {
                         .insert(decl, &Ctx::new())
                         .map_err(|e| e.to_string())?;
                     self.lib = lib;
-                    Ok(())
+                    Ok(Outcome::Proved)
                 }
-                "why" | "gap" => {
-                    let t = parse_term(arg)?;
-                    let goal = elab::elab_top(&self.lib.env, &t).map_err(|e| e.msg)?;
-                    check::check(&self.lib.env, &Ctx::new(), &goal, &Expr::Sort(0))
-                        .map_err(|e| format!("目标不是命题：{e}"))?;
-                    let mut r = Reasoner::new(&self.lib.env);
-                    // Every axiom whose declared type is a proposition is
-                    // usable as an assumption. This is how a corpus of facts
-                    // enters. See `Reasoner::assume_ledger_axioms`.
-                    r.assume_ledger_axioms()?;
-                    r.saturate()?;
-                    let mut d = r.derivation();
-
-                    let reachable = r.knows(&goal);
-
-                    if cmd == "gap" {
-                        let ex = r.explain(&goal);
-                        if reachable {
-                            writeln!(out, "目标可以推出。").ok();
-                        } else {
-                            writeln!(out, "无法推出 {}。以下是缺口：", print_expr(&goal)).ok();
-                            if let Some(n) = ex.note {
-                                writeln!(out, "  {n}").ok();
-                            }
-                            if ex.candidates.is_empty() {
-                                writeln!(
-                                    out,
-                                    "  没有任何规则以它为结论：要么补一条规则，要么把它作为已知事实登记。"
-                                )
-                                .ok();
-                            }
-                            for c in ex.candidates {
-                                writeln!(out, "  候选 ⟨{}⟩", c.rule).ok();
-                                for s in &c.sources {
-                                    writeln!(out, "    ← {}", s.one_line()).ok();
-                                }
-                                if !c.missing.is_empty() {
-                                    writeln!(
-                                        out,
-                                        "    缺：{}",
-                                        c.missing
-                                            .iter()
-                                            .map(print_expr)
-                                            .collect::<Vec<_>>()
-                                            .join("；")
-                                    )
-                                    .ok();
-                                }
-                                for b in &c.blocked_by {
-                                    writeln!(
-                                        out,
-                                        "    被阻断：「{}」已成立，故本规则不触发",
-                                        print_expr(b)
-                                    )
-                                    .ok();
-                                }
-                            }
-                        }
-                        return Ok(());
-                    }
-
-                    if reachable {
-                        d.root = r.root_for(&goal);
-                    } else {
-                        let ex = r.explain(&goal);
-                        let id = d.nodes.len();
-                        d.nodes.push(std_deduce_reason::Node::Gap {
-                            prop: goal.clone(),
-                            candidates: ex.candidates,
-                            note: ex.note,
-                        });
-                        d.root = Some(id);
-                    }
-
-                    writeln!(out, "{}", render(&self.lib.env, &d)).ok();
-                    // Verification is independent of the reasoner.
-                    match verify(&self.lib.env, &d) {
-                        Ok(()) => {
-                            writeln!(out, "推导已通过独立校验。").ok();
-                        }
-                        Err(e) => {
-                            writeln!(out, "独立校验失败：{e}").ok();
-                        }
-                    }
-                    for c in &d.conflicts {
-                        writeln!(
-                            out,
-                            "冲突：{} 与 {}（{}/{:?}）",
-                            print_expr(&c.left),
-                            print_expr(&c.right),
-                            c.left_rule,
-                            c.resolution
-                        )
-                        .ok();
-                    }
-                    Ok(())
-                }
-                "quit" | "exit" => Ok(()),
+                "why" | "gap" => self.query(cmd, arg, out),
+                "quit" | "exit" => Ok(Outcome::Proved),
                 other => Err(format!("未知命令 `:{other}`")),
             }
         } else {
             // Bare line: treated as a command.
             self.handle(&format!(":{line}"), out)
         }
+    }
+
+    fn query(&mut self, cmd: &str, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        let t = parse_term(arg)?;
+        let goal = elab::elab_top(&self.lib.env, &t).map_err(|e| e.msg)?;
+        check::check(&self.lib.env, &Ctx::new(), &goal, &Expr::Sort(0))
+            .map_err(|e| format!("目标不是命题：{e}"))?;
+        let mut r = Reasoner::new(&self.lib.env);
+        // Every axiom whose declared type is a proposition is usable as an
+        // assumption. This is how a corpus of facts enters. See
+        // `Reasoner::assume_ledger_axioms`.
+        r.assume_ledger_axioms()?;
+        r.saturate()?;
+
+        // A conclusion can be in a recorded conflict without being asserted:
+        // that is a third outcome, distinct from both success and a gap.
+        if let Some(c) = r.conflict_for(&goal) {
+            match &c.resolution {
+                Resolution::Unresolved => {
+                    report_unresolved(out, &r, &goal, &c);
+                    return Ok(Outcome::Unresolved);
+                }
+                Resolution::Defeated { winner } => {
+                    let side = r.conflict_side(&c, &goal);
+                    if side != Some(*winner) {
+                        report_defeated(out, &r, &goal, &c, *winner);
+                        return Ok(Outcome::Gap);
+                    }
+                    // The winner is asserted; fall through and show it as
+                    // proved, with a note about the defeated competitor.
+                    let reachable = r.knows(&goal);
+                    debug_assert!(reachable);
+                }
+            }
+        }
+
+        let reachable = r.knows(&goal);
+
+        if cmd == "gap" {
+            let ex = r.explain(&goal);
+            if reachable {
+                writeln!(out, "目标可以推出。").ok();
+                return Ok(Outcome::Proved);
+            }
+            writeln!(out, "无法推出 {}。以下是缺口：", print_expr(&goal)).ok();
+            if let Some(n) = ex.note {
+                writeln!(out, "  {n}").ok();
+            }
+            if ex.candidates.is_empty() {
+                writeln!(
+                    out,
+                    "  没有任何规则以它为结论：要么补一条规则，要么把它作为已知事实登记。"
+                )
+                .ok();
+            }
+            for c in ex.candidates {
+                writeln!(out, "  候选 ⟨{}⟩", c.rule).ok();
+                for s in &c.sources {
+                    writeln!(out, "    ← {}", s.one_line()).ok();
+                }
+                if !c.missing.is_empty() {
+                    writeln!(
+                        out,
+                        "    缺：{}",
+                        c.missing
+                            .iter()
+                            .map(print_expr)
+                            .collect::<Vec<_>>()
+                            .join("；")
+                    )
+                    .ok();
+                }
+                for b in &c.blocked_by {
+                    writeln!(
+                        out,
+                        "    被阻断：「{}」已成立，故本规则不触发",
+                        print_expr(b)
+                    )
+                    .ok();
+                }
+            }
+            return Ok(Outcome::Gap);
+        }
+
+        let mut d = r.derivation();
+        if reachable {
+            d.root = r.root_for(&goal);
+        } else {
+            let ex = r.explain(&goal);
+            let id = d.nodes.len();
+            d.nodes.push(std_deduce_reason::Node::Gap {
+                prop: goal.clone(),
+                candidates: ex.candidates,
+                note: ex.note,
+            });
+            d.root = Some(id);
+        }
+
+        writeln!(out, "{}", render(&self.lib.env, &d)).ok();
+        // Verification is independent of the reasoner.
+        match verify(&self.lib.env, &d) {
+            Ok(()) => {
+                writeln!(out, "推导已通过独立校验。").ok();
+            }
+            Err(e) => {
+                writeln!(out, "独立校验失败：{e}").ok();
+            }
+        }
+        for c in &d.conflicts {
+            let how = match c.resolution {
+                Resolution::Unresolved => "未决",
+                Resolution::Defeated { .. } => "已裁决",
+            };
+            writeln!(
+                out,
+                "冲突（{how}）：{} 与 {}",
+                print_expr(&c.left),
+                print_expr(&c.right)
+            )
+            .ok();
+        }
+        if reachable {
+            if let Some(c) = r.conflict_for(&goal) {
+                if let Resolution::Defeated { winner } = &c.resolution {
+                    let other = match winner {
+                        Side::Left => &c.right,
+                        Side::Right => &c.left,
+                    };
+                    writeln!(
+                        out,
+                        "注：与「{}」存在冲突，已按优先级裁决为本结论胜出。",
+                        print_expr(other)
+                    )
+                    .ok();
+                }
+            }
+            Ok(Outcome::Proved)
+        } else {
+            Ok(Outcome::Gap)
+        }
+    }
+}
+
+fn report_unresolved(out: &mut impl Write, r: &Reasoner, goal: &Expr, c: &Conflict) {
+    writeln!(out, "冲突未决：{}", print_expr(goal)).ok();
+    writeln!(
+        out,
+        "  该结论没有进入事实库——系统不替你选，但也绝不悄悄丢掉它。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  左：{}  ← {}",
+        print_expr(&c.left),
+        describe(&c.left_by)
+    )
+    .ok();
+    writeln!(
+        out,
+        "  右：{}  ← {}",
+        print_expr(&c.right),
+        describe(&c.right_by)
+    )
+    .ok();
+    for (label, prop) in [("左", &c.left), ("右", &c.right)] {
+        writeln!(out, "── 冲突{label}方：{} ──", print_expr(prop)).ok();
+        show_derivation(out, r, prop);
+    }
+}
+
+fn report_defeated(out: &mut impl Write, r: &Reasoner, goal: &Expr, c: &Conflict, winner: Side) {
+    let (win, win_by) = match winner {
+        Side::Left => (&c.left, &c.left_by),
+        Side::Right => (&c.right, &c.right_by),
+    };
+    writeln!(
+        out,
+        "冲突已裁决：{} 与 {} 不能并存",
+        print_expr(&c.left),
+        print_expr(&c.right)
+    )
+    .ok();
+    writeln!(
+        out,
+        "  本结论「{}」被否决；胜出的是「{}」（{}）。",
+        print_expr(goal),
+        print_expr(win),
+        describe(win_by)
+    )
+    .ok();
+    writeln!(out, "── 胜出方推导：{} ──", print_expr(win)).ok();
+    show_derivation(out, r, win);
+    writeln!(out, "── 被否决方推导：{} ──", print_expr(goal)).ok();
+    show_derivation(out, r, goal);
+}
+
+fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
+    match r.derivation_for(prop) {
+        Some(d) => {
+            writeln!(out, "{}", render(r.env(), &d)).ok();
+            match verify(r.env(), &d) {
+                Ok(()) => {
+                    writeln!(out, "  （该推导本身通过独立校验）").ok();
+                }
+                Err(e) => {
+                    writeln!(out, "  （该推导未通过独立校验：{e}）").ok();
+                }
+            }
+        }
+        None => {
+            writeln!(out, "  （推导无法重建：它的前提本身已不在事实库）").ok();
+        }
+    }
+}
+
+fn describe(p: &Provenance) -> String {
+    match p {
+        Provenance::Assumption => "已知事实".into(),
+        Provenance::Rules(rs) if rs.is_empty() => "已无可重建的规则实例".into(),
+        Provenance::Rules(rs) => format!(
+            "规则 {}",
+            rs.iter()
+                .map(|r| format!("⟨{r}⟩"))
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
     }
 }
 
@@ -236,14 +379,22 @@ fn main() {
 
     // Non-interactive: run every argument as a command.
     if args.len() > 1 {
+        let mut worst = Outcome::Proved;
         for a in &args[1..] {
             match session.handle(a, &mut out) {
-                Ok(()) => {}
+                Ok(o) => {
+                    if o > worst {
+                        worst = o;
+                    }
+                }
                 Err(e) => {
                     eprintln!("错误：{e}");
-                    std::process::exit(1);
+                    std::process::exit(2);
                 }
             }
+        }
+        if worst != Outcome::Proved {
+            std::process::exit(1);
         }
         return;
     }
@@ -260,7 +411,7 @@ fn main() {
             continue;
         }
         match session.handle(&line, &mut out) {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(e) => println!("错误：{e}"),
         }
     }

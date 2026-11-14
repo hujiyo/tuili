@@ -20,3 +20,17 @@ rule 规则 :
         Err(e) => panic!("load failed: {e}"),
     }
 }
+
+#[test]
+fn contrary_declaration_loads() {
+    let src = r#"
+sort 申请
+pred 该批准 : 申请 → Prop
+pred 不该批准 : 申请 → Prop
+contrary 该批准 不该批准
+"#;
+    let mut lib = Library::new();
+    lib.load("t", src)
+        .expect("contrary declaration should load");
+    assert_eq!(lib.env.contrary_pairs().len(), 1);
+}

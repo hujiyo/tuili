@@ -1,0 +1,45 @@
+-- 互补谓词的最小演示：两条规则各推一边，冲突未决。
+--
+-- 运行：
+--   :load examples/冲突-互补谓词.std
+--   :why 批准 甲
+--
+-- 会看到两条推导都打印出来，退出码为 1：结论不进事实库，但不悄悄丢掉。
+--
+-- 想让其中一边胜出，在「例外」规则里加一行：
+--   defeated_by 一般
+-- 再运行，胜出方会正常证成，被否决方仍可查看。
+
+sort 申请
+
+pred 符合条件 : 申请 → Prop
+pred 批准 : 申请 → Prop
+pred 不批准 : 申请 → Prop
+pred 可复议 : 申请 → Prop
+
+-- 「批准」与「不批准」互相排斥。系统不会从「不」字猜出来，必须声明。
+contrary 批准 不批准
+
+obj 甲 : 申请
+
+axiom 条件 : 符合条件 甲
+  source 申请人 材料 (version 2024)
+
+rule 一般 :
+  params x : 申请
+  premise 符合条件 x
+  conclude 批准 x
+  source 行政许可法 第三十八条
+
+rule 例外 :
+  params x : 申请
+  premise 符合条件 x
+  conclude 不批准 x
+  source 行政许可法 第三十九条
+
+-- 下游规则证明：败方结论不进事实库，依赖它的推导也不会触发。
+rule 救济 :
+  params x : 申请
+  premise 不批准 x
+  conclude 可复议 x
+  source 行政复议法 第六条

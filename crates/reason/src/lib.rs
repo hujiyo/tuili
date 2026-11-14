@@ -13,13 +13,26 @@
 //! If the iteration oscillates (two rules each blocked by the other), we
 //! report that instead of picking a side.
 //!
+//! ## Conflict is declared, then adjudicated — never guessed
+//!
+//! Two predicates can be declared `contrary`, and a predicate can be declared
+//! `unique` at an argument position (one case, one applicable norm). When two
+//! derived facts fall foul of either declaration, that is a conflict, and it
+//! is resolved in exactly two ways:
+//!
+//! * an explicit `defeated_by` / `prefer` beats the other side, or one side is
+//!   an assumption (facts are strict and outrank defeasible conclusions);
+//! * otherwise the conflict is unresolved, and **neither** conclusion enters
+//!   the fact base. It is not silently dropped: `conflicts()` reports it, and
+//!   the CLI prints both derivations and exits non-zero.
+//!
 //! ## Three commitments
 //!
 //! 1. **No negation as failure.** A rule fires only when every premise has
 //!    been derived, and an `unless P` blocks only when `P` *itself* has been
 //!    derived. "We could not prove it, so it is false" is impossible here.
-//! 2. **No silent conflict resolution.** Contradictory conclusions are
-//!    recorded with how, if at all, they were settled.
+//! 2. **No silent conflict resolution.** A conflict is either defeated or
+//!    reported as unresolved; it is never resolved by an internal preference.
 //! 3. **No hidden gaps.** An unreachable goal yields a gap node listing the
 //!    candidate rules, which premises are missing, and which blocking
 //!    conditions already hold. There is no `sorry` equivalent.
@@ -27,7 +40,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use std_deduce_kernel::env::{DeclKind, Env, RuleDecl, SourceRef};
-use std_deduce_kernel::norm::normalize;
+use std_deduce_kernel::norm::{normalize, spine};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Ctx, Expr, Name};
 
@@ -72,19 +85,34 @@ pub struct Derivation {
     pub conflicts: Vec<Conflict>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Conflict {
-    pub left: Expr,
-    pub right: Expr,
-    pub left_rule: Name,
-    pub right_rule: Option<Name>,
-    pub resolution: Resolution,
+/// Which side of a recorded conflict a fact sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// Where a conflicting conclusion came from. An empty `Rules` list means the
+/// conclusion was derived but its witnesses can no longer be rebuilt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Provenance {
+    Assumption,
+    Rules(Vec<Name>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
-    Defeated { winner: Name, loser: Name },
+    Defeated { winner: Side },
     Unresolved,
+}
+
+#[derive(Debug, Clone)]
+pub struct Conflict {
+    pub left: Expr,
+    pub right: Expr,
+    pub left_by: Provenance,
+    pub right_by: Provenance,
+    pub resolution: Resolution,
 }
 
 // ---------------------------------------------------------------- internals
@@ -110,6 +138,9 @@ struct Fixed {
     nodes: Vec<Node>,
     ids: BTreeMap<String, usize>,
     conflicts: Vec<Conflict>,
+    /// Conclusions that were derived but kept out of `facts` because of a
+    /// conflict, keyed by the same normalised key as `facts`.
+    contested: BTreeMap<String, Conflict>,
 }
 
 // ---------------------------------------------------------------- reasoner
@@ -119,6 +150,10 @@ pub struct Reasoner<'a> {
     assumptions: Vec<Assumption>,
     /// rule -> rules it beats (`defeated_by` / `prefer`)
     defeats: BTreeMap<Name, BTreeSet<Name>>,
+    /// symmetric contradiction relation, closed from `contrary` declarations
+    contraries: BTreeMap<Name, BTreeSet<Name>>,
+    /// predicate -> argument positions declared single-valued (`unique`)
+    uniques: BTreeMap<Name, BTreeSet<usize>>,
     fixed: Option<Fixed>,
     max_rounds: usize,
 }
@@ -128,7 +163,15 @@ impl<'a> Reasoner<'a> {
         let mut defeats: BTreeMap<Name, BTreeSet<Name>> = BTreeMap::new();
         for decl in env.iter() {
             if let DeclKind::Rule(r) = &decl.kind {
-                for loser in r.exceptions.iter().chain(r.prefers.iter()) {
+                // `defeated_by X` means X beats this rule, so the edge points
+                // from X to this one. `prefer X` means this rule beats X.
+                for beater in &r.exceptions {
+                    defeats
+                        .entry(beater.clone())
+                        .or_default()
+                        .insert(decl.name.clone());
+                }
+                for loser in &r.prefers {
                     defeats
                         .entry(decl.name.clone())
                         .or_default()
@@ -136,10 +179,21 @@ impl<'a> Reasoner<'a> {
                 }
             }
         }
+        let mut contraries: BTreeMap<Name, BTreeSet<Name>> = BTreeMap::new();
+        for (a, b) in env.contrary_pairs() {
+            contraries.entry(a.clone()).or_default().insert(b.clone());
+            contraries.entry(b).or_default().insert(a);
+        }
+        let mut uniques: BTreeMap<Name, BTreeSet<usize>> = BTreeMap::new();
+        for (pred, index) in env.unique_positions() {
+            uniques.entry(pred).or_default().insert(index);
+        }
         Reasoner {
             env,
             assumptions: Vec::new(),
             defeats,
+            contraries,
+            uniques,
             fixed: None,
             max_rounds: 256,
         }
@@ -194,17 +248,68 @@ impl<'a> Reasoner<'a> {
 
     /// Compute the least fixed point, then build the derivation.
     ///
-    /// The operator is applied to the *whole* assumption set on every round
-    /// rather than incrementally. This is not an optimisation detail: `unless`
-    /// makes it anti-monotone, so a conclusion that was derivable last round
-    /// may have to be retracted this round. Copying the previous result
-    /// forward (the usual `insert if absent` loop) would pin every conclusion
-    /// forever and quietly resurrect blocked ones.
+    /// Conflict resolution is layered on top: a conclusion that loses, or an
+    /// unresolved pair, is removed from the fact base, and the fixed point is
+    /// recomputed without it. Removals only accumulate, so the loop
+    /// terminates; each round is still a full recomputation, so `unless`
+    /// retractions remain correct.
     pub fn saturate(&mut self) -> Result<(), String> {
+        let mut removed: BTreeSet<String> = BTreeSet::new();
+        let mut seen: BTreeMap<(String, String), Conflict> = BTreeMap::new();
+
+        for _ in 0..self.max_rounds {
+            let facts = self.fixed_point(&removed)?;
+            let conflicts = self.detect_conflicts(&facts);
+            let mut next_removed = removed.clone();
+            for c in &conflicts {
+                let lk = self.key_of(&c.left);
+                let rk = self.key_of(&c.right);
+                seen.insert((lk, rk), c.clone());
+                match &c.resolution {
+                    Resolution::Unresolved => {
+                        next_removed.insert(self.key_of(&c.left));
+                        next_removed.insert(self.key_of(&c.right));
+                    }
+                    Resolution::Defeated { winner } => {
+                        let loser = match winner {
+                            Side::Left => &c.right,
+                            Side::Right => &c.left,
+                        };
+                        next_removed.insert(self.key_of(loser));
+                    }
+                }
+            }
+
+            if next_removed == removed {
+                let mut conflicts: Vec<Conflict> = seen
+                    .values()
+                    .filter(|c| {
+                        removed.contains(&self.key_of(&c.left))
+                            || removed.contains(&self.key_of(&c.right))
+                    })
+                    .cloned()
+                    .collect();
+                conflicts.sort_by_key(|c| (self.key_of(&c.left), self.key_of(&c.right)));
+                let mut contested = BTreeMap::new();
+                for c in &conflicts {
+                    contested.insert(self.key_of(&c.left), c.clone());
+                    contested.insert(self.key_of(&c.right), c.clone());
+                }
+                let fixed = self.build_nodes(facts, conflicts, contested)?;
+                self.fixed = Some(fixed);
+                return Ok(());
+            }
+            removed = next_removed;
+        }
+        Err("冲突裁决在 256 轮内未收敛".into())
+    }
+
+    fn fixed_point(&self, removed: &BTreeSet<String>) -> Result<BTreeMap<String, Expr>, String> {
         let seeds: BTreeMap<String, Expr> = self
             .assumptions
             .iter()
             .map(|a| (self.key_of(&a.prop), a.prop.clone()))
+            .filter(|(k, _)| !removed.contains(k))
             .collect();
         let mut k = seeds.clone();
         let mut previous: Option<BTreeMap<String, Expr>> = None;
@@ -221,10 +326,9 @@ impl<'a> Reasoner<'a> {
                         .or_insert_with(|| inst.conclusion.clone());
                 }
             }
+            next.retain(|key, _| !removed.contains(key));
             if same_keys(&k, &next) {
-                let fixed = self.build_nodes(next)?;
-                self.fixed = Some(fixed);
-                return Ok(());
+                return Ok(next);
             }
             if let Some(p) = &previous {
                 if same_keys(p, &next) {
@@ -252,20 +356,151 @@ impl<'a> Reasoner<'a> {
             .collect()
     }
 
+    /// Are two facts in conflict? Either their heads are declared contrary and
+    /// their arguments match, or they share a head and differ exactly at a
+    /// position declared `unique`.
+    fn in_conflict(&self, a: &Expr, b: &Expr) -> bool {
+        let (ha, aa) = spine(a);
+        let (hb, ab) = spine(b);
+        let (Expr::Const(ha), Expr::Const(hb)) = (ha, hb) else {
+            return false;
+        };
+        if aa.len() != ab.len() {
+            return false;
+        }
+        if ha != hb {
+            return self
+                .contraries
+                .get(ha)
+                .is_some_and(|set| set.contains(hb))
+                && aa
+                    .iter()
+                    .zip(ab.iter())
+                    .all(|(x, y)| self.key_of(x) == self.key_of(y));
+        }
+        let Some(positions) = self.uniques.get(ha) else {
+            return false;
+        };
+        let differing: Vec<usize> = (0..aa.len())
+            .filter(|i| self.key_of(aa[*i]) != self.key_of(ab[*i]))
+            .collect();
+        differing.len() == 1 && positions.contains(&differing[0])
+    }
+
+    fn detect_conflicts(&self, facts: &BTreeMap<String, Expr>) -> Vec<Conflict> {
+        let items: Vec<(&String, &Expr)> = facts.iter().collect();
+        let mut out = Vec::new();
+        for i in 0..items.len() {
+            for j in (i + 1)..items.len() {
+                let (ka, a) = items[i];
+                let (kb, b) = items[j];
+                if !self.in_conflict(a, b) {
+                    continue;
+                }
+                let lb = self.provenance(ka, facts);
+                let rb = self.provenance(kb, facts);
+                let resolution = self.resolve(&lb, &rb);
+                out.push(Conflict {
+                    left: a.clone(),
+                    right: b.clone(),
+                    left_by: lb,
+                    right_by: rb,
+                    resolution,
+                });
+            }
+        }
+        out
+    }
+
+    fn provenance(&self, target: &str, facts: &BTreeMap<String, Expr>) -> Provenance {
+        if self
+            .assumptions
+            .iter()
+            .any(|a| self.key_of(&a.prop) == target)
+        {
+            return Provenance::Assumption;
+        }
+        Provenance::Rules(self.derivers(target, facts))
+    }
+
+    /// Every rule that has an unblocked instance concluding `target`, with all
+    /// premises already in `facts`.
+    fn derivers(&self, target: &str, facts: &BTreeMap<String, Expr>) -> Vec<Name> {
+        let mut out = BTreeSet::new();
+        for decl in self.env.rules() {
+            let DeclKind::Rule(rule) = &decl.kind else {
+                continue;
+            };
+            for inst in self.enumerate(rule, facts) {
+                if self.key_of(&inst.conclusion) != target {
+                    continue;
+                }
+                if blocked(&inst.unlesses, facts, self.env) {
+                    continue;
+                }
+                if inst.premise_keys.iter().all(|pk| facts.contains_key(pk)) {
+                    out.insert(decl.name.clone());
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Facts are strict and always win over defeasible conclusions. Between
+    /// rules, a side wins only when it beats every rule on the other side and
+    /// is not out-beaten in return; anything else is unresolved.
+    fn resolve(&self, left: &Provenance, right: &Provenance) -> Resolution {
+        match (left, right) {
+            (Provenance::Assumption, Provenance::Assumption) => Resolution::Unresolved,
+            (Provenance::Assumption, _) => Resolution::Defeated { winner: Side::Left },
+            (_, Provenance::Assumption) => Resolution::Defeated {
+                winner: Side::Right,
+            },
+            (Provenance::Rules(l), Provenance::Rules(r)) => {
+                let beats = |a: &[Name], b: &[Name]| {
+                    !a.is_empty()
+                        && b.iter().all(|loser| {
+                            a.iter().any(|winner| {
+                                self.defeats
+                                    .get(winner)
+                                    .is_some_and(|set| set.contains(loser))
+                            })
+                        })
+                };
+                match (beats(l, r), beats(r, l)) {
+                    (true, false) => Resolution::Defeated { winner: Side::Left },
+                    (false, true) => Resolution::Defeated {
+                        winner: Side::Right,
+                    },
+                    _ => Resolution::Unresolved,
+                }
+            }
+        }
+    }
+
     /// Build nodes in dependency order: an assumption first, then any rule
     /// application whose premises all already have ids.
-    fn build_nodes(&self, facts: BTreeMap<String, Expr>) -> Result<Fixed, String> {
+    fn build_nodes(
+        &self,
+        facts: BTreeMap<String, Expr>,
+        conflicts: Vec<Conflict>,
+        contested: BTreeMap<String, Conflict>,
+    ) -> Result<Fixed, String> {
         let mut nodes: Vec<Node> = Vec::new();
         let mut ids: BTreeMap<String, usize> = BTreeMap::new();
 
         for a in &self.assumptions {
+            let k = self.key_of(&a.prop);
+            if !facts.contains_key(&k) {
+                continue;
+            }
             let id = nodes.len();
             nodes.push(Node::Assumption {
                 prop: a.prop.clone(),
                 sources: a.sources.clone(),
                 label: a.label.clone(),
             });
-            ids.insert(self.key_of(&a.prop), id);
+            ids.insert(k, id);
         }
 
         let mut pending: Vec<String> = facts
@@ -282,11 +517,7 @@ impl<'a> Reasoner<'a> {
                 let target = pending[i].clone();
                 if let Some((rule, inst, sources)) = self.witness(&target, &facts, &ids) {
                     let id = nodes.len();
-                    let premises: Vec<usize> = inst
-                        .premise_keys
-                        .iter()
-                        .map(|pk| ids[pk])
-                        .collect();
+                    let premises: Vec<usize> = inst.premise_keys.iter().map(|pk| ids[pk]).collect();
                     nodes.push(Node::RuleApplication {
                         rule,
                         conclusion: inst.conclusion,
@@ -313,7 +544,8 @@ impl<'a> Reasoner<'a> {
             facts,
             nodes,
             ids,
-            conflicts: self.conflicts(),
+            conflicts,
+            contested,
         })
     }
 
@@ -367,15 +599,13 @@ impl<'a> Reasoner<'a> {
         out
     }
 
-    fn conflicts(&self) -> Vec<Conflict> {
-        // Negation is not a connective yet, so contradictory facts cannot be
-        // recognised automatically. Recording stays empty rather than
-        // pretending. `defeated_by` priorities are exposed through `explain`.
-        let _ = &self.defeats;
-        Vec::new()
-    }
-
     // ------------------------------------------------------------ queries
+
+    /// The environment this reasoner reads. Exposed so callers can render
+    /// through the same names the reasoner used.
+    pub fn env(&self) -> &Env {
+        self.env
+    }
 
     pub fn knows(&self, prop: &Expr) -> bool {
         self.fixed
@@ -390,6 +620,34 @@ impl<'a> Reasoner<'a> {
             .and_then(|f| f.ids.get(&self.key_of(prop)).copied())
     }
 
+    /// Conflicts recorded in the settled state. A defeated conflict is still
+    /// recorded: it explains why a conclusion is absent.
+    pub fn conflicts(&self) -> Vec<Conflict> {
+        self.fixed
+            .as_ref()
+            .map(|f| f.conflicts.clone())
+            .unwrap_or_default()
+    }
+
+    /// The conflict a conclusion took part in, if any.
+    pub fn conflict_for(&self, prop: &Expr) -> Option<Conflict> {
+        self.fixed
+            .as_ref()
+            .and_then(|f| f.contested.get(&self.key_of(prop)).cloned())
+    }
+
+    /// Which side of `c` the proposition sits on.
+    pub fn conflict_side(&self, c: &Conflict, prop: &Expr) -> Option<Side> {
+        let k = self.key_of(prop);
+        if self.key_of(&c.left) == k {
+            Some(Side::Left)
+        } else if self.key_of(&c.right) == k {
+            Some(Side::Right)
+        } else {
+            None
+        }
+    }
+
     pub fn derivation(&self) -> Derivation {
         match &self.fixed {
             Some(f) => Derivation {
@@ -401,12 +659,31 @@ impl<'a> Reasoner<'a> {
         }
     }
 
+    /// A derivation that reaches `prop` even when it is not in the fact base.
+    ///
+    /// Used to show both sides of an unresolved conflict: the conclusion is
+    /// not asserted, but the argument for it must still be inspectable.
+    pub fn derivation_for(&self, prop: &Expr) -> Option<Derivation> {
+        let k = self.key_of(prop);
+        let base = self.fixed.as_ref()?;
+        let mut facts = base.facts.clone();
+        facts.insert(k.clone(), prop.clone());
+        let fixed = self.build_nodes(facts, Vec::new(), BTreeMap::new()).ok()?;
+        Some(Derivation {
+            root: fixed.ids.get(&k).copied(),
+            nodes: fixed.nodes,
+            conflicts: Vec::new(),
+        })
+    }
+
     /// Why is `goal` unreachable? List candidate rules with what each is
     /// missing and what is blocking it.
     pub fn explain(&self, goal: &Expr) -> GapExplanation {
         let mut candidates = Vec::new();
         let note = if check::check(self.env, &Ctx::new(), goal, &Expr::Sort(0)).is_err() {
             Some("目标不是命题".to_string())
+        } else if self.conflict_for(goal).is_some() {
+            Some("目标处于冲突中：未决的结论不进入事实库，需要人工裁决".to_string())
         } else if self.knows(goal) {
             Some("目标已可推出".to_string())
         } else {
@@ -551,7 +828,11 @@ fn close_pattern(p: &Expr, binding: &[(Name, Expr)]) -> Expr {
             None => p.clone(),
         },
         Expr::Sort(_) | Expr::Var(_) => p.clone(),
-        Expr::Pi { name, domain, codomain } => Expr::Pi {
+        Expr::Pi {
+            name,
+            domain,
+            codomain,
+        } => Expr::Pi {
             name: name.clone(),
             domain: Box::new(close_pattern(domain, binding)),
             codomain: Box::new(close_pattern(codomain, binding)),
@@ -684,9 +965,8 @@ pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
         // freedom left once the cited premises are fixed.
         let mut binding: Vec<(Name, Expr)> = Vec::new();
         for (i, p) in premises.iter().enumerate() {
-            let actual = node_prop(&d.nodes[*p]).ok_or_else(|| {
-                format!("节点 {id}：前提 {p} 是未闭合的缺口，不能充当前提")
-            })?;
+            let actual = node_prop(&d.nodes[*p])
+                .ok_or_else(|| format!("节点 {id}：前提 {p} 是未闭合的缺口，不能充当前提"))?;
             if !match_fact(&r.open_premise(i), actual, &mut binding) {
                 return Err(format!(
                     "节点 {id}：规则 `{rule}` 的第 {} 个前提是 `{}`，而引用的节点 {p} 证成的是 `{}`",
@@ -838,7 +1118,11 @@ fn render_node(d: &Derivation, id: usize, depth: usize, out: &mut String) {
                 if !c.missing.is_empty() {
                     out.push_str(&format!(
                         "{pad}    缺：{}\n",
-                        c.missing.iter().map(print_expr).collect::<Vec<_>>().join("；")
+                        c.missing
+                            .iter()
+                            .map(print_expr)
+                            .collect::<Vec<_>>()
+                            .join("；")
                     ));
                 }
                 for b in &c.blocked_by {

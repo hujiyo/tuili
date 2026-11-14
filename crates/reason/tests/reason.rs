@@ -6,11 +6,12 @@ use std_deduce_kernel::env::{Ctx, DeclKind, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{name, Decl, Env, Expr};
 use std_deduce_lang::Library;
-use std_deduce_reason::{verify, Reasoner};
+use std_deduce_reason::{verify, Provenance, Reasoner, Resolution};
 
 fn load(src: &str) -> Library {
     let mut lib = Library::new();
-    lib.load("test", src).unwrap_or_else(|e| panic!("load: {e}"));
+    lib.load("test", src)
+        .unwrap_or_else(|e| panic!("load: {e}"));
     lib
 }
 
@@ -112,15 +113,16 @@ rule 依法搜查不侵犯 :
 
     // Now supply 依法搜查 and 非法搜查 both. The premise holds, and the
     // `unless` condition also holds, so the rule must be blocked.
-    let src2 = format!(
-        "{base}\naxiom a : 依法搜查 张三 甲宅\naxiom b : 非法搜查 张三 甲宅\n"
-    );
+    let src2 = format!("{base}\naxiom a : 依法搜查 张三 甲宅\naxiom b : 非法搜查 张三 甲宅\n");
     // Note: the same rule name cannot be redeclared, so load the facts into
     // a fresh library.
     let mut lib2 = Library::new();
     lib2.load("t", &src2).unwrap();
     let (d2, _) = assemble(&lib2, &goal);
-    assert!(d2.root.is_none(), "unless condition holds; rule must not fire");
+    assert!(
+        d2.root.is_none(),
+        "unless condition holds; rule must not fire"
+    );
 }
 
 #[test]
@@ -331,10 +333,7 @@ rule r :
 "#;
     let mut lib = Library::new();
     let e = lib.load("t", src).unwrap_err();
-    assert!(
-        e.to_string().contains("没有出现在任何前提里"),
-        "got: {e}"
-    );
+    assert!(e.to_string().contains("没有出现在任何前提里"), "got: {e}");
 }
 
 /// The same rule with every parameter constrained loads fine.
@@ -435,10 +434,7 @@ fn kernel_rejects_a_malformed_telescope() {
     // The valid shape is checked below; here we only assert the bad one fails.
     let bad = std_deduce_kernel::RuleDecl {
         params: vec![(name("a"), Expr::Sort(0))],
-        premises: vec![(
-            None,
-            Expr::app(Expr::constant("p"), Expr::Var(2)),
-        )],
+        premises: vec![(None, Expr::app(Expr::constant("p"), Expr::Var(2)))],
         conclusion: Expr::Sort(0),
         unlesses: vec![],
         exceptions: vec![],
@@ -455,8 +451,10 @@ fn kernel_rejects_a_malformed_telescope() {
     assert!(env.insert(decl, &ctx).is_err());
 }
 
+/// A conflict is declared, never guessed: two predicates that look like
+/// opposites to a human are just two names until `contrary` links them.
 #[test]
-fn conflict_between_two_rules_is_recorded_not_resolved() {
+fn conflict_requires_a_contrary_declaration() {
     let src = r#"
 sort 申请
 pred 该批准 : 申请 → Prop
@@ -467,12 +465,233 @@ axiom f2 : 不该批准 甲申请
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
-    for d in lib.env.iter() {
-        if let DeclKind::Axiom = &d.kind {
-            r.assume(&d.ty, d.sources.clone(), None).unwrap();
-        }
-    }
+    r.assume_ledger_axioms().unwrap();
     r.saturate().unwrap();
+    assert!(
+        r.conflicts().is_empty(),
+        "without `contrary` there is nothing to conflict about"
+    );
+    assert!(r.knows(&Expr::app(p("该批准"), p("甲申请"))));
+    assert!(r.knows(&Expr::app(p("不该批准"), p("甲申请"))));
+}
+
+#[test]
+fn contrary_assumptions_are_unresolved_and_kept_out_of_the_fact_base() {
+    let src = r#"
+sort 申请
+pred 该批准 : 申请 → Prop
+pred 不该批准 : 申请 → Prop
+contrary 该批准 不该批准
+obj 甲申请 : 申请
+axiom f1 : 该批准 甲申请
+axiom f2 : 不该批准 甲申请
+"#;
+    let lib = load(src);
+    let mut r = Reasoner::new(&lib.env);
+    r.assume_ledger_axioms().unwrap();
+    r.saturate().unwrap();
+
+    let left = Expr::app(p("该批准"), p("甲申请"));
+    let right = Expr::app(p("不该批准"), p("甲申请"));
+    let cs = r.conflicts();
+    assert_eq!(cs.len(), 1);
+    assert_eq!(cs[0].resolution, Resolution::Unresolved);
+    assert_eq!(cs[0].left_by, Provenance::Assumption);
+    assert_eq!(cs[0].right_by, Provenance::Assumption);
+    assert!(!r.knows(&left), "an unresolved conclusion is not asserted");
+    assert!(!r.knows(&right));
+    assert!(r.conflict_for(&left).is_some());
+    // Not dropped silently: the argument for each side is still inspectable.
+    assert!(r.derivation_for(&left).is_some());
+}
+
+#[test]
+fn superiority_resolves_a_conflict_and_the_loser_stays_out() {
+    let src = r#"
+sort 申请
+pred 符合条件 : 申请 → Prop
+pred 批准 : 申请 → Prop
+pred 不批准 : 申请 → Prop
+pred 可复议 : 申请 → Prop
+contrary 批准 不批准
+obj 甲 : 申请
+axiom 条件 : 符合条件 甲
+rule 一般 :
+  params x : 申请
+  premise 符合条件 x
+  conclude 批准 x
+rule 例外 :
+  params x : 申请
+  premise 符合条件 x
+  conclude 不批准 x
+  defeated_by 一般
+rule 下游 :
+  params x : 申请
+  premise 不批准 x
+  conclude 可复议 x
+"#;
+    let lib = load(src);
+    let mut r = Reasoner::new(&lib.env);
+    r.assume_ledger_axioms().unwrap();
+    r.saturate().unwrap();
+
+    let approved = Expr::app(p("批准"), p("甲"));
+    let refused = Expr::app(p("不批准"), p("甲"));
+    assert!(r.knows(&approved), "the winning side is asserted");
+    assert!(!r.knows(&refused), "the loser does not enter the fact base");
+    assert!(
+        !r.knows(&Expr::app(p("可复议"), p("甲"))),
+        "nothing may be derived from a defeated conclusion"
+    );
+    let cs = r.conflicts();
+    assert_eq!(cs.len(), 1);
+    assert!(matches!(cs[0].resolution, Resolution::Defeated { .. }));
+    let side = r.conflict_side(&cs[0], &approved).unwrap();
+    assert_eq!(
+        cs[0].resolution,
+        Resolution::Defeated { winner: side },
+        "the winner is the asserted side"
+    );
+    // A defeated conclusion is still inspectable, for audit.
+    assert!(r.derivation_for(&refused).is_some());
+}
+
+#[test]
+fn prefer_points_the_other_way() {
+    let src = r#"
+sort 申请
+pred 符合条件 : 申请 → Prop
+pred 批准 : 申请 → Prop
+pred 不批准 : 申请 → Prop
+contrary 批准 不批准
+obj 甲 : 申请
+axiom 条件 : 符合条件 甲
+rule 一般 :
+  params x : 申请
+  premise 符合条件 x
+  conclude 批准 x
+  prefer 例外
+rule 例外 :
+  params x : 申请
+  premise 符合条件 x
+  conclude 不批准 x
+"#;
+    let lib = load(src);
+    let mut r = Reasoner::new(&lib.env);
+    r.assume_ledger_axioms().unwrap();
+    r.saturate().unwrap();
+    assert!(r.knows(&Expr::app(p("批准"), p("甲"))));
+    assert!(!r.knows(&Expr::app(p("不批准"), p("甲"))));
+}
+
+#[test]
+fn contrary_to_an_unknown_predicate_is_rejected_at_load() {
+    let src = r#"
+sort 申请
+pred 该批准 : 申请 → Prop
+contrary 该批准 不存在
+"#;
+    let err = Library::new().load("t", src).unwrap_err().to_string();
+    assert!(err.contains("未知谓词"), "got: {err}");
+}
+
+#[test]
+fn contrary_between_different_arities_is_rejected_at_load() {
+    let src = r#"
+sort 申请
+pred 一元 : 申请 → Prop
+pred 二元 : 申请 → 申请 → Prop
+contrary 一元 二元
+"#;
+    let err = Library::new().load("t", src).unwrap_err().to_string();
+    assert!(err.contains("参数个数不同"), "got: {err}");
+}
+
+#[test]
+fn duplicate_contrary_is_rejected_at_load() {
+    let src = r#"
+sort 申请
+pred 甲 : 申请 → Prop
+pred 乙 : 申请 → Prop
+contrary 甲 乙
+contrary 乙 甲
+"#;
+    let err = Library::new().load("t", src).unwrap_err().to_string();
+    assert!(err.contains("已经声明过"), "got: {err}");
+}
+
+/// A `unique` argument position catches "one case, one applicable norm" —
+/// the seed-case shape, where both conclusions share a predicate and differ
+/// only in one argument.
+#[test]
+fn unique_declaration_makes_same_predicate_instances_conflict() {
+    let src = r#"
+sort 案件
+sort 规范
+pred 应适用 : 规范 → 案件 → Prop
+unique 应适用 1
+obj 甲 : 案件
+obj 法A : 规范
+obj 法B : 规范
+axiom a : 应适用 法A 甲
+axiom b : 应适用 法B 甲
+"#;
+    let lib = load(src);
+    let mut r = Reasoner::new(&lib.env);
+    r.assume_ledger_axioms().unwrap();
+    r.saturate().unwrap();
+    assert_eq!(r.conflicts().len(), 1);
+    assert_eq!(r.conflicts()[0].resolution, Resolution::Unresolved);
+    assert!(!r.knows(&Expr::apps(p("应适用"), [p("法A"), p("甲")])));
+    assert!(!r.knows(&Expr::apps(p("应适用"), [p("法B"), p("甲")])));
+}
+
+#[test]
+fn unique_does_not_conflict_when_the_other_arguments_differ() {
+    let src = r#"
+sort 案件
+sort 规范
+pred 应适用 : 规范 → 案件 → Prop
+unique 应适用 1
+obj 甲 : 案件
+obj 乙 : 案件
+obj 法A : 规范
+obj 法B : 规范
+axiom a : 应适用 法A 甲
+axiom b : 应适用 法B 乙
+"#;
+    let lib = load(src);
+    let mut r = Reasoner::new(&lib.env);
+    r.assume_ledger_axioms().unwrap();
+    r.saturate().unwrap();
+    assert!(r.conflicts().is_empty());
+    assert!(r.knows(&Expr::apps(p("应适用"), [p("法A"), p("甲")])));
+    assert!(r.knows(&Expr::apps(p("应适用"), [p("法B"), p("乙")])));
+}
+
+#[test]
+fn unique_argument_position_out_of_range_is_rejected_at_load() {
+    let src = r#"
+sort 案件
+sort 规范
+pred 应适用 : 规范 → 案件 → Prop
+unique 应适用 3
+"#;
+    let err = Library::new().load("t", src).unwrap_err().to_string();
+    assert!(err.contains("参数位置超出范围"), "got: {err}");
+}
+
+#[test]
+fn duplicate_unique_is_rejected_at_load() {
+    let src = r#"
+sort 案件
+sort 规范
+pred 应适用 : 规范 → 案件 → Prop
+unique 应适用 1
+unique 应适用 1
+"#;
+    let err = Library::new().load("t", src).unwrap_err().to_string();
+    assert!(err.contains("已经声明过"), "got: {err}");
 }
 
 /// A proposition-declaring axiom (`axiom 假 : Prop`) must not poison reasoning.
@@ -632,7 +851,10 @@ rule 免责 :
         }
     }
     r.saturate().unwrap();
-    assert!(r.knows(&exempt), "exemption must stand when no blocker holds");
+    assert!(
+        r.knows(&exempt),
+        "exemption must stand when no blocker holds"
+    );
 }
 
 /// An `unless` condition that is merely *unproven* must not block.

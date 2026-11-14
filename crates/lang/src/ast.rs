@@ -83,6 +83,20 @@ pub enum Item {
         to: Term,
         sources: Vec<SourceSpec>,
     },
+    /// `contrary 该批准 不该批准` — a declared incompatibility between two
+    /// predicates. The system does not infer it from the names.
+    Contrary {
+        left: String,
+        right: String,
+        source: Option<SourceSpec>,
+    },
+    /// `unique 应适用 1` — argument 1 (one-based) is single-valued: two facts
+    /// that differ there and agree elsewhere cannot both hold.
+    Unique {
+        pred: String,
+        index: usize,
+        source: Option<SourceSpec>,
+    },
     /// `#check term`
     Check(Term),
     /// `#why prop` — derive it and show the tree.

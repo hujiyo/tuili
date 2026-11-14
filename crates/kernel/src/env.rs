@@ -63,6 +63,16 @@ pub enum DeclKind {
     Rule(Box<RuleDecl>),
     /// A marked interpretation: it turns a premise into another premise.
     Interpretation(Box<Interpretation>),
+    /// Two predicates whose facts cannot both hold: any pair with these heads
+    /// and identical arguments is a conflict. Declared, never guessed, because
+    /// a legal system cannot read Chinese and decide on its own that 「该批准」
+    /// and 「不该批准」 are opposites.
+    Contrary { left: Name, right: Name },
+    /// A predicate that can hold of only one value at argument `index`
+    /// (zero-based): two facts with the same head that differ at `index` and
+    /// agree everywhere else are a conflict. `unique 应适用 1` says one case
+    /// can have only one applicable norm.
+    Unique { pred: Name, index: usize },
 }
 
 /// A defeasible rule.
@@ -201,6 +211,27 @@ impl Env {
     pub fn interpretations(&self) -> Vec<&Decl> {
         self.iter()
             .filter(|d| matches!(d.kind, DeclKind::Interpretation(_)))
+            .collect()
+    }
+
+    /// The declared contrary pairs, as written. The relation is symmetric;
+    /// the reasoner closes it.
+    pub fn contrary_pairs(&self) -> Vec<(Name, Name)> {
+        self.iter()
+            .filter_map(|d| match &d.kind {
+                DeclKind::Contrary { left, right } => Some((left.clone(), right.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Declared single-valued argument positions, as `(predicate, index)`.
+    pub fn unique_positions(&self) -> Vec<(Name, usize)> {
+        self.iter()
+            .filter_map(|d| match &d.kind {
+                DeclKind::Unique { pred, index } => Some((pred.clone(), *index)),
+                _ => None,
+            })
             .collect()
     }
 }

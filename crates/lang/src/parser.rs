@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! program  := item*
-//! item     := sort | pred | axiom | def | rule | interpret | command
+//! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | command
 //! sort     := 'sort' IDENT source?
 //! pred     := 'pred' IDENT ':' term source?
 //! axiom    := 'axiom' IDENT ':' term source?
@@ -212,6 +212,34 @@ impl Parser {
                 let name = self.ident()?;
                 self.rule_body(name)
             }
+            "contrary" => {
+                self.bump();
+                let left = self.ident()?;
+                let right = self.ident()?;
+                let source = self.optional_source()?;
+                Ok(Item::Contrary {
+                    left,
+                    right,
+                    source,
+                })
+            }
+            "unique" => {
+                self.bump();
+                let pred = self.ident()?;
+                let raw = self.ident()?;
+                let index: usize = match raw.parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        return self.err(format!("`unique {pred} {raw}`：参数位置必须是正整数"))
+                    }
+                };
+                let source = self.optional_source()?;
+                Ok(Item::Unique {
+                    pred,
+                    index,
+                    source,
+                })
+            }
             "interpret" | "interpretation" => {
                 self.bump();
                 let name = self.ident()?;
@@ -325,9 +353,9 @@ impl Parser {
                     sources.push(self.source_spec()?);
                 }
                 // Another item starts here.
-                "rule" | "sort" | "pred" | "axiom" | "def" | "interpret"
-                | "interpretation" | "obj" | "object" | "individual"
-                | "#check" | "#why" | "#gap" | "#assert" | "#show" => break,
+                "rule" | "sort" | "pred" | "axiom" | "def" | "interpret" | "interpretation"
+                | "contrary" | "unique" | "obj" | "object" | "individual" | "#check" | "#why"
+                | "#gap" | "#assert" | "#show" => break,
                 other => return self.err(format!("规则 `{name}` 里未知的子句 `{other}`")),
             }
         }
@@ -414,7 +442,7 @@ impl Parser {
             "params" | "premise" | "premises" | "pre" | "conclude" | "conclusion"
             | "unless" | "defeated_by" | "defeated" | "prefer" | "source"
             | "rule" | "sort" | "pred" | "axiom" | "def" | "interpret"
-            | "interpretation" | "obj" | "object" | "individual"
+            | "interpretation" | "contrary" | "unique" | "obj" | "object" | "individual"
             | "#check" | "#why" | "#gap" | "#assert" | "#show"))
     }
 
