@@ -364,3 +364,61 @@ fn a_rule_must_be_well_typed() {
     };
     assert!(env.insert(decl, &ctx).is_err());
 }
+
+#[test]
+fn a_rule_with_duplicate_binder_names_is_refused() {
+    // `p` is both a parameter and a premise binder. Apart from the collision
+    // the rule is well-typed: `R p` and `P` are propositions, and `Q p` is a
+    // proposition. But opening the telescope would turn both bindings into
+    // the same `?p` constant, so the rule must not enter the ledger.
+    let mut env = Env::new();
+    let ctx = Ctx::new();
+    for (n, ty) in [
+        ("R", Expr::pi(Expr::Sort(0), Expr::Sort(0))),
+        ("P", Expr::Sort(0)),
+        ("Q", Expr::pi(Expr::Sort(0), Expr::Sort(0))),
+    ] {
+        env.insert(
+            Decl {
+                name: name(n),
+                kind: DeclKind::Pred,
+                ty,
+                sources: vec![],
+                index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+    }
+    let rule = RuleDecl {
+        // p : Prop
+        params: vec![(name("p"), Expr::Sort(0))],
+        premises: vec![
+            // r : R p
+            (Some(name("r")), Expr::app(c("R"), Expr::Var(0))),
+            // p : P
+            (Some(name("p")), c("P")),
+        ],
+        // Q p, applied to the parameter behind the premise binders.
+        conclusion: Expr::app(c("Q"), Expr::Var(2)),
+        unlesses: vec![],
+        exceptions: vec![],
+        prefers: vec![],
+        sources: vec![],
+    };
+    let decl = Decl {
+        name: name("重名规则"),
+        kind: DeclKind::Rule(Box::new(rule)),
+        ty: Expr::Sort(0),
+        sources: vec![],
+        index: 0,
+    };
+    let err = env
+        .insert(decl, &ctx)
+        .expect_err("duplicate telescope binders must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("binder `p`") && msg.contains("?p"),
+        "the error should name the duplicated binder, got: {msg}"
+    );
+}

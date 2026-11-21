@@ -319,6 +319,51 @@ rule r :
     );
 }
 
+/// The independent verifier compares blockers by kernel definitional
+/// equality: omitting an alpha-variant of the blocker must still be rejected.
+#[test]
+fn verify_rejects_an_alpha_variant_blocker() {
+    use std_deduce_reason::{Derivation, Node};
+    let src = r#"
+sort 公民
+pred 可信 : Prop → Prop
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 可信 (∀ (y : 公民), 侵占 y)
+  source 测试 一
+"#;
+    let lib = load(src);
+    let mut d = Derivation::default();
+    d.nodes.push(Node::Assumption {
+        prop: Expr::app(p("侵占"), p("张三")),
+        sources: vec![],
+        label: None,
+    });
+    d.nodes.push(Node::Assumption {
+        prop: Expr::app(
+            p("可信"),
+            Expr::forall("z", p("公民"), Expr::app(p("侵占"), Expr::Var(0))),
+        ),
+        sources: vec![],
+        label: None,
+    });
+    d.nodes.push(Node::RuleApplication {
+        rule: name("r"),
+        conclusion: Expr::app(p("违法"), p("张三")),
+        premises: vec![0],
+        bindings: vec![(name("p"), p("张三"))],
+        instance: vec!["p ↦ 张三".to_string()],
+        sources: vec![],
+    });
+    let err = verify(&lib.env, &d).expect_err("the alpha-variant blocker is proved");
+    assert!(err.contains("阻断条件"), "got: {err}");
+}
+
 /// A rule whose parameter only appears in the conclusion is refused at load
 /// time: the reasoner could never fix that parameter, so the conclusion would
 /// come out unclosed (`?x`).
@@ -909,6 +954,91 @@ rule 免责 :
     assert!(
         !cand.blocked_by.is_empty(),
         "the blocking condition must be reported"
+    );
+}
+
+/// A blocker is compared up to kernel definitional equality: a proven fact
+/// that is an alpha-variant of the `unless` condition still blocks.
+#[test]
+fn alpha_variant_blocker_blocks_the_rule() {
+    let src = r#"
+sort 公民
+pred 可信 : Prop → Prop
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+axiom 侵占事实 : 侵占 张三
+
+rule 声明 :
+  params q : 公民
+  premise 侵占 q
+  conclude 可信 (∀ (z : 公民), 侵占 z)
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 可信 (∀ (y : 公民), 侵占 y)
+  source 测试 一
+"#;
+    let lib = load(src);
+    let goal = Expr::app(p("违法"), p("张三"));
+    let mut r = Reasoner::new(&lib.env);
+    r.assume_ledger_axioms().unwrap();
+    r.saturate().unwrap();
+    assert!(
+        !r.knows(&goal),
+        "an alpha-variant of the blocker is the same proposition"
+    );
+    let ex = r.explain(&goal);
+    let cand = ex
+        .candidates
+        .iter()
+        .find(|c| c.rule.as_ref() == "r")
+        .expect("rule r should be a candidate");
+    assert!(
+        !cand.blocked_by.is_empty(),
+        "the gap explanation must name the alpha-variant blocker"
+    );
+}
+
+/// Eta-equivalent blockers block as well: `侵占` and `λ (x : 公民) := 侵占 x`
+/// are the same function to the kernel.
+#[test]
+fn eta_variant_blocker_blocks_the_rule() {
+    let src = r#"
+sort 公民
+pred 可信 : (公民 → Prop) → Prop
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+axiom 侵占事实 : 侵占 张三
+
+rule 声明 :
+  params q : 公民
+  premise 侵占 q
+  conclude 可信 侵占
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 可信 (λ (x : 公民) := 侵占 x)
+  source 测试 一
+"#;
+    let lib = load(src);
+    let goal = Expr::app(p("违法"), p("张三"));
+    let blocker = Expr::app(p("可信"), p("侵占"));
+    let mut r = Reasoner::new(&lib.env);
+    r.assume_ledger_axioms().unwrap();
+    r.saturate().unwrap();
+    assert!(
+        r.knows(&blocker),
+        "the environment rule must derive the stronger blocker fact"
+    );
+    assert!(
+        !r.knows(&goal),
+        "an eta-variant of the blocker is the same proposition"
     );
 }
 

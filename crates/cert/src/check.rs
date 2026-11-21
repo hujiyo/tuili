@@ -22,11 +22,34 @@
 //!   axiom. The check is against all proved propositions, not only the ones
 //!   reached from the root: a blocker proved in another branch, or declared
 //!   by an `axiom` whose declared type is a proposition, retracts the step
-//!   too.
+//!   too. Every assumption in the certificate's table counts, whether or not
+//!   a node cites it, and must itself be a proposition. Propositions are
+//!   compared by kernel definitional equality, so alpha- and eta-variants of
+//!   a proved blocker retract the step as well.
+//! * No instantiated `unless` condition is derivable from the environment's
+//!   rules when the certificate merely omits its derivation. The checker
+//!   computes a conservative fixed-point superset of the ground propositions
+//!   the environment's rules can derive, ignoring `unless`, conflicts and
+//!   priorities. A blocker in that superset but not among the proved
+//!   propositions rejects the step; both comparisons again use kernel
+//!   conversion. The closure is computed only when a rule step that Pass 2
+//!   rebuilds has an `unless`. A rule that cannot be evaluated
+//!   statically (for example one that references a premise binder) makes its
+//!   conclusion's predicate head opaque, and opaque heads propagate through
+//!   all rules whose premises can consume them, including rules that are
+//!   themselves opaque; an unproved blocker with an opaque head is rejected
+//!   as unconfirmable. A blocker with no extractable predicate head is
+//!   rejected too. Exceeding the closure's bounds is an error, never a pass.
 //! * A rule whose opened premises, conclusion or `unless` conditions mention a
 //!   premise binder (`premise h : ...` referenced as `?h`) is rejected:
 //!   dependent premises are not supported, and a checker that left `?h`
 //!   uninstantiated would silently miss the condition.
+//!
+//! The derivability superset is not a second reasoner and does not claim the
+//! reasoner's exact semantics; it is deliberately larger. It may therefore
+//! reject a step whose blocker has a counter-argument elsewhere in the
+//! environment. That is the intended direction: refuse a false green rather
+//! than certify an omitted blocker.
 //!
 //! A [`Node::Gap`] proves nothing, so it cannot be a premise. It may be the
 //! root; the report then says `root_proved = false`.
@@ -55,12 +78,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{DeclKind, RuleDecl};
 use std_deduce_kernel::norm::normalize;
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::is_closed;
 use std_deduce_kernel::{check as kernel_check, Ctx, Env, Expr};
 
+use crate::closure;
 use crate::expr::CertExpr;
 use crate::model::{Certificate, Node, NodeId, Resolution, Side};
 
@@ -81,8 +106,8 @@ pub struct CheckReport {
     /// assumed rather than derived by a rule.
     pub root_is_assumption: bool,
     /// The number of assumptions in the certificate's assumption table.
-    /// `root_proved` is relative to all of them; this checker does not decide
-    /// whether each listed assumption is actually used.
+    /// `root_proved` is relative to all of them: every listed assumption is in
+    /// scope whether or not a node cites it.
     pub assumption_count: usize,
     /// Whether the root proposition takes part in a recorded conflict and is
     /// on the winning side. The priority behind that resolution is not
@@ -145,7 +170,7 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
     // Pass 1: every node that proves something must prove a proposition, and
     // its proposition is collected for the `unless` check. Gaps prove
     // nothing, so they contribute nothing here.
-    let mut proved: BTreeSet<String> = BTreeSet::new();
+    let mut proved: BTreeMap<String, Expr> = BTreeMap::new();
     for (id, node) in cert.nodes.iter().enumerate() {
         let (what, proposition) = match node {
             Node::Assumption { assumption } => {
@@ -165,13 +190,57 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
         };
         kernel_check::check(env, &Ctx::new(), &proposition, &Expr::Sort(0))
             .map_err(|e| CheckError::at(id, format!("{what}不是命题：{e}")))?;
-        proved.insert(key(env, &proposition).map_err(|m| CheckError::at(id, m))?);
+        proved.insert(
+            key(env, &proposition).map_err(|m| CheckError::at(id, m))?,
+            proposition,
+        );
+    }
+
+    // Every listed assumption is part of the context the root is proved
+    // relative to, whether or not a node cites it. An unused blocker
+    // assumption must still retract the step, and an unused assumption must
+    // still be a proposition rather than an arbitrary term.
+    for (index, entry) in cert.assumptions.iter().enumerate() {
+        let proposition = Expr::from(&entry.proposition);
+        kernel_check::check(env, &Ctx::new(), &proposition, &Expr::Sort(0)).map_err(|error| {
+            CheckError {
+                node: None,
+                message: format!("第 {} 条假设不是命题：{error}", index + 1),
+            }
+        })?;
+        let fact_key = key(env, &proposition).map_err(|message| CheckError {
+            node: None,
+            message: format!("第 {} 条假设：{message}", index + 1),
+        })?;
+        proved.insert(fact_key, proposition);
     }
 
     // A proposition asserted by an environment axiom is known whether or not
     // the certificate carries a node for it. Without this, a trimmed
     // certificate could drop the blocker's own node and pass.
-    proved.extend(environment_propositions(env)?);
+    for (fact_key, proposition) in environment_propositions(env)? {
+        proved.insert(fact_key, proposition);
+    }
+
+    // The closure is only needed when a rule step that Pass 2 will rebuild
+    // actually has an `unless`. Scanning first avoids its cost — and its
+    // bounds — for a certificate that never consults a blocker. Unknown
+    // rules and non-rule declarations are still rejected by Pass 2 below.
+    let needs_closure = cert.nodes.iter().any(|node| node_has_unless(env, node));
+    // Ignoring `unless`, conflicts and priorities gives a superset of what the
+    // environment may prove. A blocker in that superset but not in `proved`
+    // is derivable without the certificate showing the derivation, so the
+    // step must not pass.
+    let possible = if needs_closure {
+        Some(
+            closure::possible(env, proved.values()).map_err(|message| CheckError {
+                node: None,
+                message,
+            })?,
+        )
+    } else {
+        None
+    };
 
     // Pass 2: rebuild each rule application from its own evidence.
     for (id, node) in cert.nodes.iter().enumerate() {
@@ -334,12 +403,54 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
 
         for unless in &r.unlesses {
             let closed = close_pattern(&r.open_unless_text(unless), &binding);
-            let closed_key = key(env, &closed).map_err(|m| CheckError::at(id, m))?;
-            if proved.contains(&closed_key) {
+            if proved_contains(env, &proved, &closed)
+                .map_err(|message| CheckError::at(id, message))?
+            {
                 return Err(CheckError::at(
                     id,
                     format!(
                         "规则 `{rule}` 的阻断条件「{}」已成立，本步不该成立",
+                        print_expr(&closed)
+                    ),
+                ));
+            }
+            let Some(possible) = possible.as_ref() else {
+                // The pre-scan computes the closure for every rule step with
+                // an `unless`; reaching this point without it would be an
+                // internal inconsistency, not a clean pass.
+                return Err(CheckError::at(
+                    id,
+                    format!("规则 `{rule}` 有阻断条件，但环境闭包没有计算：内部检查状态不一致"),
+                ));
+            };
+            if possible_contains(env, possible, &closed)
+                .map_err(|message| CheckError::at(id, message))?
+            {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "规则 `{rule}` 的阻断条件「{}」可能由环境规则推出，但证书没有给出它的推导；\
+                         请补 blocker 证明，或缩小规则/环境",
+                        print_expr(&closed)
+                    ),
+                ));
+            }
+            let head = closure::concrete_head(env, &closed).map_err(|m| CheckError::at(id, m))?;
+            let Some(head) = head else {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "规则 `{rule}`：阻断条件没有可提取的谓词头，无法确认阻断状态（「{}」）",
+                        print_expr(&closed)
+                    ),
+                ));
+            };
+            if possible.opaque_any || possible.opaque_heads.contains(&head) {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "规则 `{rule}` 的阻断条件「{}」无法确认阻断状态：\
+                         环境中有无法静态求值的规则可能推出该阻断条件",
                         print_expr(&closed)
                     ),
                 ));
@@ -422,14 +533,15 @@ fn root_conflict_resolved(
     Ok(resolved)
 }
 
-/// Every environment axiom whose declared type is a proposition.
+/// Every environment axiom whose declared type is a proposition, keyed by its
+/// normalized form.
 ///
 /// `axiom h : 侵占 张三` asserts the proposition `侵占 张三`; a declaration
 /// whose declared type is not a proposition (`axiom 假 : Prop`) only names a
 /// proposition constant and is skipped. The kernel's inference decides the
 /// sort; the name is never guessed at.
-fn environment_propositions(env: &Env) -> Result<BTreeSet<String>, CheckError> {
-    let mut facts = BTreeSet::new();
+fn environment_propositions(env: &Env) -> Result<BTreeMap<String, Expr>, CheckError> {
+    let mut facts = BTreeMap::new();
     for decl in env.iter() {
         if !matches!(decl.kind, DeclKind::Axiom) {
             continue;
@@ -443,13 +555,73 @@ fn environment_propositions(env: &Env) -> Result<BTreeSet<String>, CheckError> {
         if declared_sort != Expr::Sort(0) {
             continue;
         }
-        let fact = key(env, &decl.ty).map_err(|message| CheckError {
+        let proposition = normalize(env, &Ctx::new(), &decl.ty).map_err(|error| CheckError {
             node: None,
-            message: format!("环境公理 `{}`：{message}", decl.name),
+            message: format!("环境公理 `{}` 无法规范化，无法比较：{error}", decl.name),
         })?;
-        facts.insert(fact);
+        facts.insert(print_expr(&proposition), proposition);
     }
     Ok(facts)
+}
+
+/// Does this node rebuild a rule step that has at least one `unless`?
+///
+/// Unknown rules and non-rule declarations return false here and are rejected
+/// by Pass 2 with their own diagnostics. This scan decides whether the
+/// conservative closure is needed at all.
+fn node_has_unless(env: &Env, node: &Node) -> bool {
+    let Node::RuleApplication { rule, .. } = node else {
+        return false;
+    };
+    let Some(decl) = env.get(rule) else {
+        return false;
+    };
+    matches!(&decl.kind, DeclKind::Rule(rule) if !rule.unlesses.is_empty())
+}
+
+/// Whether `proposition` is already proved, up to kernel conversion.
+///
+/// The normalized printed key is an exact fast path. Alpha- or eta-equivalent
+/// facts have different printed keys, so a miss falls back to
+/// [`convertible`]. A conversion error is a failed check, never a non-match.
+fn proved_contains(
+    env: &Env,
+    proved: &BTreeMap<String, Expr>,
+    proposition: &Expr,
+) -> Result<bool, String> {
+    let exact = key(env, proposition)?;
+    if proved.contains_key(&exact) {
+        return Ok(true);
+    }
+    for fact in proved.values() {
+        if convertible(env, &Ctx::new(), fact, proposition)
+            .map_err(|error| format!("无法判定阻断条件是否已成立：{error}"))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether the conservative closure contains `proposition`, up to kernel
+/// conversion.
+///
+/// Every possible fact is compared with [`convertible`]. A printed-key
+/// comparison would miss alpha and eta variants, which are the same
+/// proposition to the kernel.
+fn possible_contains(
+    env: &Env,
+    possible: &closure::Possible,
+    proposition: &Expr,
+) -> Result<bool, String> {
+    for fact in &possible.facts {
+        if convertible(env, &Ctx::new(), fact, proposition)
+            .map_err(|error| format!("无法判定阻断条件是否可能推出：{error}"))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The names of a rule's premise binders, as opened to `?name`.
@@ -457,7 +629,7 @@ fn environment_propositions(env: &Env) -> Result<BTreeSet<String>, CheckError> {
 /// Parameters are excluded: they are instantiated from the certificate's
 /// `bindings`. Unnamed premises get the same generated `_p{i}` name the kernel
 /// uses, so a reference to it is detected as well.
-fn premise_binder_names(rule: &RuleDecl) -> BTreeSet<String> {
+pub(crate) fn premise_binder_names(rule: &RuleDecl) -> BTreeSet<String> {
     let params: BTreeSet<&str> = rule.params.iter().map(|(name, _)| name.as_ref()).collect();
     rule.binder_names()
         .into_iter()
@@ -468,7 +640,10 @@ fn premise_binder_names(rule: &RuleDecl) -> BTreeSet<String> {
 }
 
 /// The first premise binder an opened pattern mentions, if any.
-fn mentioned_premise_binder(pattern: &Expr, premise_binders: &BTreeSet<String>) -> Option<String> {
+pub(crate) fn mentioned_premise_binder(
+    pattern: &Expr,
+    premise_binders: &BTreeSet<String>,
+) -> Option<String> {
     match pattern {
         Expr::Const(name) => name
             .strip_prefix('?')
@@ -544,7 +719,7 @@ fn close_pattern(pattern: &Expr, binding: &BTreeMap<&str, Expr>) -> Expr {
 }
 
 /// A comparison key that is stable under kernel definitional unfolding.
-fn key(env: &Env, expression: &Expr) -> Result<String, String> {
+pub(crate) fn key(env: &Env, expression: &Expr) -> Result<String, String> {
     normalize(env, &Ctx::new(), expression)
         .map(|normalized| print_expr(&normalized))
         .map_err(|error| format!("规范化命题失败，无法比较：{error}"))

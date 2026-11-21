@@ -291,6 +291,27 @@ impl Library {
                     defeaters,
                     sources,
                 } => {
+                    // Every telescope binder is opened by the kernel as the
+                    // constant `?<binder>`. Two binders with the same name
+                    // would become one constant, so the reasoner could take a
+                    // premise proof for a parameter value. The collision is
+                    // refused before elaboration: once shadowing is in place,
+                    // the rule would otherwise fail with a misleading type
+                    // error instead of naming the real cause.
+                    let mut binder_names: Vec<std_deduce_kernel::Name> = params
+                        .iter()
+                        .map(|(pn, _)| std_deduce_kernel::name(pn))
+                        .collect();
+                    binder_names.extend(premises.iter().enumerate().map(|(i, p)| match &p.name {
+                        Some(pn) => std_deduce_kernel::name(pn),
+                        None => std_deduce_kernel::name(format!("_p{i}")),
+                    }));
+                    std_deduce_kernel::env::check_unique_binders(&binder_names).map_err(|e| {
+                        LoadError {
+                            msg: format!("`rule {n}`：{e}"),
+                        }
+                    })?;
+
                     // One telescope elaboration: params and premises are
                     // elaborated in the same growing context, and the
                     // conclusion is elaborated in the full telescope. This

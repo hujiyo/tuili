@@ -5,7 +5,7 @@
 //! A legal derivation is worthless without knowing which version of which
 //! article it used, so provenance is a first-class field rather than a comment.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::check;
 use crate::error::{Error, Result};
@@ -260,6 +260,26 @@ pub fn rule_type(rule: &RuleDecl) -> Expr {
     telescope(&params, rule.conclusion.clone())
 }
 
+/// Refuse a telescope whose binder names are not pairwise distinct.
+///
+/// Opening a rule replaces each telescope binder by the constant `?<binder>`
+/// (see `open_vars`), so two binders with the same name become one constant:
+/// a premise proof could be taken for a parameter value, or the other way
+/// round. The collision is reported instead of silently renamed, because only
+/// the author knows which binding the rule meant.
+pub fn check_unique_binders(binders: &[Name]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for binder in binders {
+        if !seen.insert(binder) {
+            return Err(Error::other(format!(
+                "参数/前提 binder `{binder}` 重名：重名会让推理器把不同的绑定打开成同一个 \
+                 `?{binder}` 常量，从而把前提证明当成参数值（或反过来）。必须改名。"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl RuleDecl {
     /// All binders of the rule: params, then premises. `unless` conditions
     /// are not binders, so they are not listed here.
@@ -289,6 +309,13 @@ impl RuleDecl {
     /// this wrong silently reinterprets de Bruijn indices, so it is spelled
     /// out step by step.
     pub fn check(&self, env: &Env, conclusion_ty: &Expr) -> Result<()> {
+        // A binder name must be unique across params and premises. Opening
+        // the rule replaces every binder by the constant `?<binder>`, so two
+        // different bindings with the same name become the same constant: a
+        // premise proof could be taken for a parameter value, or the other
+        // way round. Renaming silently would hide which binding the source
+        // meant, so it is refused before anything else.
+        check_unique_binders(&self.binder_names())?;
         let mut ctx = Ctx::new();
         for (i, (n, ty)) in self.params.iter().enumerate() {
             check::check_is_type(env, &ctx, ty)
@@ -318,24 +345,36 @@ impl RuleDecl {
             });
         }
 
-        // A parameter that appears in the conclusion but in no premise cannot
-        // be fixed at instantiation time: the reasoner would leave it as a
-        // `?name` constant, producing a conclusion that is not closed. That
-        // is a silent hole, so it is refused at load time instead.
+        // Every parameter must be fixed by a premise at instantiation time.
+        // If one appears in the conclusion or in an `unless` condition but in
+        // no premise, the reasoner would leave it as a `?name` constant, so
+        // the conclusion or the blocker never closes, and a certificate could
+        // invent a binding to dodge the blocker. If it appears nowhere at all,
+        // the reasoner never binds it, while the certificate checker demands a
+        // binding for every parameter: the two disagree about what a complete
+        // instance is. Both are silent holes, so they are refused at load time.
         for (binder, _) in &self.params {
-            let in_conclusion = mentions_pattern(&self.open_conclusion(), binder);
-            if !in_conclusion {
-                continue;
-            }
             let in_premise =
                 (0..self.premises.len()).any(|i| mentions_pattern(&self.open_premise(i), binder));
-            if !in_premise {
+            if in_premise {
+                continue;
+            }
+            let in_conclusion = mentions_pattern(&self.open_conclusion(), binder);
+            let in_unless = self
+                .unlesses
+                .iter()
+                .any(|u| mentions_pattern(&self.open_unless_text(u), binder));
+            if in_conclusion || in_unless {
                 return Err(Error::other(format!(
-                    "参数 `{binder}` 出现在结论里，但没有出现在任何前提里：\
-                     实例化时它无法被确定，结论不会闭合。\
-                     请把它纳入某条前提，或把它从结论里去掉。"
+                    "参数 `{binder}` 出现在结论或 unless 阻断条件里，但没有出现在任何前提里：\
+                     实例化时它无法被确定，结论或阻断条件不会闭合。\
+                     请把它纳入某条前提，或把它从结论/unless 里去掉。"
                 )));
             }
+            return Err(Error::other(format!(
+                "参数 `{binder}` 没有出现在任何前提里，也没有出现在结论或 unless 里：\
+                 它是一个无法被实例化的空参数。请把它纳入某条前提，或删掉这个参数。"
+            )));
         }
         Ok(())
     }

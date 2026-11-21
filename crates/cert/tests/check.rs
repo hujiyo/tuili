@@ -67,6 +67,339 @@ rule 依赖前提 :
   conclude 违法 张三
 "#;
 
+/// An environment rule derives the blocker `无辜 张三` from an axiom. A
+/// certificate may prove the premise of `r` and omit the blocker's own
+/// derivation node; the checker must still see that the blocker is derivable.
+const DERIVED_BLOCKER_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+pred 有罪 : 公民 → Prop
+obj 张三 : 公民
+axiom 有罪事实 : 有罪 张三
+axiom 侵占事实 : 侵占 张三
+
+rule 推定无辜 :
+  params p : 公民
+  premise 有罪 p
+  conclude 无辜 p
+  source 测试 二
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+  source 测试 一
+"#;
+
+/// The blocker is only reachable through a chain of environment rules, so a
+/// one-step closure would miss it.
+const TRANSITIVE_BLOCKER_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+pred 有罪 : 公民 → Prop
+pred 可罚 : 公民 → Prop
+obj 张三 : 公民
+axiom 有罪事实 : 有罪 张三
+
+rule 有罪则可罚 :
+  params p : 公民
+  premise 有罪 p
+  conclude 可罚 p
+
+rule 可罚则无辜 :
+  params p : 公民
+  premise 可罚 p
+  conclude 无辜 p
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#;
+
+/// The environment can derive `无辜 李四`, but the certificate is about
+/// `张三`. A blocker about another individual must not block this step.
+const UNRELATED_BLOCKER_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+pred 有罪 : 公民 → Prop
+obj 张三 : 公民
+obj 李四 : 公民
+axiom 李四有罪 : 有罪 李四
+
+rule 推定无辜 :
+  params p : 公民
+  premise 有罪 p
+  conclude 无辜 p
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#;
+
+/// A rule concludes `无辜`, but its premise matches no fact: it derives
+/// nothing and must not make the blocker look reachable.
+const UNMATCHED_BLOCKER_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+pred 有罪 : 公民 → Prop
+obj 张三 : 公民
+
+rule 推定无辜 :
+  params p : 公民
+  premise 有罪 p
+  conclude 无辜 p
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#;
+
+/// A rule whose `unless` references a premise binder cannot be evaluated
+/// statically, so its conclusion head (`无辜`) is opaque. An unproved blocker
+/// with that head cannot be cleared.
+const OPAQUE_BLOCKER_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+obj 张三 : 公民
+pred 佐证 : 侵占 张三 → Prop
+
+rule 依赖推定 :
+  premise h : 侵占 张三
+  unless 佐证 h
+  conclude 无辜 张三
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#;
+
+/// An opaque rule concludes `中间`; the rule `中间 p → 无辜 p` can turn that
+/// opaque head into the blocker `r` is checking.
+const OPAQUE_CHAIN_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+pred 中间 : 公民 → Prop
+obj 张三 : 公民
+pred 佐证 : 侵占 张三 → Prop
+
+rule 依赖中间 :
+  premise h : 侵占 张三
+  unless 佐证 h
+  conclude 中间 张三
+
+rule 中间推无辜 :
+  params p : 公民
+  premise 中间 p
+  conclude 无辜 p
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#;
+
+/// A two-hop chain: one propagation pass is not enough to reach the blocker.
+const OPAQUE_TRANSITIVE_CHAIN_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+pred 中间 : 公民 → Prop
+pred 第二中间 : 公民 → Prop
+obj 张三 : 公民
+pred 佐证 : 侵占 张三 → Prop
+
+rule 依赖中间 :
+  premise h : 侵占 张三
+  unless 佐证 h
+  conclude 中间 张三
+
+rule 中间推第二 :
+  params p : 公民
+  premise 中间 p
+  conclude 第二中间 p
+
+rule 第二推无辜 :
+  params p : 公民
+  premise 第二中间 p
+  conclude 无辜 p
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#;
+
+/// Two opaque rules in a row: the second one's premise mentions the first
+/// one's opaque conclusion head. Both are excluded from fact derivation, but
+/// both must stay in the opacity-propagation graph.
+const OPAQUE_CHAIN_THROUGH_OPAQUE_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 中间 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+obj 张三 : 公民
+pred 佐证 : 侵占 张三 → Prop
+
+rule 依赖中间 :
+  premise h : 侵占 张三
+  conclude 中间 张三
+  unless 佐证 h
+
+rule 依赖无辜 :
+  premise h : 侵占 张三
+  premise m : 中间 张三
+  conclude 无辜 张三
+  unless 佐证 h
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#;
+
+/// Like [`OPAQUE_CHAIN_THEORY`], but the opaque head appears nested inside
+/// another predicate's argument rather than at the premise's outer head.
+const OPAQUE_NESTED_CHAIN_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+pred 中间 : 公民 → Prop
+pred 可信 : Prop → Prop
+obj 张三 : 公民
+pred 佐证 : 侵占 张三 → Prop
+
+rule 依赖中间 :
+  premise h : 侵占 张三
+  unless 佐证 h
+  conclude 中间 张三
+
+rule 嵌套推无辜 :
+  params p : 公民
+  premise 可信 (中间 p)
+  conclude 无辜 p
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#;
+
+/// A rule whose premise head is a parameter (`?p 甲`) could match an opaque
+/// fact of any head, so its conclusion head must become opaque as well.
+const OPAQUE_VARIABLE_HEAD_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+pred 中间 : 公民 → Prop
+obj 张三 : 公民
+obj 甲 : 公民
+pred 佐证 : 侵占 张三 → Prop
+
+rule 依赖中间 :
+  premise h : 侵占 张三
+  unless 佐证 h
+  conclude 中间 甲
+
+rule 任意谓词推无辜 :
+  params p : 公民 → Prop
+  premise p 甲
+  conclude 无辜 张三
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#;
+
+/// The blocker is a quantified proposition, so it has no predicate head to
+/// compare with the opaque-head set.
+const HEADLESS_UNLESS_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+obj 张三 : 公民
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless ∀ (x : 公民), 无辜 x
+"#;
+
+/// The environment derives a blocker whose only difference from `r`'s
+/// `unless` is the binder name. `print_expr` keeps binder names, so the
+/// string key misses it; kernel conversion must not.
+const ALPHA_VARIANT_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 可信 : Prop → Prop
+obj 张三 : 公民
+axiom 侵占事实 : 侵占 张三
+
+rule 引入可信 :
+  premise 侵占 张三
+  conclude 可信 (∀ (z : 公民), 侵占 z)
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 可信 (∀ (y : 公民), 侵占 y)
+"#;
+
+/// `可信 侵占` and `可信 (λ x := 侵占 x)` are η-equivalent, but their
+/// printed forms differ.
+const ETA_VARIANT_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 可信 : (公民 → Prop) → Prop
+obj 张三 : 公民
+axiom 侵占事实 : 侵占 张三
+
+rule 引入可信 :
+  premise 侵占 张三
+  conclude 可信 侵占
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 可信 (λ (x : 公民) := 侵占 x)
+"#;
+
 fn env_from(name: &str, source: &str) -> Env {
     let mut library = Library::new();
     library.load(name, source).expect("test theory loads");
@@ -83,6 +416,90 @@ fn axiom_env() -> Env {
 
 fn dependent_env() -> Env {
     env_from("cert-check-dependent", DEPENDENT_THEORY)
+}
+
+fn derived_blocker_env() -> Env {
+    env_from("cert-check-derived-blocker", DERIVED_BLOCKER_THEORY)
+}
+
+fn transitive_blocker_env() -> Env {
+    env_from("cert-check-transitive-blocker", TRANSITIVE_BLOCKER_THEORY)
+}
+
+fn unrelated_blocker_env() -> Env {
+    env_from("cert-check-unrelated-blocker", UNRELATED_BLOCKER_THEORY)
+}
+
+fn unmatched_blocker_env() -> Env {
+    env_from("cert-check-unmatched-blocker", UNMATCHED_BLOCKER_THEORY)
+}
+
+fn opaque_blocker_env() -> Env {
+    env_from("cert-check-opaque-blocker", OPAQUE_BLOCKER_THEORY)
+}
+
+fn opaque_chain_env() -> Env {
+    env_from("cert-check-opaque-chain", OPAQUE_CHAIN_THEORY)
+}
+
+fn opaque_transitive_chain_env() -> Env {
+    env_from(
+        "cert-check-opaque-transitive-chain",
+        OPAQUE_TRANSITIVE_CHAIN_THEORY,
+    )
+}
+
+fn opaque_chain_through_opaque_env() -> Env {
+    env_from(
+        "cert-check-opaque-chain-through-opaque",
+        OPAQUE_CHAIN_THROUGH_OPAQUE_THEORY,
+    )
+}
+
+fn opaque_nested_chain_env() -> Env {
+    env_from("cert-check-opaque-nested-chain", OPAQUE_NESTED_CHAIN_THEORY)
+}
+
+fn opaque_variable_head_env() -> Env {
+    env_from(
+        "cert-check-opaque-variable-head",
+        OPAQUE_VARIABLE_HEAD_THEORY,
+    )
+}
+
+fn headless_unless_env() -> Env {
+    env_from("cert-check-headless-unless", HEADLESS_UNLESS_THEORY)
+}
+
+fn alpha_variant_env() -> Env {
+    env_from("cert-check-alpha-variant", ALPHA_VARIANT_THEORY)
+}
+
+fn eta_variant_env() -> Env {
+    env_from("cert-check-eta-variant", ETA_VARIANT_THEORY)
+}
+
+/// A rule with three premises over 120 facts has more than the closure's
+/// matching budget. A certificate without any `unless` must not pay for it.
+fn many_facts_env() -> Env {
+    let mut source = String::from(
+        "sort 公民\n\
+         pred P : 公民 → Prop\n\
+         pred Q : 公民 → 公民 → 公民 → Prop\n\
+         rule 组合 :\n\
+           params a : 公民, b : 公民, c : 公民\n\
+           premise P a\n\
+           premise P b\n\
+           premise P c\n\
+           conclude Q a b c\n",
+    );
+    for i in 0..120 {
+        source.push_str(&format!("obj c{i} : 公民\n"));
+    }
+    for i in 0..120 {
+        source.push_str(&format!("axiom p{i} : P c{i}\n"));
+    }
+    env_from("cert-check-many-facts", &source)
 }
 
 fn constant(name: &str) -> CertExpr {
@@ -573,4 +990,225 @@ fn assumption_must_be_a_proposition() {
     );
     let error = reject_at(&cert, 0);
     assert!(error.message.contains("假设不是命题"), "{error}");
+}
+
+/// A certificate that proves only the premise of `r`, not the blocker its
+/// environment can derive. The checker must reject the step: the environment
+/// proves `无辜 张三`, and the certificate's silence is not a counter-proof.
+#[test]
+fn derived_blocker_is_not_bypassed_by_omitting_its_node() {
+    let cert = certificate(
+        vec![premise(atom("侵占", "张三"))],
+        vec![
+            assumption_node(0),
+            rule_node(atom("违法", "张三"), vec![0], vec![("p", constant("张三"))]),
+        ],
+        Some(1),
+    );
+    let error = check(&derived_blocker_env(), &cert)
+        .expect_err("a blocker derived by an environment rule must not be omitted");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(
+        error.message.contains("无辜") || error.message.contains("阻断"),
+        "{error}"
+    );
+}
+
+/// `有罪 p → 可罚 p → 无辜 p`: the closure must reach a fixed point, not stop
+/// after one layer of environment rules.
+#[test]
+fn transitive_derived_blocker_is_detected() {
+    let cert = certificate(
+        vec![premise(atom("侵占", "张三"))],
+        vec![
+            assumption_node(0),
+            rule_node(atom("违法", "张三"), vec![0], vec![("p", constant("张三"))]),
+        ],
+        Some(1),
+    );
+    let error = check(&transitive_blocker_env(), &cert)
+        .expect_err("a blocker derived through two environment rules must be found");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(
+        error.message.contains("无辜") || error.message.contains("阻断"),
+        "{error}"
+    );
+}
+
+/// The environment derives `无辜 李四`, not `无辜 张三`. Predicate names alone
+/// are not enough: the individual matters.
+#[test]
+fn unrelated_individual_does_not_block() {
+    let cert = certificate(
+        vec![premise(atom("侵占", "张三"))],
+        vec![
+            assumption_node(0),
+            rule_node(atom("违法", "张三"), vec![0], vec![("p", constant("张三"))]),
+        ],
+        Some(1),
+    );
+    let report = check(&unrelated_blocker_env(), &cert)
+        .expect("a blocker derived for another individual does not block this step");
+    assert!(report.root_proved);
+}
+
+/// An assumption in the table blocks the rule even when no node cites it:
+/// `root_proved` is relative to every assumption the certificate lists.
+#[test]
+fn unused_blocker_assumption_is_detected() {
+    let cert = certificate(
+        vec![premise(atom("侵占", "张三")), premise(atom("无辜", "张三"))],
+        vec![
+            assumption_node(0),
+            rule_node(atom("违法", "张三"), vec![0], vec![("p", constant("张三"))]),
+        ],
+        Some(1),
+    );
+    let error = check(&env(), &cert)
+        .expect_err("an unused blocker assumption is still part of the context");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(error.message.contains("阻断条件"), "{error}");
+    assert!(error.message.contains("无辜"), "{error}");
+}
+
+/// The only rule concluding `无辜` has a premise that matches no fact. It
+/// derives nothing, so the blocker is not reachable.
+#[test]
+fn a_rule_that_cannot_derive_the_blocker_does_not_block() {
+    let cert = certificate(
+        vec![premise(atom("侵占", "张三"))],
+        vec![
+            assumption_node(0),
+            rule_node(atom("违法", "张三"), vec![0], vec![("p", constant("张三"))]),
+        ],
+        Some(1),
+    );
+    let report = check(&unmatched_blocker_env(), &cert)
+        .expect("a rule whose premises match no fact derives nothing");
+    assert!(report.root_proved);
+}
+
+/// The rule that could conclude `无辜` cannot be evaluated statically because
+/// its `unless` references a premise binder. Its head is opaque, so the
+/// checker cannot clear the unproved blocker.
+/// The opaque rule concludes `中间`; the intermediate rule turns `中间` into
+/// `无辜`. The opaque head must be propagated, or `r`'s blocker looks clear.
+#[test]
+fn opaque_head_propagates_through_an_intermediate_rule() {
+    let error = check(&opaque_chain_env(), &legal_certificate())
+        .expect_err("an opaque head must propagate through the intermediate rule");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(error.message.contains("无法确认阻断状态"), "{error}");
+}
+
+/// One propagation pass would stop at `第二中间`; the loop must continue until
+/// `无辜` is opaque as well.
+#[test]
+fn opaque_head_propagation_reaches_a_fixed_point() {
+    let error = check(&opaque_transitive_chain_env(), &legal_certificate())
+        .expect_err("opaque heads must propagate across multiple rules");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(error.message.contains("无法确认阻断状态"), "{error}");
+}
+
+/// Both rules are opaque; the second one consumes the first one's opaque
+/// conclusion head. The second rule's own head is registered directly when it
+/// is opened; this test also guards that opaque rules stay in the propagation
+/// graph instead of being silently dropped from it.
+#[test]
+fn opaque_head_propagates_through_another_opaque_rule() {
+    let error = check(&opaque_chain_through_opaque_env(), &legal_certificate())
+        .expect_err("an opaque rule must propagate opacity to another opaque rule");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(error.message.contains("无法确认阻断状态"), "{error}");
+}
+
+/// The opaque head is nested inside `可信 (...)`, not at the premise's outer
+/// head. Propagation must still find it.
+#[test]
+fn opaque_head_propagates_from_a_nested_premise() {
+    let error = check(&opaque_nested_chain_env(), &legal_certificate())
+        .expect_err("a nested occurrence of an opaque head must propagate");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(error.message.contains("无法确认阻断状态"), "{error}");
+}
+
+/// A premise whose head is a parameter can match an opaque fact of any head,
+/// so its conclusion head must become opaque while opaque heads exist.
+#[test]
+fn a_parameter_head_premise_is_opaque_when_opaque_heads_exist() {
+    let error = check(&opaque_variable_head_env(), &legal_certificate())
+        .expect_err("a parameter-head premise may consume an opaque fact");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(error.message.contains("无法确认阻断状态"), "{error}");
+}
+
+/// A quantified `unless` has no predicate head; leaving that unconfirmed must
+/// reject, not pass.
+#[test]
+fn unless_without_extractable_head_is_rejected() {
+    let error = check(&headless_unless_env(), &legal_certificate())
+        .expect_err("a blocker without an extractable head cannot be cleared");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(error.message.contains("没有可提取的谓词头"), "{error}");
+}
+
+/// A listed assumption must be a proposition even when no node cites it.
+#[test]
+fn unused_assumption_must_be_a_proposition() {
+    let cert = certificate(vec![premise(constant("侵占"))], Vec::new(), None);
+    let error = check(&env(), &cert).expect_err("an unused assumption must still be a proposition");
+    assert!(error.message.contains("不是命题"), "{error}");
+}
+
+/// The environment derives the same quantified proposition as the blocker,
+/// but with a different binder name. String keys miss it; conversion must not.
+#[test]
+fn alpha_variant_of_blocker_is_detected() {
+    let error = check(&alpha_variant_env(), &legal_certificate())
+        .expect_err("an alpha variant of the derived blocker must block the step");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(
+        error.message.contains("阻断") || error.message.contains("可能"),
+        "{error}"
+    );
+}
+
+/// The environment derives `可信 侵占`; the blocker is its η-expanded form.
+#[test]
+fn eta_variant_of_blocker_is_detected() {
+    let error = check(&eta_variant_env(), &legal_certificate())
+        .expect_err("an eta variant of the derived blocker must block the step");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(
+        error.message.contains("阻断") || error.message.contains("可能"),
+        "{error}"
+    );
+}
+
+/// The environment's three-premise rule exceeds the closure's matching budget.
+/// A gap-only certificate has no `unless`, so it must not run the closure.
+#[test]
+fn a_gap_certificate_does_not_require_the_unless_closure() {
+    let cert = certificate(Vec::new(), vec![gap_node(atom("P", "c0"))], Some(0));
+    let report = check(&many_facts_env(), &cert)
+        .expect("a certificate without unless conditions does not need the closure");
+    assert!(!report.root_proved);
+}
+
+#[test]
+fn an_opaque_rule_head_prevents_clearing_the_blocker() {
+    let cert = certificate(
+        vec![premise(atom("侵占", "张三"))],
+        vec![
+            assumption_node(0),
+            rule_node(atom("违法", "张三"), vec![0], vec![("p", constant("张三"))]),
+        ],
+        Some(1),
+    );
+    let error = check(&opaque_blocker_env(), &cert)
+        .expect_err("an unconfirmable blocker must not be cleared");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(error.message.contains("无法确认阻断状态"), "{error}");
+    assert!(error.message.contains("无法静态求值"), "{error}");
 }

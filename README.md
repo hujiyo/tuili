@@ -212,30 +212,41 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
   校验器从**引用的前提**重建规则实例（前提决定实例，结论必须由它推出），
   并拒绝以下情形：前提数目不符、前提不是本规则该位置的实例、参数未被任何前提约束、
   结论与实例化结果不一致、任一 `unless` 在树中已成立。
+  `unless` 是否成立按内核定义等价判断（alpha/eta 也算同一个命题），不只比打印字符串；
+  比较失败按“已阻断”处理，绝不当作未阻断。
   **它是独立校验器，不是内核检查**：校验器不构造证明项，每一步是否合法仍由它自己判断。
   它把推导转换成证书（`certificate`）：节点顺序、前提顺序、结构化绑定、来源、缺口、冲突和根原样保留；
   无法编码成证书表达式的项会报错，不会丢弃。
 - **`crates/cert`**：证书的数据模型、JSON 序列化、逻辑检查器 `check` 与内核证明项构造 `kernel_proof`
   （版本化格式，反序列化拒绝未知版本与未知字段）。`check` 从规则声明、记录的绑定和引用的前提重建每一步，
-  检查规则实例与证书内可见的 `unless` 阻断条件，并拒绝处于未决冲突或败方的根；
-  `kernel_proof` 把证书的**单调骨架**翻译成内核证明项，逐步交给内核检查。
+  检查规则实例与 `unless` 阻断条件，并拒绝处于未决冲突或败方的根。
+  阻断检查不只看证书节点和环境公理，还计算一个**保守的环境规则闭包**：忽略 `unless`、冲突和优先级，
+  从证书假设、环境公理和节点结论出发，按 ground matching 反复应用规则到不动点；闭包里出现、但证书
+  没有给出推导的 blocker 会被拒绝。无法静态求值的规则（如依赖前提 binder）把结论谓词头标为 opaque，
+  并向后续规则传播；任何撞上它的未证明 blocker 也拒绝。闭包与证书事实的比较用内核 `convertible`，
+  不靠打印字符串。
   它只依赖 `crates/kernel`，**不依赖 `crates/reason`**；已记录的冲突与裁决会被读取，但
   `defeated_by` / `prefer` 的优先级来源不在这里核验（`priority_sources_checked = false`）。
 - **`crates/cli`**：会话与命令；`:cert` 导出证书，`:check` 依次运行 `cert::check` 与 `cert::kernel_proof`，把逻辑、内核、侧条件和需人判断分成四行报告。
 
 ### 证书链的当前边界
 
-- `:why` 仍用 `reason::verify` 做复核，还没有切到 `crates/cert` 的检查器。
-- `:check` 依次运行两段：`cert::check` 检查规则实例、证书内可见的阻断条件与根冲突状态，
+- `:why` 仍用 `reason::verify` 做复核，还没有切到 `crates/cert` 的检查器；它的 blocker 比较已按
+  内核定义等价对齐（alpha/eta），但结论/前提比较仍走 `reason` 自己的 key。
+- `:check` 依次运行两段：`cert::check` 检查规则实例、阻断条件与根冲突状态，
   `kernel_proof` 再把单调骨架翻译成证明项交给内核。逻辑通过但内核失败时退出 `2`，
   不会把"逻辑有效"当成"证书有效"；`kernel_proof` 本身仍不检查 `unless` 和优先级。
 - `cert::check` 只检查根命题是否处于未决冲突或败方；非根冲突不在这里裁决，
   `defeated_by` / `prefer` 的优先级来源也未核验（`priority_sources_checked = false`）。
   `:cert` 把缺口写成 `MissingPremise`、把未决冲突写成 `UnresolvedConflict` 的
   `open_obligations`；它们只设置 `requires_human`，不会让逻辑校验失败。
-- `cert::check` 的 blocker 检查只收集证书内已证明的命题，以及环境中类型为 `Prop` 的公理；
-  **它不计算环境规则推出的闭包**。如果某个 `unless` 条件由环境规则推出、而证书省略了它的
-  推导节点，`cert::check` 会漏检；`:why` 的 reasoner 按不动点计算，不受此限。
+- `cert::check` 的 blocker 检查是**保守过近似**：闭包忽略 `unless`、冲突和优先级，可能比 reasoner
+  推出更多，因此可能拒绝一份合法证书；它不会放行省略的 blocker。opaque 头目前只到谓词名，
+  同谓词不同个体的合法步骤可能被误杀；闭包允许同一事实满足多个前提，而 reasoner 的搜索不允许，
+  两种口径尚未统一。闭包有轮次/事实/匹配上限，超限一律报错拒绝，不能当成"没有 blocker"。
+  这些精度问题记在 `M1-7e`。
+- 证书 assumption 表里的每一条都进入上下文，即使没有任何节点引用；未使用的 blocker assumption
+  也会阻断当前规则，未使用的非命题 assumption 直接报错。
 - 根是 assumption 节点时，`root_proved` 只表示它在这份证书列出的 N 条假设下成立
   （`root_is_assumption = true`、`assumption_count = N`），是**在 N 条假设下的条件证明**，
   不是无条件结论。
@@ -306,30 +317,36 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 122 个：kernel 14、lang 2、reason 36、cert 51、cli 19。
+`cargo test --workspace` 共 146 个：kernel 15、lang 6、reason 39、cert 67、cli 19。
 
-- `crates/kernel/tests/kernel.rs`（14）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
+- `crates/kernel/tests/kernel.rs`（15）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
   `types_stay_predicative`（Type 层不许自包含），以及规则常量的两条：
   类型是 `∀ 参数, 前提 → 结论`，应用到全部参数与前提后正好得到结论；
   少给一个前提时剩下的是函数类型而不是结论，证明本身也不能当命题用。
-- `crates/lang/tests/lang.rs`（2）：最小规则和 `contrary` 声明能加载。
+  另有一条固定的加载期拒绝：参数与前提 binder 重名。
+- `crates/lang/tests/lang.rs`（6）：最小规则和 `contrary` 声明能加载；参数/前提 binder 重名、
+  未命名前提生成的 `_p{i}` 重名、参数只出现在 `unless` 里、以及完全未使用的参数都拒绝加载。
 - `crates/cert/tests/json.rs`（13）：证书 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
   快照比对、字段名与节点标签固定、未知版本或未知字段被拒，以及内核表达式与 `CertExpr` 的双向转换。
-- `crates/cert/tests/check.rs`（30）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
+- `crates/cert/tests/check.rs`（46）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
   缺失/重复/未闭合绑定、结论或前提漂移、已成立的 `unless`、缺口当前提、越界索引和
   非命题假设等伪造都会被拒绝；根是缺口时 `root_proved = false`。
+  环境规则推出的 blocker 不能被“删掉推导节点”绕过：直接、多跳、opaque 链、嵌套头、
+  未使用的 blocker assumption 都拒绝；alpha/eta 变体按内核 `convertible` 命中；
+  无 `unless` 的证书不触发闭包及其上限。
 - `crates/cert/tests/kernel_proof.rs`（8）：证书的单调骨架到内核证明项——合法证书的根逐步通过内核；
   绑定漂移、结论不是命题、缺绑定、缺口当前提等错误带节点位置；已成立的 `unless` 仍能通过
   `kernel_proof`（阻断条件不在内核类型里），但会被 `cert::check` 拒绝。
 - `crates/reason/tests/certificate.rs`（4）：推导到证书的转换——宪法第三十九条的证书往返并通过
   `cert::check`（根已证明）；缺口目标导出后 `root_proved = false`；冲突的左右命题、
   provenance 和裁决保留；无法编码的 de Bruijn 索引给出带节点位置的错误。
-- `crates/reason/tests/reason.rs`（32）：各条承诺的回归测试，含三条关键的：
-  "阻断条件撤回早先结论"、"阻断条件未被证明时不阻断"、"伪造推导被校验器拒绝"。
+- `crates/reason/tests/reason.rs`（35）：各条承诺的回归测试，含三条关键的：
+  "阻断条件撤回早先结论"、"阻断条件未被证明时不阻断"、"伪造推导被校验器拒绝"；
+  另有三条 alpha/eta 用例：两种变体的 blocker 都阻断规则，`verify` 也拒绝 alpha 变体的伪造步骤。
   伪造一类另有四条独立用例钉住：跳过前提、引用无关前提、绑定漂移（结论与前提不一致）、
   阻断条件已成立。此外 `a_rule_with_an_unconstrained_parameter_is_rejected_at_load`
-  钉住"参数只出现在结论里的规则不许加载"。
+  钉住"参数只出现在结论或 `unless` 里、没有前提约束的规则不许加载"。
 - 冲突一组：`conflict_requires_a_contrary_declaration`（没有声明就不猜）、
   `contrary_assumptions_are_unresolved_and_kept_out_of_the_fact_base`（未决胜出方不进库）、
   `superiority_resolves_a_conflict_and_the_loser_stays_out`（优先级裁决且下游不触发）、

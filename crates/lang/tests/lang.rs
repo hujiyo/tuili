@@ -34,3 +34,111 @@ contrary 该批准 不该批准
         .expect("contrary declaration should load");
     assert_eq!(lib.env.contrary_pairs().len(), 1);
 }
+
+/// A parameter and a premise binder with the same name would both be opened
+/// as `?p`, so the reasoner could not tell a premise proof from a parameter
+/// value. Loading must refuse the rule.
+#[test]
+fn duplicate_param_and_premise_binder_is_rejected() {
+    let src = r#"
+pred R : Prop → Prop
+pred P : Prop
+pred Q : Prop → Prop
+
+rule 重名 :
+  params p : Prop
+  premise r : R p
+  premise p : P
+  conclude Q p
+"#;
+    let mut lib = Library::new();
+    let err = lib
+        .load("t", src)
+        .expect_err("a duplicate parameter/premise binder must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("binder `p`") && msg.contains("?p"),
+        "error should name the duplicated binder `p`, got: {msg}"
+    );
+}
+
+/// An unnamed premise gets the generated binder `_p{i}`; a parameter with
+/// that name collides with it in the opened rule.
+#[test]
+fn duplicate_generated_premise_binder_is_rejected() {
+    let src = r#"
+pred P : Prop
+pred Q : Prop
+
+rule 重名 :
+  params _p0 : Prop
+  premise P
+  conclude P
+"#;
+    let mut lib = Library::new();
+    let err = lib
+        .load("t", src)
+        .expect_err("a parameter colliding with a generated premise binder must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("binder `_p0`") && msg.contains("?_p0"),
+        "error should name the duplicated generated binder `_p0`, got: {msg}"
+    );
+}
+
+/// A parameter that appears only in an `unless` condition is not fixed when
+/// the rule fires: a certificate could pick a binding of its own to dodge the
+/// blocker, so loading must refuse the rule.
+#[test]
+fn parameter_only_in_unless_is_rejected() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+obj 张三 : 公民
+axiom 侵占事实 : 侵占 张三
+axiom 无辜事实 : 无辜 张三
+
+rule r :
+  params p : 公民, q : 公民 → Prop
+  premise 侵占 p
+  conclude 违法 p
+  unless q 张三
+"#;
+    let mut lib = Library::new();
+    let err = lib
+        .load("t", src)
+        .expect_err("a parameter only in an unless condition must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("参数 `q`") && msg.contains("没有出现在任何前提里") && msg.contains("unless"),
+        "error should name the unconstrained parameter `q` and its unless clause, got: {msg}"
+    );
+}
+
+/// A parameter used nowhere is never bound by the reasoner, while the
+/// certificate checker demands a binding for every parameter. Loading must
+/// refuse such a rule instead of letting the two disagree.
+#[test]
+fn unused_parameter_is_rejected() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+rule r :
+  params p : 公民, q : 公民
+  premise 侵占 p
+  conclude 违法 p
+"#;
+    let mut lib = Library::new();
+    let err = lib
+        .load("t", src)
+        .expect_err("a parameter used nowhere must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("参数 `q`") && msg.contains("没有出现在任何前提里") && msg.contains("空参数"),
+        "error should name the empty parameter `q`, got: {msg}"
+    );
+}

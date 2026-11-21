@@ -34,15 +34,28 @@
 //! [`check`] validates a certificate against an environment without using the
 //! reasoner: it rebuilds each rule application from the rule declaration, the
 //! recorded bindings and the cited premises, and rejects a step whose
-//! `unless` condition is proved anywhere in the certificate or asserted by an
-//! environment axiom. Rules that depend on a premise binder are rejected
-//! rather than checked with an open `?name`. [`kernel_proof`] turns the
+//! `unless` condition is proved anywhere in the certificate, asserted by an
+//! environment axiom, or derivable from the environment's rules under a
+//! conservative fixed-point superset that ignores `unless`, conflicts and
+//! priorities. Proved and derivable blockers are compared up to kernel
+//! conversion, so alpha- and eta-variants count. Every listed assumption
+//! counts, whether or not a node cites it, and each must be a proposition.
+//! The closure is computed only when a rule step has an `unless`. Rules that
+//! depend on a premise binder
+//! are rejected rather than checked with an open `?name`; a rule that cannot
+//! be evaluated statically makes its conclusion's predicate head opaque, and
+//! opaque heads propagate through all rules whose premises can consume them
+//! (including opaque rules), so a matching unproved blocker is rejected as
+//! unconfirmable. A blocker with no extractable predicate head is rejected as
+//! well. [`kernel_proof`] turns the
 //! monotone skeleton into kernel terms and has the kernel check each rule
 //! step; it does not inspect `unless`. The crate depends on the kernel only;
 //! it never depends on the reasoner. Sources and priorities are data this
 //! layer preserves, not conditions it adjudicates; conflicts are only
 //! adjudicated for the root, and open obligations are reported through
 //! [`CheckReport::requires_human`] without failing the check.
+
+mod closure;
 
 pub mod check;
 pub mod expr;

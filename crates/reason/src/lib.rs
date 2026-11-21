@@ -49,6 +49,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use std_deduce_cert::CertExpr;
+use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{DeclKind, Env, RuleDecl, SourceRef};
 use std_deduce_kernel::norm::{normalize, spine};
 use std_deduce_kernel::pretty::print_expr;
@@ -733,7 +734,7 @@ impl<'a> Reasoner<'a> {
                 .unlesses
                 .iter()
                 .map(|u| close_pattern(&rule.open_unless_text(u), &binding))
-                .filter(|u| facts.contains_key(&self.key_of(u)))
+                .filter(|u| blocked(std::slice::from_ref(u), &facts, self.env))
                 .collect();
             candidates.push(GapCandidate {
                 rule: decl.name.clone(),
@@ -798,7 +799,41 @@ fn backtrack(
 }
 
 fn blocked(unlesses: &[Expr], facts: &BTreeMap<String, Expr>, env: &Env) -> bool {
-    unlesses.iter().any(|u| facts.contains_key(&key(env, u)))
+    unlesses.iter().any(|u| {
+        // A comparison that could not be decided is not evidence that the
+        // blocker is absent: an undecidable condition may still hold, so the
+        // conservative answer is "blocked". Never turn a failed comparison
+        // into "not blocked".
+        blocker_proved(env, facts, u).unwrap_or(true)
+    })
+}
+
+/// Is the blocker `unless` established by a known fact, up to kernel
+/// definitional equality?
+///
+/// The normalized printed key is an exact fast path. Alpha- and eta-equivalent
+/// facts have different keys, so a miss compares every fact with the kernel's
+/// [`convertible`]. A conversion error is returned to the caller, which must
+/// not read it as "not a blocker".
+fn blocker_proved(
+    env: &Env,
+    facts: &BTreeMap<String, Expr>,
+    unless: &Expr,
+) -> Result<bool, String> {
+    if facts.contains_key(&key(env, unless)) {
+        return Ok(true);
+    }
+    for fact in facts.values() {
+        if convertible(env, &Ctx::new(), fact, unless).map_err(|error| {
+            format!(
+                "无法判定阻断条件「{}」是否已成立：{error}",
+                print_expr(unless)
+            )
+        })? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Is `pattern` (containing `?x` constants) matchable against ground `fact`?
@@ -918,22 +953,24 @@ pub struct GapExplanation {
 /// already visited: the reasoner's semantics is a fixed point, under which a
 /// fact derived later retracts an earlier conclusion. A derivation that keeps
 /// the conclusion while also proving its blocker is therefore invalid, no
-/// matter where the blocker sits.
+/// matter where the blocker sits. Proved propositions are compared by kernel
+/// definitional equality, so alpha- and eta-variants of a blocker count as the
+/// same proposition.
 pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
     // Pass 1: every node must be well-formed on its own, and we collect the
     // propositions proved anywhere in the tree for the `unless` check below.
-    let mut proved: BTreeSet<String> = BTreeSet::new();
+    let mut proved: BTreeMap<String, Expr> = BTreeMap::new();
     for (id, node) in d.nodes.iter().enumerate() {
         match node {
             Node::Assumption { prop, .. } => {
                 check::check(env, &Ctx::new(), prop, &Expr::Sort(0))
                     .map_err(|e| format!("节点 {id}：假设不是命题：{e}"))?;
-                proved.insert(key(env, prop));
+                proved.insert(key(env, prop), prop.clone());
             }
             Node::RuleApplication { conclusion, .. } => {
                 check::check(env, &Ctx::new(), conclusion, &Expr::Sort(0))
                     .map_err(|e| format!("节点 {id}：结论不是命题：{e}"))?;
-                proved.insert(key(env, conclusion));
+                proved.insert(key(env, conclusion), conclusion.clone());
             }
             Node::Gap { .. } => {}
         }
@@ -1013,10 +1050,12 @@ pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
 
         // A blocker that holds anywhere in the derivation invalidates the
         // step: under the fixed-point semantics the conclusion would have
-        // been retracted.
+        // been retracted. A comparison that fails is an error, never a pass.
         for u in &r.unlesses {
             let closed = close_pattern(&r.open_unless_text(u), &binding);
-            if proved.contains(&key(env, &closed)) {
+            if blocker_proved(env, &proved, &closed)
+                .map_err(|message| format!("节点 {id}：{message}"))?
+            {
                 return Err(format!(
                     "节点 {id}：规则 `{rule}` 的阻断条件「{}」已成立，本步不该成立",
                     print_expr(&closed)
