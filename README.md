@@ -77,7 +77,8 @@ cargo run -p std-deduce-cli
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导 |
 | `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告 |
 | `:cert <命题>` | 跑推理并把该目标的证书 JSON（缩进）写到 stdout；推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations` |
-| `:check <证书文件>` | 只凭**已加载的环境**检查证书 JSON：先跑 `cert::check`，再跑 `kernel_proof`，两段分开报告；必须先 `:load`，不重跑推理器 |
+| `:check <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 JSON：先跑 `cert::check`，再跑 `kernel_proof`，两段分开报告；必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。可选目标用第一个空白分隔，因此这种形式要求文件路径不含空格 |
+| `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、描述与文件数；不导入规则，不要求 `:load` |
 
 `:cert` 的 JSON 写在 `:load` 报告之后，从第一个 `{` 起才是证书。保存证书后，
 在另一个会话里加载同一理论再检查：
@@ -95,7 +96,8 @@ cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':check c
 | `:why` | 两层证书检查都通过、根已证明且无未决义务 | 缺口、未决冲突、被否决的结论，或根已证明但仍有未决义务 | 命令/解析错误、证书生成或渲染失败，或任一层证书检查失败 |
 | `:gap` | 目标可以推出 | 缺口、未决冲突或被否决的结论 | 命令或解析错误 |
 | `:cert` | 根已证明 | 根是缺口 | 用法、解析、转换或序列化错误 |
-| `:check` | 两段都通过、根已证明且无未决义务 | 两段都通过，但根是缺口 / 有 `open_obligations` / 有未决冲突 | 未加载、读不到、坏 JSON、逻辑校验失败或内核证明失败 |
+| `:check` | 两段都通过、根已证明且无未决义务 | 两段都通过，但根是缺口 / 有 `open_obligations` / 有未决冲突 | 未加载、读不到、坏 JSON、逻辑校验失败、内核证明失败，或给了目标但根命题不等价/根为缺口/没有根 |
+| `:packs` | 扫描成功；空目录也是成功 | 当前没有 `1` 的结局 | 目录不存在/不可读，或存在坏清单/坏目录项（好包仍会列出） |
 
 也可以一次性执行：
 
@@ -233,9 +235,14 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
   `convertible`；alpha/eta 和“绑定变量与同名常量”都不会因打印形式相同而混淆。
   它只依赖 `crates/kernel`，**不依赖 `crates/reason`**；已记录的冲突与裁决会被读取，但
   `defeated_by` / `prefer` 的优先级来源不在这里核验（`priority_sources_checked = false`）。
+- **`crates/lawpack`**：法律包清单格式与目录扫描。清单记录 `name`、`version`、`jurisdiction`、
+  `territory`、`namespace`、生效范围、描述和文件列表；只校验**格式**（必填、字符集、长度、真实日历日期），
+  不导入规则、不打开清单里的文件、不判断法律内容。扫描只把含普通 `lawpack.toml` 的直接子目录当作包；
+  符号链接、越界 junction 与坏清单都进入错误，不静默跳过。该 crate 只依赖 `serde` / `toml`。
 - **`crates/cli`**：会话与命令；`:why` 生成证书、从证书渲染推导树，并对同一份证书依次运行
   `cert::check` 与 `cert::kernel_proof`；冲突分支展示的推导同样从证书渲染并用 `cert::check` 复核。
-  `:cert` 导出证书，`:check` 依次运行 `cert::check` 与 `cert::kernel_proof`，把逻辑、内核、侧条件和需人判断分成四行报告。
+  `:cert` 导出证书，`:check` 依次运行 `cert::check` 与 `cert::kernel_proof`，把逻辑、内核、侧条件和需人判断分成四行报告；
+  可选的目标绑定要求证书根命题与目标内核等价。`:packs` 只扫描清单并转义输出，不导入规则。
 
 ### 证书链的当前边界
 
@@ -248,6 +255,10 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
 - `:check` 依次运行两段：`cert::check` 检查规则实例、阻断条件与根冲突状态，
   `kernel_proof` 再把单调骨架翻译成证明项交给内核。逻辑通过但内核失败时退出 `2`，
   不会把"逻辑有效"当成"证书有效"；`kernel_proof` 本身仍不检查 `unless` 和优先级。
+  带目标时还要求证书根命题与目标内核等价：证书本身合法但证明的是另一个命题，仍以 `2` 退出。
+  这一绑定只在调用者给出目标时生效；`:check <file>` 单独使用仍只回答"这份证书自身是否有效"。
+- `:packs` 只读清单格式：坏清单、悬空符号链接、越界 junction 都会报错并退出 `2`，好包仍会列出；
+  清单里的 description、路径与错误文本会先转义控制字符，不能借换行或终端转义伪造输出行。
 - `cert::check` 只检查根命题是否处于未决冲突或败方；非根冲突不在这里裁决，
   `defeated_by` / `prefer` 的优先级来源也未核验（`priority_sources_checked = false`）。
   `:cert` 把缺口写成 `MissingPremise`、把未决冲突写成 `UnresolvedConflict` 的
@@ -314,7 +325,9 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
   推理时已跳过声明型 axiom（`axiom 假 : Prop` 这类只声明常量、不断言命题），
   但账本本身仍接受形状不对的声明。
 - **出处尚未强制。** `source` 在声明账本和推导树里都会打印，但加载时不要求填写；缺出处时打印成空括号 `「」`。
-- **没有法律包和导入。** 每个示例自己定义谓词与规则；`law/` 里的整本法律原文没有被按条索引，也没有和规则出处核对；`Theory.requires` 没有解析器语法，多个文件加载后合并成一个扁平环境。
+- **法律包只有清单和前端的 `:packs`，还不能导入。** `lawpacks/cn.constitution/lawpack.toml` 是清单示例，
+  条文没有按条索引，也没有和规则出处核对；`:load` 不会读取法律包，`Theory.requires` 没有解析器语法，
+  多个文件加载后仍合并成一个扁平环境。命名空间、lockfile 与条文导入见后续 M2 项。
 - **同一结论多路径只留一条。** `build_nodes` 用 `or_insert`，另一条推导及其出处丢失。
 
 ### 修复顺序
@@ -339,7 +352,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 173 个：kernel 15、lang 6、reason 39、cert 92、cli 21。
+`cargo test --workspace` 共 218 个：kernel 15、lang 6、reason 39、cert 92、cli 41、lawpack 25（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（15）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -385,7 +398,14 @@ cargo test --workspace
 - `crates/cli/tests/examples.rs`（15）：`examples/` 下每个 `.std` 一条端到端用例——
   加载文件、执行查询，断言退出码（证成 0，缺口 / 冲突 1）和关键输出；另有两条例外路径：
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
-- `crates/cli/tests/cert.rs`（6）：`:cert` / `:check` 端到端——导出的 JSON 往返并通过检查器；
+- `crates/cli/tests/cert.rs`（15）：`:cert` / `:check` 端到端——导出的 JSON 往返并通过检查器；
   `:check` 分行报告逻辑与内核两段；缺口证书退出 `1` 且产生 `MissingPremise`；
   未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在逻辑层失败；
   逻辑层接受、内核因绑定类型不符拒绝时退出 `2` 并给出节点；证书不存在、不是 JSON、未 `:load` 时失败。
+  另含 9 条目标绑定与单点变异：删前提、换绑定、换结论、复用错误节点、追加已成立 blocker、
+  改根后带目标失败/不带目标仍合法、合法目标通过、缺口根不能绑定目标、定义等价目标通过。
+- `crates/cli/tests/packs.rs`（11）：`:packs` 端到端——合法清单逐行输出、含空格目录、好包+坏清单、
+  根不存在/空目录、默认 `lawpacks`、悬空清单符号链接、description/错误/路径中的换行与控制字符转义。
+- `crates/lawpack/tests/lawpack.rs`（24）与 1 个 doc test：清单必填/可选字段、字符集与长度、
+  真实日历日期（含闰年）、未知字段、空日期、目录扫描、坏清单、悬空清单 symlink、symlink 越界、
+  junction 越界与 `load` 的全有或全无语义。

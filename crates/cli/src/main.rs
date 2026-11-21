@@ -9,9 +9,23 @@
 //! :gap <term>             explain what is missing for a goal
 //! :cert <term>            derive and print the goal's certificate JSON
 //! :check <file> [goal]    check a certificate, optionally bound to a goal
+//! :packs [dir]            list the legal-pack manifests under a directory
 //! :given <term>           add an assumption by hand
 //! :quit
 //! ```
+//!
+//! `:packs` reads manifests but imports nothing and does not require a loaded
+//! theory. With no argument it scans `lawpacks` in the current working
+//! directory; with an argument that whole string is the directory, so a path
+//! containing spaces works without further quoting. Only direct child
+//! directories containing a regular `lawpack.toml` are packs; symbolic links
+//! and pack directories that resolve outside the root are errors. Each valid
+//! pack is printed on one line with its effective range, then an optional
+//! indented description and file count. An invalid manifest is printed as
+//! `path：error` and makes the command fail (exit `2`); valid packs are still
+//! printed. Descriptions, paths and errors are escaped first, so a newline or
+//! terminal escape sequence cannot forge another line. A root with no packs
+//! prints a "not found" line and succeeds.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -57,6 +71,7 @@
 //! unchanged.
 
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 
 use std_deduce_cert::{render, Certificate, CheckReport, Node as CertNode, ObligationKind};
 use std_deduce_kernel::conv::convertible;
@@ -64,6 +79,7 @@ use std_deduce_kernel::env::{Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::{elab, Library};
+use std_deduce_lawpack::PackInfo;
 use std_deduce_reason::{
     certificate as reason_certificate, Conflict, Provenance, Reasoner, Resolution, Side,
 };
@@ -179,6 +195,7 @@ impl Session {
                 "why" | "gap" => self.query(cmd, arg, out),
                 "cert" => self.export_certificate(arg, out),
                 "check" => self.check_certificate(arg, out),
+                "packs" => self.list_packs(arg, out),
                 "quit" | "exit" => Ok(Outcome::Proved),
                 other => Err(format!("未知命令 `:{other}`")),
             }
@@ -433,7 +450,10 @@ impl Session {
             return Err("用法：:check <证书文件> [目标命题]".into());
         }
         let (path, goal) = match arg.split_once(char::is_whitespace) {
-            Some((path, goal)) => (path, Some(goal.trim())),
+            Some((path, rest)) => {
+                let goal = rest.trim();
+                (path, if goal.is_empty() { None } else { Some(goal) })
+            }
             None => (arg, None),
         };
         let text = match std::fs::read_to_string(path) {
@@ -607,12 +627,98 @@ impl Session {
             Err(error) => fail_goal_binding(out, format!("无法比较根命题与目标：{error}")),
         }
     }
+
+    /// List the legal-pack manifests under a directory.
+    ///
+    /// This only reads and validates manifest format. It does not load rules,
+    /// does not check that listed files exist, and does not require `:load`.
+    /// Text that comes from a manifest or a path is escaped before printing,
+    /// so a newline or escape sequence cannot forge another output line.
+    fn list_packs(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        let root = if arg.is_empty() {
+            std::env::current_dir()
+                .map_err(|error| format!("无法取得当前目录：{}", escape_field(&error.to_string())))?
+                .join("lawpacks")
+        } else {
+            PathBuf::from(arg)
+        };
+        let found =
+            std_deduce_lawpack::scan(&root).map_err(|error| escape_field(&error.to_string()))?;
+
+        for pack in &found.packs {
+            let info = &pack.manifest.pack;
+            writeln!(
+                out,
+                "{} {}  {}/{}  {}  {}",
+                info.name,
+                info.version,
+                info.jurisdiction,
+                info.territory,
+                effective_range(info),
+                escape_path(&pack.dir)
+            )
+            .ok();
+            if let Some(description) = &info.description {
+                writeln!(out, "  {}", escape_field(description)).ok();
+            }
+            if !pack.manifest.files.is_empty() {
+                writeln!(out, "  文件 {} 个", pack.manifest.files.len()).ok();
+            }
+        }
+        // No packs and no errors means an empty root, not a broken one.
+        if found.packs.is_empty() && found.errors.is_empty() {
+            writeln!(out, "没有找到法律包。").ok();
+        }
+        for error in &found.errors {
+            writeln!(out, "{}", escape_field(&error.to_string())).ok();
+        }
+        if found.errors.is_empty() {
+            Ok(Outcome::Proved)
+        } else {
+            Err(format!("{} 个法律包清单错误", found.errors.len()))
+        }
+    }
 }
 
 /// Print the failed binding line and return the error that exits `2`.
 fn fail_goal_binding(out: &mut impl Write, detail: impl std::fmt::Display) -> Result<(), String> {
     writeln!(out, "目标绑定：失败（{detail}）").ok();
     Err(format!("目标绑定失败：{detail}"))
+}
+
+/// Escape control characters so one external value cannot inject another
+/// output line or a terminal control sequence. Newline, carriage return and
+/// tab get their short forms; every other control character, including ESC,
+/// becomes `\u{XXXX}`.
+fn escape_field(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => {
+                escaped.push_str(&format!("\\u{{{:04X}}}", ch as u32));
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn escape_path(path: &Path) -> String {
+    escape_field(&path.display().to_string())
+}
+
+/// Render a pack's effective date range. A missing endpoint is shown as
+/// "not stated" instead of hiding the endpoint that is present.
+fn effective_range(info: &PackInfo) -> String {
+    match (&info.effective_from, &info.effective_to) {
+        (None, None) => "未注明".to_owned(),
+        (Some(from), Some(to)) => format!("{from}..{to}"),
+        (Some(from), None) => format!("{from}..未注明"),
+        (None, Some(to)) => format!("未注明..{to}"),
+    }
 }
 
 /// Print the four labelled lines when `:check` cannot reach either layer.
@@ -889,7 +995,7 @@ fn main() {
         if line.trim() == ":help" {
             println!(
                 ":load <文件>  :inspect  :given <命题>  :why <命题>  :gap <命题>  \
-                 :cert <命题>  :check <证书文件> [目标命题]  :quit"
+                 :cert <命题>  :check <证书文件> [目标命题]  :packs [目录]  :quit"
             );
             continue;
         }
