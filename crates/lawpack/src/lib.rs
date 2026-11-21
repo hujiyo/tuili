@@ -1,4 +1,4 @@
-//! The official legal-pack manifest.
+//! The official legal-pack manifest and registry lock.
 //!
 //! A legal pack is a directory containing a `lawpack.toml` manifest. The
 //! manifest records the pack's identity, its jurisdiction and territory, its
@@ -8,6 +8,11 @@
 //! does not check that the listed files exist, and does not judge whether the
 //! legal content is correct or applicable. Those are separate steps. Discovery
 //! refuses symbolic links and pack directories that resolve outside the root.
+//!
+//! The crate also hashes pack content and manages the `std.lock` registry lock,
+//! which records the version and content hash of every pack. Verification
+//! compares a directory against its lock; it does not import or certify
+//! anything either.
 //!
 //! ```
 //! use std_deduce_lawpack::Manifest;
@@ -25,7 +30,11 @@
 //! ```
 
 mod load;
+mod lock;
 mod manifest;
 
 pub use load::{load, scan, LoadedPack, PackError, Scan, MANIFEST_FILE};
+pub use lock::{
+    build_lock, hash_pack, verify_lock, LockReport, LockedPack, Lockfile, LOCK_FILE, LOCK_VERSION,
+};
 pub use manifest::{Manifest, ManifestError, PackFile, PackInfo};

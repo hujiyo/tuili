@@ -10,6 +10,7 @@
 //! :cert <term>            derive and print the goal's certificate JSON
 //! :check <file> [goal]    check a certificate, optionally bound to a goal
 //! :packs [dir]            list the legal-pack manifests under a directory
+//! :lock [dir]             hash the packs and write the std.lock registry lock
 //! :given <term>           add an assumption by hand
 //! :quit
 //! ```
@@ -26,6 +27,21 @@
 //! printed. Descriptions, paths and errors are escaped first, so a newline or
 //! terminal escape sequence cannot forge another line. A root with no packs
 //! prints a "not found" line and succeeds.
+//!
+//! After the listing, `:packs` looks for `std.lock` in the same directory. When
+//! it is there, every pack is hashed and checked against the lock: a match
+//! prints `锁定校验：通过（N 个包）`, while a missing, changed, extra or
+//! differently versioned pack prints every error and makes the command exit
+//! `2`. Without a lock the command prints
+//! `锁定校验：未找到 std.lock（未锁定）` and keeps the listing's outcome.
+//!
+//! `:lock` hashes every pack in the directory (default `lawpacks`) and writes
+//! `<dir>/std.lock`. An unreadable directory or file, a symbolic link inside a
+//! pack, or an invalid manifest prints every error and exits `2`; no lock,
+//! partial or otherwise, is written in that case. The hash covers every
+//! regular file in the pack directory, with `/`-separated relative paths and
+//! `\r\n` normalized to `\n`, so the same files hash the same on Windows and
+//! Linux. `:lock` does not import rules and does not require a loaded theory.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -79,7 +95,7 @@ use std_deduce_kernel::env::{Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::{elab, Library};
-use std_deduce_lawpack::PackInfo;
+use std_deduce_lawpack::{PackInfo, LOCK_FILE};
 use std_deduce_reason::{
     certificate as reason_certificate, Conflict, Provenance, Reasoner, Resolution, Side,
 };
@@ -196,6 +212,7 @@ impl Session {
                 "cert" => self.export_certificate(arg, out),
                 "check" => self.check_certificate(arg, out),
                 "packs" => self.list_packs(arg, out),
+                "lock" => self.lock_packs(arg, out),
                 "quit" | "exit" => Ok(Outcome::Proved),
                 other => Err(format!("未知命令 `:{other}`")),
             }
@@ -634,14 +651,12 @@ impl Session {
     /// does not check that listed files exist, and does not require `:load`.
     /// Text that comes from a manifest or a path is escaped before printing,
     /// so a newline or escape sequence cannot forge another output line.
+    ///
+    /// When `root/std.lock` exists, the registry is verified after the
+    /// listing. A verification error is printed per pack and fails the
+    /// command; a missing lock is only reported.
     fn list_packs(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
-        let root = if arg.is_empty() {
-            std::env::current_dir()
-                .map_err(|error| format!("无法取得当前目录：{}", escape_field(&error.to_string())))?
-                .join("lawpacks")
-        } else {
-            PathBuf::from(arg)
-        };
+        let root = packs_root(arg)?;
         let found =
             std_deduce_lawpack::scan(&root).map_err(|error| escape_field(&error.to_string()))?;
 
@@ -672,11 +687,89 @@ impl Session {
         for error in &found.errors {
             writeln!(out, "{}", escape_field(&error.to_string())).ok();
         }
+
+        let lock_path = root.join(LOCK_FILE);
+        let lock_errors = match std::fs::symlink_metadata(&lock_path) {
+            Ok(_) => match std_deduce_lawpack::verify_lock(&root) {
+                Ok(report) => {
+                    writeln!(out, "锁定校验：通过（{} 个包）", report.verified).ok();
+                    None
+                }
+                Err(errors) => {
+                    for error in &errors {
+                        writeln!(out, "{}", escape_field(&error.to_string())).ok();
+                    }
+                    Some(errors.len())
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                writeln!(out, "锁定校验：未找到 std.lock（未锁定）").ok();
+                None
+            }
+            Err(error) => {
+                writeln!(
+                    out,
+                    "{}",
+                    escape_field(&format!("{}：无法读取锁文件：{error}", lock_path.display()))
+                )
+                .ok();
+                Some(1)
+            }
+        };
+
+        if let Some(count) = lock_errors {
+            return Err(format!("{count} 个锁定校验错误"));
+        }
         if found.errors.is_empty() {
             Ok(Outcome::Proved)
         } else {
             Err(format!("{} 个法律包清单错误", found.errors.len()))
         }
+    }
+
+    /// Hash every pack under a directory and write its `std.lock`.
+    ///
+    /// Nothing is written unless the whole registry could be scanned and
+    /// hashed. Every error is printed and makes the command fail, so a bad
+    /// pack can never leave a partial lock behind.
+    fn lock_packs(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        let root = packs_root(arg)?;
+        let lockfile = match std_deduce_lawpack::build_lock(&root) {
+            Ok(lockfile) => lockfile,
+            Err(errors) => {
+                for error in &errors {
+                    writeln!(out, "{}", escape_field(&error.to_string())).ok();
+                }
+                return Err(format!("{} 个错误，std.lock 未写入", errors.len()));
+            }
+        };
+        let path = root.join(LOCK_FILE);
+        lockfile
+            .write(&path)
+            .map_err(|error| escape_field(&error.to_string()))?;
+        writeln!(
+            out,
+            "已写入 {}（{} 个包）",
+            escape_path(&path),
+            lockfile.pack.len()
+        )
+        .ok();
+        Ok(Outcome::Proved)
+    }
+}
+
+/// Resolve the legal-pack directory a `:packs` or `:lock` command operates on.
+///
+/// With no argument the directory is `lawpacks` below the current working
+/// directory; with an argument the whole string is the directory, so a path
+/// containing spaces needs no further quoting.
+fn packs_root(arg: &str) -> Result<PathBuf, String> {
+    if arg.is_empty() {
+        Ok(std::env::current_dir()
+            .map_err(|error| format!("无法取得当前目录：{}", escape_field(&error.to_string())))?
+            .join("lawpacks"))
+    } else {
+        Ok(PathBuf::from(arg))
     }
 }
 
@@ -995,7 +1088,7 @@ fn main() {
         if line.trim() == ":help" {
             println!(
                 ":load <文件>  :inspect  :given <命题>  :why <命题>  :gap <命题>  \
-                 :cert <命题>  :check <证书文件> [目标命题]  :packs [目录]  :quit"
+                 :cert <命题>  :check <证书文件> [目标命题]  :packs [目录]  :lock [目录]  :quit"
             );
             continue;
         }

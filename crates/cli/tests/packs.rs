@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const PROVED: i32 = 0;
 const ERROR: i32 = 2;
 
+/// Printed by `:packs` when the directory has no `std.lock`.
+const UNLOCKED: &str = "锁定校验：未找到 std.lock（未锁定）";
+
 const VALID: &str = r#"
 [pack]
 name = "cn.constitution"
@@ -26,6 +29,14 @@ kind = "theory"
 
 [[files]]
 path = "amendment.std"
+"#;
+
+const OTHER: &str = r#"
+[pack]
+name = "cn.civil-code"
+version = "2.0"
+jurisdiction = "CN"
+territory = "CN"
 "#;
 
 fn run(command: &str) -> Output {
@@ -75,7 +86,10 @@ fn packs_lists_a_valid_pack() {
         temp.path().join("cn.constitution").display()
     );
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, vec![pack_line.as_str(), "  示例包", "  文件 2 个"]);
+    assert_eq!(
+        lines,
+        vec![pack_line.as_str(), "  示例包", "  文件 2 个", UNLOCKED]
+    );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
 
@@ -104,7 +118,7 @@ fn packs_lists_good_packs_and_reports_bad_manifests() {
 
     let out = stdout(&output);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 4, "{out:?}");
+    assert_eq!(lines.len(), 5, "{out:?}");
     let good_line = format!(
         "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  {}",
         temp.path().join("good").display()
@@ -118,6 +132,7 @@ fn packs_lists_good_packs_and_reports_bad_manifests() {
         "{out:?}"
     );
     assert!(lines[3].contains("jurisdiction"), "{out:?}");
+    assert_eq!(lines[4], UNLOCKED);
 
     assert_eq!(
         stderr(&output).lines().collect::<Vec<_>>(),
@@ -146,7 +161,7 @@ fn packs_empty_directory_succeeds_and_says_none() {
     assert_exit(&output, PROVED);
     assert_eq!(
         stdout(&output).lines().collect::<Vec<_>>(),
-        ["没有找到法律包。"]
+        ["没有找到法律包。", UNLOCKED]
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
@@ -191,12 +206,13 @@ fn packs_rejects_a_dangling_manifest_symlink() {
 
     let out = stdout(&output);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 1, "{out:?}");
+    assert_eq!(lines.len(), 2, "{out:?}");
     assert!(
         lines[0].starts_with(&format!("{}：", link.display())),
         "{out:?}"
     );
     assert!(lines[0].contains("符号链接"), "{out:?}");
+    assert_eq!(lines[1], UNLOCKED);
     assert!(!out.contains("没有找到法律包"), "{out:?}");
 }
 
@@ -219,7 +235,7 @@ description = "x\r\ty\u0007\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fak
 
     let out = stdout(&output);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 2, "{out:?}");
+    assert_eq!(lines.len(), 3, "{out:?}");
     let pack_line = format!(
         "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  {}",
         temp.path().join("cn.constitution").display()
@@ -229,6 +245,7 @@ description = "x\r\ty\u0007\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fak
         lines[1],
         "  x\\r\\ty\\u{0007}\\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fake\\u{001B}[31m"
     );
+    assert_eq!(lines[2], UNLOCKED);
     assert!(!out.contains('\u{1b}'), "{out:?}");
     assert!(
         !lines.iter().any(|line| line.starts_with("fake.pack")),
@@ -254,7 +271,7 @@ territory = "CN"
 
     let out = stdout(&output);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 1, "{out:?}");
+    assert_eq!(lines.len(), 2, "{out:?}");
     let path = temp.path().join("bad").join("lawpack.toml");
     assert!(
         lines[0].starts_with(&format!("{}：", path.display())),
@@ -262,6 +279,7 @@ territory = "CN"
     );
     assert!(lines[0].contains("bad\\nfake.pack"), "{out:?}");
     assert!(lines[0].contains("\\u{001B}[31m"), "{out:?}");
+    assert_eq!(lines[1], UNLOCKED);
     assert!(!out.contains('\u{1b}'), "{out:?}");
     assert!(
         !lines.iter().any(|line| line.starts_with("fake.pack")),
@@ -282,6 +300,190 @@ fn packs_escapes_control_characters_in_an_error_path() {
     assert!(!err.contains('\u{1b}'), "{err:?}");
     assert!(!err.contains("bad\nname"), "{err:?}");
     assert_eq!(err.lines().count(), 1, "{err:?}");
+}
+
+#[test]
+fn lock_writes_a_lock_that_packs_verifies() {
+    let temp = TempDir::new("lock-ok");
+    temp.pack("cn.constitution", VALID);
+    temp.pack("cn.civil-code", OTHER);
+    let root = temp.path();
+    let lock_path = root.join("std.lock");
+
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, PROVED);
+    assert_eq!(
+        stdout(&output),
+        format!("已写入 {}（2 个包）\n", lock_path.display())
+    );
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    let lock_text = fs::read_to_string(&lock_path).expect("the lock exists");
+    assert!(lock_text.contains("lock_version = 1"), "{lock_text}");
+    assert!(lock_text.contains("[[pack]]"), "{lock_text}");
+    assert!(
+        lock_text.contains("name = \"cn.civil-code\""),
+        "{lock_text}"
+    );
+    assert!(
+        lock_text.contains("name = \"cn.constitution\""),
+        "{lock_text}"
+    );
+    assert_eq!(
+        lock_text.matches("hash = \"sha256:").count(),
+        2,
+        "{lock_text}"
+    );
+
+    let output = run(&format!(":packs {}", root.display()));
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(out.contains("锁定校验：通过（2 个包）"), "{out}");
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn packs_fails_after_a_pack_changes() {
+    let temp = TempDir::new("lock-changed");
+    temp.pack("cn.constitution", VALID);
+    let root = temp.path();
+
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, PROVED);
+
+    // One changed byte changes the content hash but keeps the manifest valid.
+    let manifest_path = root.join("cn.constitution").join("lawpack.toml");
+    let changed = VALID.replace("1982-12-04", "1982-12-05");
+    assert_eq!(changed.len(), VALID.len());
+    assert_ne!(changed, VALID);
+    fs::write(&manifest_path, changed).unwrap();
+
+    let output = run(&format!(":packs {}", root.display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("哈希不符"), "{out}");
+    assert!(!out.contains("锁定校验：通过"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个锁定校验错误"]
+    );
+}
+
+#[test]
+fn packs_fails_when_the_locked_version_differs() {
+    let temp = TempDir::new("lock-version");
+    temp.pack("cn.constitution", VALID);
+    let root = temp.path();
+    let lock_path = root.join("std.lock");
+
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, PROVED);
+    let text = fs::read_to_string(&lock_path).unwrap();
+    let changed = text.replace("version = \"0.1.0\"", "version = \"0.2.0\"");
+    assert_ne!(changed, text);
+    fs::write(&lock_path, changed).unwrap();
+
+    let output = run(&format!(":packs {}", root.display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("版本不符"), "{out}");
+    assert!(out.contains("0.1.0"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个锁定校验错误"]
+    );
+}
+
+#[test]
+fn packs_fails_when_a_locked_pack_is_missing() {
+    let temp = TempDir::new("lock-missing-pack");
+    temp.pack("cn.constitution", VALID);
+    let root = temp.path();
+
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, PROVED);
+    fs::remove_dir_all(root.join("cn.constitution")).unwrap();
+
+    let output = run(&format!(":packs {}", root.display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("没有找到法律包。"), "{out}");
+    assert!(out.contains("在目录中不存在"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个锁定校验错误"]
+    );
+}
+
+#[test]
+fn packs_fails_when_a_pack_is_not_locked() {
+    let temp = TempDir::new("lock-extra-pack");
+    temp.pack("cn.constitution", VALID);
+    let root = temp.path();
+
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, PROVED);
+    temp.pack("cn.civil-code", OTHER);
+
+    let output = run(&format!(":packs {}", root.display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("未锁定"), "{out}");
+    assert!(out.contains("cn.civil-code"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个锁定校验错误"]
+    );
+}
+
+#[test]
+fn lock_fails_and_writes_nothing_with_a_bad_pack() {
+    let temp = TempDir::new("lock-bad-pack");
+    temp.pack("good", VALID);
+    temp.pack("bad", "[pack]\nname = \"bad.pack\"\nversion = \"1.0\"\n");
+    let root = temp.path();
+
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, ERROR);
+    assert!(
+        !root.join("std.lock").exists(),
+        "no partial lock is written"
+    );
+    let out = stdout(&output);
+    assert!(out.contains("jurisdiction"), "{out}");
+    assert!(
+        stderr(&output).contains("std.lock 未写入"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn lock_defaults_to_lawpacks_in_the_current_directory() {
+    let temp = TempDir::new("lock-default");
+    temp.pack("lawpacks/cn.constitution", VALID);
+
+    let output = run_in(Some(temp.path()), ":lock");
+    assert_exit(&output, PROVED);
+    assert!(
+        temp.path().join("lawpacks").join("std.lock").is_file(),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn lock_reports_a_missing_directory() {
+    let temp = TempDir::new("lock-missing-dir");
+    let missing = temp.path().join("does-not-exist");
+
+    let output = run(&format!(":lock {}", missing.display()));
+    assert_exit(&output, ERROR);
+    assert!(stdout(&output).contains("无法读取法律包目录"), "{output:?}");
+    assert!(
+        stderr(&output).contains("std.lock 未写入"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 struct TempDir {

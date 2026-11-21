@@ -27,7 +27,7 @@ pub struct PackError {
 }
 
 impl PackError {
-    fn new(path: PathBuf, message: impl Into<String>) -> Self {
+    pub(crate) fn new(path: PathBuf, message: impl Into<String>) -> Self {
         PackError {
             path,
             message: message.into(),
