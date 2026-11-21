@@ -123,11 +123,22 @@ fn invalid_names_are_rejected() {
         "cn constitution",
         "cn_constitution",
         "cn/宪法",
+        ".",
+        "..",
+        ".cn",
+        "cn.",
+        "-cn",
+        "cn-",
     ] {
         let text = manifest_with("").replace("cn.constitution", name);
         let error = parse_error(&text);
         assert!(error.contains("pack.name"), "{name}: {error}");
     }
+
+    let long = "a".repeat(129);
+    let text = manifest_with("").replace("cn.constitution", &long);
+    let error = parse_error(&text);
+    assert!(error.contains("长度不能超过 128"), "{error}");
 }
 
 #[test]
@@ -137,6 +148,11 @@ fn invalid_versions_are_rejected() {
         let error = parse_error(&text);
         assert!(error.contains("pack.version"), "{version}: {error}");
     }
+
+    let long = "1".repeat(65);
+    let text = manifest_with("").replace("0.1.0", &long);
+    let error = parse_error(&text);
+    assert!(error.contains("长度不能超过 64"), "{error}");
 }
 
 #[test]
@@ -162,7 +178,9 @@ fn invalid_dates_are_rejected() {
         "82-12-04",
         "1982/12/04",
         "19821204",
-        "",
+        "2019-02-29",
+        "1900-02-29",
+        "2020-04-31",
     ] {
         let text = manifest_with(&format!("effective_from = \"{date}\""));
         let error = parse_error(&text);
@@ -171,10 +189,20 @@ fn invalid_dates_are_rejected() {
 }
 
 #[test]
+fn calendar_leap_days_are_accepted() {
+    for date in ["2020-02-29", "2000-02-29", "1982-12-31"] {
+        let text = manifest_with(&format!("effective_from = \"{date}\""));
+        let manifest = Manifest::parse(&text)
+            .unwrap_or_else(|error| panic!("{date} should be a real calendar date: {error}"));
+        assert_eq!(manifest.pack.effective_from.as_deref(), Some(date));
+    }
+}
+
+#[test]
 fn invalid_effective_to_is_rejected() {
     let text = manifest_with("effective_to = \"2020-02-30\"");
-    let manifest = Manifest::parse(&text).expect("day 30 is in 1..31; content is not judged");
-    assert_eq!(manifest.pack.effective_to.as_deref(), Some("2020-02-30"));
+    let error = parse_error(&text);
+    assert!(error.contains("pack.effective_to"), "{error}");
 
     let text = manifest_with("effective_to = \"2020-02-32\"");
     let error = parse_error(&text);
@@ -182,9 +210,10 @@ fn invalid_effective_to_is_rejected() {
 }
 
 #[test]
-fn empty_effective_to_is_treated_as_unset() {
-    let text = manifest_with("effective_from = \"1982-12-04\"\neffective_to = \"\"");
-    let manifest = Manifest::parse(&text).expect("an empty effective_to means unset");
+fn empty_dates_are_treated_as_unset() {
+    let text = manifest_with("effective_from = \"\"\neffective_to = \"\"");
+    let manifest = Manifest::parse(&text).expect("empty dates mean unset");
+    assert_eq!(manifest.pack.effective_from, None);
     assert_eq!(manifest.pack.effective_to, None);
 }
 
@@ -288,6 +317,152 @@ fn a_manifest_path_that_is_not_a_file_is_reported() {
         found.errors[0].message().contains("不是普通文件"),
         "{found:?}"
     );
+}
+
+#[test]
+fn a_dangling_manifest_symlink_is_an_error() {
+    let temp = TempDir::new("dangling-manifest");
+    let dir = temp.path().join("pkg");
+    fs::create_dir_all(&dir).unwrap();
+    let link = dir.join("lawpack.toml");
+    if !create_file_symlink(&temp.path().join("missing.toml"), &link) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let found = scan(temp.path()).expect("the root is readable");
+    assert!(found.packs.is_empty(), "{found:?}");
+    assert_eq!(found.errors.len(), 1, "{found:?}");
+    assert_eq!(found.errors[0].path(), link.as_path());
+    assert!(found.errors[0].message().contains("符号链接"), "{found:?}");
+    assert!(load(temp.path()).is_err(), "a dangling link is not a pack");
+}
+
+#[test]
+fn a_manifest_symlink_to_an_external_file_is_rejected() {
+    let temp = TempDir::new("external-manifest-file");
+    let outside = TempDir::new("outside-manifest-file");
+    let external = outside.path().join("external-lawpack.toml");
+    fs::write(&external, VALID).unwrap();
+
+    let dir = temp.path().join("pkg");
+    fs::create_dir_all(&dir).unwrap();
+    let link = dir.join("lawpack.toml");
+    if !create_file_symlink(&external, &link) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let found = scan(temp.path()).expect("the root is readable");
+    assert!(found.packs.is_empty(), "{found:?}");
+    assert_eq!(found.errors.len(), 1, "{found:?}");
+    assert_eq!(found.errors[0].path(), link.as_path());
+    assert!(found.errors[0].message().contains("符号链接"), "{found:?}");
+}
+
+#[test]
+fn a_manifest_symlink_to_an_external_directory_is_rejected() {
+    let temp = TempDir::new("external-manifest-dir");
+    let outside = TempDir::new("outside-manifest-dir");
+    let external = outside.path().join("external-dir");
+    fs::create_dir_all(&external).unwrap();
+
+    let dir = temp.path().join("pkg");
+    fs::create_dir_all(&dir).unwrap();
+    let link = dir.join("lawpack.toml");
+    if !create_dir_symlink(&external, &link) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let found = scan(temp.path()).expect("the root is readable");
+    assert!(found.packs.is_empty(), "{found:?}");
+    assert_eq!(found.errors.len(), 1, "{found:?}");
+    assert_eq!(found.errors[0].path(), link.as_path());
+    assert!(found.errors[0].message().contains("符号链接"), "{found:?}");
+}
+
+#[test]
+fn a_symlinked_child_directory_is_rejected() {
+    let temp = TempDir::new("linked-child");
+    let outside = TempDir::new("outside-child");
+    outside.write_pack("real", VALID);
+
+    let link = temp.path().join("linked");
+    if !create_dir_symlink(&outside.path().join("real"), &link) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let found = scan(temp.path()).expect("the root is readable");
+    assert!(found.packs.is_empty(), "{found:?}");
+    assert_eq!(found.errors.len(), 1, "{found:?}");
+    assert_eq!(found.errors[0].path(), link.as_path());
+    assert!(found.errors[0].message().contains("符号链接"), "{found:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_junction_outside_the_root_is_rejected() {
+    let temp = TempDir::new("junction-root");
+    let outside = TempDir::new("junction-outside");
+    outside.write_pack("real", VALID);
+
+    let link = temp.path().join("linked");
+    if !create_junction(&outside.path().join("real"), &link) {
+        eprintln!("skipping: cannot create a junction");
+        return;
+    }
+
+    let found = scan(temp.path()).expect("the root is readable");
+    assert!(found.packs.is_empty(), "{found:?}");
+    assert_eq!(found.errors.len(), 1, "{found:?}");
+    let message = found.errors[0].message();
+    assert!(
+        message.contains("越界") || message.contains("符号链接"),
+        "{found:?}"
+    );
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+#[cfg(unix)]
+fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_dir(target, link).is_ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_file_symlink(_target: &Path, _link: &Path) -> bool {
+    false
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_dir_symlink(_target: &Path, _link: &Path) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn create_junction(target: &Path, link: &Path) -> bool {
+    std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 struct TempDir {

@@ -69,9 +69,18 @@ pub struct Scan {
 /// packs and are ignored. A manifest that cannot be read or validated is
 /// reported in [`Scan::errors`], never skipped.
 ///
+/// Symbolic links are refused: a link among the root's direct entries or at a
+/// manifest path is an error, so a dangling link cannot make a bad pack
+/// disappear. A pack directory that resolves outside `root` (a Windows
+/// junction, for example) is also an error. Only paths that really are inside
+/// `root` are read.
+///
 /// The only fatal condition is that `root` itself cannot be read; an empty
 /// root is a successful scan with no packs, not an error.
 pub fn scan(root: &Path) -> Result<Scan, PackError> {
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        PackError::new(root.to_path_buf(), format!("无法读取法律包目录：{error}"))
+    })?;
     let entries = fs::read_dir(root).map_err(|error| {
         PackError::new(root.to_path_buf(), format!("无法读取法律包目录：{error}"))
     })?;
@@ -90,10 +99,22 @@ pub fn scan(root: &Path) -> Result<Scan, PackError> {
             }
         };
         let path = entry.path();
-        match fs::metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => dirs.push(path),
-            Ok(_) => {}
-            Err(error) => errors.push(PackError::new(path, format!("无法读取目录项：{error}"))),
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                errors.push(PackError::new(path, format!("无法读取目录项类型：{error}")));
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            errors.push(PackError::new(
+                path,
+                "拒绝符号链接：法律包根目录的直接子项不能是符号链接",
+            ));
+            continue;
+        }
+        if file_type.is_dir() {
+            dirs.push(path);
         }
     }
     // Directory order is platform-dependent; sort it so output is stable.
@@ -101,13 +122,24 @@ pub fn scan(root: &Path) -> Result<Scan, PackError> {
 
     let mut packs = Vec::new();
     for dir in dirs {
-        let manifest_path = dir.join(MANIFEST_FILE);
-        match fs::metadata(&manifest_path) {
-            Ok(metadata) if metadata.is_file() => {}
-            Ok(_) => {
-                errors.push(PackError::new(manifest_path, "清单路径存在但不是普通文件"));
+        let canonical_dir = match fs::canonicalize(&dir) {
+            Ok(path) => path,
+            Err(error) => {
+                errors.push(PackError::new(dir, format!("无法解析法律包目录：{error}")));
                 continue;
             }
+        };
+        if !canonical_dir.starts_with(&canonical_root) {
+            errors.push(PackError::new(
+                dir,
+                "拒绝越界链接：法律包目录解析后不在根目录内",
+            ));
+            continue;
+        }
+
+        let manifest_path = dir.join(MANIFEST_FILE);
+        let metadata = match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => {
                 errors.push(PackError::new(
@@ -116,6 +148,17 @@ pub fn scan(root: &Path) -> Result<Scan, PackError> {
                 ));
                 continue;
             }
+        };
+        if metadata.file_type().is_symlink() {
+            errors.push(PackError::new(
+                manifest_path,
+                "拒绝符号链接：法律包清单不能是符号链接",
+            ));
+            continue;
+        }
+        if !metadata.is_file() {
+            errors.push(PackError::new(manifest_path, "清单路径存在但不是普通文件"));
+            continue;
         }
         let text = match fs::read_to_string(&manifest_path) {
             Ok(text) => text,

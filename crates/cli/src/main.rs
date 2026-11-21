@@ -18,11 +18,14 @@
 //! theory. With no argument it scans `lawpacks` in the current working
 //! directory; with an argument that whole string is the directory, so a path
 //! containing spaces works without further quoting. Only direct child
-//! directories containing `lawpack.toml` are packs. Each valid pack is printed
-//! on one line with its effective range, then an optional indented description
-//! and file count. An invalid manifest is printed as `path：error` and makes
-//! the command fail (exit `2`); valid packs are still printed. A root with no
-//! packs prints a "not found" line and succeeds.
+//! directories containing a regular `lawpack.toml` are packs; symbolic links
+//! and pack directories that resolve outside the root are errors. Each valid
+//! pack is printed on one line with its effective range, then an optional
+//! indented description and file count. An invalid manifest is printed as
+//! `path：error` and makes the command fail (exit `2`); valid packs are still
+//! printed. Descriptions, paths and errors are escaped first, so a newline or
+//! terminal escape sequence cannot forge another line. A root with no packs
+//! prints a "not found" line and succeeds.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -58,7 +61,7 @@
 //! therefore a `2`, never a `0`.
 
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std_deduce_cert::{render, Certificate, CheckReport, Node as CertNode, ObligationKind};
 use std_deduce_kernel::conv::convertible;
@@ -529,15 +532,18 @@ impl Session {
     ///
     /// This only reads and validates manifest format. It does not load rules,
     /// does not check that listed files exist, and does not require `:load`.
+    /// Text that comes from a manifest or a path is escaped before printing,
+    /// so a newline or escape sequence cannot forge another output line.
     fn list_packs(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let root = if arg.is_empty() {
             std::env::current_dir()
-                .map_err(|error| format!("无法取得当前目录：{error}"))?
+                .map_err(|error| format!("无法取得当前目录：{}", escape_field(&error.to_string())))?
                 .join("lawpacks")
         } else {
             PathBuf::from(arg)
         };
-        let found = std_deduce_lawpack::scan(&root).map_err(|error| error.to_string())?;
+        let found =
+            std_deduce_lawpack::scan(&root).map_err(|error| escape_field(&error.to_string()))?;
 
         for pack in &found.packs {
             let info = &pack.manifest.pack;
@@ -549,11 +555,11 @@ impl Session {
                 info.jurisdiction,
                 info.territory,
                 effective_range(info),
-                pack.dir.display()
+                escape_path(&pack.dir)
             )
             .ok();
             if let Some(description) = &info.description {
-                writeln!(out, "  {description}").ok();
+                writeln!(out, "  {}", escape_field(description)).ok();
             }
             if !pack.manifest.files.is_empty() {
                 writeln!(out, "  文件 {} 个", pack.manifest.files.len()).ok();
@@ -564,14 +570,38 @@ impl Session {
             writeln!(out, "没有找到法律包。").ok();
         }
         for error in &found.errors {
-            writeln!(out, "{error}").ok();
+            writeln!(out, "{}", escape_field(&error.to_string())).ok();
         }
         if found.errors.is_empty() {
             Ok(Outcome::Proved)
         } else {
-            Err(format!("{} 个法律包清单无效", found.errors.len()))
+            Err(format!("{} 个法律包清单错误", found.errors.len()))
         }
     }
+}
+
+/// Escape control characters so one external value cannot inject another
+/// output line or a terminal control sequence. Newline, carriage return and
+/// tab get their short forms; every other control character, including ESC,
+/// becomes `\u{XXXX}`.
+fn escape_field(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => {
+                escaped.push_str(&format!("\\u{{{:04X}}}", ch as u32));
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn escape_path(path: &Path) -> String {
+    escape_field(&path.display().to_string())
 }
 
 /// Render a pack's effective date range. A missing endpoint is shown as

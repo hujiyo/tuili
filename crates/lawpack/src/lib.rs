@@ -6,7 +6,8 @@
 //!
 //! This crate validates the manifest's *format* only. It does not import rules,
 //! does not check that the listed files exist, and does not judge whether the
-//! legal content is correct or applicable. Those are separate steps.
+//! legal content is correct or applicable. Those are separate steps. Discovery
+//! refuses symbolic links and pack directories that resolve outside the root.
 //!
 //! ```
 //! use std_deduce_lawpack::Manifest;

@@ -70,15 +70,12 @@ fn packs_lists_a_valid_pack() {
     assert_exit(&output, PROVED);
 
     let out = stdout(&output);
-    assert!(
-        out.contains("cn.constitution 0.1.0  CN/CN  1982-12-04..未注明"),
-        "{out}"
+    let pack_line = format!(
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  {}",
+        temp.path().join("cn.constitution").display()
     );
-    let dir = temp.path().join("cn.constitution").display().to_string();
-    assert!(out.contains(&dir), "{out}");
-    assert!(out.contains("  示例包"), "{out}");
-    assert!(out.contains("  文件 2 个"), "{out}");
-    assert!(!out.contains("没有找到法律包"), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec![pack_line.as_str(), "  示例包", "  文件 2 个"]);
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
 
@@ -106,15 +103,26 @@ fn packs_lists_good_packs_and_reports_bad_manifests() {
     assert_exit(&output, ERROR);
 
     let out = stdout(&output);
-    assert!(out.contains("cn.constitution 0.1.0"), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 4, "{out:?}");
+    let good_line = format!(
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  {}",
+        temp.path().join("good").display()
+    );
+    assert_eq!(lines[0], good_line);
+    assert_eq!(lines[1], "  示例包");
+    assert_eq!(lines[2], "  文件 2 个");
     let bad = temp.path().join("bad").join("lawpack.toml");
-    assert!(out.contains(&bad.display().to_string()), "{out}");
-    assert!(out.contains("jurisdiction"), "{out}");
-    assert!(!out.contains("没有找到法律包"), "{out}");
+    assert!(
+        lines[3].starts_with(&format!("{}：", bad.display())),
+        "{out:?}"
+    );
+    assert!(lines[3].contains("jurisdiction"), "{out:?}");
 
-    let err = stderr(&output);
-    assert!(err.contains("错误："), "{err}");
-    assert!(err.contains("1 个法律包清单无效"), "{err}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个法律包清单错误"]
+    );
 }
 
 #[test]
@@ -136,7 +144,10 @@ fn packs_empty_directory_succeeds_and_says_none() {
     let temp = TempDir::new("empty");
     let output = run(&format!(":packs {}", temp.path().display()));
     assert_exit(&output, PROVED);
-    assert!(stdout(&output).contains("没有找到法律包。"), "{output:?}");
+    assert_eq!(
+        stdout(&output).lines().collect::<Vec<_>>(),
+        ["没有找到法律包。"]
+    );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
 
@@ -162,6 +173,115 @@ fn packs_defaults_to_lawpacks_in_the_current_directory() {
         stdout(&output).contains("cn.constitution 0.1.0"),
         "{output:?}"
     );
+}
+
+#[test]
+fn packs_rejects_a_dangling_manifest_symlink() {
+    let temp = TempDir::new("dangling-link");
+    let dir = temp.path().join("pkg");
+    fs::create_dir_all(&dir).unwrap();
+    let link = dir.join("lawpack.toml");
+    if !create_file_symlink(&temp.path().join("missing.toml"), &link) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let output = run(&format!(":packs {}", temp.path().display()));
+    assert_exit(&output, ERROR);
+
+    let out = stdout(&output);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "{out:?}");
+    assert!(
+        lines[0].starts_with(&format!("{}：", link.display())),
+        "{out:?}"
+    );
+    assert!(lines[0].contains("符号链接"), "{out:?}");
+    assert!(!out.contains("没有找到法律包"), "{out:?}");
+}
+
+#[test]
+fn packs_escapes_control_characters_in_a_description() {
+    let temp = TempDir::new("escape-description");
+    let manifest = r#"
+[pack]
+name = "cn.constitution"
+version = "0.1.0"
+jurisdiction = "CN"
+territory = "CN"
+effective_from = "1982-12-04"
+description = "x\r\ty\u0007\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fake\u001B[31m"
+"#;
+    temp.pack("cn.constitution", manifest);
+
+    let output = run(&format!(":packs {}", temp.path().display()));
+    assert_exit(&output, PROVED);
+
+    let out = stdout(&output);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "{out:?}");
+    let pack_line = format!(
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  {}",
+        temp.path().join("cn.constitution").display()
+    );
+    assert_eq!(lines[0], pack_line);
+    assert_eq!(
+        lines[1],
+        "  x\\r\\ty\\u{0007}\\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fake\\u{001B}[31m"
+    );
+    assert!(!out.contains('\u{1b}'), "{out:?}");
+    assert!(
+        !lines.iter().any(|line| line.starts_with("fake.pack")),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn packs_escapes_control_characters_in_manifest_errors() {
+    let temp = TempDir::new("escape-error");
+    let manifest = r#"
+[pack]
+name = """bad
+fake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fake\u001B[31m"""
+version = "1.0"
+jurisdiction = "CN"
+territory = "CN"
+"#;
+    temp.pack("bad", manifest);
+
+    let output = run(&format!(":packs {}", temp.path().display()));
+    assert_exit(&output, ERROR);
+
+    let out = stdout(&output);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "{out:?}");
+    let path = temp.path().join("bad").join("lawpack.toml");
+    assert!(
+        lines[0].starts_with(&format!("{}：", path.display())),
+        "{out:?}"
+    );
+    assert!(lines[0].contains("bad\\nfake.pack"), "{out:?}");
+    assert!(lines[0].contains("\\u{001B}[31m"), "{out:?}");
+    assert!(!out.contains('\u{1b}'), "{out:?}");
+    assert!(
+        !lines.iter().any(|line| line.starts_with("fake.pack")),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn packs_escapes_control_characters_in_an_error_path() {
+    let temp = TempDir::new("escape-path");
+    let weird = temp.path().join("bad\nname\u{1b}[31m");
+
+    let output = run(&format!(":packs {}", weird.display()));
+    assert_exit(&output, ERROR);
+
+    let err = stderr(&output);
+    assert!(err.contains("bad\\nname\\u{001B}[31m"), "{err:?}");
+    assert!(!err.contains('\u{1b}'), "{err:?}");
+    assert!(!err.contains("bad\nname"), "{err:?}");
+    assert_eq!(err.lines().count(), 1, "{err:?}");
 }
 
 struct TempDir {
@@ -208,4 +328,19 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_file_symlink(_target: &Path, _link: &Path) -> bool {
+    false
 }
