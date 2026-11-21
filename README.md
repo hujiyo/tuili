@@ -77,7 +77,7 @@ cargo run -p std-deduce-cli
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导 |
 | `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告 |
 | `:cert <命题>` | 跑推理并把该目标的证书 JSON（缩进）写到 stdout；推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations` |
-| `:check <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 JSON：先跑 `cert::check`，再跑 `kernel_proof`，两段分开报告；必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。可选目标用第一个空白分隔，因此这种形式要求文件路径不含空格 |
+| `:check <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 JSON：先跑 `cert::check`，再跑 `kernel_proof`，两段分开报告；必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标 |
 | `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、描述与文件数；若目录里有 `std.lock`，再重新哈希并校验；不导入规则，不要求 `:load` |
 | `:lock [目录]` | 对目录（默认 `lawpacks`）里的所有包计算内容哈希，写入 `<目录>/std.lock`；坏包/坏文件/重复包名时打印错误并退出 `2`，不写部分锁 |
 
@@ -360,7 +360,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 258 个：kernel 15、lang 6、reason 39、cert 92、cli 54、lawpack 52（含 1 个 doc test）。
+`cargo test --workspace` 共 262 个：kernel 15、lang 6、reason 39、cert 92、cli 58、lawpack 52（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（15）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -406,12 +406,13 @@ cargo test --workspace
 - `crates/cli/tests/examples.rs`（15）：`examples/` 下每个 `.std` 一条端到端用例——
   加载文件、执行查询，断言退出码（证成 0，缺口 / 冲突 1）和关键输出；另有两条例外路径：
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
-- `crates/cli/tests/cert.rs`（15）：`:cert` / `:check` 端到端——导出的 JSON 往返并通过检查器；
+- `crates/cli/tests/cert.rs`（19）：`:cert` / `:check` 端到端——导出的 JSON 往返并通过检查器；
   `:check` 分行报告逻辑与内核两段；缺口证书退出 `1` 且产生 `MissingPremise`；
   未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在逻辑层失败；
   逻辑层接受、内核因绑定类型不符拒绝时退出 `2` 并给出节点；证书不存在、不是 JSON、未 `:load` 时失败。
-  另含 9 条目标绑定与单点变异：删前提、换绑定、换结论、复用错误节点、追加已成立 blocker、
-  改根后带目标失败/不带目标仍合法、合法目标通过、缺口根不能绑定目标、定义等价目标通过。
+  另含目标绑定与单点变异：删前提、换绑定、换结论、复用错误节点、追加已成立 blocker、
+  改根后带目标失败/不带目标仍合法、合法目标通过、缺口根不能绑定目标、定义等价目标通过；
+  以及含空格路径（不加引号只当路径、加引号可带目标）、缺根、目标无法解析。
 - `crates/cli/tests/packs.rs`（24）：`:packs` / `:lock` 端到端——合法清单逐行输出、含空格目录、
   好包+坏清单、根不存在/空目录、默认 `lawpacks`、悬空清单符号链接、description/错误/路径中的换行与
   控制字符转义；`:lock` 写锁、锁缺失/版本不符/哈希不符/多包/锁符号链接、坏包不覆盖旧锁、示例锁一致。

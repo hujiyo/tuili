@@ -110,6 +110,34 @@ impl Drop for TempFile {
     }
 }
 
+/// A temporary directory whose name contains a space, removed on drop.
+struct TempSpaceDir {
+    path: PathBuf,
+}
+
+impl TempSpaceDir {
+    fn new(tag: &str) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("std-deduce cert {} {tag} {n}", std::process::id()));
+        fs::create_dir_all(&path).unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        TempSpaceDir { path }
+    }
+
+    fn write(&self, name: &str, contents: &str) -> PathBuf {
+        let path = self.path.join(name);
+        fs::write(&path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+        path
+    }
+}
+
+impl Drop for TempSpaceDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 fn check_file(theory: &str, tag: &str, certificate: &Certificate) -> Output {
     let json = certificate.to_json_pretty().unwrap();
     let file = TempFile::new(tag, &json);
@@ -641,4 +669,80 @@ fn goal_binding_uses_kernel_conversion_not_printed_text() {
     assert_exit(&checked, PROVED);
     let out = stdout(&checked);
     assert!(out.contains("目标绑定：通过"), "{out}");
+}
+
+/// The old `:check <file>` form must keep working when the file path contains
+/// spaces: the whole argument names the existing file, so no goal is split off.
+#[test]
+fn check_accepts_an_unquoted_path_with_spaces_without_a_goal() {
+    let generated = session(
+        "constitution-39.std",
+        &[":cert 不受侵犯 张三 甲宅".to_owned()],
+    );
+    assert_exit(&generated, PROVED);
+    let certificate = certificate_json(&generated);
+
+    let dir = TempSpaceDir::new("unquoted");
+    let file = dir.write("cert one.json", &certificate.to_json_pretty().unwrap());
+    let checked = session(
+        "constitution-39.std",
+        &[format!(":check {}", file.display())],
+    );
+    assert_exit(&checked, PROVED);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：通过"), "{out}");
+    assert!(!out.contains("目标绑定："), "{out}");
+}
+
+/// A quoted path may contain spaces and still be followed by a goal.
+#[test]
+fn check_accepts_a_quoted_path_with_spaces_and_a_goal() {
+    let generated = session(
+        "constitution-39.std",
+        &[":cert 不受侵犯 张三 甲宅".to_owned()],
+    );
+    assert_exit(&generated, PROVED);
+    let certificate = certificate_json(&generated);
+
+    let dir = TempSpaceDir::new("quoted");
+    let file = dir.write("cert two.json", &certificate.to_json_pretty().unwrap());
+    let checked = session(
+        "constitution-39.std",
+        &[format!(":check \"{}\" 不受侵犯 张三 甲宅", file.display())],
+    );
+    assert_exit(&checked, PROVED);
+    let out = stdout(&checked);
+    assert!(out.contains("目标绑定：通过"), "{out}");
+}
+
+/// A certificate without a root cannot be bound to a goal.
+#[test]
+fn a_missing_root_cannot_satisfy_a_goal_binding() {
+    let mut certificate = defense_certificate();
+    certificate.root = None;
+    let file = TempFile::new("goal-missing-root", &certificate.to_json_pretty().unwrap());
+    let checked = session(
+        "刑法第二十条-基本.std",
+        &[format!(
+            ":check {} 不负刑事责任 乙行为",
+            file.path.display()
+        )],
+    );
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("目标绑定：失败（证书没有根节点）"), "{out}");
+}
+
+/// A goal that cannot be parsed is a binding failure, not a silent pass.
+#[test]
+fn an_unparseable_goal_fails_the_binding() {
+    let certificate = defense_certificate();
+    let file = TempFile::new("goal-unparseable", &certificate.to_json_pretty().unwrap());
+    let checked = session(
+        "刑法第二十条-基本.std",
+        &[format!(":check {} 不存在的谓词 某人", file.path.display())],
+    );
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("目标绑定：失败（目标无法解析"), "{out}");
 }

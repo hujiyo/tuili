@@ -84,10 +84,12 @@
 //! be definitionally equal to the elaborated goal. A gap root, a missing root
 //! or a different proposition makes the binding fail (exit `2`) and prints
 //! `目标绑定：失败（...）`; a match prints `目标绑定：通过（根命题与目标在内核下等价）`
-//! and keeps the original `0`/`1` outcome. The file and the goal are separated
-//! by the first whitespace, so this optional form requires a file path without
-//! spaces. Without a goal, no binding line is printed and the output is
-//! unchanged.
+//! and keeps the original `0`/`1` outcome. A file path containing whitespace
+//! is written in double quotes before the goal (`:check "<path>" <goal>`);
+//! without quotes, an argument that is exactly an existing file is taken as a
+//! path, which preserves the old space-containing `:check <file>` form. In all
+//! other cases the first whitespace separates the path from the goal. Without a
+//! goal, no binding line is printed and the output is unchanged.
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -456,11 +458,12 @@ impl Session {
     /// monotone proof terms and asks the kernel. A logical pass with a kernel
     /// failure is an error (`2`), not a valid certificate.
     ///
-    /// The argument is `<file>` or `<file> <goal>`. The optional goal is the
-    /// whole text after the first whitespace, so a path containing spaces
-    /// cannot be used together with a goal. When a goal is given, the root's
-    /// proposition must be definitionally equal to it; a gap root, a missing
-    /// root and a mismatch all fail the binding (exit `2`).
+    /// The argument is `<file>` or `<file> <goal>`. A path containing
+    /// whitespace is double-quoted when a goal follows. Without quotes, an
+    /// argument that is exactly an existing file is taken as a path; otherwise
+    /// the first whitespace separates the path from the goal. When a goal is
+    /// given, the root's proposition must be definitionally equal to it; a gap
+    /// root, a missing root and a mismatch all fail the binding (exit `2`).
     fn check_certificate(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !self.loaded {
             write_check_not_run(out, "尚未加载理论");
@@ -469,13 +472,7 @@ impl Session {
         if arg.is_empty() {
             return Err("用法：:check <证书文件> [目标命题]".into());
         }
-        let (path, goal) = match arg.split_once(char::is_whitespace) {
-            Some((path, rest)) => {
-                let goal = rest.trim();
-                (path, if goal.is_empty() { None } else { Some(goal) })
-            }
-            None => (arg, None),
-        };
+        let (path, goal) = split_check_argument(arg)?;
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) => {
@@ -777,6 +774,38 @@ fn packs_root(arg: &str) -> Result<PathBuf, String> {
             .join("lawpacks"))
     } else {
         Ok(PathBuf::from(arg))
+    }
+}
+
+/// Split `:check`'s argument into a file path and an optional goal.
+///
+/// A leading double quote delimits a path that may contain whitespace; the
+/// rest of the argument is the goal. Without quotes, an argument that names an
+/// existing file is taken whole, which preserves the old `:check <file>` form
+/// for paths containing spaces. Otherwise the first whitespace separates the
+/// path from the goal.
+fn split_check_argument(arg: &str) -> Result<(&str, Option<&str>), String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err("用法：:check <证书文件> [目标命题]".into());
+    }
+    if let Some(rest) = arg.strip_prefix('"') {
+        let Some(end) = rest.find('"') else {
+            return Err("证书路径的引号未闭合".into());
+        };
+        let path = &rest[..end];
+        let goal = rest[end + 1..].trim();
+        return Ok((path, if goal.is_empty() { None } else { Some(goal) }));
+    }
+    if Path::new(arg).is_file() {
+        return Ok((arg, None));
+    }
+    match arg.split_once(char::is_whitespace) {
+        Some((path, rest)) => {
+            let goal = rest.trim();
+            Ok((path, if goal.is_empty() { None } else { Some(goal) }))
+        }
+        None => Ok((arg, None)),
     }
 }
 
