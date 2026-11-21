@@ -43,11 +43,11 @@
 //! The closure is computed only when a rule step has an `unless`. Rules that
 //! depend on a premise binder
 //! are rejected rather than checked with an open `?name`; a rule that cannot
-//! be evaluated statically makes its conclusion's predicate head opaque, and
-//! opaque heads propagate through all rules whose premises can consume them
-//! (including opaque rules), so a matching unproved blocker is rejected as
-//! unconfirmable. A blocker with no extractable predicate head is rejected as
-//! well. [`kernel_proof`] turns the
+//! be evaluated statically contributes its opened conclusion as a pattern,
+//! and patterns propagate through the statically evaluable rules whose
+//! premises can consume them, so a matching unproved blocker is rejected as
+//! unconfirmable. A blocker with no extractable
+//! predicate head is rejected as well. [`kernel_proof`] turns the
 //! monotone skeleton into kernel terms and has the kernel check each rule
 //! step; it does not inspect `unless`. The crate depends on the kernel only;
 //! it never depends on the reasoner. Sources and priorities are data this
@@ -64,6 +64,7 @@
 //! placeholder.
 
 mod closure;
+mod key;
 
 pub mod check;
 pub mod expr;

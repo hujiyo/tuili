@@ -28,18 +28,21 @@
 //!   a proved blocker retract the step as well.
 //! * No instantiated `unless` condition is derivable from the environment's
 //!   rules when the certificate merely omits its derivation. The checker
-//!   computes a conservative fixed-point superset of the ground propositions
-//!   the environment's rules can derive, ignoring `unless`, conflicts and
-//!   priorities. A blocker in that superset but not among the proved
-//!   propositions rejects the step; both comparisons again use kernel
-//!   conversion. The closure is computed only when a rule step that Pass 2
-//!   rebuilds has an `unless`. A rule that cannot be evaluated
-//!   statically (for example one that references a premise binder) makes its
-//!   conclusion's predicate head opaque, and opaque heads propagate through
-//!   all rules whose premises can consume them, including rules that are
-//!   themselves opaque; an unproved blocker with an opaque head is rejected
-//!   as unconfirmable. A blocker with no extractable predicate head is
-//!   rejected too. Exceeding the closure's bounds is an error, never a pass.
+//!   computes a conservative fixed-point superset of the propositions the
+//!   environment's rules can derive, ignoring `unless`, conflicts and
+//!   priorities. The superset has two layers. Ground facts are the
+//!   conclusions of the statically evaluable rules. Conclusion patterns come
+//!   from rules that cannot be evaluated statically (for example one that
+//!   references a premise binder), and propagate through every rule premise
+//!   until a fixed point. A blocker in that superset but not among the proved
+//!   propositions rejects the step: a fact match says the environment can
+//!   derive the blocker without the certificate showing the derivation, a
+//!   pattern match says the blocker cannot be confirmed clear. Both
+//!   comparisons use kernel conversion, and pattern matching is followed by
+//!   conversion too, so alpha- and eta-variants match. The closure is
+//!   computed only when a rule step that Pass 2 rebuilds has an `unless`. A
+//!   blocker with no extractable predicate head is rejected as well.
+//!   Exceeding the closure's bounds is an error, never a pass.
 //! * A rule whose opened premises, conclusion or `unless` conditions mention a
 //!   premise binder (`premise h : ...` referenced as `?h`) is rejected:
 //!   dependent premises are not supported, and a checker that left `?h`
@@ -87,6 +90,7 @@ use std_deduce_kernel::{check as kernel_check, Ctx, Env, Expr};
 
 use crate::closure;
 use crate::expr::CertExpr;
+use crate::key::expression_key;
 use crate::model::{Certificate, Node, NodeId, Resolution, Side};
 
 /// The result of a successful certificate check.
@@ -423,34 +427,39 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
                     format!("规则 `{rule}` 有阻断条件，但环境闭包没有计算：内部检查状态不一致"),
                 ));
             };
-            if possible_contains(env, possible, &closed)
+            match closure::contains(env, possible, &closed)
                 .map_err(|message| CheckError::at(id, message))?
+            {
+                Some(closure::PossibleMatch::Fact) => {
+                    return Err(CheckError::at(
+                        id,
+                        format!(
+                            "规则 `{rule}` 的阻断条件「{}」可能由环境规则推出，但证书没有给出它的推导；\
+                             请补 blocker 证明，或缩小规则/环境",
+                            print_expr(&closed)
+                        ),
+                    ));
+                }
+                Some(closure::PossibleMatch::Opaque) => {
+                    return Err(CheckError::at(
+                        id,
+                        format!(
+                            "规则 `{rule}` 的阻断条件「{}」无法确认阻断状态：\
+                             环境中有无法静态求值的规则可能推出该阻断条件",
+                            print_expr(&closed)
+                        ),
+                    ));
+                }
+                None => {}
+            }
+            if closure::concrete_head(env, &closed)
+                .map_err(|m| CheckError::at(id, m))?
+                .is_none()
             {
                 return Err(CheckError::at(
                     id,
                     format!(
-                        "规则 `{rule}` 的阻断条件「{}」可能由环境规则推出，但证书没有给出它的推导；\
-                         请补 blocker 证明，或缩小规则/环境",
-                        print_expr(&closed)
-                    ),
-                ));
-            }
-            let head = closure::concrete_head(env, &closed).map_err(|m| CheckError::at(id, m))?;
-            let Some(head) = head else {
-                return Err(CheckError::at(
-                    id,
-                    format!(
                         "规则 `{rule}`：阻断条件没有可提取的谓词头，无法确认阻断状态（「{}」）",
-                        print_expr(&closed)
-                    ),
-                ));
-            };
-            if possible.opaque_any || possible.opaque_heads.contains(&head) {
-                return Err(CheckError::at(
-                    id,
-                    format!(
-                        "规则 `{rule}` 的阻断条件「{}」无法确认阻断状态：\
-                         环境中有无法静态求值的规则可能推出该阻断条件",
                         print_expr(&closed)
                     ),
                 ));
@@ -559,7 +568,7 @@ fn environment_propositions(env: &Env) -> Result<BTreeMap<String, Expr>, CheckEr
             node: None,
             message: format!("环境公理 `{}` 无法规范化，无法比较：{error}", decl.name),
         })?;
-        facts.insert(print_expr(&proposition), proposition);
+        facts.insert(expression_key(&proposition), proposition);
     }
     Ok(facts)
 }
@@ -596,27 +605,6 @@ fn proved_contains(
     for fact in proved.values() {
         if convertible(env, &Ctx::new(), fact, proposition)
             .map_err(|error| format!("无法判定阻断条件是否已成立：{error}"))?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Whether the conservative closure contains `proposition`, up to kernel
-/// conversion.
-///
-/// Every possible fact is compared with [`convertible`]. A printed-key
-/// comparison would miss alpha and eta variants, which are the same
-/// proposition to the kernel.
-fn possible_contains(
-    env: &Env,
-    possible: &closure::Possible,
-    proposition: &Expr,
-) -> Result<bool, String> {
-    for fact in &possible.facts {
-        if convertible(env, &Ctx::new(), fact, proposition)
-            .map_err(|error| format!("无法判定阻断条件是否可能推出：{error}"))?
         {
             return Ok(true);
         }
@@ -721,6 +709,6 @@ fn close_pattern(pattern: &Expr, binding: &BTreeMap<&str, Expr>) -> Expr {
 /// A comparison key that is stable under kernel definitional unfolding.
 pub(crate) fn key(env: &Env, expression: &Expr) -> Result<String, String> {
     normalize(env, &Ctx::new(), expression)
-        .map(|normalized| print_expr(&normalized))
+        .map(|normalized| expression_key(&normalized))
         .map_err(|error| format!("规范化命题失败，无法比较：{error}"))
 }

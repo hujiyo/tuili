@@ -227,9 +227,10 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
   检查规则实例与 `unless` 阻断条件，并拒绝处于未决冲突或败方的根。
   阻断检查不只看证书节点和环境公理，还计算一个**保守的环境规则闭包**：忽略 `unless`、冲突和优先级，
   从证书假设、环境公理和节点结论出发，按 ground matching 反复应用规则到不动点；闭包里出现、但证书
-  没有给出推导的 blocker 会被拒绝。无法静态求值的规则（如依赖前提 binder）把结论谓词头标为 opaque，
-  并向后续规则传播；任何撞上它的未证明 blocker 也拒绝。闭包与证书事实的比较用内核 `convertible`，
-  不靠打印字符串。
+  没有给出推导的 blocker 会被拒绝。无法静态求值的规则（依赖前提 binder、或在前提里应用函数参数）
+  把打开的结论作为**结论模式**加入闭包；模式可以带规则参数变量，并沿可静态求值规则的前提（整体或
+  嵌套子项）传播到不动点。blocker 与事实用内核 `convertible` 比较，与模式先做一阶合一、再把实例交给
+  `convertible`；alpha/eta 和“绑定变量与同名常量”都不会因打印形式相同而混淆。
   它只依赖 `crates/kernel`，**不依赖 `crates/reason`**；已记录的冲突与裁决会被读取，但
   `defeated_by` / `prefer` 的优先级来源不在这里核验（`priority_sources_checked = false`）。
 - **`crates/cli`**：会话与命令；`:why` 生成证书、从证书渲染推导树，并对同一份证书依次运行
@@ -252,10 +253,10 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
   `:cert` 把缺口写成 `MissingPremise`、把未决冲突写成 `UnresolvedConflict` 的
   `open_obligations`；它们只设置 `requires_human`，不会让逻辑校验失败。
 - `cert::check` 的 blocker 检查是**保守过近似**：闭包忽略 `unless`、冲突和优先级，可能比 reasoner
-  推出更多，因此可能拒绝一份合法证书；它不会放行省略的 blocker。opaque 头目前只到谓词名，
-  同谓词不同个体的合法步骤可能被误杀；闭包允许同一事实满足多个前提，而 reasoner 的搜索不允许，
-  两种口径尚未统一。闭包有轮次/事实/匹配上限，超限一律报错拒绝，不能当成"没有 blocker"。
-  这些精度问题记在 `M1-7e`。
+  推出更多，因此可能拒绝一份合法证书；它不会放行省略的 blocker。结论模式减少了“同谓词名就误杀”
+  的问题，但仍不精确：不可静态求值的规则按最一般结论模式处理，不利用其前提约束；高阶应用或绑定
+  变量下的应用会退化为通配符；嵌套子项匹配和同一事实复用都是有意放宽。闭包有轮次/事实/模式/
+  单条项大小/匹配上限，超限一律报错拒绝，不能当成"没有 blocker"。
 - 证书 assumption 表里的每一条都进入上下文，即使没有任何节点引用；未使用的 blocker assumption
   也会阻断当前规则，未使用的非命题 assumption 直接报错。
 - 根是 assumption 节点时，`root_proved` 只表示它在这份证书列出的 N 条假设下成立
@@ -338,7 +339,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 157 个：kernel 15、lang 6、reason 39、cert 76、cli 21。
+`cargo test --workspace` 共 173 个：kernel 15、lang 6、reason 39、cert 92、cli 21。
 
 - `crates/kernel/tests/kernel.rs`（15）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -353,12 +354,15 @@ cargo test --workspace
 - `crates/cert/tests/render.rs`（9）：从证书渲染推导树——假设与规则树（label、source、note、bindings、
   多前提）、缺口与候选（缺失前提、阻断条件）、无根时的多根与空行、`Source::one_line` 与内核格式一致，
   以及越界根/越界假设/越界前提和可达、不可达的节点环都返回带节点编号的错误。
-- `crates/cert/tests/check.rs`（46）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
+- `crates/cert/tests/check.rs`（60）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
   缺失/重复/未闭合绑定、结论或前提漂移、已成立的 `unless`、缺口当前提、越界索引和
   非命题假设等伪造都会被拒绝；根是缺口时 `root_proved = false`。
-  环境规则推出的 blocker 不能被“删掉推导节点”绕过：直接、多跳、opaque 链、嵌套头、
-  未使用的 blocker assumption 都拒绝；alpha/eta 变体按内核 `convertible` 命中；
+  环境规则推出的 blocker 不能被“删掉推导节点”绕过：直接、多跳、ground/变量结论模式、链式传播、
+  嵌套前提、参数头、未使用的 blocker assumption 都拒绝；alpha/eta 变体按内核 `convertible` 命中；
+  高阶应用、绑定变量下的应用和超出项大小上限的传播失败关闭；
   无 `unless` 的证书不触发闭包及其上限。
+- `crates/cert/src/key.rs`（2 个单元测试）：表达式身份按 AST 结构编码，`Var(i)` 与同名 `Const`
+  不同键，binder 名不影响键。
 - `crates/cert/tests/kernel_proof.rs`（8）：证书的单调骨架到内核证明项——合法证书的根逐步通过内核；
   绑定漂移、结论不是命题、缺绑定、缺口当前提等错误带节点位置；已成立的 `unless` 仍能通过
   `kernel_proof`（阻断条件不在内核类型里），但会被 `cert::check` 拒绝。
