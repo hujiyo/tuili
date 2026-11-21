@@ -27,6 +27,18 @@ pub struct Source {
     pub note: String,
 }
 
+impl Source {
+    /// The citation in one line: `「<text><locator>」`, followed by
+    /// `（<version>）` when a version is recorded.
+    pub fn one_line(&self) -> String {
+        let mut line = format!("「{}{}」", self.text, self.locator);
+        if !self.version.is_empty() {
+            line.push_str(&format!("（{}）", self.version));
+        }
+        line
+    }
+}
+
 impl From<&SourceRef> for Source {
     fn from(source: &SourceRef) -> Self {
         Source {

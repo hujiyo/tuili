@@ -54,6 +54,14 @@
 //! layer preserves, not conditions it adjudicates; conflicts are only
 //! adjudicated for the root, and open obligations are reported through
 //! [`CheckReport::requires_human`] without failing the check.
+//!
+//! ## Rendering
+//!
+//! [`render`] prints the user-facing derivation tree from the certificate
+//! alone, so what a user sees is the object that [`check`] and
+//! [`kernel_proof`] inspect. It rejects an out-of-range node reference or a
+//! cyclic node graph with an error naming the node; it never falls back to a
+//! placeholder.
 
 mod closure;
 
@@ -61,6 +69,7 @@ pub mod check;
 pub mod expr;
 pub mod model;
 pub mod proof;
+pub mod render;
 pub mod source;
 pub mod version;
 
@@ -71,5 +80,6 @@ pub use model::{
     ObligationKind, OpenObligation, Provenance, Resolution, Side,
 };
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
+pub use render::render;
 pub use source::Source;
 pub use version::{FormatVersion, FORMAT_VERSION};

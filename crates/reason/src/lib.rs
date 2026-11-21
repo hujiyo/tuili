@@ -70,8 +70,6 @@ pub enum Node {
         premises: Vec<usize>,
         /// The rule's parameters and the values this step bound them to.
         bindings: Vec<(Name, Expr)>,
-        /// The same bindings rendered for humans. `bindings` is authoritative.
-        instance: Vec<String>,
         sources: Vec<SourceRef>,
     },
     /// An unclosed goal. The honest replacement for `sorry`.
@@ -145,8 +143,6 @@ struct Instance {
     unlesses: Vec<Expr>,
     /// The rule's parameters and the values this instantiation bound them to.
     bindings: Vec<(Name, Expr)>,
-    /// The same bindings rendered for humans.
-    binding_strings: Vec<String>,
 }
 
 /// The settled result: the set of facts and a derivation for each.
@@ -537,7 +533,6 @@ impl<'a> Reasoner<'a> {
                         conclusion: inst.conclusion,
                         premises,
                         bindings: inst.bindings,
-                        instance: inst.binding_strings,
                         sources,
                     });
                     ids.insert(target, id);
@@ -615,8 +610,8 @@ impl<'a> Reasoner<'a> {
 
     // ------------------------------------------------------------ queries
 
-    /// The environment this reasoner reads. Exposed so callers can render
-    /// through the same names the reasoner used.
+    /// The environment this reasoner reads. Exposed so callers can check a
+    /// certificate against the same declarations the derivation used.
     pub fn env(&self) -> &Env {
         self.env
     }
@@ -772,10 +767,6 @@ fn backtrack(
             premise_keys: keys.clone(),
             unlesses,
             bindings: binding.clone(),
-            binding_strings: binding
-                .iter()
-                .map(|(n, v)| format!("{n} ↦ {}", print_expr(v)))
-                .collect(),
         });
         return;
     }
@@ -940,6 +931,10 @@ pub struct GapExplanation {
 /// the rule it cites?
 ///
 /// This shares no search state with the reasoner, only the environment.
+///
+/// It is the reason crate's internal checker, used by its own tests. The CLI's
+/// user-visible check renders the generated certificate and runs
+/// [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`] instead.
 ///
 /// A rule application is legal when there is a single binding of the rule's
 /// parameters such that:
@@ -1264,116 +1259,5 @@ fn cert_resolution(resolution: &Resolution) -> std_deduce_cert::Resolution {
             },
         },
         Resolution::Unresolved => std_deduce_cert::Resolution::Unresolved,
-    }
-}
-
-// ---------------------------------------------------------------- render
-
-pub fn render(_env: &Env, d: &Derivation) -> String {
-    let mut out = String::new();
-    if let Some(root) = d.root {
-        render_node(d, root, 0, &mut out);
-        return out;
-    }
-    // No root: print every node not used as a premise elsewhere.
-    let mut used = BTreeSet::new();
-    for n in &d.nodes {
-        if let Node::RuleApplication { premises, .. } = n {
-            used.extend(premises.iter().copied());
-        }
-    }
-    let mut roots = Vec::new();
-    for (id, n) in d.nodes.iter().enumerate() {
-        match n {
-            Node::Assumption { .. } | Node::RuleApplication { .. } => {
-                if !used.contains(&id) {
-                    roots.push(id);
-                }
-            }
-            Node::Gap { .. } => roots.push(id),
-        }
-    }
-    for (i, id) in roots.into_iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        render_node(d, id, 0, &mut out);
-    }
-    out
-}
-
-fn render_node(d: &Derivation, id: usize, depth: usize, out: &mut String) {
-    let pad = "  ".repeat(depth);
-    match &d.nodes[id] {
-        Node::Assumption {
-            prop,
-            sources,
-            label,
-        } => {
-            out.push_str(&format!("{pad}· {}", print_expr(prop)));
-            if let Some(l) = label {
-                out.push_str(&format!("  [{l}]"));
-            }
-            if let Some(s) = sources.first() {
-                out.push_str(&format!("  ← {}", s.one_line()));
-            }
-            out.push('\n');
-        }
-        Node::RuleApplication {
-            rule,
-            conclusion,
-            premises,
-            bindings: _,
-            instance,
-            sources,
-        } => {
-            out.push_str(&format!("{pad}▸ {}", print_expr(conclusion)));
-            out.push_str(&format!("  ⟨{rule}⟩"));
-            if let Some(s) = sources.first() {
-                out.push_str(&format!(" ← {}", s.one_line()));
-            }
-            out.push('\n');
-            if let Some(s) = sources.first() {
-                if !s.note.is_empty() {
-                    out.push_str(&format!("{pad}  注：{}\n", s.note));
-                }
-            }
-            if !instance.is_empty() {
-                out.push_str(&format!("{pad}  实例：{}\n", instance.join("，")));
-            }
-            for p in premises {
-                render_node(d, *p, depth + 1, out);
-            }
-        }
-        Node::Gap {
-            prop,
-            candidates,
-            note,
-        } => {
-            out.push_str(&format!("{pad}? {}  【未闭合】\n", print_expr(prop)));
-            if let Some(n) = note {
-                out.push_str(&format!("{pad}  {n}\n"));
-            }
-            for c in candidates {
-                out.push_str(&format!("{pad}  候选 ⟨{}⟩", c.rule));
-                if let Some(s) = c.sources.first() {
-                    out.push_str(&format!(" ← {}", s.one_line()));
-                }
-                out.push('\n');
-                if !c.missing.is_empty() {
-                    out.push_str(&format!(
-                        "{pad}    缺：{}\n",
-                        c.missing
-                            .iter()
-                            .map(print_expr)
-                            .collect::<Vec<_>>()
-                            .join("；")
-                    ));
-                }
-                for b in &c.blocked_by {
-                    out.push_str(&format!("{pad}    被阻断：「{}」已成立\n", print_expr(b)));
-                }
-            }
-        }
     }
 }

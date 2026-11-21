@@ -5,7 +5,7 @@
 //! ```text
 //! :load <file>            load a theory file
 //! :inspect                dump the ledger
-//! :why <term>             derive, print the tree, and verify it
+//! :why <term>             derive, print the certificate's tree, and check it
 //! :gap <term>             explain what is missing for a goal
 //! :cert <term>            derive and print the goal's certificate JSON
 //! :check <file>           check a certificate JSON against the loaded environment
@@ -13,14 +13,19 @@
 //! :quit
 //! ```
 //!
-//! `:why` has three outcomes, and only the first is a success:
+//! `:why` prints the derivation tree rendered from the generated certificate,
+//! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
+//! on that same certificate. Its three outcomes are:
 //!
-//! * proved — the tree is printed and independently verified;
-//! * a gap — the missing premises are listed;
+//! * proved — the tree is printed, both layers accept the certificate, and
+//!   the certificate leaves nothing open;
+//! * a gap — the certificate is valid but its root is a gap, so the conclusion
+//!   is not proved;
 //! * a conflict — both derivations are printed and the process exits non-zero.
 //!
-//! A conclusion caught in an unresolved conflict is kept out of the fact
-//! base, but it is never dropped silently.
+//! A certificate that fails either layer is an error (exit `2`), never a
+//! successful query. A conclusion caught in an unresolved conflict is kept out
+//! of the fact base, but it is never dropped silently.
 //!
 //! `:cert` writes only the certificate JSON to stdout; a gap becomes a
 //! `MissingPremise` obligation and an unresolved conflict becomes an
@@ -43,12 +48,15 @@
 
 use std::io::{self, BufRead, Write};
 
-use std_deduce_cert::{Certificate, CheckReport, Node as CertNode, ObligationKind};
-use std_deduce_kernel::env::{Ctx, DeclKind, SourceRef};
+use std_deduce_cert::{render, Certificate, CheckReport, Node as CertNode, ObligationKind};
+use std_deduce_kernel::conv::convertible;
+use std_deduce_kernel::env::{Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::{elab, Library};
-use std_deduce_reason::{render, verify, Conflict, Provenance, Reasoner, Resolution, Side};
+use std_deduce_reason::{
+    certificate as reason_certificate, Conflict, Provenance, Reasoner, Resolution, Side,
+};
 
 /// How a query ended. Only `Proved` is a success; the other two make the
 /// process exit non-zero, the way a failed `check` does.
@@ -263,48 +271,83 @@ impl Session {
             d.root = Some(id);
         }
 
-        writeln!(out, "{}", render(&self.lib.env, &d)).ok();
-        // Verification is independent of the reasoner.
-        match verify(&self.lib.env, &d) {
-            Ok(()) => {
-                writeln!(out, "推导已通过独立校验。").ok();
+        let certificate = reason_certificate(&d)?;
+        // The tree is printed from the certificate, then that same certificate
+        // is checked by both layers: the tree the user sees and the object
+        // being checked cannot diverge.
+        writeln!(out, "{}", render(&certificate)?).ok();
+
+        let checked = std_deduce_cert::check(&self.lib.env, &certificate);
+        let kernel = std_deduce_cert::kernel_proof(&self.lib.env, &certificate);
+        let (report, kernel_report) = match (checked, kernel) {
+            (Ok(report), Ok(kernel)) => (report, kernel),
+            (checked, kernel) => {
+                let mut failures = Vec::new();
+                if let Err(error) = checked {
+                    writeln!(out, "逻辑校验失败：{error}").ok();
+                    failures.push(format!("逻辑层：{error}"));
+                }
+                if let Err(error) = kernel {
+                    writeln!(out, "内核证明失败：{error}").ok();
+                    failures.push(format!("内核层：{error}"));
+                }
+                return Err(format!("证书校验失败（{}）", failures.join("；")));
             }
-            Err(e) => {
-                writeln!(out, "独立校验失败：{e}").ok();
-            }
+        };
+
+        let root = certificate
+            .root
+            .ok_or_else(|| "推理器生成的证书没有根节点：无法确认结论".to_owned())?;
+        if matches!(certificate.nodes.get(root), Some(CertNode::Gap { .. })) {
+            writeln!(out, "证书有效，但根为缺口，结论未被证明。").ok();
+            report_conflicts(out, &certificate);
+            return Ok(Outcome::Gap);
         }
-        for c in &d.conflicts {
-            let how = match c.resolution {
-                Resolution::Unresolved => "未决",
-                Resolution::Defeated { .. } => "已裁决",
-            };
+        if !report.root_proved || !kernel_report.root_proved {
+            writeln!(out, "证书有效，但根未被证明，结论未被证明。").ok();
+            report_conflicts(out, &certificate);
+            return Ok(Outcome::Gap);
+        }
+
+        let unresolved = certificate
+            .conflicts
+            .iter()
+            .filter(|conflict| {
+                matches!(conflict.resolution, std_deduce_cert::Resolution::Unresolved)
+            })
+            .count();
+        if !certificate.open_obligations.is_empty() || unresolved > 0 {
             writeln!(
                 out,
-                "冲突（{how}）：{} 与 {}",
-                print_expr(&c.left),
-                print_expr(&c.right)
+                "证书有效且根已证明，但仍有未决义务（open_obligations {} 项，未决冲突 {} 项），不能报告为无保留的证明。",
+                certificate.open_obligations.len(),
+                unresolved
+            )
+            .ok();
+            report_conflicts(out, &certificate);
+            return Ok(Outcome::Gap);
+        }
+
+        // Determine the defeated-conflict note before printing the success
+        // line: a comparison failure is an error, never a success followed by
+        // an error.
+        let won_conflict = if reachable {
+            won_conflict_note(&self.lib.env, &goal, &certificate)?
+        } else {
+            None
+        };
+
+        writeln!(out, "推导已通过独立校验。").ok();
+        report_conflicts(out, &certificate);
+        if let Some(other) = won_conflict {
+            writeln!(
+                out,
+                "注：与「{}」存在冲突，已按记录的裁决为本结论胜出（裁决依据与优先级来源未核验）。",
+                print_expr(&other)
             )
             .ok();
         }
-        if reachable {
-            if let Some(c) = r.conflict_for(&goal) {
-                if let Resolution::Defeated { winner } = &c.resolution {
-                    let other = match winner {
-                        Side::Left => &c.right,
-                        Side::Right => &c.left,
-                    };
-                    writeln!(
-                        out,
-                        "注：与「{}」存在冲突，已按优先级裁决为本结论胜出。",
-                        print_expr(other)
-                    )
-                    .ok();
-                }
-            }
-            Ok(Outcome::Proved)
-        } else {
-            Ok(Outcome::Gap)
-        }
+        Ok(Outcome::Proved)
     }
 
     /// Parse `arg` as a proposition in the current environment.
@@ -346,7 +389,7 @@ impl Session {
             d.root = Some(id);
         }
 
-        let certificate = std_deduce_reason::certificate(&d)?;
+        let certificate = reason_certificate(&d)?;
         let json = certificate
             .to_json_pretty()
             .map_err(|e| format!("证书序列化失败：{e}"))?;
@@ -592,22 +635,92 @@ fn report_defeated(out: &mut impl Write, r: &Reasoner, goal: &Expr, c: &Conflict
 }
 
 fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
-    match r.derivation_for(prop) {
-        Some(d) => {
-            writeln!(out, "{}", render(r.env(), &d)).ok();
-            match verify(r.env(), &d) {
-                Ok(()) => {
-                    writeln!(out, "  （该推导本身通过独立校验）").ok();
-                }
-                Err(e) => {
-                    writeln!(out, "  （该推导未通过独立校验：{e}）").ok();
-                }
-            }
+    let Some(d) = r.derivation_for(prop) else {
+        writeln!(out, "  （推导无法重建：它的前提本身已不在事实库）").ok();
+        return;
+    };
+    let certificate = match reason_certificate(&d) {
+        Ok(certificate) => certificate,
+        Err(error) => {
+            writeln!(out, "  （该推导未能生成证书：{error}）").ok();
+            return;
         }
-        None => {
-            writeln!(out, "  （推导无法重建：它的前提本身已不在事实库）").ok();
+    };
+    match render(&certificate) {
+        Ok(rendered) => writeln!(out, "{rendered}").ok(),
+        Err(error) => {
+            writeln!(out, "  （该推导的证书无法渲染：{error}）").ok();
+            return;
+        }
+    };
+    match std_deduce_cert::check(r.env(), &certificate) {
+        Ok(report) if report.root_proved => {
+            writeln!(out, "  （该推导通过证书逻辑校验）").ok();
+        }
+        Ok(_) => {
+            writeln!(out, "  （该推导未通过证书逻辑校验：根未被证明）").ok();
+        }
+        Err(error) => {
+            writeln!(out, "  （该推导未通过证书逻辑校验：{error}）").ok();
         }
     }
+}
+
+/// Print every conflict the certificate records.
+fn report_conflicts(out: &mut impl Write, certificate: &Certificate) {
+    for conflict in &certificate.conflicts {
+        let how = match conflict.resolution {
+            std_deduce_cert::Resolution::Unresolved => "未决",
+            std_deduce_cert::Resolution::Defeated { .. } => "已裁决",
+        };
+        writeln!(
+            out,
+            "冲突（{how}）：{} 与 {}",
+            print_expr(&Expr::from(&conflict.left)),
+            print_expr(&Expr::from(&conflict.right))
+        )
+        .ok();
+    }
+}
+
+/// The defeated competitor of a conflict the queried proposition won.
+///
+/// The proposition is matched with kernel definitional equality, not by
+/// comparing printed strings.
+fn won_conflict_note(
+    env: &Env,
+    goal: &Expr,
+    certificate: &Certificate,
+) -> Result<Option<Expr>, String> {
+    for conflict in &certificate.conflicts {
+        let left = Expr::from(&conflict.left);
+        let right = Expr::from(&conflict.right);
+        let side = if convertible(env, &Ctx::new(), goal, &left)
+            .map_err(|error| format!("无法比较目标与冲突左命题：{error}"))?
+        {
+            Some(std_deduce_cert::Side::Left)
+        } else if convertible(env, &Ctx::new(), goal, &right)
+            .map_err(|error| format!("无法比较目标与冲突右命题：{error}"))?
+        {
+            Some(std_deduce_cert::Side::Right)
+        } else {
+            None
+        };
+        let (Some(side), std_deduce_cert::Resolution::Defeated { winner }) =
+            (side, &conflict.resolution)
+        else {
+            continue;
+        };
+        if side != *winner {
+            continue;
+        }
+        let other = match winner {
+            std_deduce_cert::Side::Left => &conflict.right,
+            std_deduce_cert::Side::Right => &conflict.left,
+        };
+        return Ok(Some(Expr::from(other)));
+    }
+    Ok(None)
 }
 
 fn describe(p: &Provenance) -> String {

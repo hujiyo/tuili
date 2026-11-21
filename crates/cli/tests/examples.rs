@@ -5,8 +5,10 @@
 //! and a few stable substrings, not whole-output snapshots.
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const PROVED: i32 = 0;
 const GAP_OR_CONFLICT: i32 = 1;
@@ -35,6 +37,36 @@ fn load(name: &str) -> Output {
 
 fn session(name: &str, commands: &[&str]) -> Output {
     let mut all = vec![format!(":load {}", example(name))];
+    all.extend(commands.iter().map(|command| command.to_string()));
+    run(all)
+}
+
+/// A theory file outside the repository, removed when the test ends.
+struct TempTheory {
+    path: PathBuf,
+}
+
+impl TempTheory {
+    fn new(tag: &str, source: &str) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "std-deduce-cli-{}-{tag}-{n}.std",
+            std::process::id()
+        ));
+        fs::write(&path, source).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+        TempTheory { path }
+    }
+}
+
+impl Drop for TempTheory {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn session_with_theory(theory: &TempTheory, commands: &[&str]) -> Output {
+    let mut all = vec![format!(":load {}", theory.path.display())];
     all.extend(commands.iter().map(|command| command.to_string()));
     run(all)
 }
@@ -120,7 +152,11 @@ fn complementary_predicates_report_an_unresolved_conflict() {
     check(
         session("冲突-互补谓词.std", &[":why 可复议 甲"]),
         GAP_OR_CONFLICT,
-        &["? 可复议 甲", "缺：不批准 甲"],
+        &[
+            "? 可复议 甲",
+            "缺：不批准 甲",
+            "证书有效，但根为缺口，结论未被证明。",
+        ],
     );
 }
 
@@ -360,6 +396,68 @@ fn negation_experiment_two_fake_proof_is_rejected_at_load() {
         load("否定-实验二-伪证明.std"),
         LOAD_ERROR,
         &["错误：", "伪消去", "类型不匹配"],
+    );
+}
+
+/// A proved root is not a successful query if the same certificate still
+/// carries an unrelated unresolved conflict: `:check` would exit `1`, and
+/// `:why` must not report a cleaner result than the certificate checker.
+#[test]
+fn a_proved_root_with_an_unrelated_unresolved_conflict_is_not_a_success() {
+    let output = check(
+        session("冲突-互补谓词.std", &[":why 符合条件 甲"]),
+        GAP_OR_CONFLICT,
+        &[
+            "· 符合条件 甲",
+            "证书有效且根已证明，但仍有未决义务",
+            "不能报告为无保留的证明",
+        ],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("推导已通过独立校验。"),
+        "a certificate with open obligations must not print the success line:\n{out}"
+    );
+}
+
+/// The conservative blocker check may reject a derivation the reasoner built.
+/// That is a false red, not a licence to print a success: `:why` must fail
+/// closed and exit `2`.
+#[test]
+fn why_fails_closed_when_a_blocker_cannot_be_cleared() {
+    let theory = TempTheory::new(
+        "why-conservative-blocker",
+        r#"
+sort 公民
+obj 张三 : 公民
+obj 李四 : 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+pred 佐证 : 侵占 李四 → Prop
+axiom 侵占事实 : 侵占 张三
+rule 依赖推定 :
+  premise h : 侵占 李四
+  unless 佐证 h
+  conclude 无辜 张三
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+"#,
+    );
+    let output = session_with_theory(&theory, &[":why 违法 张三"]);
+    let output = check(output, LOAD_ERROR, &["▸ 违法 张三", "逻辑校验失败"]);
+    let out = stdout(&output);
+    let err = stderr(&output);
+    assert!(
+        !out.contains("推导已通过独立校验。"),
+        "a failed certificate must not print the success line:\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        err.contains("证书校验失败（逻辑层"),
+        "the failure must name the failed layer:\nstderr:\n{err}"
     );
 }
 

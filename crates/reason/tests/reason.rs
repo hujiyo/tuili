@@ -178,7 +178,6 @@ rule r :
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![],
         bindings: vec![],
-        instance: vec![],
         sources: vec![SourceRef::new("测试", "一")],
     });
     assert!(
@@ -192,7 +191,6 @@ rule r :
         conclusion: Expr::app(p("侵占"), p("张三")),
         premises: vec![],
         bindings: vec![],
-        instance: vec![],
         sources: vec![],
     });
     assert!(verify(&lib.env, &d2).is_err());
@@ -228,7 +226,6 @@ rule r :
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
         bindings: vec![],
-        instance: vec![],
         sources: vec![],
     });
     assert!(
@@ -266,7 +263,6 @@ rule r :
         conclusion: Expr::app(p("违法"), p("李四")),
         premises: vec![0],
         bindings: vec![],
-        instance: vec![],
         sources: vec![],
     });
     assert!(
@@ -310,7 +306,6 @@ rule r :
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
         bindings: vec![],
-        instance: vec![],
         sources: vec![],
     });
     assert!(
@@ -357,7 +352,6 @@ rule r :
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
         bindings: vec![(name("p"), p("张三"))],
-        instance: vec!["p ↦ 张三".to_string()],
         sources: vec![],
     });
     let err = verify(&lib.env, &d).expect_err("the alpha-variant blocker is proved");
