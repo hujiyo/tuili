@@ -1,0 +1,9 @@
+# 清单示例：只演示格式，条文尚未导入。
+[pack]
+name = "cn.constitution"
+version = "0.1.0"
+jurisdiction = "CN"
+territory = "CN"
+namespace = "cn.constitution"
+effective_from = "1982-12-04"
+description = "中华人民共和国宪法清单示例；仅清单示例，条文尚未导入。"
