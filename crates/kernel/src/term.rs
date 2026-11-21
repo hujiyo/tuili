@@ -123,11 +123,7 @@ pub fn shift(e: &Expr, d: isize, cutoff: usize) -> Expr {
             domain: Box::new(shift(domain, d, cutoff)),
             codomain: Box::new(shift(codomain, d, cutoff + 1)),
         },
-        Expr::Lam {
-            name,
-            domain,
-            body,
-        } => Expr::Lam {
+        Expr::Lam { name, domain, body } => Expr::Lam {
             name: name.clone(),
             domain: Box::new(shift(domain, d, cutoff)),
             body: Box::new(shift(body, d, cutoff + 1)),
@@ -169,11 +165,7 @@ pub fn subst(e: &Expr, j: usize, s: &Expr) -> Expr {
             domain: Box::new(subst(domain, j, s)),
             codomain: Box::new(subst(codomain, j + 1, &shift(s, 1, 0))),
         },
-        Expr::Lam {
-            name,
-            domain,
-            body,
-        } => Expr::Lam {
+        Expr::Lam { name, domain, body } => Expr::Lam {
             name: name.clone(),
             domain: Box::new(subst(domain, j, s)),
             body: Box::new(subst(body, j + 1, &shift(s, 1, 0))),

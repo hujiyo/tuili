@@ -39,11 +39,7 @@ pub fn infer(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
             // impossible.
             Ok(Expr::Sort(if c == 0 { 0 } else { c.max(d) }))
         }
-        Expr::Lam {
-            name,
-            domain,
-            body,
-        } => {
+        Expr::Lam { name, domain, body } => {
             // An annotated lambda can be inferred: the annotation supplies
             // the domain, and the codomain is the body's type re-closed
             // under the same binder. Un-annotated lambdas are the only
@@ -59,7 +55,7 @@ pub fn infer(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
             })
         }
         Expr::App { func, arg } => {
-            let f_ty = whnf(env, ctx, &infer(env, ctx, func)?)?;
+            let f_ty = whnf(env, &infer(env, ctx, func)?)?;
             match f_ty {
                 Expr::Pi {
                     domain, codomain, ..
@@ -82,12 +78,8 @@ pub fn infer(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
 /// Check `e : ty`.
 pub fn check(env: &Env, ctx: &Ctx, e: &Expr, ty: &Expr) -> Result<()> {
     match e {
-        Expr::Lam {
-            name,
-            domain,
-            body,
-        } => {
-            let ty = whnf(env, ctx, ty)?;
+        Expr::Lam { name, domain, body } => {
+            let ty = whnf(env, ty)?;
             let Expr::Pi {
                 name: n,
                 domain: binder_domain,
@@ -130,7 +122,7 @@ pub fn check_is_type(env: &Env, ctx: &Ctx, e: &Expr) -> Result<()> {
 
 /// The universe `e` lives in, i.e. `e : Sort l`.
 pub fn infer_sort(env: &Env, ctx: &Ctx, e: &Expr) -> Result<u32> {
-    match whnf(env, ctx, &infer(env, ctx, e)?)? {
+    match whnf(env, &infer(env, ctx, e)?)? {
         Expr::Sort(l) => Ok(l),
         other => Err(Error::NotASort(other)),
     }

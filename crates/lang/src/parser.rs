@@ -478,14 +478,9 @@ impl Parser {
 
     fn application(&mut self) -> PResult<Term> {
         let mut t = self.atom()?;
-        loop {
-            match self.peek() {
-                Tok::Ident(_) | Tok::LParen => {
-                    let a = self.atom()?;
-                    t = Term::App(Box::new(t), Box::new(a));
-                }
-                _ => break,
-            }
+        while let Tok::Ident(_) | Tok::LParen = self.peek() {
+            let a = self.atom()?;
+            t = Term::App(Box::new(t), Box::new(a));
         }
         Ok(t)
     }
@@ -561,9 +556,7 @@ impl Parser {
             Ok((n, t))
         } else {
             let n = self.ident()?;
-            self.err::<(String, Term)>(format!(
-                "绑定 `{n}` 缺少类型，请写成 `({n} : T)`"
-            ))
+            self.err::<(String, Term)>(format!("绑定 `{n}` 缺少类型，请写成 `({n} : T)`"))
         }
     }
 }

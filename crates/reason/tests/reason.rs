@@ -177,6 +177,7 @@ rule r :
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![],
+        bindings: vec![],
         instance: vec![],
         sources: vec![SourceRef::new("测试", "一")],
     });
@@ -190,6 +191,7 @@ rule r :
         rule: name("r"),
         conclusion: Expr::app(p("侵占"), p("张三")),
         premises: vec![],
+        bindings: vec![],
         instance: vec![],
         sources: vec![],
     });
@@ -225,6 +227,7 @@ rule r :
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
+        bindings: vec![],
         instance: vec![],
         sources: vec![],
     });
@@ -262,6 +265,7 @@ rule r :
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("李四")),
         premises: vec![0],
+        bindings: vec![],
         instance: vec![],
         sources: vec![],
     });
@@ -305,6 +309,7 @@ rule r :
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
+        bindings: vec![],
         instance: vec![],
         sources: vec![],
     });
@@ -399,6 +404,61 @@ rule r :
     let (d, v) = assemble(&lib, &goal);
     assert!(d.root.is_some());
     assert!(v.is_ok(), "{v:?}");
+}
+
+/// The node must carry the structured parameter values, not only their
+/// rendered form, so a proof term can be built without parsing strings.
+#[test]
+fn a_rule_node_records_structured_bindings() {
+    use std_deduce_reason::Node;
+    let src = r#"
+sort 公民
+sort 证件
+pred 持有 : 公民 → 证件 → Prop
+pred 有证资格 : 公民 → Prop
+obj 张三 : 公民
+obj 身份证 : 证件
+
+axiom f : 持有 张三 身份证
+
+rule r :
+  params p : 公民, z : 证件
+  premise 持有 p z
+  conclude 有证资格 p
+  source 测试 二
+"#;
+    let lib = load(src);
+    let goal = Expr::app(p("有证资格"), p("张三"));
+    let (d, v) = assemble(&lib, &goal);
+    assert!(v.is_ok(), "independent verification failed: {v:?}");
+
+    let (rule, bindings) = d
+        .nodes
+        .iter()
+        .find_map(|n| match n {
+            Node::RuleApplication { rule, bindings, .. } => Some((rule, bindings)),
+            _ => None,
+        })
+        .expect("the derivation should contain the rule step");
+    assert_eq!(rule.as_ref(), "r");
+    assert!(
+        bindings.contains(&(name("p"), p("张三"))),
+        "the step must bind p to 张三, got {bindings:?}"
+    );
+    assert!(bindings.contains(&(name("z"), p("身份证"))));
+
+    // Every declared parameter is determined by this instantiation.
+    let decl = lib.env.get("r").expect("the rule is in the ledger");
+    let DeclKind::Rule(rule_decl) = &decl.kind else {
+        panic!("`r` should be a rule");
+    };
+    assert_eq!(bindings.len(), rule_decl.params.len());
+    for (binder, _) in &rule_decl.params {
+        assert!(
+            bindings.iter().any(|(k, _)| k == binder),
+            "parameter `{binder}` missing from the node's bindings"
+        );
+    }
 }
 
 #[test]
@@ -733,6 +793,42 @@ axiom f : 侵占 张三
     r.assume_ledger_axioms().unwrap();
     r.saturate().unwrap();
     assert!(r.knows(&Expr::app(p("侵占"), p("张三"))));
+}
+
+/// A rule's declared type ends in its conclusion, so it is a proposition and
+/// would pass the proposition guard in `assume_ledger_axioms`. It must still
+/// not be assumed: rules drive the reasoner, they are not facts.
+#[test]
+fn rules_are_not_assumed_as_axioms() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+axiom f : 侵占 张三
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  source 测试 一
+"#;
+    let lib = load(src);
+    let rule = lib.env.get("r").expect("the rule must be in the ledger");
+    std_deduce_kernel::check::check(&lib.env, &Ctx::new(), &rule.ty, &Expr::Sort(0))
+        .expect("a rule's declared type is a proposition");
+
+    let mut r = Reasoner::new(&lib.env);
+    r.assume_ledger_axioms().unwrap();
+    r.saturate().unwrap();
+    assert!(
+        !r.knows(&rule.ty),
+        "the rule declaration itself must not enter the fact base"
+    );
+    assert!(
+        r.knows(&Expr::app(p("违法"), p("张三"))),
+        "the rule must still fire on the axiom"
+    );
 }
 
 /// A universally quantified axiom is a proposition and is assumed.

@@ -11,8 +11,14 @@ fn c(s: &str) -> Expr {
 fn sorts_form_a_predicative_chain() {
     let env = Env::new();
     let ctx = Ctx::new();
-    assert_eq!(check::infer(&env, &ctx, &Expr::Sort(0)).unwrap(), Expr::Sort(1));
-    assert_eq!(check::infer(&env, &ctx, &Expr::Sort(3)).unwrap(), Expr::Sort(4));
+    assert_eq!(
+        check::infer(&env, &ctx, &Expr::Sort(0)).unwrap(),
+        Expr::Sort(1)
+    );
+    assert_eq!(
+        check::infer(&env, &ctx, &Expr::Sort(3)).unwrap(),
+        Expr::Sort(4)
+    );
 }
 
 #[test]
@@ -49,10 +55,7 @@ fn applying_the_identity_works() {
         &ctx,
     )
     .unwrap();
-    let app = Expr::app(
-        Expr::lam("x", Expr::Sort(0), Expr::Var(0)),
-        c("Pa"),
-    );
+    let app = Expr::app(Expr::lam("x", Expr::Sort(0), Expr::Var(0)), c("Pa"));
     assert_eq!(check::infer(&env, &ctx, &app).unwrap(), Expr::Sort(0));
 }
 
@@ -233,6 +236,97 @@ fn duplicate_names_are_refused() {
         env.insert(d(), &ctx),
         Err(Error::DuplicateName(_))
     ));
+}
+
+/// The environment shared by the rule-constant tests: `公民`;
+/// `P Q : 公民 → Prop`; `甲 : 公民`; `h : P 甲`; and the rule
+/// `r : ∀ (x : 公民), P x → Q x`.
+fn rule_constant_env() -> Env {
+    let mut env = Env::new();
+    let ctx = Ctx::new();
+    let mut add = |n: &str, kind: DeclKind, ty: Expr| {
+        env.insert(
+            Decl {
+                name: name(n),
+                kind,
+                ty,
+                sources: vec![],
+                index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+    };
+    add("公民", DeclKind::Sort, Expr::Sort(1));
+    add("P", DeclKind::Pred, Expr::pi(c("公民"), Expr::Sort(0)));
+    add("Q", DeclKind::Pred, Expr::pi(c("公民"), Expr::Sort(0)));
+    add("甲", DeclKind::Obj, c("公民"));
+    add("h", DeclKind::Axiom, Expr::app(c("P"), c("甲")));
+    let rdecl = RuleDecl {
+        params: vec![(name("x"), c("公民"))],
+        premises: vec![(None, Expr::app(c("P"), Expr::Var(0)))],
+        // The conclusion lives under the whole telescope: `x` is behind the
+        // premise binder.
+        conclusion: Expr::app(c("Q"), Expr::Var(1)),
+        unlesses: vec![],
+        exceptions: vec![],
+        prefers: vec![],
+        sources: vec![],
+    };
+    let ty = std_deduce_kernel::env::rule_type(&rdecl);
+    add("r", DeclKind::Rule(Box::new(rdecl)), ty);
+    env
+}
+
+#[test]
+fn rule_constant_applies_to_prove_its_conclusion() {
+    let env = rule_constant_env();
+    let ctx = Ctx::new();
+    let r_ty = check::infer(&env, &ctx, &c("r")).unwrap();
+    let expected = Expr::forall(
+        "x",
+        c("公民"),
+        Expr::pi(
+            Expr::app(c("P"), Expr::Var(0)),
+            Expr::app(c("Q"), Expr::Var(1)),
+        ),
+    );
+    assert!(
+        conv::convertible(&env, &ctx, &r_ty, &expected).unwrap(),
+        "rule constant must have type `∀ x : 公民, P x → Q x`, got `{r_ty}`"
+    );
+    let proof = Expr::apps(c("r"), [c("甲"), c("h")]);
+    let proof_ty = check::infer(&env, &ctx, &proof).unwrap();
+    let conclusion = Expr::app(c("Q"), c("甲"));
+    assert!(
+        conv::convertible(&env, &ctx, &proof_ty, &conclusion).unwrap(),
+        "applying the rule to every argument must yield `Q 甲`, got `{proof_ty}`"
+    );
+    check::check(&env, &ctx, &proof, &conclusion).unwrap();
+}
+
+#[test]
+fn rule_constant_needs_every_premise_and_is_not_a_prop() {
+    let env = rule_constant_env();
+    let ctx = Ctx::new();
+    // Supplying only the parameter leaves a function waiting for the premise.
+    let partial = Expr::apps(c("r"), [c("甲")]);
+    let partial_ty = check::infer(&env, &ctx, &partial).unwrap();
+    let missing = Expr::pi(Expr::app(c("P"), c("甲")), Expr::app(c("Q"), c("甲")));
+    assert!(
+        conv::convertible(&env, &ctx, &partial_ty, &missing).unwrap(),
+        "`r 甲` must have type `P 甲 → Q 甲`, got `{partial_ty}`"
+    );
+    assert!(
+        !conv::convertible(&env, &ctx, &partial_ty, &Expr::app(c("Q"), c("甲"))).unwrap(),
+        "`r 甲` must not already be a proof of `Q 甲`"
+    );
+    // A proof of a proposition is not itself a proposition.
+    let proof = Expr::apps(c("r"), [c("甲"), c("h")]);
+    assert!(
+        check::check(&env, &ctx, &proof, &Expr::Sort(0)).is_err(),
+        "`r 甲 h` proves `Q 甲`; it is not a proof of `Prop`"
+    );
 }
 
 #[test]

@@ -9,3 +9,4 @@ description = "The command-line interface."
 std-deduce-kernel = { path = "../kernel" }
 std-deduce-lang = { path = "../lang" }
 std-deduce-reason = { path = "../reason" }
+std-deduce-cert = { path = "../cert" }

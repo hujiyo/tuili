@@ -52,12 +52,12 @@ impl Locals {
     pub fn len(&self) -> usize {
         self.names.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
     /// Resolve a name to a de Bruijn index.
     pub fn lookup(&self, n: &str) -> Option<usize> {
-        self.names
-            .iter()
-            .rev()
-            .position(|x| x == n)
+        self.names.iter().rev().position(|x| x == n)
     }
     /// The local names as the kernel context needs them.
     pub fn as_ctx(&self, types: &[Expr]) -> Ctx {
@@ -101,16 +101,16 @@ pub fn elab(env: &Env, locals: &[(String, Expr)], t: &Term) -> Result<Expr> {
             ext.push((n.clone(), d.clone()));
             let c = elab(env, &ext, codomain)?;
             Ok(Expr::Pi {
-                name: if name.is_some() { Some(std_deduce_kernel::name(&n)) } else { None },
+                name: if name.is_some() {
+                    Some(std_deduce_kernel::name(&n))
+                } else {
+                    None
+                },
                 domain: Box::new(d),
                 codomain: Box::new(c),
             })
         }
-        Term::Lam {
-            name,
-            domain,
-            body,
-        } => {
+        Term::Lam { name, domain, body } => {
             let d = elab(env, locals, domain)?;
             let mut ext = locals.to_vec();
             ext.push((name.clone(), d.clone()));
@@ -145,13 +145,10 @@ pub fn elab_telescope(
     for (n, t) in params {
         let ty = elab(env, &locals, t)?;
         // The kernel checks each telescope entry lives in a sort.
-        std_deduce_kernel::check::check_is_type(
-            env,
-            &locals_ctx(&locals),
-            &ty,
-        )
-        .map_err(|e| ElabError {
-            msg: format!("参数 `{n}` 的类型不合法：{e}"),
+        std_deduce_kernel::check::check_is_type(env, &locals_ctx(&locals), &ty).map_err(|e| {
+            ElabError {
+                msg: format!("参数 `{n}` 的类型不合法：{e}"),
+            }
         })?;
         locals.push((n.clone(), ty));
     }
@@ -159,15 +156,10 @@ pub fn elab_telescope(
     let mut premise_binders = Vec::new();
     for (i, p) in premises.iter().enumerate() {
         let ty = elab(env, &locals, &p.ty)?;
-        std_deduce_kernel::check::check_is_type(env, &kernel_ctx, &ty).map_err(|e| {
-            ElabError {
-                msg: format!("前提 {} 不是命题：{e}", i + 1),
-            }
+        std_deduce_kernel::check::check_is_type(env, &kernel_ctx, &ty).map_err(|e| ElabError {
+            msg: format!("前提 {} 不是命题：{e}", i + 1),
         })?;
-        let bind = p
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("_p{}", i));
+        let bind = p.name.clone().unwrap_or_else(|| format!("_p{}", i));
         premise_binders.push((bind.clone(), ty.clone()));
         kernel_ctx.push(Some(name(&bind)), ty.clone());
         locals.push((bind, ty));

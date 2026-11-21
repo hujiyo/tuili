@@ -10,12 +10,15 @@ use crate::error::Result;
 use crate::term::{instantiate, Expr};
 
 /// Weak head normal form: reduce until the head is not a redex.
-pub fn whnf(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
+///
+/// No context is needed: beta and zeta substitute immediately, and a `def`'s
+/// body is closed, so unfolding never looks at the local binders.
+pub fn whnf(env: &Env, e: &Expr) -> Result<Expr> {
     let mut e = e.clone();
     loop {
         match e {
             Expr::App { func, arg } => {
-                let f = whnf(env, ctx, &func)?;
+                let f = whnf(env, &func)?;
                 match f {
                     Expr::Lam { body, .. } => {
                         e = instantiate(&body, &arg);
@@ -44,7 +47,7 @@ pub fn whnf(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
 
 /// Full normal form.
 pub fn normalize(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
-    let e = whnf(env, ctx, e)?;
+    let e = whnf(env, e)?;
     Ok(match e {
         Expr::App { .. } => {
             let (head, args) = spine(&e);
@@ -67,11 +70,7 @@ pub fn normalize(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
                 name,
             }
         }
-        Expr::Lam {
-            name,
-            domain,
-            body,
-        } => {
+        Expr::Lam { name, domain, body } => {
             let mut inner = ctx.clone();
             inner.push(name.clone(), domain.as_ref().clone());
             Expr::Lam {

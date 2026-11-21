@@ -7,6 +7,8 @@
 //! :inspect                dump the ledger
 //! :why <term>             derive, print the tree, and verify it
 //! :gap <term>             explain what is missing for a goal
+//! :cert <term>            derive and print the goal's certificate JSON
+//! :check <file>           check a certificate JSON against the loaded environment
 //! :given <term>           add an assumption by hand
 //! :quit
 //! ```
@@ -19,9 +21,29 @@
 //!
 //! A conclusion caught in an unresolved conflict is kept out of the fact
 //! base, but it is never dropped silently.
+//!
+//! `:cert` writes only the certificate JSON to stdout; a gap becomes a
+//! `MissingPremise` obligation and an unresolved conflict becomes an
+//! `UnresolvedConflict` obligation in that JSON.
+//!
+//! `:check` requires a loaded theory and runs two layers in order:
+//!
+//! 1. [`std_deduce_cert::check`] rebuilds every rule instance and checks the
+//!    recorded `unless` conditions and the root's conflict status;
+//! 2. [`std_deduce_cert::kernel_proof`] turns the monotone skeleton into
+//!    kernel terms and has the kernel check every step.
+//!
+//! The two layers are printed separately, together with the side conditions
+//! and whether a human must decide something. The process exits `0` only when
+//! both layers pass, the root is proved and nothing is left open; `1` when
+//! both layers pass but the root is a gap, an open obligation remains or a
+//! recorded conflict is unresolved; and `2` when the file cannot be read or
+//! parsed, or either layer fails. A logical pass with a kernel failure is
+//! therefore a `2`, never a `0`.
 
 use std::io::{self, BufRead, Write};
 
+use std_deduce_cert::{Certificate, CheckReport, Node as CertNode, ObligationKind};
 use std_deduce_kernel::env::{Ctx, DeclKind, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
@@ -37,14 +59,29 @@ enum Outcome {
     Unresolved,
 }
 
+impl Outcome {
+    /// The process exit code this outcome stands for. Only `Proved` is `0`;
+    /// both a gap and an unresolved conflict mean the query was not proved.
+    fn exit_code(self) -> i32 {
+        match self {
+            Outcome::Proved => 0,
+            Outcome::Gap | Outcome::Unresolved => 1,
+        }
+    }
+}
+
 struct Session {
     lib: Library,
+    /// Whether a theory has been loaded. `:check` needs an environment, so it
+    /// refuses to run before any `:load`.
+    loaded: bool,
 }
 
 impl Session {
     fn new() -> Self {
         Session {
             lib: Library::new(),
+            loaded: false,
         }
     }
 
@@ -61,6 +98,7 @@ impl Session {
                     let src = std::fs::read_to_string(arg)
                         .map_err(|e| format!("读取 `{arg}` 失败：{e}"))?;
                     let report = self.lib.load(arg, &src).map_err(|e| e.to_string())?;
+                    self.loaded = true;
                     writeln!(out, "已加载 `{arg}`。").ok();
                     for d in &report.declared {
                         writeln!(out, "  + {d}").ok();
@@ -121,6 +159,8 @@ impl Session {
                     Ok(Outcome::Proved)
                 }
                 "why" | "gap" => self.query(cmd, arg, out),
+                "cert" => self.export_certificate(arg, out),
+                "check" => self.check_certificate(arg, out),
                 "quit" | "exit" => Ok(Outcome::Proved),
                 other => Err(format!("未知命令 `:{other}`")),
             }
@@ -131,10 +171,7 @@ impl Session {
     }
 
     fn query(&mut self, cmd: &str, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
-        let t = parse_term(arg)?;
-        let goal = elab::elab_top(&self.lib.env, &t).map_err(|e| e.msg)?;
-        check::check(&self.lib.env, &Ctx::new(), &goal, &Expr::Sort(0))
-            .map_err(|e| format!("目标不是命题：{e}"))?;
+        let goal = self.goal(arg)?;
         let mut r = Reasoner::new(&self.lib.env);
         // Every axiom whose declared type is a proposition is usable as an
         // assumption. This is how a corpus of facts enters. See
@@ -269,6 +306,236 @@ impl Session {
             Ok(Outcome::Gap)
         }
     }
+
+    /// Parse `arg` as a proposition in the current environment.
+    fn goal(&self, arg: &str) -> Result<Expr, String> {
+        let t = parse_term(arg)?;
+        let goal = elab::elab_top(&self.lib.env, &t).map_err(|e| e.msg)?;
+        check::check(&self.lib.env, &Ctx::new(), &goal, &Expr::Sort(0))
+            .map_err(|e| format!("目标不是命题：{e}"))?;
+        Ok(goal)
+    }
+
+    /// Derive `arg` and print its certificate as pretty JSON.
+    ///
+    /// A proved goal has that proof as the root. An unreachable goal gets a
+    /// gap node as the root, with the same candidates `:gap` would report, so
+    /// the exported certificate is still checkable and says `root_proved
+    /// = false` rather than pretending to be a proof.
+    fn export_certificate(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if arg.is_empty() {
+            return Err("用法：:cert <目标命题>".into());
+        }
+        let goal = self.goal(arg)?;
+        let mut r = Reasoner::new(&self.lib.env);
+        r.assume_ledger_axioms()?;
+        r.saturate()?;
+
+        let reachable = r.knows(&goal);
+        let mut d = r.derivation();
+        if reachable {
+            d.root = r.root_for(&goal);
+        } else {
+            let ex = r.explain(&goal);
+            let id = d.nodes.len();
+            d.nodes.push(std_deduce_reason::Node::Gap {
+                prop: goal.clone(),
+                candidates: ex.candidates,
+                note: ex.note,
+            });
+            d.root = Some(id);
+        }
+
+        let certificate = std_deduce_reason::certificate(&d)?;
+        let json = certificate
+            .to_json_pretty()
+            .map_err(|e| format!("证书序列化失败：{e}"))?;
+        writeln!(out, "{json}").ok();
+        Ok(if reachable {
+            Outcome::Proved
+        } else {
+            Outcome::Gap
+        })
+    }
+
+    /// Check a certificate against the loaded environment, without rerunning
+    /// the reasoner.
+    ///
+    /// Both layers run and are reported separately: `cert::check` rebuilds
+    /// rule instances and side conditions, then `kernel_proof` rebuilds the
+    /// monotone proof terms and asks the kernel. A logical pass with a kernel
+    /// failure is an error (`2`), not a valid certificate.
+    fn check_certificate(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if !self.loaded {
+            write_check_not_run(out, "尚未加载理论");
+            return Err("尚未加载理论：:check 需要环境才能校验证书，请先 :load <文件>".into());
+        }
+        if arg.is_empty() {
+            return Err("用法：:check <证书文件>".into());
+        }
+        let text = match std::fs::read_to_string(arg) {
+            Ok(text) => text,
+            Err(e) => {
+                write_check_not_run(out, "读取证书失败");
+                return Err(format!("读取证书 `{arg}` 失败：{e}"));
+            }
+        };
+        let certificate = match Certificate::from_json(&text) {
+            Ok(certificate) => certificate,
+            Err(e) => {
+                write_check_not_run(out, "证书 JSON 无效");
+                return Err(format!("证书 `{arg}` 不是有效的证书 JSON：{e}"));
+            }
+        };
+
+        // Layer 1: rebuild every rule instance from its own evidence and check
+        // the recorded `unless` conditions and the root's conflict status.
+        let report = match std_deduce_cert::check(&self.lib.env, &certificate) {
+            Ok(report) => report,
+            Err(e) => {
+                writeln!(out, "逻辑校验：失败（{e}）").ok();
+                writeln!(out, "内核证明：未运行（逻辑校验失败）").ok();
+                writeln!(out, "侧条件：未评估（逻辑校验失败）").ok();
+                writeln!(out, "需人判断：未评估（逻辑校验失败）").ok();
+                return Err(format!("证书校验失败（逻辑层）：{e}"));
+            }
+        };
+        writeln!(
+            out,
+            "逻辑校验：通过（检查 {} 个节点；{}）",
+            report.nodes_checked,
+            root_summary(&certificate, &report)
+        )
+        .ok();
+
+        // Layer 2: the monotone skeleton must survive the kernel, not only the
+        // structural check above.
+        let kernel = match std_deduce_cert::kernel_proof(&self.lib.env, &certificate) {
+            Ok(kernel) => kernel,
+            Err(e) => {
+                writeln!(out, "内核证明：失败（{e}）").ok();
+                writeln!(out, "侧条件：未评估（内核证明失败）").ok();
+                writeln!(out, "需人判断：未评估（内核证明失败）").ok();
+                return Err(format!("证书校验失败（内核层）：{e}"));
+            }
+        };
+        writeln!(
+            out,
+            "内核证明：通过（{} 个规则步骤；{}）",
+            kernel.steps.len(),
+            if kernel.root_proved {
+                "根证明项通过内核"
+            } else {
+                "根为缺口，无证明项"
+            }
+        )
+        .ok();
+
+        let unresolved = certificate
+            .conflicts
+            .iter()
+            .filter(|conflict| {
+                matches!(conflict.resolution, std_deduce_cert::Resolution::Unresolved)
+            })
+            .count();
+        let requires_human = report.requires_human || unresolved > 0;
+
+        writeln!(
+            out,
+            "侧条件：unless 未发现已成立的阻断条件；未决冲突 {} 项；{}优先级来源未核验",
+            unresolved,
+            if report.conflict_resolved {
+                "根冲突已按记录裁决；"
+            } else {
+                ""
+            }
+        )
+        .ok();
+        writeln!(
+            out,
+            "需人判断：{}",
+            human_summary(&certificate, requires_human, unresolved)
+        )
+        .ok();
+
+        // A root is successful only when both layers agree on it and nothing
+        // is left to a human or an unresolved conflict.
+        let proved = report.root_proved && kernel.root_proved && !requires_human && unresolved == 0;
+        Ok(if proved {
+            Outcome::Proved
+        } else {
+            Outcome::Gap
+        })
+    }
+}
+
+/// Print the four labelled lines when `:check` cannot reach either layer.
+fn write_check_not_run(out: &mut impl Write, reason: &str) {
+    writeln!(out, "逻辑校验：未运行（{reason}）").ok();
+    writeln!(out, "内核证明：未运行（{reason}）").ok();
+    writeln!(out, "侧条件：未评估（{reason}）").ok();
+    writeln!(out, "需人判断：未评估（{reason}）").ok();
+}
+
+/// Describe what the logical layer established about the root.
+fn root_summary(certificate: &Certificate, report: &CheckReport) -> String {
+    match certificate.root {
+        None => "没有根节点".to_owned(),
+        Some(root) if matches!(certificate.nodes[root], CertNode::Gap { .. }) => {
+            "根未被证明，根为缺口".to_owned()
+        }
+        Some(_) if report.root_proved && report.root_is_assumption => {
+            format!(
+                "根已证明，根为假设，证书共 {} 条假设",
+                report.assumption_count
+            )
+        }
+        Some(_) if report.root_proved => {
+            format!(
+                "根已证明，根为规则推导，证书共 {} 条假设",
+                report.assumption_count
+            )
+        }
+        Some(_) => "根未被证明".to_owned(),
+    }
+}
+
+/// Explain why a human is or is not needed, using the recorded obligations.
+fn human_summary(certificate: &Certificate, requires_human: bool, unresolved: usize) -> String {
+    if !requires_human {
+        return "否（无未决义务）".to_owned();
+    }
+    let mut counts: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for obligation in &certificate.open_obligations {
+        *counts
+            .entry(obligation_kind_label(obligation.kind))
+            .or_default() += 1;
+    }
+    let mut details: Vec<String> = counts
+        .iter()
+        .map(|(label, count)| format!("{label} {count} 项"))
+        .collect();
+    if details.is_empty() || (unresolved > 0 && !counts.contains_key("冲突未决")) {
+        details.push(format!("未决冲突 {unresolved} 项"));
+    }
+    format!(
+        "是（open_obligations {} 项：{}）",
+        certificate.open_obligations.len(),
+        details.join("、")
+    )
+}
+
+/// The user-facing label of an obligation kind.
+fn obligation_kind_label(kind: ObligationKind) -> &'static str {
+    match kind {
+        ObligationKind::MissingPremise => "缺少前提",
+        ObligationKind::MissingSource => "缺少来源",
+        ObligationKind::OpenConcept => "开放概念",
+        ObligationKind::UnresolvedConflict => "冲突未决",
+        ObligationKind::NeedsHumanDetermination => "需人判断",
+        ObligationKind::Other => "其他",
+    }
 }
 
 fn report_unresolved(out: &mut impl Write, r: &Reasoner, goal: &Expr, c: &Conflict) {
@@ -379,40 +646,48 @@ fn main() {
 
     // Non-interactive: run every argument as a command.
     if args.len() > 1 {
-        let mut worst = Outcome::Proved;
+        let mut worst = 0;
         for a in &args[1..] {
             match session.handle(a, &mut out) {
-                Ok(o) => {
-                    if o > worst {
-                        worst = o;
-                    }
-                }
+                Ok(o) => worst = worst.max(o.exit_code()),
                 Err(e) => {
                     eprintln!("错误：{e}");
                     std::process::exit(2);
                 }
             }
         }
-        if worst != Outcome::Proved {
-            std::process::exit(1);
+        if worst != 0 {
+            std::process::exit(worst);
         }
         return;
     }
 
     println!("std-deduce 0.1 — 输入 :help 查看命令。");
     let stdin = io::stdin();
+    let mut worst = 0;
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         if line.trim() == ":quit" || line.trim() == ":exit" {
             break;
         }
         if line.trim() == ":help" {
-            println!(":load <文件>  :inspect  :given <命题>  :why <命题>  :gap <命题>  :quit");
+            println!(
+                ":load <文件>  :inspect  :given <命题>  :why <命题>  :gap <命题>  \
+                 :cert <命题>  :check <证书文件>  :quit"
+            );
             continue;
         }
         match session.handle(&line, &mut out) {
-            Ok(_) => {}
-            Err(e) => println!("错误：{e}"),
+            Ok(outcome) => worst = worst.max(outcome.exit_code()),
+            Err(e) => {
+                println!("错误：{e}");
+                worst = 2;
+            }
         }
+    }
+    // Interactive mode used to ignore every result; stdin input now settles
+    // the exit code on the worst command, the same way argv mode does.
+    if worst != 0 {
+        std::process::exit(worst);
     }
 }

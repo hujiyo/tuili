@@ -4,6 +4,7 @@ members = [
     "crates/kernel",
     "crates/lang",
     "crates/reason",
+    "crates/cert",
     "crates/cli",
 ]
 

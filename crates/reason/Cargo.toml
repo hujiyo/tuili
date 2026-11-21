@@ -7,6 +7,7 @@ description = "The reasoner: defeasible derivations and checkable proof trees."
 
 [dependencies]
 std-deduce-kernel = { path = "../kernel" }
+std-deduce-cert = { path = "../cert" }
 
 [dev-dependencies]
 std-deduce-lang = { path = "../lang" }

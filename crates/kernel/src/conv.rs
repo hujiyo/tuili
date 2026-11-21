@@ -10,8 +10,8 @@ use crate::norm::whnf;
 use crate::term::{shift, Expr};
 
 pub fn convertible(env: &Env, ctx: &Ctx, a: &Expr, b: &Expr) -> Result<bool> {
-    let a = whnf(env, ctx, a)?;
-    let b = whnf(env, ctx, b)?;
+    let a = whnf(env, a)?;
+    let b = whnf(env, b)?;
     eq(env, ctx, &a, &b)
 }
 
@@ -58,16 +58,9 @@ fn eq(env: &Env, ctx: &Ctx, a: &Expr, b: &Expr) -> Result<bool> {
             inner.push(None, d1.as_ref().clone());
             convertible(env, &inner, b1, b2)
         }
-        (
-            Expr::App {
-                func: f1,
-                arg: a1,
-            },
-            Expr::App {
-                func: f2,
-                arg: a2,
-            },
-        ) => Ok(convertible(env, ctx, f1, f2)? && convertible(env, ctx, a1, a2)?),
+        (Expr::App { func: f1, arg: a1 }, Expr::App { func: f2, arg: a2 }) => {
+            Ok(convertible(env, ctx, f1, f2)? && convertible(env, ctx, a1, a2)?)
+        }
         // η: `λ x : A. body` equals `f` iff `body` equals `f x` under the
         // binder. The lambda's own domain tells us what to bind.
         (Expr::Lam { domain, body, .. }, other) => {

@@ -110,7 +110,8 @@ pub struct Decl {
     pub name: Name,
     pub kind: DeclKind,
     /// Declared type. For `Rule`, the telescope over params and premises
-    /// ending in the conclusion's sort.
+    /// ending in the conclusion, so the constant can be applied to its
+    /// arguments to prove that conclusion.
     pub ty: Expr,
     pub sources: Vec<SourceRef>,
     /// Position in the ledger, assigned on insertion.
@@ -176,6 +177,9 @@ impl Env {
     }
     pub fn len(&self) -> usize {
         self.decls.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.decls.is_empty()
     }
 
     /// Add a declaration. The type is checked to live in a sort, so a typo
@@ -245,14 +249,15 @@ pub fn telescope(params: &[(Name, Expr)], body: Expr) -> Expr {
 }
 
 /// A rule's declared type: telescope over params and premises, ending in the
-/// sort of the conclusion.
+/// conclusion. Applying the constant to a parameter and a proof of every
+/// premise therefore yields a proof of the conclusion.
 ///
 /// Premise types are written relative to the telescope prefix, and later
 /// premises may mention earlier named ones. The conclusion is checked in the
 /// *full* telescope, which is what makes dependency between premises usable.
-pub fn rule_type(rule: &RuleDecl, conclusion_sort: u32) -> Expr {
+pub fn rule_type(rule: &RuleDecl) -> Expr {
     let params = rule.telescope();
-    telescope(&params, Expr::Sort(conclusion_sort))
+    telescope(&params, rule.conclusion.clone())
 }
 
 impl RuleDecl {
@@ -261,7 +266,9 @@ impl RuleDecl {
     pub fn telescope(&self) -> Vec<(Name, Expr)> {
         let mut out = self.params.clone();
         for (i, (n, ty)) in self.premises.iter().enumerate() {
-            let n = n.clone().unwrap_or_else(|| crate::term::name(format!("_p{i}")));
+            let n = n
+                .clone()
+                .unwrap_or_else(|| crate::term::name(format!("_p{i}")));
             out.push((n, ty.clone()));
         }
         out
@@ -320,8 +327,8 @@ impl RuleDecl {
             if !in_conclusion {
                 continue;
             }
-            let in_premise = (0..self.premises.len())
-                .any(|i| mentions_pattern(&self.open_premise(i), binder));
+            let in_premise =
+                (0..self.premises.len()).any(|i| mentions_pattern(&self.open_premise(i), binder));
             if !in_premise {
                 return Err(Error::other(format!(
                     "参数 `{binder}` 出现在结论里，但没有出现在任何前提里：\
@@ -392,11 +399,7 @@ fn open_vars(e: &Expr, names: &[Name], depth: usize, in_scope: usize) -> Expr {
             domain: Box::new(open_vars(domain, names, depth, in_scope)),
             codomain: Box::new(open_vars(codomain, names, depth + 1, in_scope)),
         },
-        Expr::Lam {
-            name,
-            domain,
-            body,
-        } => Expr::Lam {
+        Expr::Lam { name, domain, body } => Expr::Lam {
             name: name.clone(),
             domain: Box::new(open_vars(domain, names, depth, in_scope)),
             body: Box::new(open_vars(body, names, depth + 1, in_scope)),
@@ -405,11 +408,7 @@ fn open_vars(e: &Expr, names: &[Name], depth: usize, in_scope: usize) -> Expr {
             func: Box::new(open_vars(func, names, depth, in_scope)),
             arg: Box::new(open_vars(arg, names, depth, in_scope)),
         },
-        Expr::Let {
-            name,
-            value,
-            body,
-        } => Expr::Let {
+        Expr::Let { name, value, body } => Expr::Let {
             name: name.clone(),
             value: Box::new(open_vars(value, names, depth, in_scope)),
             body: Box::new(open_vars(body, names, depth + 1, in_scope)),
@@ -431,9 +430,9 @@ fn mentions_pattern(e: &Expr, binder: &Name) -> bool {
         Some(pv) => pv == binder.as_ref(),
         None => match e {
             Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) => false,
-            Expr::Pi { domain, codomain, .. } => {
-                mentions_pattern(domain, binder) || mentions_pattern(codomain, binder)
-            }
+            Expr::Pi {
+                domain, codomain, ..
+            } => mentions_pattern(domain, binder) || mentions_pattern(codomain, binder),
             Expr::Lam { domain, body, .. } => {
                 mentions_pattern(domain, binder) || mentions_pattern(body, binder)
             }

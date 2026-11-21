@@ -1,0 +1,14 @@
+[package]
+name = "std-deduce-cert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The proof certificate format: a versioned data model with JSON round-trip."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+std-deduce-kernel = { path = "../kernel" }
+
+[dev-dependencies]
+std-deduce-lang = { path = "../lang" }

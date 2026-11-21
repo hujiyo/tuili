@@ -216,7 +216,7 @@ impl Library {
                         }
                     }
                     let decl = Decl {
-                        name: std_deduce_kernel::name(&format!("contrary:{left}:{right}")),
+                        name: std_deduce_kernel::name(format!("contrary:{left}:{right}")),
                         kind: std_deduce_kernel::DeclKind::Contrary { left: l, right: r },
                         ty: Expr::Sort(0),
                         sources: source.into_iter().map(to_source).collect(),
@@ -266,7 +266,7 @@ impl Library {
                         }
                     }
                     let decl = Decl {
-                        name: std_deduce_kernel::name(&format!("unique:{pred}:{index}")),
+                        name: std_deduce_kernel::name(format!("unique:{pred}:{index}")),
                         kind: std_deduce_kernel::DeclKind::Unique {
                             pred: p,
                             index: pos,
@@ -331,8 +331,7 @@ impl Library {
                         })?;
                         let bind = p.name.clone().unwrap_or_else(|| format!("_p{i}"));
                         binds.push((bind.clone(), ty.clone()));
-                        rule_premises
-                            .push((p.name.as_ref().map(|x| std_deduce_kernel::name(x)), ty));
+                        rule_premises.push((p.name.as_ref().map(std_deduce_kernel::name), ty));
                     }
 
                     let concl =
@@ -388,7 +387,7 @@ impl Library {
                         prefers,
                         sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
                     };
-                    let ty = std_deduce_kernel::env::rule_type(&rdecl, 0);
+                    let ty = std_deduce_kernel::env::rule_type(&rdecl);
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
                         kind: std_deduce_kernel::DeclKind::Rule(Box::new(rdecl)),

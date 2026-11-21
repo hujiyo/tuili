@@ -36,9 +36,19 @@
 //! 3. **No hidden gaps.** An unreachable goal yields a gap node listing the
 //!    candidate rules, which premises are missing, and which blocking
 //!    conditions already hold. There is no `sorry` equivalent.
+//!
+//! ## Certificates
+//!
+//! [`certificate`] converts a derivation into the versioned certificate
+//! format owned by the `cert` crate. The conversion is structural: node
+//! order, premise order, bindings, sources, conflicts and the root are
+//! carried over unchanged. It does not decide anything the derivation did
+//! not already decide, and it refuses to drop an expression it cannot
+//! encode.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use std_deduce_cert::CertExpr;
 use std_deduce_kernel::env::{DeclKind, Env, RuleDecl, SourceRef};
 use std_deduce_kernel::norm::{normalize, spine};
 use std_deduce_kernel::pretty::print_expr;
@@ -57,6 +67,9 @@ pub enum Node {
         rule: Name,
         conclusion: Expr,
         premises: Vec<usize>,
+        /// The rule's parameters and the values this step bound them to.
+        bindings: Vec<(Name, Expr)>,
+        /// The same bindings rendered for humans. `bindings` is authoritative.
         instance: Vec<String>,
         sources: Vec<SourceRef>,
     },
@@ -129,6 +142,9 @@ struct Instance {
     premise_keys: Vec<String>,
     /// Open `unless` expressions, already closed by this instantiation.
     unlesses: Vec<Expr>,
+    /// The rule's parameters and the values this instantiation bound them to.
+    bindings: Vec<(Name, Expr)>,
+    /// The same bindings rendered for humans.
     binding_strings: Vec<String>,
 }
 
@@ -369,10 +385,7 @@ impl<'a> Reasoner<'a> {
             return false;
         }
         if ha != hb {
-            return self
-                .contraries
-                .get(ha)
-                .is_some_and(|set| set.contains(hb))
+            return self.contraries.get(ha).is_some_and(|set| set.contains(hb))
                 && aa
                     .iter()
                     .zip(ab.iter())
@@ -522,6 +535,7 @@ impl<'a> Reasoner<'a> {
                         rule,
                         conclusion: inst.conclusion,
                         premises,
+                        bindings: inst.bindings,
                         instance: inst.binding_strings,
                         sources,
                     });
@@ -590,7 +604,6 @@ impl<'a> Reasoner<'a> {
             &rules,
             0,
             facts,
-            self.env,
             &mut binding,
             &mut keys,
             &mut out,
@@ -743,7 +756,6 @@ fn backtrack(
     rule: &RuleDecl,
     idx: usize,
     facts: &BTreeMap<String, Expr>,
-    env: &Env,
     binding: &mut Vec<(Name, Expr)>,
     keys: &mut Vec<String>,
     out: &mut Vec<Instance>,
@@ -758,6 +770,7 @@ fn backtrack(
             conclusion,
             premise_keys: keys.clone(),
             unlesses,
+            bindings: binding.clone(),
             binding_strings: binding
                 .iter()
                 .map(|(n, v)| format!("{n} ↦ {}", print_expr(v)))
@@ -778,7 +791,7 @@ fn backtrack(
         }
         *binding = b;
         keys.push(k.clone());
-        backtrack(rule, idx + 1, facts, env, binding, keys, out, unless_len);
+        backtrack(rule, idx + 1, facts, binding, keys, out, unless_len);
         keys.pop();
         binding.truncate(before);
     }
@@ -1023,6 +1036,198 @@ fn node_prop(n: &Node) -> Option<&Expr> {
     }
 }
 
+// ---------------------------------------------------------------- certificate
+
+/// Convert a derivation into the versioned certificate format.
+///
+/// Node order, premise order, bindings, sources, conflicts and the root are
+/// preserved exactly, so the certificate describes the same proof graph as
+/// the derivation. Every gap becomes a `MissingPremise` obligation and every
+/// unresolved conflict becomes an `UnresolvedConflict` obligation; both carry
+/// the node or propositions they are about, and their description is the
+/// existing note or proposition text. No source, subject or object is
+/// invented for them. A generation timestamp stays empty.
+///
+/// Every kernel expression goes through [`std_deduce_cert::CertExpr::try_from`].
+/// An expression that cannot be represented aborts the conversion with an
+/// error naming the node and the field, rather than being dropped.
+pub fn certificate(d: &Derivation) -> Result<std_deduce_cert::Certificate, String> {
+    let mut assumptions = Vec::new();
+    let mut nodes = Vec::with_capacity(d.nodes.len());
+    let mut open_obligations = Vec::new();
+
+    for (id, node) in d.nodes.iter().enumerate() {
+        match node {
+            Node::Assumption {
+                prop,
+                sources,
+                label,
+            } => {
+                let assumption = assumptions.len();
+                assumptions.push(std_deduce_cert::Assumption {
+                    proposition: cert_expr(prop, Some(id), "假设命题")?,
+                    sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
+                    label: label.clone(),
+                });
+                nodes.push(std_deduce_cert::Node::Assumption { assumption });
+            }
+            Node::RuleApplication {
+                rule,
+                conclusion,
+                premises,
+                bindings,
+                sources,
+                ..
+            } => {
+                let mut converted = Vec::with_capacity(bindings.len());
+                for (parameter, value) in bindings {
+                    converted.push(std_deduce_cert::Binding {
+                        parameter: parameter.to_string(),
+                        value: cert_expr(value, Some(id), &format!("参数 `{parameter}` 的绑定值"))?,
+                    });
+                }
+                nodes.push(std_deduce_cert::Node::RuleApplication {
+                    rule: rule.to_string(),
+                    conclusion: cert_expr(conclusion, Some(id), "结论")?,
+                    premises: premises.clone(),
+                    bindings: converted,
+                    sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
+                });
+            }
+            Node::Gap {
+                prop,
+                candidates,
+                note,
+            } => {
+                let mut converted = Vec::with_capacity(candidates.len());
+                for candidate in candidates {
+                    let missing = candidate
+                        .missing
+                        .iter()
+                        .enumerate()
+                        .map(|(i, expr)| {
+                            cert_expr(
+                                expr,
+                                Some(id),
+                                &format!("候选规则 `{}` 的第 {} 个缺失前提", candidate.rule, i + 1),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    let blocked_by = candidate
+                        .blocked_by
+                        .iter()
+                        .enumerate()
+                        .map(|(i, expr)| {
+                            cert_expr(
+                                expr,
+                                Some(id),
+                                &format!("候选规则 `{}` 的第 {} 个阻断条件", candidate.rule, i + 1),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    converted.push(std_deduce_cert::GapCandidate {
+                        rule: candidate.rule.to_string(),
+                        missing,
+                        blocked_by,
+                        sources: candidate
+                            .sources
+                            .iter()
+                            .map(std_deduce_cert::Source::from)
+                            .collect(),
+                    });
+                }
+                nodes.push(std_deduce_cert::Node::Gap {
+                    proposition: cert_expr(prop, Some(id), "缺口命题")?,
+                    candidates: converted,
+                    note: note.clone(),
+                });
+                open_obligations.push(std_deduce_cert::OpenObligation {
+                    id: format!("gap-{id}"),
+                    kind: std_deduce_cert::ObligationKind::MissingPremise,
+                    description: match note {
+                        Some(note) => format!("缺口「{}」：{note}", print_expr(prop)),
+                        None => format!("缺口「{}」：没有可用的推导", print_expr(prop)),
+                    },
+                    nodes: vec![id],
+                });
+            }
+        }
+    }
+
+    let conflicts = d
+        .conflicts
+        .iter()
+        .enumerate()
+        .map(|(i, conflict)| {
+            Ok(std_deduce_cert::Conflict {
+                left: cert_expr(&conflict.left, None, &format!("冲突 {} 的左命题", i + 1))?,
+                right: cert_expr(&conflict.right, None, &format!("冲突 {} 的右命题", i + 1))?,
+                left_by: cert_provenance(&conflict.left_by),
+                right_by: cert_provenance(&conflict.right_by),
+                resolution: cert_resolution(&conflict.resolution),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    for (index, conflict) in d.conflicts.iter().enumerate() {
+        if matches!(conflict.resolution, Resolution::Unresolved) {
+            open_obligations.push(std_deduce_cert::OpenObligation {
+                id: format!("conflict-{index}"),
+                kind: std_deduce_cert::ObligationKind::UnresolvedConflict,
+                description: format!(
+                    "冲突未决：「{}」与「{}」",
+                    print_expr(&conflict.left),
+                    print_expr(&conflict.right)
+                ),
+                nodes: Vec::new(),
+            });
+        }
+    }
+
+    Ok(std_deduce_cert::Certificate {
+        format_version: std_deduce_cert::FormatVersion::CURRENT,
+        assumptions,
+        nodes,
+        root: d.root,
+        conflicts,
+        open_obligations,
+        metadata: std_deduce_cert::Metadata {
+            generated_at: None,
+            tool: Some("std-deduce".to_owned()),
+            tool_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        },
+    })
+}
+
+/// Encode one kernel expression, naming its location on failure.
+fn cert_expr(expr: &Expr, node: Option<usize>, role: &str) -> Result<CertExpr, String> {
+    CertExpr::try_from(expr).map_err(|error| match node {
+        Some(id) => format!("节点 {id} 的{role}无法转换为证书表达式：{error}"),
+        None => format!("{role}无法转换为证书表达式：{error}"),
+    })
+}
+
+fn cert_provenance(provenance: &Provenance) -> std_deduce_cert::Provenance {
+    match provenance {
+        Provenance::Assumption => std_deduce_cert::Provenance::Assumption,
+        Provenance::Rules(rules) => std_deduce_cert::Provenance::Rules {
+            rules: rules.iter().map(ToString::to_string).collect(),
+        },
+    }
+}
+
+fn cert_resolution(resolution: &Resolution) -> std_deduce_cert::Resolution {
+    match resolution {
+        Resolution::Defeated { winner } => std_deduce_cert::Resolution::Defeated {
+            winner: match winner {
+                Side::Left => std_deduce_cert::Side::Left,
+                Side::Right => std_deduce_cert::Side::Right,
+            },
+        },
+        Resolution::Unresolved => std_deduce_cert::Resolution::Unresolved,
+    }
+}
+
 // ---------------------------------------------------------------- render
 
 pub fn render(_env: &Env, d: &Derivation) -> String {
@@ -1079,6 +1284,7 @@ fn render_node(d: &Derivation, id: usize, depth: usize, out: &mut String) {
             rule,
             conclusion,
             premises,
+            bindings: _,
             instance,
             sources,
         } => {

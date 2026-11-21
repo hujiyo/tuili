@@ -115,42 +115,74 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 col += 1;
             }
             ',' => {
-                out.push(Token { tok: Tok::Comma, line, col });
+                out.push(Token {
+                    tok: Tok::Comma,
+                    line,
+                    col,
+                });
                 i += 1;
                 col += 1;
             }
             '(' => {
-                out.push(Token { tok: Tok::LParen, line, col });
+                out.push(Token {
+                    tok: Tok::LParen,
+                    line,
+                    col,
+                });
                 i += 1;
                 col += 1;
             }
             ')' => {
-                out.push(Token { tok: Tok::RParen, line, col });
+                out.push(Token {
+                    tok: Tok::RParen,
+                    line,
+                    col,
+                });
                 i += 1;
                 col += 1;
             }
             '{' => {
-                out.push(Token { tok: Tok::LBrace, line, col });
+                out.push(Token {
+                    tok: Tok::LBrace,
+                    line,
+                    col,
+                });
                 i += 1;
                 col += 1;
             }
             '}' => {
-                out.push(Token { tok: Tok::RBrace, line, col });
+                out.push(Token {
+                    tok: Tok::RBrace,
+                    line,
+                    col,
+                });
                 i += 1;
                 col += 1;
             }
             '∀' => {
-                out.push(Token { tok: Tok::Forall, line, col });
+                out.push(Token {
+                    tok: Tok::Forall,
+                    line,
+                    col,
+                });
                 i += 1;
                 col += 1;
             }
             'λ' => {
-                out.push(Token { tok: Tok::Lambda, line, col });
+                out.push(Token {
+                    tok: Tok::Lambda,
+                    line,
+                    col,
+                });
                 i += 1;
                 col += 1;
             }
             '=' => {
-                out.push(Token { tok: Tok::Eq, line, col });
+                out.push(Token {
+                    tok: Tok::Eq,
+                    line,
+                    col,
+                });
                 i += 1;
                 col += 1;
             }
@@ -164,7 +196,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             }
             '#' => {
                 // Command sigil: the *name* after it is the keyword.
-                out.push(Token { tok: Tok::Ident("#".into()), line, col });
+                out.push(Token {
+                    tok: Tok::Ident("#".into()),
+                    line,
+                    col,
+                });
                 i += 1;
                 col += 1;
             }

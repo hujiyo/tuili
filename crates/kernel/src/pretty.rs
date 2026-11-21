@@ -56,11 +56,7 @@ fn go(e: &Expr, prec: u8, out: &mut String, names: &mut Vec<String>) {
                 }
             }
         }
-        Expr::Lam {
-            name,
-            domain,
-            body,
-        } => {
+        Expr::Lam { name, domain, body } => {
             let n = label(name, names.len());
             if prec > 0 {
                 out.push('(');
@@ -88,11 +84,7 @@ fn go(e: &Expr, prec: u8, out: &mut String, names: &mut Vec<String>) {
                 out.push(')');
             }
         }
-        Expr::Let {
-            name,
-            value,
-            body,
-        } => {
+        Expr::Let { name, value, body } => {
             let n = label(name, names.len());
             if prec > 0 {
                 out.push('(');
@@ -129,9 +121,7 @@ pub fn size(e: &Expr) -> usize {
         Expr::Pi {
             domain, codomain, ..
         } => 1 + size(domain) + size(codomain),
-        Expr::Lam {
-            domain, body, ..
-        } => 1 + size(domain) + size(body),
+        Expr::Lam { domain, body, .. } => 1 + size(domain) + size(body),
         Expr::App { func, arg } => 1 + size(func) + size(arg),
         Expr::Let { value, body, .. } => 1 + size(value) + size(body),
     }

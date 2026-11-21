@@ -51,7 +51,10 @@ impl fmt::Display for Error {
             Error::NotWellFounded(n) => write!(f, "规则 {n} 不满足有根据性"),
             Error::NotPositive(n) => write!(f, "归纳类型 {n} 不是严格正的"),
             Error::UniverseMismatch { expected, actual } => {
-                write!(f, "宇宙层级不匹配：期望 Type {expected}，实际 Type {actual}")
+                write!(
+                    f,
+                    "宇宙层级不匹配：期望 Type {expected}，实际 Type {actual}"
+                )
             }
             Error::Other(s) => write!(f, "{s}"),
         }
