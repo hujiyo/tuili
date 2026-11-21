@@ -63,6 +63,25 @@ fn lockfile_round_trips_through_a_file() {
 }
 
 #[test]
+fn write_refuses_a_symlinked_target() {
+    let temp = TempDir::new("write-link");
+    let target = temp.path().join("outside-lock");
+    fs::write(&target, "unchanged").unwrap();
+    let link = temp.path().join(LOCK_FILE);
+    if !create_file_symlink(&target, &link) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let error = lockfile(&[("cn.constitution", "0.1.0", "sha256:abc")])
+        .write(&link)
+        .unwrap_err();
+    assert_eq!(error.path(), link.as_path());
+    assert!(error.message().contains("符号链接"), "{error}");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "unchanged");
+}
+
+#[test]
 fn an_unsupported_lock_version_is_rejected() {
     let error = Lockfile::parse("lock_version = 2\n").unwrap_err();
     assert!(error.message().contains("版本 2"), "{error}");
@@ -104,17 +123,38 @@ fn hash_covers_relative_paths_and_contents() {
     let hash = hash_pack(&dir).expect("the pack is hashable");
 
     // Paths are relative to the pack directory and use '/'; each file
-    // contributes its path, a NUL, its content and a NUL, in path order.
+    // contributes its path length, path, content length and content, in path
+    // order, with both lengths as little-endian u64.
     let mut expected = Sha256::new();
-    expected.update(b"content/a.txt");
-    expected.update([0]);
-    expected.update("第一条\n".as_bytes());
-    expected.update([0]);
-    expected.update(b"lawpack.toml");
-    expected.update([0]);
-    expected.update(text.as_bytes());
-    expected.update([0]);
+    for (path, content) in [
+        ("content/a.txt", "第一条\n"),
+        ("lawpack.toml", text.as_str()),
+    ] {
+        expected.update((path.len() as u64).to_le_bytes());
+        expected.update(path.as_bytes());
+        expected.update((content.len() as u64).to_le_bytes());
+        expected.update(content.as_bytes());
+    }
     assert_eq!(hash, format!("sha256:{}", hex(&expected.finalize())));
+}
+
+#[test]
+fn hash_keeps_distinct_file_sets_distinct_when_content_contains_nul() {
+    let temp = TempDir::new("nul");
+    // The legacy `path\0content\0` stream would be identical for these two
+    // packs; the explicit lengths keep them apart.
+    let one = temp.path().join("one");
+    fs::create_dir_all(&one).unwrap();
+    fs::write(one.join("a.txt"), b"b\0c.txt\0").unwrap();
+    let two = temp.path().join("two");
+    fs::create_dir_all(&two).unwrap();
+    fs::write(two.join("a.txt"), b"b").unwrap();
+    fs::write(two.join("c.txt"), b"").unwrap();
+
+    assert_ne!(
+        hash_pack(&one).expect("the pack is hashable"),
+        hash_pack(&two).expect("the pack is hashable")
+    );
 }
 
 #[test]
@@ -170,7 +210,7 @@ fn hash_rejects_a_symlink_inside_the_pack() {
 }
 
 #[test]
-fn a_lock_file_inside_the_pack_is_not_hashed() {
+fn a_lock_file_inside_the_pack_is_hashed() {
     let temp = TempDir::new("pack-lock");
     let dir = temp.pack("cn.constitution", &manifest("cn.constitution", "0.1.0"));
     fs::create_dir_all(dir.join("content")).unwrap();
@@ -179,7 +219,7 @@ fn a_lock_file_inside_the_pack_is_not_hashed() {
 
     fs::write(dir.join(LOCK_FILE), "lock_version = 1\n").unwrap();
     let after = hash_pack(&dir).expect("the pack is still hashable");
-    assert_eq!(before, after);
+    assert_ne!(before, after);
 }
 
 #[test]
@@ -358,6 +398,16 @@ fn verify_lock_reports_a_bad_manifest() {
             .any(|error| error.message().contains("锁文件") || error.message().contains("TOML")),
         "{errors:?}"
     );
+}
+
+#[test]
+fn the_repository_lock_matches_the_repository_packs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("lawpacks");
+    let report = verify_lock(&root).expect("lawpacks/std.lock matches lawpacks");
+    assert!(report.verified >= 1, "{report:?}");
 }
 
 struct TempDir {

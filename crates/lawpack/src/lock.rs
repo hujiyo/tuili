@@ -7,13 +7,15 @@
 //! added pack is reported instead of being accepted.
 //!
 //! A pack hash covers every regular file below the pack directory, including
-//! `lawpack.toml`. Paths are relative to the pack directory and always use
-//! `/` as the separator. Each file contributes its path bytes, a `0` byte, its
-//! content and another `0` byte, in path order. Before hashing, `\r\n` in the
-//! content is replaced by `\n`: a Windows checkout and a Linux checkout of the
-//! same files therefore hash the same, while any other byte difference does
-//! not. A `std.lock` directly inside the pack directory is not hashed, so a
-//! lock file can live next to the content it describes.
+//! `lawpack.toml` and any nested `std.lock`; the registry lock itself lives
+//! next to the pack directories, not inside them. Paths are relative to the
+//! pack directory and always use `/` as the separator. In path order each file
+//! contributes its path length as a little-endian `u64`, its path bytes, its
+//! content length as a little-endian `u64`, and its content. The lengths make
+//! the digest unambiguous even when a file contains a NUL byte. Before hashing,
+//! `\r\n` in the content is replaced by `\n`: a Windows checkout and a Linux
+//! checkout of the same files therefore hash the same, while any other byte
+//! difference does not.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -102,7 +104,26 @@ impl Lockfile {
     }
 
     /// Write the lock file's TOML text.
+    ///
+    /// A target that already exists as a symbolic link is refused instead of
+    /// being followed, so writing cannot replace a file outside the registry.
     pub fn write(&self, path: &Path) -> Result<(), PackError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(PackError::new(
+                    path.to_path_buf(),
+                    "拒绝符号链接：std.lock 不能是符号链接",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(PackError::new(
+                    path.to_path_buf(),
+                    format!("无法检查锁文件路径：{error}"),
+                ));
+            }
+        }
         fs::write(path, self.to_toml_string())
             .map_err(|error| PackError::new(path.to_path_buf(), format!("无法写入锁文件：{error}")))
     }
@@ -125,11 +146,14 @@ fn parse_at(path: &Path, text: &str) -> Result<Lockfile, PackError> {
 
 /// Hash the content of one pack directory.
 ///
-/// Every regular file below `dir` is collected, including `lawpack.toml` but
-/// not a `std.lock` directly inside `dir`. Paths are relative to `dir` with
-/// `/` separators; `\r\n` in a file's content is normalized to `\n` before
-/// hashing. Symbolic links and other non-regular entries are errors: they are
-/// neither followed nor skipped. The result is `sha256:` plus lowercase hex.
+/// Every regular file below `dir` is collected, including `lawpack.toml` and
+/// any nested `std.lock`. Paths are relative to `dir` with `/` separators. In
+/// path order each file contributes its path length (`u64` little-endian), its
+/// path bytes, its content length (`u64` little-endian) and the content with
+/// `\r\n` normalized to `\n`. The explicit lengths keep distinct file sets
+/// distinct even when a file contains a NUL byte. Symbolic links and other
+/// non-regular entries are errors: they are neither followed nor skipped. The
+/// result is `sha256:` plus lowercase hex.
 pub fn hash_pack(dir: &Path) -> Result<String, PackError> {
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     collect_files(dir, dir, &mut files)?;
@@ -137,12 +161,13 @@ pub fn hash_pack(dir: &Path) -> Result<String, PackError> {
 
     let mut hasher = Sha256::new();
     for (relative, path) in files {
-        hasher.update(relative.as_bytes());
-        hasher.update([0]);
         let bytes = fs::read(&path)
             .map_err(|error| PackError::new(path.clone(), format!("无法读取包文件：{error}")))?;
-        hasher.update(normalized(&bytes));
-        hasher.update([0]);
+        let content = normalized(&bytes);
+        hasher.update((relative.len() as u64).to_le_bytes());
+        hasher.update(relative.as_bytes());
+        hasher.update((content.len() as u64).to_le_bytes());
+        hasher.update(&content);
     }
     Ok(format!("sha256:{}", hex(&hasher.finalize())))
 }
@@ -185,9 +210,6 @@ fn collect_files(
                 path,
                 "拒绝非普通文件：法律包只能包含普通文件和目录",
             ));
-        }
-        if path == root.join(LOCK_FILE) {
-            continue;
         }
         let relative = path.strip_prefix(root).map_err(|error| {
             PackError::new(path.clone(), format!("无法取得相对包目录的路径：{error}"))

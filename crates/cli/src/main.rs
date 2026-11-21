@@ -33,7 +33,10 @@
 //! prints `锁定校验：通过（N 个包）`, while a missing, changed, extra or
 //! differently versioned pack prints every error and makes the command exit
 //! `2`. Without a lock the command prints
-//! `锁定校验：未找到 std.lock（未锁定）` and keeps the listing's outcome.
+//! `锁定校验：未找到 std.lock（未锁定）` and keeps the listing's outcome. If
+//! the listing itself found manifest errors, lock verification is skipped and
+//! reported as `锁定校验：未运行（清单错误）`, so one bad manifest is reported
+//! once and the listing's exit code stands.
 //!
 //! `:lock` hashes every pack in the directory (default `lawpacks`) and writes
 //! `<dir>/std.lock`. An unreadable directory or file, a symbolic link inside a
@@ -654,7 +657,8 @@ impl Session {
     ///
     /// When `root/std.lock` exists, the registry is verified after the
     /// listing. A verification error is printed per pack and fails the
-    /// command; a missing lock is only reported.
+    /// command; a missing lock is only reported. Verification is skipped when
+    /// the listing already failed, so a bad manifest is reported once.
     fn list_packs(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let root = packs_root(arg)?;
         let found =
@@ -686,6 +690,13 @@ impl Session {
         }
         for error in &found.errors {
             writeln!(out, "{}", escape_field(&error.to_string())).ok();
+        }
+        // A broken manifest already fails the listing. Scanning the registry
+        // again for the lock would print the same manifest error twice and
+        // count it as a lock error, so verification waits for a clean listing.
+        if !found.errors.is_empty() {
+            writeln!(out, "锁定校验：未运行（清单错误）").ok();
+            return Err(format!("{} 个法律包清单错误", found.errors.len()));
         }
 
         let lock_path = root.join(LOCK_FILE);
@@ -720,11 +731,7 @@ impl Session {
         if let Some(count) = lock_errors {
             return Err(format!("{count} 个锁定校验错误"));
         }
-        if found.errors.is_empty() {
-            Ok(Outcome::Proved)
-        } else {
-            Err(format!("{} 个法律包清单错误", found.errors.len()))
-        }
+        Ok(Outcome::Proved)
     }
 
     /// Hash every pack under a directory and write its `std.lock`.

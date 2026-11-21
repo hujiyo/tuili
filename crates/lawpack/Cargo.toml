@@ -9,6 +9,3 @@ description = "The official legal-pack manifest: parse, validate, and discover l
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 toml = "0.8"
-
-[dev-dependencies]
-sha2 = "0.10"

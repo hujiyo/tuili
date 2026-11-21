@@ -13,6 +13,8 @@ const ERROR: i32 = 2;
 
 /// Printed by `:packs` when the directory has no `std.lock`.
 const UNLOCKED: &str = "锁定校验：未找到 std.lock（未锁定）";
+/// Printed by `:packs` when the listing failed, so the lock was not checked.
+const LOCK_NOT_RUN: &str = "锁定校验：未运行（清单错误）";
 
 const VALID: &str = r#"
 [pack]
@@ -132,7 +134,7 @@ fn packs_lists_good_packs_and_reports_bad_manifests() {
         "{out:?}"
     );
     assert!(lines[3].contains("jurisdiction"), "{out:?}");
-    assert_eq!(lines[4], UNLOCKED);
+    assert_eq!(lines[4], LOCK_NOT_RUN);
 
     assert_eq!(
         stderr(&output).lines().collect::<Vec<_>>(),
@@ -212,7 +214,7 @@ fn packs_rejects_a_dangling_manifest_symlink() {
         "{out:?}"
     );
     assert!(lines[0].contains("符号链接"), "{out:?}");
-    assert_eq!(lines[1], UNLOCKED);
+    assert_eq!(lines[1], LOCK_NOT_RUN);
     assert!(!out.contains("没有找到法律包"), "{out:?}");
 }
 
@@ -279,7 +281,7 @@ territory = "CN"
     );
     assert!(lines[0].contains("bad\\nfake.pack"), "{out:?}");
     assert!(lines[0].contains("\\u{001B}[31m"), "{out:?}");
-    assert_eq!(lines[1], UNLOCKED);
+    assert_eq!(lines[1], LOCK_NOT_RUN);
     assert!(!out.contains('\u{1b}'), "{out:?}");
     assert!(
         !lines.iter().any(|line| line.starts_with("fake.pack")),
@@ -484,6 +486,131 @@ fn lock_reports_a_missing_directory() {
         "{}",
         stderr(&output)
     );
+}
+
+#[test]
+fn packs_skips_lock_verification_when_a_manifest_is_bad() {
+    let temp = TempDir::new("lock-skip-bad");
+    temp.pack("good", VALID);
+    let root = temp.path();
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, PROVED);
+
+    temp.pack("bad", "[pack]\nname = \"bad.pack\"\nversion = \"1.0\"\n");
+    let output = run(&format!(":packs {}", root.display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    let bad_manifest = root.join("bad").join("lawpack.toml");
+    let reported = format!("{}：", bad_manifest.display());
+    assert_eq!(out.matches(&reported).count(), 1, "{out}");
+    assert!(out.contains(LOCK_NOT_RUN), "{out}");
+    assert!(!out.contains("锁定校验：通过"), "{out}");
+    assert!(!out.contains("未锁定"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个法律包清单错误"]
+    );
+}
+
+#[test]
+fn packs_fails_on_an_unsupported_lock_version() {
+    let temp = TempDir::new("lock-bad-version");
+    temp.pack("cn.constitution", VALID);
+    let root = temp.path();
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, PROVED);
+
+    let lock_path = root.join("std.lock");
+    let text = fs::read_to_string(&lock_path).unwrap();
+    let changed = text.replace("lock_version = 1", "lock_version = 2");
+    assert_ne!(changed, text);
+    fs::write(&lock_path, changed).unwrap();
+
+    let output = run(&format!(":packs {}", root.display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("不支持的锁文件版本 2"), "{out}");
+    assert!(!out.contains("锁定校验：通过"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个锁定校验错误"]
+    );
+}
+
+#[test]
+fn packs_fails_on_a_malformed_lock() {
+    let temp = TempDir::new("lock-malformed");
+    temp.pack("cn.constitution", VALID);
+    let root = temp.path();
+    fs::write(root.join("std.lock"), "lock_version = \n").unwrap();
+
+    let output = run(&format!(":packs {}", root.display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("锁文件解析失败"), "{out}");
+    assert!(!out.contains("锁定校验：通过"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个锁定校验错误"]
+    );
+}
+
+#[test]
+fn packs_fails_on_a_symlinked_lock() {
+    let temp = TempDir::new("lock-symlinked");
+    temp.pack("cn.constitution", VALID);
+    let root = temp.path();
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, PROVED);
+
+    let lock_path = root.join("std.lock");
+    let target = root.join("lock-target");
+    fs::rename(&lock_path, &target).unwrap();
+    if !create_file_symlink(&target, &lock_path) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let output = run(&format!(":packs {}", root.display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    // Discovery already refuses a symbolic link at the root's direct children,
+    // so the lock is reported there and verification is skipped. The library's
+    // own lock-link refusal is covered by `verify_lock_rejects_a_symlinked_lock`.
+    assert!(out.contains("符号链接"), "{out}");
+    assert!(!out.contains("锁定校验：通过"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个法律包清单错误"]
+    );
+}
+
+#[test]
+fn lock_keeps_an_existing_lock_when_a_pack_cannot_be_hashed() {
+    let temp = TempDir::new("lock-no-overwrite");
+    temp.pack("cn.constitution", VALID);
+    let root = temp.path();
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, PROVED);
+    let lock_path = root.join("std.lock");
+    let original = fs::read(&lock_path).expect("the lock exists");
+
+    let pack_dir = root.join("cn.constitution");
+    let link = pack_dir.join("link.txt");
+    if !create_file_symlink(&pack_dir.join("lawpack.toml"), &link) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let output = run(&format!(":lock {}", root.display()));
+    assert_exit(&output, ERROR);
+    assert!(stdout(&output).contains("符号链接"), "{output:?}");
+    assert!(
+        stderr(&output).contains("std.lock 未写入"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fs::read(&lock_path).unwrap(), original);
 }
 
 struct TempDir {
