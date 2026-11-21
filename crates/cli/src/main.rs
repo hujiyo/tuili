@@ -8,7 +8,7 @@
 //! :why <term>             derive, print the certificate's tree, and check it
 //! :gap <term>             explain what is missing for a goal
 //! :cert <term>            derive and print the goal's certificate JSON
-//! :check <file>           check a certificate JSON against the loaded environment
+//! :check <file> [goal]    check a certificate, optionally bound to a goal
 //! :given <term>           add an assumption by hand
 //! :quit
 //! ```
@@ -45,6 +45,16 @@
 //! recorded conflict is unresolved; and `2` when the file cannot be read or
 //! parsed, or either layer fails. A logical pass with a kernel failure is
 //! therefore a `2`, never a `0`.
+//!
+//! `:check <file> <goal>` additionally binds the certificate to the goal: after
+//! both layers accept the certificate, the proposition proved by its root must
+//! be definitionally equal to the elaborated goal. A gap root, a missing root
+//! or a different proposition makes the binding fail (exit `2`) and prints
+//! `目标绑定：失败（...）`; a match prints `目标绑定：通过（根命题与目标在内核下等价）`
+//! and keeps the original `0`/`1` outcome. The file and the goal are separated
+//! by the first whitespace, so this optional form requires a file path without
+//! spaces. Without a goal, no binding line is printed and the output is
+//! unchanged.
 
 use std::io::{self, BufRead, Write};
 
@@ -408,26 +418,36 @@ impl Session {
     /// rule instances and side conditions, then `kernel_proof` rebuilds the
     /// monotone proof terms and asks the kernel. A logical pass with a kernel
     /// failure is an error (`2`), not a valid certificate.
+    ///
+    /// The argument is `<file>` or `<file> <goal>`. The optional goal is the
+    /// whole text after the first whitespace, so a path containing spaces
+    /// cannot be used together with a goal. When a goal is given, the root's
+    /// proposition must be definitionally equal to it; a gap root, a missing
+    /// root and a mismatch all fail the binding (exit `2`).
     fn check_certificate(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !self.loaded {
             write_check_not_run(out, "尚未加载理论");
             return Err("尚未加载理论：:check 需要环境才能校验证书，请先 :load <文件>".into());
         }
         if arg.is_empty() {
-            return Err("用法：:check <证书文件>".into());
+            return Err("用法：:check <证书文件> [目标命题]".into());
         }
-        let text = match std::fs::read_to_string(arg) {
+        let (path, goal) = match arg.split_once(char::is_whitespace) {
+            Some((path, goal)) => (path, Some(goal.trim())),
+            None => (arg, None),
+        };
+        let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) => {
                 write_check_not_run(out, "读取证书失败");
-                return Err(format!("读取证书 `{arg}` 失败：{e}"));
+                return Err(format!("读取证书 `{path}` 失败：{e}"));
             }
         };
         let certificate = match Certificate::from_json(&text) {
             Ok(certificate) => certificate,
             Err(e) => {
                 write_check_not_run(out, "证书 JSON 无效");
-                return Err(format!("证书 `{arg}` 不是有效的证书 JSON：{e}"));
+                return Err(format!("证书 `{path}` 不是有效的证书 JSON：{e}"));
             }
         };
 
@@ -504,12 +524,95 @@ impl Session {
         // A root is successful only when both layers agree on it and nothing
         // is left to a human or an unresolved conflict.
         let proved = report.root_proved && kernel.root_proved && !requires_human && unresolved == 0;
-        Ok(if proved {
+        let outcome = if proved {
             Outcome::Proved
         } else {
             Outcome::Gap
-        })
+        };
+
+        // The certificate may be legal while proving a different proposition.
+        // Only a caller-supplied goal can rule that out, and a failed binding
+        // is an error even when the certificate itself passed both layers.
+        if let Some(goal) = goal {
+            self.check_goal_binding(goal, &certificate, out)?;
+        }
+        Ok(outcome)
     }
+
+    /// Check that the root node's proposition is the supplied goal.
+    ///
+    /// The comparison is kernel definitional equality, not the printed form.
+    /// A root that proves nothing (a gap) and a certificate without a root
+    /// cannot be bound to any goal. Every failure prints
+    /// `目标绑定：失败（...）` and returns an error, so the process exits `2`.
+    fn check_goal_binding(
+        &self,
+        goal_text: &str,
+        certificate: &Certificate,
+        out: &mut impl Write,
+    ) -> Result<(), String> {
+        let goal = match self.goal(goal_text) {
+            Ok(goal) => goal,
+            Err(error) => {
+                return fail_goal_binding(out, format!("目标无法解析：{error}"));
+            }
+        };
+
+        let root_proposition = match certificate.root {
+            None => return fail_goal_binding(out, "证书没有根节点"),
+            Some(root) => match certificate.nodes.get(root) {
+                None => {
+                    return fail_goal_binding(
+                        out,
+                        format!(
+                            "根节点 {root} 越界：证书只有 {} 个节点",
+                            certificate.nodes.len()
+                        ),
+                    );
+                }
+                Some(CertNode::Assumption { assumption }) => {
+                    match certificate.assumptions.get(*assumption) {
+                        Some(entry) => Expr::from(&entry.proposition),
+                        None => {
+                            return fail_goal_binding(
+                                out,
+                                format!(
+                                    "根引用了不存在的假设 {assumption}：证书只有 {} 条假设",
+                                    certificate.assumptions.len()
+                                ),
+                            );
+                        }
+                    }
+                }
+                Some(CertNode::RuleApplication { conclusion, .. }) => Expr::from(conclusion),
+                Some(CertNode::Gap { .. }) => {
+                    return fail_goal_binding(out, "根为缺口，不证明任何命题");
+                }
+            },
+        };
+
+        match convertible(&self.lib.env, &Ctx::new(), &root_proposition, &goal) {
+            Ok(true) => {
+                writeln!(out, "目标绑定：通过（根命题与目标在内核下等价）").ok();
+                Ok(())
+            }
+            Ok(false) => fail_goal_binding(
+                out,
+                format!(
+                    "根命题「{}」与目标「{}」不等价",
+                    print_expr(&root_proposition),
+                    print_expr(&goal)
+                ),
+            ),
+            Err(error) => fail_goal_binding(out, format!("无法比较根命题与目标：{error}")),
+        }
+    }
+}
+
+/// Print the failed binding line and return the error that exits `2`.
+fn fail_goal_binding(out: &mut impl Write, detail: impl std::fmt::Display) -> Result<(), String> {
+    writeln!(out, "目标绑定：失败（{detail}）").ok();
+    Err(format!("目标绑定失败：{detail}"))
 }
 
 /// Print the four labelled lines when `:check` cannot reach either layer.
@@ -786,7 +889,7 @@ fn main() {
         if line.trim() == ":help" {
             println!(
                 ":load <文件>  :inspect  :given <命题>  :why <命题>  :gap <命题>  \
-                 :cert <命题>  :check <证书文件>  :quit"
+                 :cert <命题>  :check <证书文件> [目标命题]  :quit"
             );
             continue;
         }

@@ -116,6 +116,34 @@ fn check_file(theory: &str, tag: &str, certificate: &Certificate) -> Output {
     session(theory, &[format!(":check {}", file.path.display())])
 }
 
+fn check_file_with_goal(theory: &str, tag: &str, certificate: &Certificate, goal: &str) -> Output {
+    let json = certificate.to_json_pretty().unwrap();
+    let file = TempFile::new(tag, &json);
+    session(theory, &[format!(":check {} {goal}", file.path.display())])
+}
+
+/// The index and mutable node of the first application of `rule`.
+fn rule_node_mut<'a>(certificate: &'a mut Certificate, rule: &str) -> (usize, &'a mut Node) {
+    certificate
+        .nodes
+        .iter_mut()
+        .enumerate()
+        .find(|(_, node)| {
+            matches!(node, Node::RuleApplication { rule: name, .. } if name.as_str() == rule)
+        })
+        .unwrap_or_else(|| panic!("certificate has no rule application `{rule}`"))
+}
+
+/// A proved certificate for the basic defense example, used by mutation tests.
+fn defense_certificate() -> Certificate {
+    let generated = session(
+        "刑法第二十条-基本.std",
+        &[":cert 不负刑事责任 乙行为".to_owned()],
+    );
+    assert_exit(&generated, PROVED);
+    certificate_json(&generated)
+}
+
 #[test]
 fn certificate_round_trips_and_check_accepts_it() {
     let generated = session(
@@ -376,4 +404,241 @@ fn check_requires_a_loaded_environment() {
     assert!(out.contains("需人判断：未评估"), "{out}");
     let err = stderr(&checked);
     assert!(err.contains("尚未加载理论"), "{err}");
+}
+
+#[test]
+fn deleting_a_rule_premise_is_rejected() {
+    let mut certificate = defense_certificate();
+    let (node, rule) = rule_node_mut(&mut certificate, "认定正当防卫");
+    let Node::RuleApplication { premises, .. } = rule else {
+        unreachable!("rule_node_mut returns a rule application");
+    };
+    premises.remove(2);
+
+    let checked = check_file("刑法第二十条-基本.std", "missing-premise", &certificate);
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    assert!(out.contains("内核证明：未运行"), "{out}");
+    let err = stderr(&checked);
+    assert!(err.contains(&format!("节点 {node}")), "{err}");
+    assert!(err.contains("认定正当防卫"), "{err}");
+    assert!(err.contains("前提"), "{err}");
+}
+
+#[test]
+fn changing_a_rule_binding_to_a_wrong_individual_is_rejected() {
+    let mut certificate = defense_certificate();
+    let (node, rule) = rule_node_mut(&mut certificate, "认定正当防卫");
+    let Node::RuleApplication { bindings, .. } = rule else {
+        unreachable!("rule_node_mut returns a rule application");
+    };
+    let binding = bindings
+        .iter_mut()
+        .find(|binding| binding.parameter == "x")
+        .expect("认定正当防卫 binds x");
+    binding.value = CertExpr::Const {
+        name: "张三".to_owned(),
+    };
+
+    let checked = check_file("刑法第二十条-基本.std", "wrong-binding", &certificate);
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    let err = stderr(&checked);
+    assert!(err.contains(&format!("节点 {node}")), "{err}");
+    assert!(err.contains("认定正当防卫"), "{err}");
+    assert!(err.contains("张三"), "{err}");
+    assert!(err.contains("李四"), "{err}");
+}
+
+#[test]
+fn changing_a_rule_conclusion_is_rejected() {
+    let mut certificate = defense_certificate();
+    let (node, rule) = rule_node_mut(&mut certificate, "正当防卫不负刑责");
+    let Node::RuleApplication { conclusion, .. } = rule else {
+        unreachable!("rule_node_mut returns a rule application");
+    };
+    let wrong = Expr::apps(Expr::constant("正当防卫"), [Expr::constant("乙行为")]);
+    *conclusion = CertExpr::try_from(&wrong).unwrap();
+
+    let checked = check_file("刑法第二十条-基本.std", "wrong-conclusion", &certificate);
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    let err = stderr(&checked);
+    assert!(err.contains(&format!("节点 {node}")), "{err}");
+    assert!(err.contains("实例结论"), "{err}");
+    assert!(err.contains("不负刑事责任 乙行为"), "{err}");
+    assert!(err.contains("正当防卫 乙行为"), "{err}");
+}
+
+#[test]
+fn reusing_a_wrong_premise_node_is_rejected() {
+    let mut certificate = defense_certificate();
+    let (node, rule) = rule_node_mut(&mut certificate, "正当防卫不负刑责");
+    let Node::RuleApplication { premises, .. } = rule else {
+        unreachable!("rule_node_mut returns a rule application");
+    };
+    premises[0] = 0;
+
+    let checked = check_file("刑法第二十条-基本.std", "wrong-premise-node", &certificate);
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    let err = stderr(&checked);
+    assert!(err.contains(&format!("节点 {node}")), "{err}");
+    assert!(err.contains("正当防卫不负刑责"), "{err}");
+    assert!(err.contains("引用的节点 0"), "{err}");
+    assert!(err.contains("正当防卫 乙行为"), "{err}");
+    assert!(err.contains("不法 甲侵害"), "{err}");
+}
+
+#[test]
+fn adding_a_satisfied_unless_blocker_is_rejected() {
+    let mut certificate = defense_certificate();
+    let root = certificate.root.expect("the defense certificate is proved");
+    let blocker = Expr::apps(Expr::constant("防卫过当"), [Expr::constant("乙行为")]);
+    // The assumption is not cited by any node; `cert::check` still puts every
+    // listed assumption in scope, so it must retract the `unless` step.
+    certificate.assumptions.push(Assumption {
+        proposition: CertExpr::try_from(&blocker).unwrap(),
+        sources: Vec::new(),
+        label: Some("变异：追加已成立的阻断条件".to_owned()),
+    });
+
+    let checked = check_file("刑法第二十条-基本.std", "satisfied-blocker", &certificate);
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    let err = stderr(&checked);
+    assert!(err.contains(&format!("节点 {root}")), "{err}");
+    assert!(err.contains("正当防卫不负刑责"), "{err}");
+    assert!(err.contains("阻断条件"), "{err}");
+    assert!(err.contains("已成立"), "{err}");
+    assert!(err.contains("防卫过当 乙行为"), "{err}");
+}
+
+#[test]
+fn swapped_root_stays_valid_but_fails_the_goal_binding() {
+    let mut certificate = defense_certificate();
+    let original_root = certificate.root.expect("the defense certificate is proved");
+    assert!(matches!(
+        certificate.nodes[original_root],
+        Node::RuleApplication { .. }
+    ));
+    assert!(matches!(certificate.nodes[0], Node::Assumption { .. }));
+    certificate.root = Some(0);
+
+    // The certificate is still legal by itself: its root is an assumption.
+    let checked = check_file("刑法第二十条-基本.std", "swapped-root", &certificate);
+    assert_exit(&checked, PROVED);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：通过"), "{out}");
+    assert!(out.contains("根为假设"), "{out}");
+    assert!(!out.contains("目标绑定"), "{out}");
+
+    // But it no longer proves the goal it was generated for.
+    let checked = check_file_with_goal(
+        "刑法第二十条-基本.std",
+        "swapped-root-goal",
+        &certificate,
+        "不负刑事责任 乙行为",
+    );
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：通过"), "{out}");
+    assert!(out.contains("内核证明：通过"), "{out}");
+    assert!(out.contains("目标绑定：失败"), "{out}");
+    assert!(!out.contains("目标绑定：通过"), "{out}");
+    let err = stderr(&checked);
+    assert!(err.contains("目标绑定失败"), "{err}");
+    assert!(err.contains("不法 甲侵害"), "{err}");
+    assert!(err.contains("不负刑事责任 乙行为"), "{err}");
+    assert!(err.contains("不等价"), "{err}");
+}
+
+#[test]
+fn matching_goal_keeps_a_valid_certificate_passing() {
+    let certificate = defense_certificate();
+
+    let checked = check_file("刑法第二十条-基本.std", "goal-control", &certificate);
+    assert_exit(&checked, PROVED);
+    assert!(!stdout(&checked).contains("目标绑定"));
+
+    let checked = check_file_with_goal(
+        "刑法第二十条-基本.std",
+        "goal-control-with-goal",
+        &certificate,
+        "不负刑事责任 乙行为",
+    );
+    assert_exit(&checked, PROVED);
+    let out = stdout(&checked);
+    for label in [
+        "逻辑校验：通过",
+        "内核证明：通过",
+        "侧条件：",
+        "需人判断：否",
+        "目标绑定：通过（根命题与目标在内核下等价）",
+    ] {
+        assert!(out.contains(label), "missing {label:?}:\n{out}");
+    }
+}
+
+#[test]
+fn a_gap_root_cannot_satisfy_a_goal_binding() {
+    let generated = session(
+        "刑法第二十条-基本.std",
+        &[":cert 应当负刑事责任 乙行为".to_owned()],
+    );
+    assert_exit(&generated, GAP);
+    let certificate = certificate_json(&generated);
+
+    let checked = check_file_with_goal(
+        "刑法第二十条-基本.std",
+        "gap-goal",
+        &certificate,
+        "应当负刑事责任 乙行为",
+    );
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：通过"), "{out}");
+    assert!(
+        out.contains("目标绑定：失败（根为缺口，不证明任何命题）"),
+        "{out}"
+    );
+    let err = stderr(&checked);
+    assert!(err.contains("目标绑定失败"), "{err}");
+}
+
+#[test]
+fn goal_binding_uses_kernel_conversion_not_printed_text() {
+    let theory = TempFile::new(
+        "goal-conversion-theory",
+        "sort 人\n\
+         obj 张三 : 人\n\
+         pred 好人 : 人 → Prop\n\
+         def 善 : 人 → Prop := λ (x : 人) := 好人 x\n\
+         axiom 张三是好人 : 好人 张三\n",
+    );
+    let generated = run(vec![
+        format!(":load {}", theory.path.display()),
+        ":cert 好人 张三".to_owned(),
+    ]);
+    assert_exit(&generated, PROVED);
+    let certificate = certificate_json(&generated);
+    let root = certificate.root.expect("the axiom is the root");
+    assert!(matches!(certificate.nodes[root], Node::Assumption { .. }));
+
+    let file = TempFile::new(
+        "goal-conversion-cert",
+        &certificate.to_json_pretty().unwrap(),
+    );
+    let checked = run(vec![
+        format!(":load {}", theory.path.display()),
+        format!(":check {} 善 张三", file.path.display()),
+    ]);
+    assert_exit(&checked, PROVED);
+    let out = stdout(&checked);
+    assert!(out.contains("目标绑定：通过"), "{out}");
 }
