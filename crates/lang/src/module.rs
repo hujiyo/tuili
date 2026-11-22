@@ -22,7 +22,8 @@ pub struct Theory {
     pub decls: Vec<String>,
     /// Rules among those declarations.
     pub rules: Vec<String>,
-    /// Theories this one builds on.
+    /// Theories this one builds on: the package names it imports, in first
+    /// appearance order and without duplicates.
     pub requires: Vec<String>,
 }
 
@@ -46,12 +47,28 @@ impl Library {
     /// and only commit at the end).
     pub fn load(&mut self, name: &str, src: &str) -> Result<LoadReport, LoadError> {
         let items = parser::parse(src).map_err(|e| LoadError::at(e.msg, e.line, e.col))?;
-        // The parser guarantees that a `namespace` item, when present, is the
-        // first item and appears once. A namespaced file is a module: every
-        // declaration name and every reference to a declaration must be
-        // qualified. This is checked over the whole file before anything is
-        // inserted, so a bad module cannot leave a partial theory behind.
-        let namespace = match items.first() {
+        // Imports name packages, not files: every imported namespace must
+        // already be in this session. This is checked before any declaration
+        // is inserted, so an import failure cannot leave a partial theory.
+        let imported = collect_imports(&items);
+        for pack in &imported {
+            let loaded = self
+                .theories
+                .iter()
+                .any(|t| t.namespace.as_deref() == Some(pack.as_str()));
+            if !loaded {
+                return Err(LoadError::new(format!(
+                    "包 `{pack}` 尚未加载；请通过注册表导入"
+                )));
+            }
+        }
+        // The parser guarantees that imports come first and that a
+        // `namespace` item, when present, is the first non-import item and
+        // appears once. A namespaced file is a module: every declaration name
+        // and every reference to a declaration must be qualified. This is
+        // checked over the whole file before anything is inserted, so a bad
+        // module cannot leave a partial theory behind.
+        let namespace = match items.iter().find(|item| !matches!(item, Item::Import(_))) {
             Some(Item::Namespace(ns)) => Some(ns.clone()),
             _ => None,
         };
@@ -78,13 +95,17 @@ impl Library {
         let mut theory = Theory {
             name: theory_name.clone(),
             namespace: namespace.clone(),
+            requires: imported.clone(),
             ..Default::default()
         };
-        let mut report = LoadReport::default();
+        let mut report = LoadReport {
+            imported,
+            ..Default::default()
+        };
 
         for item in items {
             match item {
-                Item::Namespace(_) => {}
+                Item::Namespace(_) | Item::Import(_) => {}
                 Item::Sort { name: n, source } => {
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
@@ -512,6 +533,11 @@ impl Library {
         if let Some(existing) = next.theories.iter_mut().find(|t| t.name == theory_name) {
             existing.decls.extend(theory.decls);
             existing.rules.extend(theory.rules);
+            for pack in theory.requires {
+                if !existing.requires.contains(&pack) {
+                    existing.requires.push(pack);
+                }
+            }
         } else {
             next.theories.push(theory);
         }
@@ -525,6 +551,9 @@ pub struct LoadReport {
     pub declared: Vec<String>,
     pub checked: Vec<String>,
     pub shown: Vec<String>,
+    /// Packages imported by this file, in first appearance order and without
+    /// duplicates. An import is not a declaration and never enters the ledger.
+    pub imported: Vec<String>,
 }
 
 /// Escape a path for a one-line diagnostic.
@@ -623,6 +652,21 @@ impl From<Error> for LoadError {
     }
 }
 
+/// The package names imported by a file, in first appearance order, without
+/// duplicates. Duplicate imports are legal: they name the same package and are
+/// recorded once.
+fn collect_imports(items: &[Item]) -> Vec<String> {
+    let mut packs: Vec<String> = Vec::new();
+    for item in items {
+        if let Item::Import(pack) = item {
+            if !packs.contains(pack) {
+                packs.push(pack.clone());
+            }
+        }
+    }
+    packs
+}
+
 /// A qualified name has at least one dot and no empty dot-separated segment.
 /// Whether the namespace exists is left to the elaborator's existing
 /// unknown-name check.
@@ -670,6 +714,7 @@ fn check_case_decl_names(items: &[Item]) -> Result<(), String> {
             Item::Rule { name, .. } => ("rule", name),
             Item::Interpretation { name, .. } => ("interpret", name),
             Item::Namespace(_)
+            | Item::Import(_)
             | Item::Contrary { .. }
             | Item::Unique { .. }
             | Item::Check(_)
@@ -833,7 +878,7 @@ fn check_rule(
 fn check_module_names(ns: &str, items: &[Item]) -> Result<(), String> {
     for item in items {
         match item {
-            Item::Namespace(_) => {}
+            Item::Namespace(_) | Item::Import(_) => {}
             Item::Sort { name, .. } => require_decl_name(ns, "sort", name)?,
             Item::Obj { name, ty, .. } => {
                 require_decl_name(ns, "obj", name)?;

@@ -35,9 +35,13 @@ impl fmt::Display for Term {
 /// A top-level declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
-    /// `namespace cn.constitution` — the first item of a module file. Every
-    /// declaration name and every reference to a declaration in that file is
-    /// then required to carry the namespace prefix.
+    /// `import cn.constitution` — the named namespace must already be loaded.
+    /// Imports appear before the namespace and every declaration. The import
+    /// carries no version: the lock file fixes versions.
+    Import(String),
+    /// `namespace cn.constitution` — the first non-import item of a module
+    /// file. Every declaration name and every reference to a declaration in
+    /// that file is then required to carry the namespace prefix.
     Namespace(String),
     /// `sort 公民`
     Sort {

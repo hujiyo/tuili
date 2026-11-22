@@ -317,25 +317,26 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
 `#check` 打印项的类型，`#show` 打印声明的类型；`#proposition` 只做命题类型检查，
 不证明命题成立——要断言成立，请用 `axiom` 写事实或用 `rule` 写规则。
 
-模块文件的第一条可以是 `namespace`：
+模块文件与案件/示例文件都可以以可选的 `import` 块开头，模块随后写 `namespace`：
 
 ```
-namespace cn.constitution
-sort cn.constitution.公民
-pred cn.constitution.非法搜查 : cn.constitution.公民 → cn.constitution.住宅 → Prop
+import cn.constitution
 
-rule cn.constitution.非法搜查即侵犯 :
-  params p : cn.constitution.公民, h : cn.constitution.住宅
-  premise cn.constitution.非法搜查 p h
-  conclude cn.constitution.不受侵犯 p h
-  source text "宪法" locator "第三十九条"
+namespace cn.criminal
+sort cn.criminal.罪名
+pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
 ```
 
-`namespace` 只能出现一次，之后所有声明名（`sort` / `obj` / `pred` / `axiom` / `def` / `rule` /
-`interpret`）和所有对声明的引用都必须带 `<namespace>.` 前缀。规则参数、前提 binder 和
-`λ` / `∀` 的 binder 是局部名，不带前缀。不同模块可以用相同的后缀（`a.违法` 与 `b.违法`
-可以同时存在），加载顺序不影响结果。没有 `namespace` 的文件是案件/示例文件：它可以引用
+`namespace` 只能出现一次，且必须在所有 `import` 之后；之后所有声明名（`sort` / `obj` / `pred` /
+`axiom` / `def` / `rule` / `interpret`）和所有对声明的引用都必须带 `<namespace>.` 前缀。规则参数、
+前提 binder 和 `λ` / `∀` 的 binder 是局部名，不带前缀。不同模块可以用相同的后缀（`a.违法` 与
+`b.违法` 可以同时存在），加载顺序不影响结果。没有 `namespace` 的文件是案件/示例文件：它可以引用
 `a.违法` 这样的限定名，但不能自己声明带 `.` 的名字。
+
+`import` 每行写一个带点包名，只能出现在 `namespace` 和所有声明之前；被 import 的 namespace
+必须已经在当前会话中加载，否则加载失败并报告“包 `x` 尚未加载”。`import` 只写包名，不写版本；
+重复 import 同一个包合法，加载报告与 `Theory.requires` 只记录一次。`import` 不是声明，也不会
+进入 `:inspect` 账本。
 
 出处要求的当前范围：
 
@@ -520,7 +521,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 437 个：kernel 19、lang 60、reason 41、cert 101、cli 115、lawpack 101（含 1 个 doc test）。
+`cargo test --workspace` 共 453 个：kernel 19、lang 76、reason 41、cert 101、cli 115、lawpack 101（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -548,6 +549,11 @@ cargo test --workspace
   体/`obj`/`axiom`/`#check`/`#show` 的拒绝、局部 binder 豁免；两模块同名后缀与加载顺序无关；
   案件文件不能声明带点名字但仍可引用限定名；同名 theory 的 namespace 冲突；`defeated_by`/`prefer`
   目标必须存在且是规则并允许同文件前向引用；`interpret` 可解析但加载期拒绝；`LoadReport` 不含 namespace。
+- `crates/lang/tests/import.rs`（16）：`import` 语法与加载校验——import 块可跨空行且位于 namespace 与
+  所有声明之前，空 import 报在 import 行、行尾多 token 被拒、`import x@2018` 被词法拒绝、重复 import
+  由解析层保留；案件与模块文件都可 import 已加载 namespace，报告按首次出现去重，未加载时报“尚未加载”
+  且不改变库，同名但非 namespace 的 theory 不满足 import，模块可 import 已加载模块（含带点包名），
+  失败加载不回滚记录 import，重载同一 theory 时 `requires` 合并去重，import 不豁免声明名检查。
 - `crates/cert/tests/json.rs`（16）：证书 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
   快照比对、字段名与节点标签固定、未知版本或未知字段被拒、真正的 v1 证书因版本不符被拒并报告版本，
   缺少 v2 新字段的 v2 证书按默认值解析；全部来源字段（含引文、链接、管辖、抓取时间、哈希）的 JSON

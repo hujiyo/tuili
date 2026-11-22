@@ -3,8 +3,9 @@
 //! Grammar (summary):
 //!
 //! ```text
-//! program  := namespace? item*
-//! namespace := 'namespace' NAMESPACE      (first item only)
+//! program  := import* namespace? item*
+//! import   := 'import' PACK                (before namespace and all items)
+//! namespace := 'namespace' NAMESPACE      (first non-import item only)
 //! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | command
 //! sort     := 'sort' IDENT source?
 //! pred     := 'pred' IDENT ':' term source?
@@ -178,11 +179,22 @@ impl Parser {
             if matches!(self.peek(), Tok::Eof) {
                 break;
             }
+            // `import` opens the file: it may follow only other imports
+            // (blank lines are skipped above), never the namespace or a
+            // declaration.
+            let only_imports_so_far = items.iter().all(|item| matches!(item, Item::Import(_)));
+            if self.keyword("import") {
+                if !only_imports_so_far {
+                    return self.err("import 只能出现在 namespace 和所有声明之前");
+                }
+                items.push(self.item()?);
+                continue;
+            }
             if self.keyword("namespace") {
                 if namespace_seen {
                     return self.err("namespace 只能出现一次");
                 }
-                if !items.is_empty() {
+                if !only_imports_so_far {
                     return self.err("namespace 必须是文件的第一条声明，不能出现在其他声明之后");
                 }
                 namespace_seen = true;
@@ -242,6 +254,35 @@ impl Parser {
     /// so the `#`-command path above stays short.
     fn dispatch_plain(&mut self, kw: &str) -> PResult<Item> {
         match kw {
+            "import" => {
+                // Report a bare `import` at the keyword itself; after the
+                // bump `here()` would point at the newline or next item.
+                let (line, col) = {
+                    let token = self.here();
+                    (token.line, token.col)
+                };
+                self.bump();
+                let pack = match self.peek().clone() {
+                    Tok::Ident(pack) => {
+                        self.bump();
+                        pack
+                    }
+                    other => {
+                        return Err(ParseError {
+                            msg: format!("`import` 之后必须是包名，实际是 `{other:?}`"),
+                            line,
+                            col,
+                        });
+                    }
+                };
+                if !matches!(self.peek(), Tok::Newline | Tok::Eof) {
+                    return self.err(format!(
+                        "`import {pack}` 之后必须是换行，实际是 `{:?}`",
+                        self.peek()
+                    ));
+                }
+                Ok(Item::Import(pack))
+            }
             "namespace" => {
                 self.bump();
                 let (line, col) = {
@@ -471,9 +512,11 @@ impl Parser {
                 // Another item starts here. `#` covers every sigiled command:
                 // the lexer splits the sigil from the command name, so the
                 // combined spellings never reach this match.
-                "#" | "namespace" | "rule" | "sort" | "pred" | "axiom" | "def" | "interpret"
-                | "interpretation" | "contrary" | "unique" | "obj" | "object" | "individual"
-                | "check" | "why" | "gap" | "proposition" | "assert" | "show" => break,
+                "#" | "import" | "namespace" | "rule" | "sort" | "pred" | "axiom" | "def"
+                | "interpret" | "interpretation" | "contrary" | "unique" | "obj" | "object"
+                | "individual" | "check" | "why" | "gap" | "proposition" | "assert" | "show" => {
+                    break
+                }
                 other => return self.err(format!("规则 `{name}` 里未知的子句 `{other}`")),
             }
         }
