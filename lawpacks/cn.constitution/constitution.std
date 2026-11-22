@@ -367,6 +367,7 @@ pred cn.constitution.申诉权 : cn.constitution.人 → Prop
 pred cn.constitution.控告权 : cn.constitution.人 → Prop
 pred cn.constitution.检举权 : cn.constitution.人 → Prop
 pred cn.constitution.因国家机关侵权受损失 : cn.constitution.人 → Prop
+pred cn.constitution.因国家机关违法失职受侵害 : cn.constitution.人 → Prop
 pred cn.constitution.取得赔偿权 : cn.constitution.人 → Prop
 
 rule cn.constitution.公民有批评建议权 :
@@ -381,6 +382,7 @@ rule cn.constitution.公民有批评建议权 :
 rule cn.constitution.公民有申诉权 :
   params x : cn.constitution.人
   premise cn.constitution.公民 x
+  premise cn.constitution.因国家机关违法失职受侵害 x
   conclude cn.constitution.申诉权 x
   source text "宪法" locator "第四十一条" version "2018"
          quote "中华人民共和国公民对于任何国家机关和国家工作人员，有提出批评和建议的权利；对于任何国家机关和国家工作人员的违法失职行为，有向有关国家机关提出申诉、控告或者检举的权利，但是不得捏造或者歪曲事实进行诬告陷害。\n对于公民的申诉、控告或者检举，有关国家机关必须查清事实，负责处理。任何人不得压制和打击报复。\n由于国家机关和国家工作人员侵犯公民权利而受到损失的人，有依照法律规定取得赔偿的权利。"
@@ -390,6 +392,7 @@ rule cn.constitution.公民有申诉权 :
 rule cn.constitution.公民有控告权 :
   params x : cn.constitution.人
   premise cn.constitution.公民 x
+  premise cn.constitution.因国家机关违法失职受侵害 x
   conclude cn.constitution.控告权 x
   source text "宪法" locator "第四十一条" version "2018"
          quote "中华人民共和国公民对于任何国家机关和国家工作人员，有提出批评和建议的权利；对于任何国家机关和国家工作人员的违法失职行为，有向有关国家机关提出申诉、控告或者检举的权利，但是不得捏造或者歪曲事实进行诬告陷害。\n对于公民的申诉、控告或者检举，有关国家机关必须查清事实，负责处理。任何人不得压制和打击报复。\n由于国家机关和国家工作人员侵犯公民权利而受到损失的人，有依照法律规定取得赔偿的权利。"
@@ -399,6 +402,7 @@ rule cn.constitution.公民有控告权 :
 rule cn.constitution.公民有检举权 :
   params x : cn.constitution.人
   premise cn.constitution.公民 x
+  premise cn.constitution.因国家机关违法失职受侵害 x
   conclude cn.constitution.检举权 x
   source text "宪法" locator "第四十一条" version "2018"
          quote "中华人民共和国公民对于任何国家机关和国家工作人员，有提出批评和建议的权利；对于任何国家机关和国家工作人员的违法失职行为，有向有关国家机关提出申诉、控告或者检举的权利，但是不得捏造或者歪曲事实进行诬告陷害。\n对于公民的申诉、控告或者检举，有关国家机关必须查清事实，负责处理。任何人不得压制和打击报复。\n由于国家机关和国家工作人员侵犯公民权利而受到损失的人，有依照法律规定取得赔偿的权利。"

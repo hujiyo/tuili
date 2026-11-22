@@ -130,9 +130,9 @@ fn inspect_marks_pack_declarations_with_the_pack_version() {
         ],
     );
     let out = stdout(&output);
-    // The pack contributes 2 sorts + 53 predicates + 41 rules = 96 declarations,
+    // The pack contributes 2 sorts + 54 predicates + 41 rules = 97 declarations,
     // all marked with the locked version; the case objects are not.
-    assert_eq!(out.matches("[cn.constitution@0.3.0]").count(), 96, "{out}");
+    assert_eq!(out.matches("[cn.constitution@0.3.0]").count(), 97, "{out}");
 }
 
 /// A user file may not declare into the official pack's namespace. The ledger
@@ -168,8 +168,8 @@ fn a_file_cannot_declare_into_a_loaded_pack_namespace() {
     );
     assert_eq!(
         out.matches("[cn.constitution@0.3.0]").count(),
-        96,
-        "the pack's 96 declarations still carry the pack suffix:\n{out}"
+        97,
+        "the pack's 97 declarations still carry the pack suffix:\n{out}"
     );
 }
 
@@ -197,6 +197,7 @@ fn audit_matches_the_quotations_inside_the_official_pack() {
             "条文哈希：41 条已固定并核验，0 条未固定，0 条未核验或格式非法。",
             "覆盖 cn.constitution@2018：形式化 14 条 / 索引 129 条 / 开放概念 29 个",
             "  形式化：「第三十三条」、「第三十四条」、「第三十五条」、「第三十六条」、「第三十七条」、「第三十八条」、「第三十九条」、「第四十条」、「第四十一条」、「第四十二条」、「第四十三条」、「第四十四条」、「第四十五条」、「第四十六条」",
+            "  备注：官方包 v0.3.0 的 coverage.formalized 表示每条至少一条核心操作性句子已写成规则，不等于整条完整形式化",
         ],
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
@@ -292,6 +293,9 @@ axiom 张三被非法检查通信 : cn.constitution.非法检查通信 张三
 axiom 张三因国家机关侵权受损失 : cn.constitution.因国家机关侵权受损失 张三
   source text "测试案情" locator "损失"
 
+axiom 张三因国家机关违法失职受侵害 : cn.constitution.因国家机关违法失职受侵害 张三
+  source text "测试案情" locator "违法失职"
+
 axiom 张三是劳动者 : cn.constitution.劳动者 张三
   source text "测试案情" locator "劳动者"
 
@@ -386,21 +390,174 @@ axiom 李四依法被剥夺政治权利 : cn.constitution.依法被剥夺政治�
             &[
                 case.display().to_string(),
                 ":why cn.constitution.选举权 李四".to_string(),
+                ":why cn.constitution.被选举权 李四".to_string(),
             ],
         ),
         LOAD_FAILED,
         &[
             "? cn.constitution.选举权 李四  【未闭合】",
             "候选 ⟨cn.constitution.公民有选举权⟩ ← 「宪法第三十四条」（2018）",
+            "? cn.constitution.被选举权 李四  【未闭合】",
+            "候选 ⟨cn.constitution.公民有被选举权⟩ ← 「宪法第三十四条」（2018）",
             "被阻断：「cn.constitution.依法被剥夺政治权利 李四」已成立",
             "证书有效，但根为缺口，结论未被证明。",
         ],
     );
+    let out = stdout(&output);
     assert!(
-        !stdout(&output).contains("推导已通过独立校验。"),
-        "a blocked right must not be reported as proved:\n{}",
-        stdout(&output)
+        !out.contains("推导已通过独立校验。"),
+        "a blocked right must not be reported as proved:\n{out}"
     );
+    assert_eq!(
+        out.matches("【未闭合】").count(),
+        2,
+        "both electoral rights must stay gaps:\n{out}"
+    );
+}
+
+/// Article 41 conditions the remedy rights on a public office's unlawful or
+/// derelict act. Nationality alone must not prove them.
+#[test]
+fn article_41_remedy_rights_need_a_public_office_violation() {
+    let temp = TempDir::new("chapter-two-remedy-condition");
+    let case = temp.path().join("case.std");
+    fs::write(
+        &case,
+        r#"import cn.constitution
+
+obj 王五 : cn.constitution.人
+
+axiom 王五有中国国籍 : cn.constitution.中国国籍 王五
+  source text "测试案情" locator "国籍"
+"#,
+    )
+    .expect("write the case file");
+
+    let output = check(
+        run_in(
+            &repo_root(),
+            &[
+                case.display().to_string(),
+                ":why cn.constitution.申诉权 王五".to_string(),
+                ":why cn.constitution.控告权 王五".to_string(),
+                ":why cn.constitution.检举权 王五".to_string(),
+            ],
+        ),
+        LOAD_FAILED,
+        &[
+            "? cn.constitution.申诉权 王五  【未闭合】",
+            "候选 ⟨cn.constitution.公民有申诉权⟩ ← 「宪法第四十一条」（2018）",
+            "? cn.constitution.控告权 王五  【未闭合】",
+            "候选 ⟨cn.constitution.公民有控告权⟩ ← 「宪法第四十一条」（2018）",
+            "? cn.constitution.检举权 王五  【未闭合】",
+            "候选 ⟨cn.constitution.公民有检举权⟩ ← 「宪法第四十一条」（2018）",
+            "缺：cn.constitution.因国家机关违法失职受侵害 王五",
+        ],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("推导已通过独立校验。"),
+        "nationality alone must not prove the remedy rights:\n{out}"
+    );
+    assert_eq!(
+        out.matches("【未闭合】").count(),
+        3,
+        "all three remedy rights must stay gaps:\n{out}"
+    );
+}
+
+/// Each rule that the batch test does not reach still needs a direct
+/// derivation. Every case states exactly one triggering fact, so no sibling
+/// rule with the same conclusion can satisfy the query.
+#[test]
+fn the_remaining_batch_two_rules_each_have_a_direct_derivation() {
+    let cases = [
+        (
+            "religious-coercion",
+            "被强制信仰宗教",
+            "宗教信仰自由受侵犯",
+            "被强制信仰宗教侵犯宗教信仰自由",
+        ),
+        (
+            "religious-discrimination",
+            "因信仰宗教受歧视",
+            "宗教信仰自由受侵犯",
+            "因信仰宗教受歧视侵犯宗教信仰自由",
+        ),
+        (
+            "non-religious-discrimination",
+            "因不信仰宗教受歧视",
+            "宗教信仰自由受侵犯",
+            "因不信仰宗教受歧视侵犯宗教信仰自由",
+        ),
+        ("defamation", "诽谤", "人格尊严受侵犯", "诽谤侵犯人格尊严"),
+        (
+            "false-accusation",
+            "诬告陷害",
+            "人格尊严受侵犯",
+            "诬告陷害侵犯人格尊严",
+        ),
+        (
+            "communication-intrusion",
+            "非法侵犯通信",
+            "通信自由和通信秘密受侵犯",
+            "非法侵犯通信侵犯通信自由和通信秘密",
+        ),
+        ("illness", "疾病", "物质帮助权", "疾病公民有物质帮助权"),
+        (
+            "incapacity",
+            "丧失劳动能力",
+            "物质帮助权",
+            "丧失劳动能力的公民有物质帮助权",
+        ),
+    ];
+
+    for (tag, fact, target, rule) in cases {
+        let temp = TempDir::new(tag);
+        let case = temp.path().join("case.std");
+        fs::write(
+            &case,
+            format!(
+                r#"import cn.constitution
+
+obj 甲 : cn.constitution.人
+
+axiom 甲有中国国籍 : cn.constitution.中国国籍 甲
+  source text "测试案情" locator "国籍"
+
+axiom 甲有事实 : cn.constitution.{fact} 甲
+  source text "测试案情" locator "事实"
+"#
+            ),
+        )
+        .expect("write the case file");
+
+        let output = run_in(
+            &repo_root(),
+            &[
+                case.display().to_string(),
+                format!(":why cn.constitution.{target} 甲"),
+            ],
+        );
+        let code = output.status.code();
+        let out = stdout(&output);
+        let err = stderr(&output);
+        assert_eq!(
+            code,
+            Some(PROVED),
+            "{tag}: expected a proof\nstdout:\n{out}\nstderr:\n{err}"
+        );
+        let expected = format!("▸ cn.constitution.{target} 甲  ⟨cn.constitution.{rule}⟩");
+        assert!(
+            out.contains(&expected),
+            "{tag}: stdout does not contain {expected:?}\nstdout:\n{out}\nstderr:\n{err}"
+        );
+        assert_eq!(
+            out.matches("推导已通过独立校验。").count(),
+            1,
+            "{tag}: the query must pass both certificate checks:\n{out}"
+        );
+    }
 }
 
 /// A changed pack file must be caught by both the registry lock check and the

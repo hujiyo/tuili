@@ -1045,12 +1045,26 @@ fn the_repository_constitution_corpus_parses() {
             .any(|number| number == "第四十七条"),
         "article 47 belongs to the next batch and is not formalized yet"
     );
+    let notes = coverage.notes.as_deref().unwrap_or_default();
     assert!(
-        coverage.notes.as_deref().is_some_and(
-            |notes| notes.contains("第二章第一批") && notes.contains("第四十七至五十六条")
-        ),
-        "{:?}",
-        coverage.notes
+        notes.contains("不等于整条完整形式化"),
+        "coverage.notes must define formalized as a lower bar than a whole article: {notes:?}"
+    );
+    assert!(
+        notes.contains("第三十六、四十、四十四条按 partial 处理"),
+        "coverage.notes must name the partial articles: {notes:?}"
+    );
+    assert!(
+        notes.contains("合法检查程序") && notes.contains("退休制度"),
+        "coverage.notes must name the unmodelled sentences: {notes:?}"
+    );
+    assert!(
+        notes.contains("光荣职责") && notes.contains("不窄化该义务"),
+        "coverage.notes must explain the article 42 reading: {notes:?}"
+    );
+    assert!(
+        notes.contains("第二章第一批") && notes.contains("第四十七至五十六条"),
+        "{notes:?}"
     );
 }
 
