@@ -106,17 +106,32 @@ impl SourceRef {
     }
 }
 
-/// Escape control characters so a source field cannot inject another output
-/// line or a terminal control sequence. Newline, carriage return and tab get
-/// their short forms; every other control character becomes `\u{XXXX}`.
-fn escape_control(value: &str) -> String {
+/// Escape control and invisible formatting characters so an external value
+/// cannot inject another output line, a terminal control sequence or a
+/// bidirectional display override. Newline, carriage return and tab get their
+/// short forms; a literal backslash is doubled; every control or formatting
+/// character becomes `\u{XXXX}`.
+pub fn escape_control(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
-            ch if ch.is_control() => {
+            '\\' => escaped.push_str("\\\\"),
+            ch if ch.is_control()
+                || matches!(
+                    ch,
+                    '\u{061C}'
+                        | '\u{180E}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{2028}'
+                        | '\u{2029}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{206F}'
+                        | '\u{FEFF}'
+                ) =>
+            {
                 escaped.push_str(&format!("\\u{{{:04X}}}", ch as u32));
             }
             ch => escaped.push(ch),

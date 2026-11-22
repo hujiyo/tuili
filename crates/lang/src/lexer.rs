@@ -252,6 +252,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                                 col,
                             })
                         }
+                        c if c.is_control() => {
+                            return Err(LexError {
+                                msg: "字符串字面量内不能出现裸控制字符；请写 `\\t` 等转义".into(),
+                                line,
+                                col,
+                            })
+                        }
                         c => {
                             value.push(c);
                             i += 1;

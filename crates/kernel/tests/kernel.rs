@@ -442,6 +442,31 @@ fn source_one_line_keeps_the_existing_rendering() {
 }
 
 #[test]
+fn source_one_line_distinguishes_a_literal_backslash_n_from_a_newline() {
+    let literal = std_deduce_kernel::env::SourceRef::new("a\\nb", "");
+    let newline = std_deduce_kernel::env::SourceRef::new("a\nb", "");
+    assert_eq!(literal.one_line(), "「a\\\\nb」");
+    assert_eq!(newline.one_line(), "「a\\nb」");
+    assert_ne!(literal.one_line(), newline.one_line());
+}
+
+#[test]
+fn source_one_line_escapes_invisible_formatting_characters() {
+    let source = std_deduce_kernel::env::SourceRef::new("a\u{2028}b", "c\u{202E}d")
+        .with_version("v\u{FEFF}");
+    assert_eq!(
+        source.one_line(),
+        "「a\\u{2028}bc\\u{202E}d」（v\\u{FEFF}）"
+    );
+
+    let zero_width = std_deduce_kernel::env::SourceRef::new("a\u{200B}b", "");
+    assert_eq!(zero_width.one_line(), "「a\\u{200B}b」");
+
+    let empty = std_deduce_kernel::env::SourceRef::default();
+    assert_eq!(empty.one_line(), "「」");
+}
+
+#[test]
 fn source_full_prints_every_non_empty_field_and_escapes_control_characters() {
     let source = std_deduce_kernel::env::SourceRef {
         text: "中华人民共和国宪法".to_owned(),
