@@ -66,6 +66,11 @@ pub struct PackInfo {
     /// Namespace owned by the pack, if declared.
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Optional link to the pack's article corpus, written as
+    /// `<law-id>/<version>`. Only the format is validated; whether the corpus
+    /// file exists is decided by the command that reads it.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub corpus: Option<String>,
     /// Trust level; absence means `community`.
     #[serde(default)]
     pub trust: Trust,
@@ -138,6 +143,9 @@ impl Manifest {
         validate_version("pack.version", &self.pack.version).map_err(ManifestError::new)?;
         validate_code("pack.jurisdiction", &self.pack.jurisdiction)?;
         validate_code("pack.territory", &self.pack.territory)?;
+        if let Some(corpus) = &self.pack.corpus {
+            validate_corpus("pack.corpus", corpus).map_err(ManifestError::new)?;
+        }
         if let Some(date) = &self.pack.effective_from {
             date::validate("pack.effective_from", date).map_err(ManifestError::new)?;
         }
@@ -190,6 +198,33 @@ pub(crate) fn validate_version(field: &str, version: &str) -> Result<(), String>
         return Err(format!(
             "{field} `{version}` 格式无效：必须是至少两段的数字和点，如 1.0"
         ));
+    }
+    Ok(())
+}
+
+/// Validate a manifest's optional corpus link.
+///
+/// The link is `<law-id>/<version>`: exactly one `/`, the law id uses the pack
+/// name character set, and the version is non-empty and cannot escape the
+/// corpus directory. The file's existence is checked only when a command reads
+/// it.
+fn validate_corpus(field: &str, value: &str) -> Result<(), String> {
+    let Some((law, version)) = value.split_once('/') else {
+        return Err(format!(
+            "{field} `{value}` 格式无效：必须是 `<law-id>/<version>`"
+        ));
+    };
+    validate_name(&format!("{field} 的 law-id"), law)?;
+    if version.is_empty() {
+        return Err(format!("{field} 的 version 不能为空"));
+    }
+    if version.contains('/') || version.contains('\\') || version.contains(':') {
+        return Err(format!(
+            "{field} 的 version `{version}` 不能包含路径分隔符或冒号"
+        ));
+    }
+    if version.contains("..") {
+        return Err(format!("{field} 的 version `{version}` 不能包含 `..`"));
     }
     Ok(())
 }

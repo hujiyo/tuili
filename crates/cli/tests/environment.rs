@@ -167,7 +167,7 @@ fn env_reports_the_default_profile_and_its_official_pack() {
             "环境 profile：cn.default",
             "中国法默认环境：只含官方宪法包",
             "  信任要求：official",
-            "  cn.constitution 0.3 → 0.3.0（official，锁 sha256:",
+            "  cn.constitution 0.4 → 0.4.0（official，锁 sha256:",
             "注册表：",
             "lawpacks",
             "锁定校验：通过（1 个包）",
@@ -196,7 +196,7 @@ fn env_accepts_the_cn_alias() {
     let output = check(
         run_in(&repo_root(), &args(&["--profile", "cn", "env"])),
         PROVED,
-        &["环境 profile：cn.default", "  cn.constitution 0.3 → 0.3.0"],
+        &["环境 profile：cn.default", "  cn.constitution 0.4 → 0.4.0"],
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
@@ -227,7 +227,7 @@ fn the_facts_only_example_proves_under_the_default_environment() {
         PROVED,
         &[
             "默认环境 cn.default：已加载 1 个包",
-            "  cn.constitution@0.3.0（official）",
+            "  cn.constitution@0.4.0（official）",
             "推导已通过独立校验。",
         ],
     );
@@ -569,7 +569,7 @@ fn the_environment_is_not_preloaded_by_startup_or_listing_commands() {
     let output = check(
         run_in(&repo_root(), &args(&[":packs lawpacks"])),
         PROVED,
-        &["cn.constitution 0.3.0"],
+        &["cn.constitution 0.4.0"],
     );
     assert!(
         !stdout(&output).contains("默认环境"),

@@ -2,7 +2,8 @@
 //!
 //! A legal pack is a directory containing a `lawpack.toml` manifest. The
 //! manifest records the pack's identity, its jurisdiction and territory, its
-//! effective date range, and the files that belong to it.
+//! effective date range, the files that belong to it, and optionally a
+//! `<law-id>/<version>` link to its article corpus.
 //!
 //! This crate validates the manifest's *format* only. It does not import rules,
 //! does not check that the listed files exist, and does not judge whether the
@@ -19,9 +20,10 @@
 //! environment requires. Profiles are scanned from `<registry>/profiles/*.toml`;
 //! they never enter a pack hash or the lock.
 //!
-//! [`corpus`] holds the article-level texts used to check a rule's quotation.
-//! [`corpus::audit`] proves that a quotation matches a stored article; it does
-//! not prove that a rule is a faithful or applicable reading of the law.
+//! [`corpus`] holds the article-level texts used to check a rule's quotation
+//! and a v2 coverage ledger classifying every article. [`corpus::audit`]
+//! proves that a quotation matches a stored article; it does not prove that a
+//! rule is a faithful or applicable reading of the law.
 //!
 //! ```
 //! use std_deduce_lawpack::Manifest;

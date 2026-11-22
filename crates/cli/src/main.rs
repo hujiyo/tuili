@@ -78,12 +78,16 @@
 //! containing spaces works without further quoting. Only direct child
 //! directories containing a regular `lawpack.toml` are packs; symbolic links
 //! and pack directories that resolve outside the root are errors. Each valid
-//! pack is printed on one line with its effective range, then an optional
-//! indented description and file count. An invalid manifest is printed as
-//! `path：error` and makes the command fail (exit `2`); valid packs are still
-//! printed. Descriptions, paths and errors are escaped first, so a newline or
-//! terminal escape sequence cannot forge another line. A root with no packs
-//! prints a "not found" line and succeeds.
+//! pack is printed on one line with its effective range and trust level, then
+//! an optional indented description and file count. A manifest may link an
+//! article corpus as `<law-id>/<version>`; `:packs` reads
+//! `<registry-parent>/law/corpus/<law-id>/<version>.json` and prints its
+//! coverage counts and named ontology gaps. A missing or invalid linked corpus
+//! is printed as a diagnostic and fails the command. An invalid manifest is
+//! printed as `path：error` and makes the command fail (exit `2`); valid packs
+//! are still printed. Descriptions, paths and errors are escaped first, so a
+//! newline or terminal escape sequence cannot forge another line. A root with
+//! no packs prints a "not found" line and succeeds.
 //!
 //! After the listing, `:packs` looks for `std.lock` in the same directory. When
 //! it is there, every pack is hashed and checked against the lock: a match
@@ -121,9 +125,11 @@
 //! path is escaped before printing, so a newline in a quotation cannot forge
 //! another output line. A corpus's `text_sha256` is provenance metadata only
 //! and is neither recomputed nor verified. After the summary, each loaded
-//! corpus prints its declared `coverage`: formalized article count, indexed
-//! article count and open concepts. The declaration is printed only and is not
-//! compared with the loaded theory's rules.
+//! corpus prints its declared `coverage`: counts for formalized, partial,
+//! indexed and needs-ontology articles, the formalized and partial article
+//! numbers, the named ontology gaps with their counts, the open concepts and
+//! the note. The declaration is printed only and is not compared with the
+//! loaded theory's rules.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -189,7 +195,7 @@ use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::module::escape_path;
 use std_deduce_lang::{elab, Library, LoadReport};
-use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus};
+use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus, CoverageStatus};
 use std_deduce_lawpack::{PackInfo, LOCK_FILE};
 use std_deduce_reason::{
     certificate as reason_certificate, Conflict, Provenance, Reasoner, Resolution, Side,
@@ -1059,16 +1065,18 @@ impl Session {
         let found =
             std_deduce_lawpack::scan(&root).map_err(|error| escape_control(&error.to_string()))?;
 
+        let mut corpus_errors = 0;
         for pack in &found.packs {
             let info = &pack.manifest.pack;
             writeln!(
                 out,
-                "{} {}  {}/{}  {}  {}",
+                "{} {}  {}/{}  {}  {}  {}",
                 info.name,
                 info.version,
                 info.jurisdiction,
                 info.territory,
                 effective_range(info),
+                info.trust,
                 escape_display_path(&pack.dir)
             )
             .ok();
@@ -1077,6 +1085,17 @@ impl Session {
             }
             if !pack.manifest.files.is_empty() {
                 writeln!(out, "  文件 {} 个", pack.manifest.files.len()).ok();
+            }
+            if let Some(link) = &info.corpus {
+                match pack_corpus_path(&root, link)
+                    .and_then(|path| Corpus::read(&path).map_err(|error| error.to_string()))
+                {
+                    Ok(corpus) => write_pack_coverage(out, &corpus),
+                    Err(message) => {
+                        writeln!(out, "{}", escape_control(&message)).ok();
+                        corpus_errors += 1;
+                    }
+                }
             }
         }
         // No packs and no errors means an empty root, not a broken one.
@@ -1125,6 +1144,9 @@ impl Session {
 
         if let Some(count) = lock_errors {
             return Err(format!("{count} 个锁定校验错误"));
+        }
+        if corpus_errors > 0 {
+            return Err(format!("{corpus_errors} 个语料读取错误"));
         }
         Ok(Outcome::Proved)
     }
@@ -1179,9 +1201,10 @@ impl Session {
     /// absent hashes and hashes that could not be verified or are malformed.
     /// `text_sha256` in a corpus is provenance metadata only and is neither
     /// recomputed nor verified. After the summary, each loaded corpus prints its
-    /// declared coverage: formalized article count, indexed article count and
-    /// open concepts. The declaration is printed only; it is not compared with
-    /// the rules in the loaded theory.
+    /// declared coverage: counts for formalized, partial, indexed and
+    /// needs-ontology articles, the formalized and partial article numbers, the
+    /// named ontology gaps, the open concepts and the note. The declaration is
+    /// printed only; it is not compared with the rules in the loaded theory.
     fn audit_sources(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !self.loaded {
             writeln!(out, "语料核对：未运行（尚未加载理论）").ok();
@@ -1342,15 +1365,80 @@ fn reject_pack_namespace(
 ///
 /// Each item is wrapped in `「」`; an empty list prints `（无）` so the line does
 /// not end at a bare colon.
-fn quoted_list(items: &[String]) -> String {
+fn quoted_list<S: AsRef<str>>(items: &[S]) -> String {
     if items.is_empty() {
         return "（无）".to_owned();
     }
     items
         .iter()
-        .map(|item| format!("「{}」", escape_control(item)))
+        .map(|item| format!("「{}」", escape_control(item.as_ref())))
         .collect::<Vec<_>>()
         .join("、")
+}
+
+/// Format ontology-gap counts as `code count` joined by `、`.
+fn format_gap_counts(gaps: &[(&str, usize)]) -> String {
+    if gaps.is_empty() {
+        return "（无）".to_owned();
+    }
+    gaps.iter()
+        .map(|(gap, count)| format!("{} {count}", escape_control(gap)))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+/// Print the coverage attached to a pack's linked corpus.
+///
+/// The counts are a declaration from the corpus, not a comparison with the
+/// pack's rules. A corpus without coverage prints `覆盖：未声明`.
+fn write_pack_coverage(out: &mut impl Write, corpus: &Corpus) {
+    match &corpus.coverage {
+        Some(coverage) => {
+            writeln!(
+                out,
+                "  覆盖：形式化 {} / 部分 {} / 仅索引 {} / 待本体 {}；开放概念 {}",
+                coverage.count(CoverageStatus::Formalized),
+                coverage.count(CoverageStatus::Partial),
+                coverage.count(CoverageStatus::Indexed),
+                coverage.count(CoverageStatus::NeedsOntology),
+                coverage.open_concepts.len()
+            )
+            .ok();
+            writeln!(
+                out,
+                "  本体缺口：{}",
+                format_gap_counts(&coverage.gap_counts())
+            )
+            .ok();
+        }
+        None => {
+            writeln!(out, "  覆盖：未声明").ok();
+        }
+    }
+}
+
+/// Resolve a manifest's `corpus = "<law-id>/<version>"` link.
+///
+/// The corpus lives next to the registry, not inside it: `law/corpus` is a
+/// sibling of `lawpacks`. The manifest validator has already checked the link's
+/// shape, but the function does not unwrap that check.
+fn pack_corpus_path(root: &Path, link: &str) -> Result<PathBuf, String> {
+    let Some((law, version)) = link.split_once('/') else {
+        return Err(format!(
+            "语料链接 `{link}` 格式无效：必须是 `<law-id>/<version>`"
+        ));
+    };
+    let Some(parent) = root.parent() else {
+        return Err(format!(
+            "无法从注册表路径 `{}` 推导语料目录",
+            root.display()
+        ));
+    };
+    Ok(parent
+        .join("law")
+        .join("corpus")
+        .join(law)
+        .join(format!("{version}.json")))
 }
 
 /// Print each loaded corpus's declared coverage.
@@ -1363,15 +1451,34 @@ fn write_coverage(out: &mut impl Write, corpora: &[Corpus]) {
         let id = escape_control(&format!("{}@{}", corpus.law, corpus.version));
         match &corpus.coverage {
             Some(coverage) => {
-                let formalized = coverage.formalized.len();
-                let indexed = corpus.articles.len() - formalized;
                 writeln!(
                     out,
-                    "覆盖 {id}：形式化 {formalized} 条 / 索引 {indexed} 条 / 开放概念 {} 个",
+                    "覆盖 {id}：形式化 {} 条 / 部分 {} 条 / 仅索引 {} 条 / 待本体 {} 条 / 开放概念 {} 个",
+                    coverage.count(CoverageStatus::Formalized),
+                    coverage.count(CoverageStatus::Partial),
+                    coverage.count(CoverageStatus::Indexed),
+                    coverage.count(CoverageStatus::NeedsOntology),
                     coverage.open_concepts.len()
                 )
                 .ok();
-                writeln!(out, "  形式化：{}", quoted_list(&coverage.formalized)).ok();
+                writeln!(
+                    out,
+                    "  形式化：{}",
+                    quoted_list(&coverage.numbers(CoverageStatus::Formalized))
+                )
+                .ok();
+                writeln!(
+                    out,
+                    "  部分：{}",
+                    quoted_list(&coverage.numbers(CoverageStatus::Partial))
+                )
+                .ok();
+                writeln!(
+                    out,
+                    "  待本体：{}",
+                    format_gap_counts(&coverage.gap_counts())
+                )
+                .ok();
                 writeln!(out, "  开放概念：{}", quoted_list(&coverage.open_concepts)).ok();
                 if let Some(notes) = &coverage.notes {
                     writeln!(out, "  备注：{}", escape_control(notes)).ok();
@@ -1475,9 +1582,9 @@ fn unknown_option_message(option: &str, expected: &str) -> String {
 fn effective_range(info: &PackInfo) -> String {
     match (&info.effective_from, &info.effective_to) {
         (None, None) => "未注明".to_owned(),
-        (Some(from), Some(to)) => format!("{from}..{to}"),
-        (Some(from), None) => format!("{from}..未注明"),
-        (None, Some(to)) => format!("未注明..{to}"),
+        (Some(from), Some(to)) => format!("{from} 至 {to}"),
+        (Some(from), None) => format!("{from} 起"),
+        (None, Some(to)) => format!("{to} 止"),
     }
 }
 

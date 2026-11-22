@@ -507,3 +507,176 @@ rule cn.constitution.丧失劳动能力的公民有物质帮助权 :
          url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
          jurisdiction "CN" retrieved_at "2026-11-22"
          hash "sha256:d2e97b273880079c3caa14fe4d4a099643bc7bd8c97ec02b83b23424077c5439"
+
+-- 第四十七条：科学研究、文学艺术创作和其他文化活动的自由。
+pred cn.constitution.科学研究自由 : cn.constitution.人 → Prop
+pred cn.constitution.文学艺术创作自由 : cn.constitution.人 → Prop
+pred cn.constitution.其他文化活动自由 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有科学研究自由 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.科学研究自由 x
+  source text "宪法" locator "第四十七条" version "2018"
+         quote "中华人民共和国公民有进行科学研究、文学艺术创作和其他文化活动的自由。国家对于从事教育、科学、技术、文学、艺术和其他文化事业的公民的有益于人民的创造性工作，给以鼓励和帮助。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:f74705984653369ceaaa91ce9ec3dfdfec5b81d89158df569ed2f200f8e736d3"
+rule cn.constitution.公民有文学艺术创作自由 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.文学艺术创作自由 x
+  source text "宪法" locator "第四十七条" version "2018"
+         quote "中华人民共和国公民有进行科学研究、文学艺术创作和其他文化活动的自由。国家对于从事教育、科学、技术、文学、艺术和其他文化事业的公民的有益于人民的创造性工作，给以鼓励和帮助。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:f74705984653369ceaaa91ce9ec3dfdfec5b81d89158df569ed2f200f8e736d3"
+rule cn.constitution.公民有其他文化活动自由 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.其他文化活动自由 x
+  source text "宪法" locator "第四十七条" version "2018"
+         quote "中华人民共和国公民有进行科学研究、文学艺术创作和其他文化活动的自由。国家对于从事教育、科学、技术、文学、艺术和其他文化事业的公民的有益于人民的创造性工作，给以鼓励和帮助。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:f74705984653369ceaaa91ce9ec3dfdfec5b81d89158df569ed2f200f8e736d3"
+
+-- 第四十八条：妇女在各方面享有同男子平等的权利。
+pred cn.constitution.妇女 : cn.constitution.人 → Prop
+pred cn.constitution.妇女平等权利 : cn.constitution.人 → Prop
+
+rule cn.constitution.妇女享有平等权利 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.妇女 x
+  conclude cn.constitution.妇女平等权利 x
+  source text "宪法" locator "第四十八条" version "2018"
+         quote "中华人民共和国妇女在政治的、经济的、文化的、社会的和家庭的生活等各方面享有同男子平等的权利。\n国家保护妇女的权利和利益，实行男女同工同酬，培养和选拔妇女干部。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:9e6c2f4a4537e824ef4b3df4001ab34f6f3ed28a1fa5be2cd31fa10f5f07b3c3"
+
+-- 第五十二条：维护国家统一和全国各民族团结的义务。
+pred cn.constitution.维护国家统一和民族团结义务 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有维护国家统一和民族团结义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.维护国家统一和民族团结义务 x
+  source text "宪法" locator "第五十二条" version "2018"
+         quote "中华人民共和国公民有维护国家统一和全国各民族团结的义务。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:5f1ff5208e5a1602cd08fe1d3bae71ac33bd0b7d033912402c501eb8d4888f9f"
+
+-- 第五十三条：遵守宪法法律、保守国家秘密、爱护公共财产等义务。
+pred cn.constitution.遵守宪法法律义务 : cn.constitution.人 → Prop
+pred cn.constitution.保守国家秘密义务 : cn.constitution.人 → Prop
+pred cn.constitution.爱护公共财产义务 : cn.constitution.人 → Prop
+pred cn.constitution.遵守劳动纪律义务 : cn.constitution.人 → Prop
+pred cn.constitution.遵守公共秩序义务 : cn.constitution.人 → Prop
+pred cn.constitution.尊重社会公德义务 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有遵守宪法法律义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.遵守宪法法律义务 x
+  source text "宪法" locator "第五十三条" version "2018"
+         quote "中华人民共和国公民必须遵守宪法和法律，保守国家秘密，爱护公共财产，遵守劳动纪律，遵守公共秩序，尊重社会公德。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:a437865917fd9eb73755b862bbed3d026c1b2610ddf64428aa98a2c9a24c6bbb"
+rule cn.constitution.公民有保守国家秘密义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.保守国家秘密义务 x
+  source text "宪法" locator "第五十三条" version "2018"
+         quote "中华人民共和国公民必须遵守宪法和法律，保守国家秘密，爱护公共财产，遵守劳动纪律，遵守公共秩序，尊重社会公德。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:a437865917fd9eb73755b862bbed3d026c1b2610ddf64428aa98a2c9a24c6bbb"
+rule cn.constitution.公民有爱护公共财产义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.爱护公共财产义务 x
+  source text "宪法" locator "第五十三条" version "2018"
+         quote "中华人民共和国公民必须遵守宪法和法律，保守国家秘密，爱护公共财产，遵守劳动纪律，遵守公共秩序，尊重社会公德。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:a437865917fd9eb73755b862bbed3d026c1b2610ddf64428aa98a2c9a24c6bbb"
+rule cn.constitution.公民有遵守劳动纪律义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.遵守劳动纪律义务 x
+  source text "宪法" locator "第五十三条" version "2018"
+         quote "中华人民共和国公民必须遵守宪法和法律，保守国家秘密，爱护公共财产，遵守劳动纪律，遵守公共秩序，尊重社会公德。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:a437865917fd9eb73755b862bbed3d026c1b2610ddf64428aa98a2c9a24c6bbb"
+rule cn.constitution.公民有遵守公共秩序义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.遵守公共秩序义务 x
+  source text "宪法" locator "第五十三条" version "2018"
+         quote "中华人民共和国公民必须遵守宪法和法律，保守国家秘密，爱护公共财产，遵守劳动纪律，遵守公共秩序，尊重社会公德。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:a437865917fd9eb73755b862bbed3d026c1b2610ddf64428aa98a2c9a24c6bbb"
+rule cn.constitution.公民有尊重社会公德义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.尊重社会公德义务 x
+  source text "宪法" locator "第五十三条" version "2018"
+         quote "中华人民共和国公民必须遵守宪法和法律，保守国家秘密，爱护公共财产，遵守劳动纪律，遵守公共秩序，尊重社会公德。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:a437865917fd9eb73755b862bbed3d026c1b2610ddf64428aa98a2c9a24c6bbb"
+
+-- 第五十四条：维护祖国的安全、荣誉和利益的义务。
+pred cn.constitution.维护祖国安全荣誉利益义务 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有维护祖国安全荣誉利益义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.维护祖国安全荣誉利益义务 x
+  source text "宪法" locator "第五十四条" version "2018"
+         quote "中华人民共和国公民有维护祖国的安全、荣誉和利益的义务，不得有危害祖国的安全、荣誉和利益的行为。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:f3f78137076f70f94bfb964c7d4dc5ec89f2195d3dbe82bc08e2a54d879f30d4"
+
+-- 第五十五条：保卫祖国、抵抗侵略的职责和依法服兵役、参加民兵组织的义务。
+pred cn.constitution.保卫祖国抵抗侵略职责 : cn.constitution.人 → Prop
+pred cn.constitution.依法服兵役参加民兵组织义务 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有保卫祖国抵抗侵略职责 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.保卫祖国抵抗侵略职责 x
+  source text "宪法" locator "第五十五条" version "2018"
+         quote "保卫祖国、抵抗侵略是中华人民共和国每一个公民的神圣职责。\n依照法律服兵役和参加民兵组织是中华人民共和国公民的光荣义务。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:9ff8a7680c254c586abae1b25320a17dfb062f831f0ffce5cdbd603eb8c374d6"
+rule cn.constitution.公民有依法服兵役参加民兵组织义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.依法服兵役参加民兵组织义务 x
+  source text "宪法" locator "第五十五条" version "2018"
+         quote "保卫祖国、抵抗侵略是中华人民共和国每一个公民的神圣职责。\n依照法律服兵役和参加民兵组织是中华人民共和国公民的光荣义务。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:9ff8a7680c254c586abae1b25320a17dfb062f831f0ffce5cdbd603eb8c374d6"
+
+-- 第五十六条：依照法律纳税的义务。
+pred cn.constitution.纳税义务 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有纳税义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.纳税义务 x
+  source text "宪法" locator "第五十六条" version "2018"
+         quote "中华人民共和国公民有依照法律纳税的义务。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:37e5d76f816c58feb55373ac5aa987147983b7dc808c8c615f7d5e5cfb9d37d8"

@@ -20,6 +20,9 @@ const QUOTE_39: &str = "中华人民共和国公民的住宅不受侵犯。禁�
 const ARTICLE_39_SHA256: &str =
     "sha256:b0102d49a2563dde914e6247384e97403529aeb110f467434e620d1d08735fdb";
 
+const COVERAGE_ONE: &str = r#"{ "open_concepts": ["非法、搜查", "住宅"], "notes": "形式化声明", "gaps": {}, "articles": [{ "number": "第三十九条", "status": "formalized", "rules": ["cn.test.规则"] }] }"#;
+const COVERAGE_ONE_EMPTY: &str = r#"{ "open_concepts": [], "gaps": {}, "articles": [{ "number": "第三十九条", "status": "formalized", "rules": ["cn.test.规则"] }] }"#;
+
 fn corpus_json_for(
     law: &str,
     title: &str,
@@ -33,7 +36,7 @@ fn corpus_json_for(
         .unwrap_or_default();
     format!(
         r#"{{
-  "format": 1,
+  "format": 2,
   "law": "{law}",
   "title": "{title}",
   "aliases": {aliases},
@@ -124,20 +127,23 @@ fn line_starting_with(out: &str, prefix: char) -> &str {
 fn the_audit_prints_declared_coverage() {
     let temp = TempDir::new("coverage");
     let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
-    let coverage = r#"{ "formalized": ["第三十九条"], "open_concepts": ["非法、搜查", "住宅"], "notes": "形式化声明" }"#;
     temp.corpus(
         "corpus/cn.constitution/2018.json",
-        &corpus_json_with_coverage("2018", ARTICLE_39_JSON, coverage),
+        &corpus_json_with_coverage("2018", ARTICLE_39_JSON, COVERAGE_ONE),
     );
 
     let output = session(&theory, &temp.path().join("corpus"));
     assert_exit(&output, PROVED);
     let out = stdout(&output);
     assert!(
-        out.contains("覆盖 cn.constitution@2018：形式化 1 条 / 索引 0 条 / 开放概念 2 个"),
+        out.contains(
+            "覆盖 cn.constitution@2018：形式化 1 条 / 部分 0 条 / 仅索引 0 条 / 待本体 0 条 / 开放概念 2 个"
+        ),
         "{out}"
     );
     assert!(out.contains("  形式化：「第三十九条」"), "{out}");
+    assert!(out.contains("  部分：（无）"), "{out}");
+    assert!(out.contains("  待本体：（无）"), "{out}");
     assert!(
         out.contains("  开放概念：「非法、搜查」、「住宅」"),
         "{out}"
@@ -165,10 +171,9 @@ fn the_audit_reports_undeclared_coverage() {
 fn the_audit_prints_coverage_for_every_loaded_corpus_in_order() {
     let temp = TempDir::new("coverage-multiple");
     let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
-    let coverage = r#"{ "formalized": ["第三十九条"], "open_concepts": [] }"#;
     temp.corpus(
         "corpus/cn.constitution/2018.json",
-        &corpus_json_with_coverage("2018", ARTICLE_39_JSON, coverage),
+        &corpus_json_with_coverage("2018", ARTICLE_39_JSON, COVERAGE_ONE_EMPTY),
     );
     temp.corpus(
         "corpus/cn.other-law/2018.json",
@@ -186,7 +191,7 @@ fn the_audit_prints_coverage_for_every_loaded_corpus_in_order() {
     assert_exit(&output, PROVED);
     let out = stdout(&output);
     let constitution = out
-        .find("覆盖 cn.constitution@2018：形式化 1 条 / 索引 0 条 / 开放概念 0 个")
+        .find("覆盖 cn.constitution@2018：形式化 1 条 / 部分 0 条 / 仅索引 0 条 / 待本体 0 条 / 开放概念 0 个")
         .unwrap_or_else(|| panic!("missing the constitution coverage line:\n{out}"));
     let other = out
         .find("覆盖 cn.other-law@2018：未声明")
@@ -207,7 +212,7 @@ fn coverage_indexed_count_uses_the_article_total() {
     {{ "number": "第二条", "text": "乙" }},
     {{ "number": "第三十九条", "text": "{ARTICLE_39_JSON}" }}"#
     );
-    let coverage = r#"{ "formalized": ["第三十九条"], "open_concepts": [] }"#;
+    let coverage = r#"{ "open_concepts": [], "gaps": {}, "articles": [{ "number": "第一条", "status": "indexed" }, { "number": "第二条", "status": "indexed" }, { "number": "第三十九条", "status": "formalized", "rules": ["cn.test.规则"] }] }"#;
     temp.corpus(
         "corpus/cn.constitution/2018.json",
         &corpus_json_for(
@@ -224,10 +229,13 @@ fn coverage_indexed_count_uses_the_article_total() {
     assert_exit(&output, PROVED);
     let out = stdout(&output);
     assert!(
-        out.contains("覆盖 cn.constitution@2018：形式化 1 条 / 索引 2 条 / 开放概念 0 个"),
+        out.contains(
+            "覆盖 cn.constitution@2018：形式化 1 条 / 部分 0 条 / 仅索引 2 条 / 待本体 0 条 / 开放概念 0 个"
+        ),
         "{out}"
     );
     assert!(out.contains("  形式化：「第三十九条」"), "{out}");
+    assert!(out.contains("  部分：（无）"), "{out}");
     assert!(out.contains("  开放概念：（无）"), "{out}");
 }
 
@@ -235,7 +243,7 @@ fn coverage_indexed_count_uses_the_article_total() {
 fn the_audit_escapes_coverage_fields() {
     let temp = TempDir::new("coverage-escaped");
     let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
-    let coverage = "{\n  \"formalized\": [\"第三十九条\"],\n  \"open_concepts\": [\"非法\u{2028}住宅\"],\n  \"notes\": \"备注\\u001b[31m\"\n}";
+    let coverage = "{\n  \"open_concepts\": [\"非法\u{2028}住宅\"],\n  \"notes\": \"备注\\u001b[31m\",\n  \"gaps\": {},\n  \"articles\": [{ \"number\": \"第三十九条\", \"status\": \"formalized\", \"rules\": [\"cn.test.规则\"] }]\n}";
     temp.corpus(
         "corpus/cn.constitution/2018.json",
         &corpus_json_with_coverage("2018", ARTICLE_39_JSON, coverage),
@@ -554,11 +562,7 @@ fn a_missing_quote_does_not_participate_and_alone_fails() {
     );
     temp.corpus(
         "corpus/cn.constitution/2018.json",
-        &corpus_json_with_coverage(
-            "2018",
-            ARTICLE_39_JSON,
-            r#"{ "formalized": ["第三十九条"], "open_concepts": [] }"#,
-        ),
+        &corpus_json_with_coverage("2018", ARTICLE_39_JSON, COVERAGE_ONE_EMPTY),
     );
 
     let output = session(&theory, &temp.path().join("corpus"));
@@ -575,9 +579,13 @@ fn a_missing_quote_does_not_participate_and_alone_fails() {
         "{out}"
     );
     assert!(
-        out.contains("覆盖 cn.constitution@2018：形式化 1 条 / 索引 0 条 / 开放概念 0 个"),
+        out.contains(
+            "覆盖 cn.constitution@2018：形式化 1 条 / 部分 0 条 / 仅索引 0 条 / 待本体 0 条 / 开放概念 0 个"
+        ),
         "{out}"
     );
+    assert!(out.contains("  部分：（无）"), "{out}");
+    assert!(out.contains("  待本体：（无）"), "{out}");
     assert!(out.contains("  开放概念：（无）"), "{out}");
     assert!(!out.contains("  备注："), "{out}");
     assert!(out.contains("没有可核对的引文"), "{out}");
@@ -726,7 +734,7 @@ fn an_unknown_corpus_field_exits_two() {
     let temp = TempDir::new("unknown-field");
     let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
     let body = corpus_json("2018", ARTICLE_39_JSON)
-        .replace("\"format\": 1,", "\"format\": 1,\n  \"bogus\": 1,");
+        .replace("\"format\": 2,", "\"format\": 2,\n  \"bogus\": 1,");
     temp.corpus("corpus/cn.constitution/2018.json", &body);
 
     let output = session(&theory, &temp.path().join("corpus"));

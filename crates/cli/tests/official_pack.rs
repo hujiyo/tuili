@@ -105,9 +105,11 @@ fn the_official_pack_is_listed_and_its_lock_verifies() {
         run_in_repo(&[":packs lawpacks".to_string()]),
         PROVED,
         &[
-            "cn.constitution 0.3.0",
-            "中华人民共和国宪法官方包 v0.3.0（第三十三至四十六条中的选定基本权利；非完整形式化）",
+            "cn.constitution 0.4.0  CN/CN  1982-12-04 起  official  ",
+            "中华人民共和国宪法官方包 v0.4.0（第三十三至五十六条中的选定权利与义务；非完整形式化）",
             "文件 1 个",
+            "覆盖：形式化 14 / 部分 7 / 仅索引 17 / 待本体 105；开放概念 49",
+            "本体缺口：state_organs 82、property_economy 11、legal_norms 3、procedure 3、territory 2、deontic_harm 1、kinship 1、military 1、protection_remedy 1",
             "锁定校验：通过（1 个包）",
         ],
     );
@@ -125,14 +127,14 @@ fn inspect_marks_pack_declarations_with_the_pack_version() {
         &[
             "rule  cn.constitution.非法搜查侵犯住宅",
             "pred  cn.constitution.公民 : cn.constitution.人 → Prop",
-            "[cn.constitution@0.3.0]",
+            "[cn.constitution@0.4.0]",
             "引文：中华人民共和国公民的住宅不受侵犯。禁止非法搜查或者非法侵入公民的住宅。",
         ],
     );
     let out = stdout(&output);
-    // The pack contributes 2 sorts + 54 predicates + 41 rules = 97 declarations,
+    // The pack contributes 2 sorts + 70 predicates + 56 rules = 128 declarations,
     // all marked with the locked version; the case objects are not.
-    assert_eq!(out.matches("[cn.constitution@0.3.0]").count(), 97, "{out}");
+    assert_eq!(out.matches("[cn.constitution@0.4.0]").count(), 128, "{out}");
 }
 
 /// A user file may not declare into the official pack's namespace. The ledger
@@ -167,9 +169,9 @@ fn a_file_cannot_declare_into_a_loaded_pack_namespace() {
         "a rejected declaration must not enter the ledger:\n{out}"
     );
     assert_eq!(
-        out.matches("[cn.constitution@0.3.0]").count(),
-        97,
-        "the pack's 97 declarations still carry the pack suffix:\n{out}"
+        out.matches("[cn.constitution@0.4.0]").count(),
+        128,
+        "the pack's 128 declarations still carry the pack suffix:\n{out}"
     );
 }
 
@@ -193,11 +195,20 @@ fn audit_matches_the_quotations_inside_the_official_pack() {
             "✓ 「宪法第四十四条」← cn.constitution@2018",
             "✓ 「宪法第四十五条」← cn.constitution@2018",
             "✓ 「宪法第四十六条」← cn.constitution@2018",
-            "核对 41 条带引文来源：命中 41，不一致 0，未核对 0；另有 2 条来源无引文（不参与核对）。",
-            "条文哈希：41 条已固定并核验，0 条未固定，0 条未核验或格式非法。",
-            "覆盖 cn.constitution@2018：形式化 14 条 / 索引 129 条 / 开放概念 29 个",
-            "  形式化：「第三十三条」、「第三十四条」、「第三十五条」、「第三十六条」、「第三十七条」、「第三十八条」、「第三十九条」、「第四十条」、「第四十一条」、「第四十二条」、「第四十三条」、「第四十四条」、「第四十五条」、「第四十六条」",
-            "  备注：官方包 v0.3.0 的 coverage.formalized 表示每条至少一条核心操作性句子已写成规则，不等于整条完整形式化",
+            "✓ 「宪法第四十七条」← cn.constitution@2018",
+            "✓ 「宪法第四十八条」← cn.constitution@2018",
+            "✓ 「宪法第五十二条」← cn.constitution@2018",
+            "✓ 「宪法第五十三条」← cn.constitution@2018",
+            "✓ 「宪法第五十四条」← cn.constitution@2018",
+            "✓ 「宪法第五十五条」← cn.constitution@2018",
+            "✓ 「宪法第五十六条」← cn.constitution@2018",
+            "核对 56 条带引文来源：命中 56，不一致 0，未核对 0；另有 2 条来源无引文（不参与核对）。",
+            "条文哈希：56 条已固定并核验，0 条未固定，0 条未核验或格式非法。",
+            "覆盖 cn.constitution@2018：形式化 14 条 / 部分 7 条 / 仅索引 17 条 / 待本体 105 条 / 开放概念 49 个",
+            "  形式化：「第三十三条」、「第三十四条」、「第三十五条」、「第三十七条」、「第三十八条」、「第三十九条」、「第四十一条」、「第四十二条」、「第四十三条」、「第四十五条」、「第四十六条」、「第五十二条」、「第五十三条」、「第五十六条」",
+            "  部分：「第三十六条」、「第四十条」、「第四十四条」、「第四十七条」、「第四十八条」、「第五十四条」、「第五十五条」",
+            "  待本体：state_organs 82、property_economy 11、legal_norms 3、procedure 3、territory 2、deontic_harm 1、kinship 1、military 1、protection_remedy 1",
+            "  备注：coverage.articles 是整个宪法的 143 条台账",
         ],
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
@@ -356,6 +367,77 @@ axiom 张三年老 : cn.constitution.年老 张三
         out.matches("推导已通过独立校验。").count(),
         16,
         "all sixteen queries must pass both certificate checks:\n{out}"
+    );
+}
+
+/// The second-chapter tail adds three freedoms, one equality right and eleven
+/// duties. Each of the 15 new rules gets its own direct query in one facts-only
+/// case; every target predicate is unique to its rule.
+#[test]
+fn a_facts_only_case_proves_the_second_chapter_tail() {
+    let temp = TempDir::new("chapter-two-tail");
+    let case = temp.path().join("case.std");
+    fs::write(
+        &case,
+        r#"import cn.constitution
+
+obj 张三 : cn.constitution.人
+
+axiom 张三有中国国籍 : cn.constitution.中国国籍 张三
+  source text "测试案情" locator "国籍"
+
+axiom 张三是妇女 : cn.constitution.妇女 张三
+  source text "测试案情" locator "妇女"
+"#,
+    )
+    .expect("write the case file");
+
+    let output = check(
+        run_in(
+            &repo_root(),
+            &[
+                case.display().to_string(),
+                ":why cn.constitution.科学研究自由 张三".to_string(),
+                ":why cn.constitution.文学艺术创作自由 张三".to_string(),
+                ":why cn.constitution.其他文化活动自由 张三".to_string(),
+                ":why cn.constitution.妇女平等权利 张三".to_string(),
+                ":why cn.constitution.维护国家统一和民族团结义务 张三".to_string(),
+                ":why cn.constitution.遵守宪法法律义务 张三".to_string(),
+                ":why cn.constitution.保守国家秘密义务 张三".to_string(),
+                ":why cn.constitution.爱护公共财产义务 张三".to_string(),
+                ":why cn.constitution.遵守劳动纪律义务 张三".to_string(),
+                ":why cn.constitution.遵守公共秩序义务 张三".to_string(),
+                ":why cn.constitution.尊重社会公德义务 张三".to_string(),
+                ":why cn.constitution.维护祖国安全荣誉利益义务 张三".to_string(),
+                ":why cn.constitution.保卫祖国抵抗侵略职责 张三".to_string(),
+                ":why cn.constitution.依法服兵役参加民兵组织义务 张三".to_string(),
+                ":why cn.constitution.纳税义务 张三".to_string(),
+            ],
+        ),
+        PROVED,
+        &[
+            "▸ cn.constitution.科学研究自由 张三  ⟨cn.constitution.公民有科学研究自由⟩",
+            "▸ cn.constitution.文学艺术创作自由 张三  ⟨cn.constitution.公民有文学艺术创作自由⟩",
+            "▸ cn.constitution.其他文化活动自由 张三  ⟨cn.constitution.公民有其他文化活动自由⟩",
+            "▸ cn.constitution.妇女平等权利 张三  ⟨cn.constitution.妇女享有平等权利⟩",
+            "▸ cn.constitution.维护国家统一和民族团结义务 张三  ⟨cn.constitution.公民有维护国家统一和民族团结义务⟩",
+            "▸ cn.constitution.遵守宪法法律义务 张三  ⟨cn.constitution.公民有遵守宪法法律义务⟩",
+            "▸ cn.constitution.保守国家秘密义务 张三  ⟨cn.constitution.公民有保守国家秘密义务⟩",
+            "▸ cn.constitution.爱护公共财产义务 张三  ⟨cn.constitution.公民有爱护公共财产义务⟩",
+            "▸ cn.constitution.遵守劳动纪律义务 张三  ⟨cn.constitution.公民有遵守劳动纪律义务⟩",
+            "▸ cn.constitution.遵守公共秩序义务 张三  ⟨cn.constitution.公民有遵守公共秩序义务⟩",
+            "▸ cn.constitution.尊重社会公德义务 张三  ⟨cn.constitution.公民有尊重社会公德义务⟩",
+            "▸ cn.constitution.维护祖国安全荣誉利益义务 张三  ⟨cn.constitution.公民有维护祖国安全荣誉利益义务⟩",
+            "▸ cn.constitution.保卫祖国抵抗侵略职责 张三  ⟨cn.constitution.公民有保卫祖国抵抗侵略职责⟩",
+            "▸ cn.constitution.依法服兵役参加民兵组织义务 张三  ⟨cn.constitution.公民有依法服兵役参加民兵组织义务⟩",
+            "▸ cn.constitution.纳税义务 张三  ⟨cn.constitution.公民有纳税义务⟩",
+        ],
+    );
+    let out = stdout(&output);
+    assert_eq!(
+        out.matches("推导已通过独立校验。").count(),
+        15,
+        "all fifteen queries must pass both certificate checks:\n{out}"
     );
 }
 
@@ -657,6 +739,10 @@ fn copy_official_pack(root: &Path) {
     copy_file(
         &source.join("cn.constitution/constitution.std"),
         &target.join("cn.constitution/constitution.std"),
+    );
+    copy_file(
+        &repo_root().join("law/corpus/cn.constitution/2018.json"),
+        &root.join("law/corpus/cn.constitution/2018.json"),
     );
 }
 

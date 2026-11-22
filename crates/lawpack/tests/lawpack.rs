@@ -16,6 +16,7 @@ namespace = "cn.constitution"
 effective_from = "1982-12-04"
 effective_to = "2018-03-11"
 description = "示例"
+corpus = "cn.constitution/2018"
 
 [[files]]
 path = "constitution.std"
@@ -55,6 +56,7 @@ fn valid_manifest_parses_all_fields() {
     assert_eq!(pack.effective_from.as_deref(), Some("1982-12-04"));
     assert_eq!(pack.effective_to.as_deref(), Some("2018-03-11"));
     assert_eq!(pack.description.as_deref(), Some("示例"));
+    assert_eq!(pack.corpus.as_deref(), Some("cn.constitution/2018"));
     assert_eq!(pack.trust, Trust::Community);
     assert_eq!(manifest.files.len(), 2);
     assert_eq!(manifest.files[0].path.as_deref(), Some("constitution.std"));
@@ -67,6 +69,37 @@ fn valid_manifest_parses_all_fields() {
 fn files_are_optional() {
     let manifest = Manifest::parse(&manifest_with("")).expect("files may be absent");
     assert!(manifest.files.is_empty());
+}
+
+#[test]
+fn corpus_links_are_optional_and_format_checked() {
+    let manifest = Manifest::parse(&manifest_with("")).expect("corpus may be absent");
+    assert_eq!(manifest.pack.corpus, None);
+
+    let manifest =
+        Manifest::parse(&manifest_with("corpus = \"cn.constitution/2018\"")).expect("valid link");
+    assert_eq!(
+        manifest.pack.corpus.as_deref(),
+        Some("cn.constitution/2018")
+    );
+
+    let manifest = Manifest::parse(&manifest_with("corpus = \"\"")).expect("empty means absent");
+    assert_eq!(manifest.pack.corpus, None);
+
+    for (link, expected) in [
+        ("cn.constitution", "格式无效"),
+        ("cn.constitution/2018/extra", "路径分隔符"),
+        ("cn.constitution/", "不能为空"),
+        ("/2018", "law-id"),
+        ("CN.constitution/2018", "law-id"),
+        ("cn.constitution/..", "`..`"),
+    ] {
+        let error = parse_error(&manifest_with(&format!("corpus = \"{link}\"")));
+        assert!(error.contains(expected), "`{link}`: {error}");
+    }
+
+    let error = parse_error(&manifest_with("corpus = \"cn.constitution/2018\\\\x\""));
+    assert!(error.contains("路径分隔符"), "{error}");
 }
 
 #[test]

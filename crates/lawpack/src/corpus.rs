@@ -9,9 +9,12 @@
 //! Corpus files are static repository data; this crate never downloads one.
 //! Parsing is strict: `deny_unknown_fields`, a supported format version, real
 //! calendar dates, a well-formed `sha256:` value, a non-empty article list,
-//! unique article numbers and, when present, a coverage declaration whose
-//! `formalized` numbers exist and whose lists contain no blanks, padding or
-//! duplicates. A broken corpus is an error, never a skipped file.
+//! unique article numbers and, when present, a coverage ledger. The ledger has
+//! exactly one entry per article in corpus order; each entry is `formalized`,
+//! `partial`, `indexed` or `needs_ontology`, with rules only for the first two,
+//! a note for `partial`, and a named gap for `needs_ontology`. Gap keys must be
+//! used by at least one article, and a rule name may appear under only one
+//! article. A broken corpus is an error, never a skipped file.
 //!
 //! The audit reads exactly the fields of a rule's `source` that bear on the
 //! quotation: the instrument name, the article number, the version, the quoted
@@ -28,7 +31,7 @@ use sha2::{Digest, Sha256};
 use crate::{date, hex};
 
 /// The corpus format version this crate understands.
-pub const CORPUS_FORMAT: u32 = 1;
+pub const CORPUS_FORMAT: u32 = 2;
 
 /// The corpus file extension.
 const CORPUS_EXTENSION: &str = "json";
@@ -68,8 +71,9 @@ pub struct Corpus {
     /// corpus. Never used for matching.
     #[serde(default)]
     pub notes: Option<String>,
-    /// Declared coverage of this corpus. It is a statement, not a check: the
-    /// audit prints it but does not compare it with the rules in an environment.
+    /// Declared v2 coverage ledger of this corpus. It is a statement, not a
+    /// check: the audit and `:packs` print it but do not compare it with the
+    /// rules in an environment.
     #[serde(default)]
     pub coverage: Option<Coverage>,
     /// The articles, in the order the corpus lists them.
@@ -78,20 +82,56 @@ pub struct Corpus {
 
 /// A corpus's declared coverage.
 ///
-/// `formalized` lists article numbers that a rule in this repository already
-/// formalises; every other article is held in the corpus as an index only.
-/// `open_concepts` lists concepts that need a human reading. The declaration is
-/// not verified against an environment.
+/// The ledger has one [`ArticleCoverage`] per article, in corpus order. Its
+/// counts are declarations, not a check: the audit and `:packs` print them but
+/// do not compare them with the rules in an environment.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Coverage {
-    /// Article numbers formalised by at least one rule in this repository.
-    pub formalized: Vec<String>,
     /// Concepts that need a human reading; may be empty.
     pub open_concepts: Vec<String>,
-    /// Free-form explanation of the coverage counts.
+    /// Free-form explanation of the coverage counts and semantics.
     #[serde(default)]
     pub notes: Option<String>,
+    /// Named ontology gaps. Every key must be used by a `needs_ontology`
+    /// article, and every `needs_ontology` article must name an existing key.
+    pub gaps: BTreeMap<String, String>,
+    /// One ledger entry per corpus article, in the same order.
+    pub articles: Vec<ArticleCoverage>,
+}
+
+/// How much of one article is covered by rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageStatus {
+    /// At least one core operative sentence is written as a rule.
+    Formalized,
+    /// Rules cover some sentences; a substantive clause remains open.
+    Partial,
+    /// The article is indexed only, with no formalization claim.
+    Indexed,
+    /// A named ontology is missing; this is not an omission.
+    NeedsOntology,
+}
+
+/// One article's entry in the coverage ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArticleCoverage {
+    /// Article number, matching the corpus article at the same position.
+    pub number: String,
+    /// Coverage status.
+    pub status: CoverageStatus,
+    /// Rules formalising this article. Required and non-empty for
+    /// `formalized` and `partial`; forbidden for the other two statuses.
+    #[serde(default)]
+    pub rules: Vec<String>,
+    /// Substantive clause left unmodelled. Required for `partial`.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Named ontology gap. Required for `needs_ontology`.
+    #[serde(default)]
+    pub gap: Option<String>,
 }
 
 /// One article of a corpus.
@@ -247,34 +287,127 @@ impl Corpus {
             }
         }
         if let Some(coverage) = &self.coverage {
-            coverage.validate(&numbers)?;
+            coverage.validate(&self.articles)?;
         }
         Ok(())
     }
 }
 
 impl Coverage {
-    /// Validate the declaration against the corpus's normalized article
-    /// numbers. An unknown or repeated formalized number is an error, never a
-    /// number the audit silently ignores.
-    fn validate(&self, article_numbers: &BTreeSet<String>) -> Result<(), String> {
-        if self.formalized.is_empty() {
-            return Err("coverage.formalized 不能为空：至少声明一条已形式化的条文".to_owned());
+    /// Validate the ledger against the corpus articles.
+    ///
+    /// The ledger must match the article list one-to-one and in order, every
+    /// status must carry exactly the fields it allows, every gap key must be
+    /// used, and a rule may belong to only one article.
+    fn validate(&self, articles: &[Article]) -> Result<(), String> {
+        if self.articles.len() != articles.len() {
+            return Err(format!(
+                "coverage.articles 有 {} 条，articles 有 {} 条；必须一一对应",
+                self.articles.len(),
+                articles.len()
+            ));
         }
         let mut seen = BTreeSet::new();
-        for (index, number) in self.formalized.iter().enumerate() {
-            require_text(&format!("coverage.formalized[{index}]"), number)?;
-            require_unpadded(&format!("coverage.formalized[{index}]"), number)?;
-            let normalized = normalize_space(number);
+        for (index, (entry, article)) in self.articles.iter().zip(articles).enumerate() {
+            let field = format!("coverage.articles[{index}].number");
+            require_text(&field, &entry.number)?;
+            require_unpadded(&field, &entry.number)?;
+            let normalized = normalize_space(&entry.number);
             if !seen.insert(normalized.clone()) {
-                return Err(format!("coverage.formalized 条号 `{number}` 重复"));
+                return Err(format!("coverage.articles 条号 `{}` 重复", entry.number));
             }
-            if !article_numbers.contains(&normalized) {
+            if normalized != normalize_space(&article.number) {
                 return Err(format!(
-                    "coverage.formalized 条号 `{number}` 不在 articles 中"
+                    "coverage.articles[{index}] 条号 `{}` 与 articles[{index}] 条号 `{}` 不符；必须一一对应且顺序一致",
+                    entry.number, article.number
                 ));
             }
         }
+
+        let mut formalized = 0;
+        for (index, entry) in self.articles.iter().enumerate() {
+            let field = format!("coverage.articles[{index}]");
+            match entry.status {
+                CoverageStatus::Formalized => {
+                    formalized += 1;
+                    require_rules(&field, &entry.rules)?;
+                    if entry.gap.is_some() {
+                        return Err(format!("{field} 是 formalized，不能声明 gap"));
+                    }
+                }
+                CoverageStatus::Partial => {
+                    require_rules(&field, &entry.rules)?;
+                    if entry.gap.is_some() {
+                        return Err(format!("{field} 是 partial，不能声明 gap"));
+                    }
+                    let note = entry
+                        .note
+                        .as_deref()
+                        .ok_or_else(|| format!("{field} 是 partial，必须声明非空 note"))?;
+                    require_text(&format!("{field}.note"), note)?;
+                }
+                CoverageStatus::Indexed => {
+                    if !entry.rules.is_empty() {
+                        return Err(format!("{field} 是 indexed，不能声明 rules"));
+                    }
+                    if entry.gap.is_some() {
+                        return Err(format!("{field} 是 indexed，不能声明 gap"));
+                    }
+                }
+                CoverageStatus::NeedsOntology => {
+                    if !entry.rules.is_empty() {
+                        return Err(format!("{field} 是 needs_ontology，不能声明 rules"));
+                    }
+                    let gap = entry
+                        .gap
+                        .as_deref()
+                        .ok_or_else(|| format!("{field} 是 needs_ontology，必须声明非空 gap"))?;
+                    require_text(&format!("{field}.gap"), gap)?;
+                    if !self.gaps.contains_key(gap) {
+                        return Err(format!("{field} 引用了未定义的 gap `{gap}`"));
+                    }
+                }
+            }
+        }
+        if formalized == 0 {
+            return Err("coverage.articles 至少要有一条 formalized".to_owned());
+        }
+
+        let mut rules: BTreeMap<&str, &str> = BTreeMap::new();
+        for entry in &self.articles {
+            for rule in &entry.rules {
+                require_text("coverage.articles.rules", rule)?;
+                require_unpadded("coverage.articles.rules", rule)?;
+                if let Some(first) = rules.insert(rule.as_str(), entry.number.as_str()) {
+                    return Err(format!(
+                        "规则 `{rule}` 同时被 `{first}` 和 `{}` 引用；一条规则只能引用一个条号",
+                        entry.number
+                    ));
+                }
+            }
+        }
+
+        let mut used_gaps = BTreeSet::new();
+        for (gap, description) in &self.gaps {
+            require_text("coverage.gaps 的键", gap)?;
+            require_unpadded("coverage.gaps 的键", gap)?;
+            require_text(&format!("coverage.gaps.{gap}"), description)?;
+        }
+        for entry in &self.articles {
+            if entry.status == CoverageStatus::NeedsOntology {
+                if let Some(gap) = &entry.gap {
+                    used_gaps.insert(gap.as_str());
+                }
+            }
+        }
+        for gap in self.gaps.keys() {
+            if !used_gaps.contains(gap.as_str()) {
+                return Err(format!(
+                    "coverage.gaps 中的 `{gap}` 没有被任何 needs_ontology 条文引用"
+                ));
+            }
+        }
+
         let mut concepts = BTreeSet::new();
         for (index, concept) in self.open_concepts.iter().enumerate() {
             require_text(&format!("coverage.open_concepts[{index}]"), concept)?;
@@ -284,6 +417,47 @@ impl Coverage {
                 return Err(format!("coverage.open_concepts 概念 `{concept}` 重复"));
             }
         }
+        Ok(())
+    }
+
+    /// How many articles have `status` in the ledger.
+    pub fn count(&self, status: CoverageStatus) -> usize {
+        self.articles
+            .iter()
+            .filter(|entry| entry.status == status)
+            .count()
+    }
+
+    /// The article numbers with `status`, in ledger order.
+    pub fn numbers(&self, status: CoverageStatus) -> Vec<&str> {
+        self.articles
+            .iter()
+            .filter(|entry| entry.status == status)
+            .map(|entry| entry.number.as_str())
+            .collect()
+    }
+
+    /// How many `needs_ontology` articles name each gap, ordered by descending
+    /// count and then by gap code, so the display is stable.
+    pub fn gap_counts(&self) -> Vec<(&str, usize)> {
+        let mut counts: BTreeMap<&str, usize> =
+            self.gaps.keys().map(|gap| (gap.as_str(), 0)).collect();
+        for entry in &self.articles {
+            if let Some(gap) = &entry.gap {
+                *counts.entry(gap.as_str()).or_insert(0) += 1;
+            }
+        }
+        let mut rows: Vec<(&str, usize)> = counts.into_iter().collect();
+        rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+        rows
+    }
+}
+
+/// Require a non-empty rule list for `formalized` and `partial`.
+fn require_rules(field: &str, rules: &[String]) -> Result<(), String> {
+    if rules.is_empty() {
+        Err(format!("{field} 必须有非空 rules"))
+    } else {
         Ok(())
     }
 }

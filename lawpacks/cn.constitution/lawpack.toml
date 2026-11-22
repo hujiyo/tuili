@@ -1,13 +1,14 @@
-# 中华人民共和国宪法官方包 v0.3.0（第三十三至四十六条中的选定基本权利；非完整形式化）。
+# 中华人民共和国宪法官方包 v0.4.0（第三十三至五十六条中的选定权利与义务；非完整形式化）。
 [pack]
 name = "cn.constitution"
-version = "0.3.0"
+version = "0.4.0"
 jurisdiction = "CN"
 territory = "CN"
 namespace = "cn.constitution"
 trust = "official"
 effective_from = "1982-12-04"
-description = "中华人民共和国宪法官方包 v0.3.0（第三十三至四十六条中的选定基本权利；非完整形式化）"
+description = "中华人民共和国宪法官方包 v0.4.0（第三十三至五十六条中的选定权利与义务；非完整形式化）"
+corpus = "cn.constitution/2018"
 
 [[files]]
 path = "constitution.std"

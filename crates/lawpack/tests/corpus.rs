@@ -1,10 +1,11 @@
 //! Tests for corpus parsing, discovery and citation auditing.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus};
+use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus, CoverageStatus};
 
 const TEXT_39: &str = "中华人民共和国公民的住宅不受侵犯。\n禁止非法搜查或者非法侵入公民的住宅。";
 const TEXT_39_JSON: &str =
@@ -36,7 +37,7 @@ const OFFICIAL_143: &str = "中华人民共和国首都是北京。";
 fn corpus_json(law: &str, title: &str, aliases: &str, version: &str, articles: &str) -> String {
     format!(
         r#"{{
-  "format": 1,
+  "format": 2,
   "law": "{law}",
   "title": "{title}",
   "aliases": {aliases},
@@ -65,13 +66,31 @@ fn constitution_json() -> String {
     )
 }
 
-/// Insert a coverage declaration into the fixture corpus.
-fn constitution_with_coverage(formalized: &str, open_concepts: &str) -> String {
-    constitution_with_coverage_fields(formalized, open_concepts, Some("声明"))
+/// Insert a v2 coverage ledger into the one-article fixture corpus.
+fn constitution_with_coverage(ledger: &str) -> String {
+    constitution_with_coverage_parts(ledger, "{}", r#""住宅", "非法""#, Some("声明"))
 }
 
-fn constitution_with_coverage_fields(
-    formalized: &str,
+fn constitution_with_coverage_parts(
+    ledger: &str,
+    gaps: &str,
+    open_concepts: &str,
+    notes: Option<&str>,
+) -> String {
+    corpus_with_coverage(
+        &article("第三十九条", TEXT_39_JSON),
+        ledger,
+        gaps,
+        open_concepts,
+        notes,
+    )
+}
+
+/// Insert a v2 coverage ledger into a corpus with the given article JSON list.
+fn corpus_with_coverage(
+    article_list: &str,
+    ledger: &str,
+    gaps: &str,
     open_concepts: &str,
     notes: Option<&str>,
 ) -> String {
@@ -79,9 +98,24 @@ fn constitution_with_coverage_fields(
         .map(|notes| format!(",\n    \"notes\": \"{notes}\""))
         .unwrap_or_default();
     let coverage = format!(
-        "  \"coverage\": {{\n    \"formalized\": [{formalized}],\n    \"open_concepts\": [{open_concepts}]{notes}\n  }},\n"
+        "  \"coverage\": {{\n    \"open_concepts\": [{open_concepts}]{notes},\n    \"gaps\": {gaps},\n    \"articles\": [{ledger}]\n  }},\n"
     );
-    constitution_json().replace("  \"articles\": [", &format!("{coverage}  \"articles\": ["))
+    corpus_json(
+        "cn.constitution",
+        "中华人民共和国宪法",
+        r#"["宪法"]"#,
+        "2018",
+        article_list,
+    )
+    .replace("  \"articles\": [", &format!("{coverage}  \"articles\": ["))
+}
+
+fn coverage_entry(number: &str, status: &str, extra: &str) -> String {
+    if extra.is_empty() {
+        format!(r#"{{ "number": "{number}", "status": "{status}" }}"#)
+    } else {
+        format!(r#"{{ "number": "{number}", "status": "{status}", {extra} }}"#)
+    }
 }
 
 /// Read a Chinese article number (`第...条`) as an integer.
@@ -236,7 +270,7 @@ fn parse_error(text: &str) -> String {
 #[test]
 fn valid_corpus_parses_all_fields() {
     let corpus = constitution();
-    assert_eq!(corpus.format, 1);
+    assert_eq!(corpus.format, 2);
     assert_eq!(corpus.law, "cn.constitution");
     assert_eq!(corpus.title, "中华人民共和国宪法");
     assert_eq!(corpus.aliases, ["宪法"]);
@@ -257,7 +291,7 @@ fn valid_corpus_parses_all_fields() {
 
 #[test]
 fn unknown_fields_are_rejected() {
-    let text = constitution_json().replace("\"format\": 1,", "\"format\": 1,\n  \"bogus\": 1,");
+    let text = constitution_json().replace("\"format\": 2,", "\"format\": 2,\n  \"bogus\": 1,");
     let error = parse_error(&text);
     assert!(error.contains("bogus"), "{error}");
 
@@ -271,9 +305,12 @@ fn unknown_fields_are_rejected() {
 
 #[test]
 fn unsupported_format_is_rejected() {
-    let text = constitution_json().replace("\"format\": 1", "\"format\": 2");
+    let text = constitution_json().replace("\"format\": 2", "\"format\": 1");
     let error = parse_error(&text);
-    assert!(error.contains("格式版本") && error.contains('2'), "{error}");
+    assert!(
+        error.contains("格式版本") && error.contains("只支持 2"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -371,7 +408,7 @@ fn blank_article_fields_are_rejected() {
 #[test]
 fn optional_fields_may_be_absent() {
     let text = r#"{
-      "format": 1,
+      "format": 2,
       "law": "cn.test",
       "title": "测试法",
       "version": "1",
@@ -389,44 +426,218 @@ fn optional_fields_may_be_absent() {
 }
 
 #[test]
-fn coverage_parses_and_may_have_no_open_concepts() {
-    let text = constitution_with_coverage(r#""第三十九条""#, r#""住宅", "非法""#);
-    let corpus = Corpus::parse(&text).expect("the coverage declaration is valid");
+fn coverage_parses_the_v2_ledger_and_exposes_counts() {
+    let articles = format!(
+        "{}, {}, {}, {}",
+        article("第一条", "a"),
+        article("第二条", "b"),
+        article("第三条", "c"),
+        article("第四条", "d")
+    );
+    let ledger = format!(
+        "{}, {}, {}, {}",
+        coverage_entry("第一条", "formalized", r#""rules": ["cn.test.规则一"]"#),
+        coverage_entry(
+            "第二条",
+            "partial",
+            r#""rules": ["cn.test.规则二"], "note": "未建模乙""#
+        ),
+        coverage_entry("第三条", "indexed", ""),
+        coverage_entry("第四条", "needs_ontology", r#""gap": "kinship""#)
+    );
+    let text = corpus_with_coverage(
+        &articles,
+        &ledger,
+        r#"{"kinship": "亲属关系"}"#,
+        r#""住宅", "非法""#,
+        Some("声明"),
+    );
+    let corpus = Corpus::parse(&text).expect("the v2 ledger is valid");
     let coverage = corpus.coverage.as_ref().expect("coverage was parsed");
-    assert_eq!(coverage.formalized, ["第三十九条"]);
+    assert_eq!(coverage.count(CoverageStatus::Formalized), 1);
+    assert_eq!(coverage.count(CoverageStatus::Partial), 1);
+    assert_eq!(coverage.count(CoverageStatus::Indexed), 1);
+    assert_eq!(coverage.count(CoverageStatus::NeedsOntology), 1);
+    assert_eq!(coverage.numbers(CoverageStatus::Formalized), ["第一条"]);
+    assert_eq!(coverage.numbers(CoverageStatus::Partial), ["第二条"]);
+    assert_eq!(coverage.numbers(CoverageStatus::Indexed), ["第三条"]);
+    assert_eq!(coverage.numbers(CoverageStatus::NeedsOntology), ["第四条"]);
+    assert_eq!(coverage.gap_counts(), [("kinship", 1)]);
     assert_eq!(coverage.open_concepts, ["住宅", "非法"]);
     assert_eq!(coverage.notes.as_deref(), Some("声明"));
-
-    let text = constitution_with_coverage(r#""第三十九条""#, "");
-    let corpus = Corpus::parse(&text).expect("open_concepts may be empty");
-    assert!(corpus.coverage.unwrap().open_concepts.is_empty());
 }
 
 #[test]
-fn coverage_without_notes_parses() {
-    let text = constitution_with_coverage_fields(r#""第三十九条""#, r#""住宅""#, None);
-    let corpus = Corpus::parse(&text).expect("coverage.notes is optional");
-    let coverage = corpus.coverage.expect("coverage was parsed");
-    assert_eq!(coverage.notes, None);
-}
-
-#[test]
-fn coverage_rejects_unknown_duplicate_or_blank_formalized_numbers() {
-    for (formalized, expected) in [
-        (r#""第四十条""#, "不在 articles"),
-        (r#""第三十九条", "第三十九条""#, "重复"),
-        (r#""""#, "coverage.formalized[0]"),
-        ("", "不能为空"),
-        (r#"" 第三十九条""#, "首尾空白"),
-        (r#""第三十九条 ""#, "首尾空白"),
-        (r#""\t第三十九条""#, "首尾空白"),
+fn coverage_articles_must_match_the_corpus_one_to_one_in_order() {
+    let articles = format!(
+        "{}, {}, {}, {}",
+        article("第一条", "a"),
+        article("第二条", "b"),
+        article("第三条", "c"),
+        article("第四条", "d")
+    );
+    let entries = [
+        coverage_entry("第一条", "formalized", r#""rules": ["cn.test.r1"]"#),
+        coverage_entry("第二条", "indexed", ""),
+        coverage_entry("第三条", "indexed", ""),
+        coverage_entry("第四条", "indexed", ""),
+    ];
+    let valid = entries.join(", ");
+    let missing = entries[..3].join(", ");
+    let extra = entries
+        .iter()
+        .cloned()
+        .chain(std::iter::once(coverage_entry("第五条", "indexed", "")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let duplicate = format!(
+        "{}, {}, {}, {}",
+        coverage_entry("第一条", "formalized", r#""rules": ["cn.test.r1"]"#),
+        coverage_entry("第一条", "formalized", r#""rules": ["cn.test.r1"]"#),
+        entries[2],
+        entries[3]
+    );
+    let swapped = format!(
+        "{}, {}, {}, {}",
+        entries[0], entries[2], entries[1], entries[3]
+    );
+    for (ledger, expected) in [
+        (valid.as_str(), None),
+        (missing.as_str(), Some("一一对应")),
+        (extra.as_str(), Some("一一对应")),
+        (duplicate.as_str(), Some("重复")),
+        (swapped.as_str(), Some("顺序一致")),
     ] {
-        let text = constitution_with_coverage(formalized, "");
+        let text = corpus_with_coverage(&articles, ledger, "{}", "", None);
+        match expected {
+            None => {
+                Corpus::parse(&text).expect("the valid ledger parses");
+            }
+            Some(expected) => {
+                let error = parse_error(&text);
+                assert!(error.contains(expected), "expected `{expected}`: {error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn coverage_enforces_status_specific_fields() {
+    let cases = [
+        (
+            coverage_entry("第三十九条", "formalized", ""),
+            "必须有非空 rules",
+            "{}",
+        ),
+        (
+            coverage_entry("第三十九条", "partial", r#""rules": ["cn.test.r"]"#),
+            "必须声明非空 note",
+            "{}",
+        ),
+        (
+            coverage_entry(
+                "第三十九条",
+                "partial",
+                r#""rules": ["cn.test.r"], "note": """#,
+            ),
+            "note 不能为空",
+            "{}",
+        ),
+        (
+            coverage_entry("第三十九条", "indexed", r#""rules": ["cn.test.r"]"#),
+            "不能声明 rules",
+            "{}",
+        ),
+        (
+            coverage_entry("第三十九条", "indexed", r#""gap": "kinship""#),
+            "不能声明 gap",
+            r#"{"kinship": "亲属关系"}"#,
+        ),
+        (
+            coverage_entry("第三十九条", "needs_ontology", ""),
+            "必须声明非空 gap",
+            "{}",
+        ),
+        (
+            coverage_entry("第三十九条", "needs_ontology", r#""gap": "unknown""#),
+            "未定义的 gap",
+            "{}",
+        ),
+        (
+            coverage_entry(
+                "第三十九条",
+                "needs_ontology",
+                r#""rules": ["cn.test.r"], "gap": "kinship""#,
+            ),
+            "不能声明 rules",
+            r#"{"kinship": "亲属关系"}"#,
+        ),
+        (
+            coverage_entry(
+                "第三十九条",
+                "formalized",
+                r#""rules": ["cn.test.r"], "gap": "kinship""#,
+            ),
+            "不能声明 gap",
+            r#"{"kinship": "亲属关系"}"#,
+        ),
+    ];
+    for (ledger, expected, gaps) in cases {
+        let text = constitution_with_coverage_parts(&ledger, gaps, "", None);
         let error = parse_error(&text);
-        assert!(
-            error.contains(expected),
-            "`{formalized}` expected `{expected}`: {error}"
-        );
+        assert!(error.contains(expected), "expected `{expected}`: {error}");
+    }
+}
+
+#[test]
+fn coverage_rejects_duplicate_rule_names_and_unused_gaps() {
+    let duplicate = format!(
+        "{}, {}, {}",
+        coverage_entry("第三十九条", "formalized", r#""rules": ["cn.test.同一条"]"#),
+        coverage_entry("第四十条", "formalized", r#""rules": ["cn.test.同一条"]"#),
+        coverage_entry("第四十一条", "indexed", "")
+    );
+    let articles = format!(
+        "{}, {}, {}",
+        article("第三十九条", "a"),
+        article("第四十条", "b"),
+        article("第四十一条", "c")
+    );
+    let text = corpus_with_coverage(&articles, &duplicate, "{}", "", None);
+    let error = parse_error(&text);
+    assert!(error.contains("只能引用一个条号"), "{error}");
+
+    let unused = constitution_with_coverage_parts(
+        r#"{ "number": "第三十九条", "status": "formalized", "rules": ["cn.test.r"] }"#,
+        r#"{"kinship": "亲属关系"}"#,
+        "",
+        None,
+    );
+    let error = parse_error(&unused);
+    assert!(error.contains("没有被任何 needs_ontology"), "{error}");
+
+    let no_formalized =
+        constitution_with_coverage(r#"{ "number": "第三十九条", "status": "indexed" }"#);
+    let error = parse_error(&no_formalized);
+    assert!(error.contains("至少要有一条 formalized"), "{error}");
+}
+
+#[test]
+fn coverage_rejects_invalid_ledger_numbers() {
+    for (entry, expected) in [
+        (
+            r#"{ "number": "第四十条", "status": "indexed" }"#,
+            "与 articles[0]",
+        ),
+        (
+            r#"{ "number": " 第三十九条", "status": "indexed" }"#,
+            "首尾空白",
+        ),
+        (r#"{ "number": "", "status": "indexed" }"#, "不能为空"),
+    ] {
+        let text = constitution_with_coverage(entry);
+        let error = parse_error(&text);
+        assert!(error.contains(expected), "expected `{expected}`: {error}");
     }
 }
 
@@ -438,7 +649,9 @@ fn coverage_rejects_duplicate_or_blank_open_concepts() {
         (r#"" 住宅""#, "首尾空白"),
         (r#""住宅 ""#, "首尾空白"),
     ] {
-        let text = constitution_with_coverage(r#""第三十九条""#, concepts);
+        let ledger =
+            r#"{ "number": "第三十九条", "status": "formalized", "rules": ["cn.test.r"] }"#;
+        let text = constitution_with_coverage_parts(ledger, "{}", concepts, Some("声明"));
         let error = parse_error(&text);
         assert!(
             error.contains(expected),
@@ -448,9 +661,21 @@ fn coverage_rejects_duplicate_or_blank_open_concepts() {
 }
 
 #[test]
-fn coverage_rejects_unknown_fields() {
-    let text = constitution_with_coverage(r#""第三十九条""#, r#""住宅""#)
+fn coverage_without_notes_parses_and_unknown_fields_are_rejected() {
+    let ledger = r#"{ "number": "第三十九条", "status": "formalized", "rules": ["cn.test.r"] }"#;
+    let text = constitution_with_coverage_parts(ledger, "{}", "", None);
+    let corpus = Corpus::parse(&text).expect("coverage.notes is optional");
+    assert_eq!(corpus.coverage.unwrap().notes, None);
+
+    let text = constitution_with_coverage(ledger)
         .replace("\"notes\": \"声明\"", "\"notes\": \"声明\", \"bogus\": 1");
+    let error = parse_error(&text);
+    assert!(error.contains("bogus"), "{error}");
+
+    let text = constitution_with_coverage(ledger).replace(
+        "\"open_concepts\": [\"住宅\", \"非法\"]",
+        "\"open_concepts\": [\"住宅\", \"非法\"], \"bogus\": 1",
+    );
     let error = parse_error(&text);
     assert!(error.contains("bogus"), "{error}");
 }
@@ -933,6 +1158,7 @@ fn the_repository_constitution_corpus_parses() {
     assert_eq!(scan.corpora.len(), 1);
 
     let corpus = &scan.corpora[0].corpus;
+    assert_eq!(corpus.format, 2);
     assert_eq!(corpus.law, "cn.constitution");
     assert_eq!(corpus.title, "中华人民共和国宪法");
     assert_eq!(corpus.aliases, ["宪法"]);
@@ -982,95 +1208,210 @@ fn the_repository_constitution_corpus_parses() {
         .as_ref()
         .expect("the repository corpus declares coverage");
     assert_eq!(
-        coverage.formalized,
+        coverage.numbers(CoverageStatus::Formalized),
         [
             "第三十三条",
             "第三十四条",
             "第三十五条",
-            "第三十六条",
             "第三十七条",
             "第三十八条",
             "第三十九条",
-            "第四十条",
             "第四十一条",
             "第四十二条",
             "第四十三条",
-            "第四十四条",
             "第四十五条",
-            "第四十六条"
+            "第四十六条",
+            "第五十二条",
+            "第五十三条",
+            "第五十六条"
         ]
     );
     assert_eq!(
-        coverage.open_concepts,
+        coverage.numbers(CoverageStatus::Partial),
         [
-            "非法",
-            "住宅",
-            "侵犯",
-            "人身自由",
-            "言论自由",
-            "出版自由",
-            "集会自由",
-            "结社自由",
-            "游行自由",
-            "示威自由",
-            "受教育权",
-            "中国国籍",
-            "年满十八周岁",
-            "依法被剥夺政治权利",
-            "正常宗教活动",
-            "侮辱",
-            "诽谤",
-            "诬告陷害",
-            "通信自由",
-            "通信秘密",
-            "国家安全",
-            "批评建议",
-            "申诉控告检举",
-            "违法失职",
-            "劳动能力",
-            "退休",
-            "物质帮助",
-            "年老",
-            "疾病",
+            "第三十六条",
+            "第四十条",
+            "第四十四条",
+            "第四十七条",
+            "第四十八条",
+            "第五十四条",
+            "第五十五条"
         ]
     );
-    assert!(
-        !coverage.formalized.iter().any(|number| number == "第五条"),
-        "article 5 is indexed, not formalized in the official pack"
+    assert_eq!(
+        coverage.numbers(CoverageStatus::Indexed),
+        [
+            "第一条",
+            "第四条",
+            "第十四条",
+            "第十五条",
+            "第十九条",
+            "第二十条",
+            "第二十一条",
+            "第二十二条",
+            "第二十三条",
+            "第二十四条",
+            "第二十五条",
+            "第二十六条",
+            "第二十八条",
+            "第三十二条",
+            "第一百四十一条",
+            "第一百四十二条",
+            "第一百四十三条"
+        ]
     );
-    assert!(
-        !coverage
-            .formalized
-            .iter()
-            .any(|number| number == "第四十七条"),
-        "article 47 belongs to the next batch and is not formalized yet"
+    assert_eq!(coverage.count(CoverageStatus::NeedsOntology), 105);
+    assert_eq!(
+        coverage.gap_counts(),
+        [
+            ("state_organs", 82),
+            ("property_economy", 11),
+            ("legal_norms", 3),
+            ("procedure", 3),
+            ("territory", 2),
+            ("deontic_harm", 1),
+            ("kinship", 1),
+            ("military", 1),
+            ("protection_remedy", 1),
+        ]
     );
+    assert_eq!(coverage.open_concepts.len(), 49);
+    assert!(coverage
+        .open_concepts
+        .iter()
+        .any(|concept| concept == "科学研究"));
+    assert!(coverage
+        .open_concepts
+        .iter()
+        .any(|concept| concept == "纳税"));
+
+    let formalized_rules: usize = coverage
+        .articles
+        .iter()
+        .filter(|entry| entry.status == CoverageStatus::Formalized)
+        .map(|entry| entry.rules.len())
+        .sum();
+    let partial_rules: usize = coverage
+        .articles
+        .iter()
+        .filter(|entry| entry.status == CoverageStatus::Partial)
+        .map(|entry| entry.rules.len())
+        .sum();
+    assert_eq!((formalized_rules, partial_rules), (41, 15));
+    let all_rules: BTreeSet<&str> = coverage
+        .articles
+        .iter()
+        .flat_map(|entry| entry.rules.iter().map(String::as_str))
+        .collect();
+    assert_eq!(all_rules.len(), 56);
+    assert!(coverage.articles.iter().all(|entry| {
+        matches!(
+            entry.status,
+            CoverageStatus::Formalized | CoverageStatus::Partial
+        ) || entry.rules.is_empty()
+    }));
+    let article_5 = coverage
+        .articles
+        .iter()
+        .find(|entry| entry.number == "第五条")
+        .expect("article 5 is in the ledger");
+    assert_eq!(article_5.status, CoverageStatus::NeedsOntology);
+    assert_eq!(article_5.gap.as_deref(), Some("legal_norms"));
+    let article_49 = coverage
+        .articles
+        .iter()
+        .find(|entry| entry.number == "第四十九条")
+        .expect("article 49 is in the ledger");
+    assert_eq!(article_49.status, CoverageStatus::NeedsOntology);
+    assert_eq!(article_49.gap.as_deref(), Some("kinship"));
+
     let notes = coverage.notes.as_deref().unwrap_or_default();
-    assert!(
-        notes.contains("不等于整条完整形式化"),
-        "coverage.notes must define formalized as a lower bar than a whole article: {notes:?}"
+    for needle in [
+        "143 条台账",
+        "formalized",
+        "partial",
+        "indexed",
+        "needs_ontology",
+        "第三十六条",
+        "第四十条",
+        "第四十四条",
+        "第四十七条",
+        "第四十八条",
+        "第五十四条",
+        "第五十五条",
+        "第五条",
+        "第三章国家机构",
+        "不是整部宪法的完整形式化",
+    ] {
+        assert!(notes.contains(needle), "missing {needle:?} in {notes:?}");
+    }
+}
+
+#[test]
+fn the_coverage_ledger_matches_the_pack_rules() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../law/corpus");
+    let scan = corpus::scan(&root).expect("the repository corpus directory is readable");
+    assert!(scan.errors.is_empty(), "{:?}", scan.errors);
+    let coverage = scan.corpora[0]
+        .corpus
+        .coverage
+        .as_ref()
+        .expect("the repository corpus declares coverage");
+
+    let theory_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../lawpacks/cn.constitution/constitution.std");
+    let theory = fs::read_to_string(&theory_path).expect("read constitution.std");
+    let mut rule_locators: BTreeMap<String, String> = BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in theory.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("rule ") {
+            if let Some(name) = rest.trim_end().strip_suffix(" :") {
+                current = Some(name.to_owned());
+                continue;
+            }
+        }
+        if let Some(name) = &current {
+            if let Some((_, rest)) = line.split_once("locator \"") {
+                let locator = rest
+                    .split_once('"')
+                    .map(|(locator, _)| locator)
+                    .unwrap_or_else(|| panic!("unterminated locator for rule {name}"));
+                rule_locators.insert(name.clone(), locator.to_owned());
+                current = None;
+            }
+        }
+    }
+    assert_eq!(
+        rule_locators.len(),
+        56,
+        "constitution.std must have 56 rules"
     );
-    assert!(
-        notes.contains("第三十六、四十、四十四条按 partial 处理"),
-        "coverage.notes must name the partial articles: {notes:?}"
-    );
-    assert!(
-        notes.contains("合法检查程序") && notes.contains("退休制度"),
-        "coverage.notes must name the unmodelled sentences: {notes:?}"
-    );
-    assert!(
-        notes.contains("光荣职责") && notes.contains("不窄化该义务"),
-        "coverage.notes must explain the article 42 reading: {notes:?}"
-    );
-    assert!(
-        notes.contains("不要求提出者本人受侵害")
-            && notes.contains("具体是哪个机关或人员是开放概念"),
-        "coverage.notes must explain the article 41 condition: {notes:?}"
-    );
-    assert!(
-        notes.contains("第二章第一批") && notes.contains("第四十七至五十六条"),
-        "{notes:?}"
-    );
+
+    let mut ledger_rules: BTreeSet<&str> = BTreeSet::new();
+    for entry in &coverage.articles {
+        for rule in &entry.rules {
+            assert!(
+                ledger_rules.insert(rule.as_str()),
+                "rule {rule} appears more than once in the ledger"
+            );
+            let locator = rule_locators
+                .get(rule)
+                .unwrap_or_else(|| panic!("ledger rule {rule} is not in constitution.std"));
+            assert_eq!(
+                locator, &entry.number,
+                "rule {rule} is filed under {} but its locator is {locator}",
+                entry.number
+            );
+        }
+    }
+    assert_eq!(ledger_rules.len(), 56, "the ledger must list all 56 rules");
+    for rule in rule_locators.keys() {
+        assert!(
+            ledger_rules.contains(rule.as_str()),
+            "rule {rule} is in constitution.std but missing from the ledger"
+        );
+    }
 }
 
 #[test]
