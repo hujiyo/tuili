@@ -23,23 +23,23 @@ contrary 批准 不批准
 obj 甲 : 申请
 
 axiom 条件 : 符合条件 甲
-  source 申请人 材料 (version 2024)
+  source text "申请人" locator "材料" version "2024"
 
 rule 一般 :
   params x : 申请
   premise 符合条件 x
   conclude 批准 x
-  source 行政许可法 第三十八条
+  source text "行政许可法" locator "第三十八条"
 
 rule 例外 :
   params x : 申请
   premise 符合条件 x
   conclude 不批准 x
-  source 行政许可法 第三十九条
+  source text "行政许可法" locator "第三十九条"
 
 -- 下游规则证明：败方结论不进事实库，依赖它的推导也不会触发。
 rule 救济 :
   params x : 申请
   premise 不批准 x
   conclude 可复议 x
-  source 行政复议法 第六条
+  source text "行政复议法" locator "第六条"

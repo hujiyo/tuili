@@ -418,7 +418,7 @@ fn check_rejects_missing_and_malformed_files() {
 
 #[test]
 fn check_requires_a_loaded_environment() {
-    let certificate = Certificate::from_json(r#"{"format_version": 1, "nodes": [], "root": null}"#)
+    let certificate = Certificate::from_json(r#"{"format_version": 2, "nodes": [], "root": null}"#)
         .expect("a minimal valid certificate");
     let json = certificate.to_json_pretty().unwrap();
     let file = TempFile::new("no-env", &json);

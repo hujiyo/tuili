@@ -422,3 +422,57 @@ fn a_rule_with_duplicate_binder_names_is_refused() {
         "the error should name the duplicated binder, got: {msg}"
     );
 }
+
+#[test]
+fn source_one_line_keeps_the_existing_rendering() {
+    let plain = std_deduce_kernel::env::SourceRef::new("宪法", "第三十九条");
+    assert_eq!(plain.one_line(), "「宪法第三十九条」");
+
+    let versioned = std_deduce_kernel::env::SourceRef::new("刑法", "第二十条").with_version("2020");
+    assert_eq!(versioned.one_line(), "「刑法第二十条」（2020）");
+
+    // Control characters are shown as escapes, so a source can never turn
+    // one output line into several.
+    let escaped = std_deduce_kernel::env::SourceRef::new("宪法\n第二版", "第三十九条\t")
+        .with_version("2018\r");
+    assert_eq!(
+        escaped.one_line(),
+        "「宪法\\n第二版第三十九条\\t」（2018\\r）"
+    );
+}
+
+#[test]
+fn source_full_prints_every_non_empty_field_and_escapes_control_characters() {
+    let source = std_deduce_kernel::env::SourceRef {
+        text: "中华人民共和国宪法".to_owned(),
+        locator: "第三十九条".to_owned(),
+        version: "2018".to_owned(),
+        effective: Some("1982-12-04".to_owned()),
+        note: "备注\r".to_owned(),
+        quote: "中华人民共和国公民的住宅不受侵犯。\n禁止非法搜查。".to_owned(),
+        url: "https://www.npc.gov.cn/law?article=39&lang=zh".to_owned(),
+        jurisdiction: "CN".to_owned(),
+        retrieved_at: "2026-11-21".to_owned(),
+        hash: "sha256:abc".to_owned(),
+    };
+    let full = source.full();
+    for needle in [
+        "文本：中华人民共和国宪法",
+        "条号：第三十九条",
+        "版本：2018",
+        "生效：1982-12-04",
+        "引文：中华人民共和国公民的住宅不受侵犯。\\n禁止非法搜查。",
+        "链接：https://www.npc.gov.cn/law?article=39&lang=zh",
+        "管辖：CN",
+        "抓取时间：2026-11-21",
+        "哈希：sha256:abc",
+        "备注：备注\\r",
+    ] {
+        assert!(full.contains(needle), "missing {needle:?} in:\n{full}");
+    }
+    assert!(!full.contains('\r'), "{full:?}");
+    assert!(!full.contains("\n禁止"), "{full:?}");
+
+    let sparse = std_deduce_kernel::env::SourceRef::new("宪法", "第三十九条");
+    assert_eq!(sparse.full(), "文本：宪法\n条号：第三十九条");
+}

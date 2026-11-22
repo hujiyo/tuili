@@ -41,18 +41,18 @@ rule 宪法第四十六条 :
   params p : 公民
   premise 是公民 p
   conclude 受教育权利 p
-  source 宪法 第四十六条 (version 2018) (note 公民有受教育的权利)
+  source text "宪法" locator "第四十六条" version "2018" note "公民有受教育的权利"
 
 rule 顶替侵害受教育权 :
   params a : 行为, p : 公民, s : 学校
   premise 冒名顶替 a p s
   premise 受教育权利 p
   conclude 受教育权受侵害 a p
-  source 最高人民法院 法释2001第25号 (version 2001)
+  source text "最高人民法院" locator "法释2001第25号" version "2001"
 
 rule 侵害受教育权应承担民事责任 :
   params a : 行为, p : 公民
   premise 受教育权受侵害 a p
   conclude 应承担民事责任 a p
   unless 批复已废止
-  source 最高人民法院 法释2001第25号 (version 2001)
+  source text "最高人民法院" locator "法释2001第25号" version "2001"

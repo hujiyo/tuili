@@ -8,6 +8,9 @@ use std::fmt;
 pub enum Tok {
     /// A bare identifier or keyword. `(`/`)` etc. are their own tokens.
     Ident(String),
+    /// A double-quoted string literal. Values in a `source` clause use it;
+    /// escapes are limited to `\\`, `\"`, `\n`, `\t` and `\r`.
+    Str(String),
     /// →, in, forall, Pi, lambda are all lowered to `Tok::Ident` keywords so
     /// the parser does not care whether a user types "->" or "→".
     Arrow,
@@ -186,10 +189,86 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 i += 1;
                 col += 1;
             }
-            '—' | '─' | '"' | '\'' => {
-                // Characters sometimes used to quote legal text; treat as a
-                // comment-ish delimiter and skip until the next newline, so
-                // quoted article text never derails lexing.
+            '"' => {
+                let start_line = line;
+                let start_col = col;
+                i += 1;
+                col += 1;
+                let mut value = String::new();
+                loop {
+                    if i >= bytes.len() {
+                        return Err(LexError {
+                            msg: "未闭合字符串".into(),
+                            line: start_line,
+                            col: start_col,
+                        });
+                    }
+                    match bytes[i] {
+                        '"' => {
+                            i += 1;
+                            col += 1;
+                            break;
+                        }
+                        '\\' => {
+                            let escape_line = line;
+                            let escape_col = col;
+                            i += 1;
+                            col += 1;
+                            if i >= bytes.len() {
+                                return Err(LexError {
+                                    msg: "未闭合字符串".into(),
+                                    line: start_line,
+                                    col: start_col,
+                                });
+                            }
+                            match bytes[i] {
+                                '\\' => value.push('\\'),
+                                '"' => value.push('"'),
+                                'n' => value.push('\n'),
+                                't' => value.push('\t'),
+                                'r' => value.push('\r'),
+                                '\n' | '\r' => {
+                                    return Err(LexError {
+                                        msg: "字符串字面量内不能出现裸换行；请写 `\\n`".into(),
+                                        line,
+                                        col,
+                                    })
+                                }
+                                other => {
+                                    return Err(LexError {
+                                        msg: format!("未知转义序列 `\\{other}`"),
+                                        line: escape_line,
+                                        col: escape_col,
+                                    })
+                                }
+                            }
+                            i += 1;
+                            col += 1;
+                        }
+                        '\n' | '\r' => {
+                            return Err(LexError {
+                                msg: "字符串字面量内不能出现裸换行；请写 `\\n`".into(),
+                                line,
+                                col,
+                            })
+                        }
+                        c => {
+                            value.push(c);
+                            i += 1;
+                            col += 1;
+                        }
+                    }
+                }
+                out.push(Token {
+                    tok: Tok::Str(value),
+                    line: start_line,
+                    col: start_col,
+                });
+            }
+            '—' | '─' | '\'' => {
+                // An em dash or single quote starts a comment-ish delimiter
+                // that skips to the next newline, so prose punctuation never
+                // derails lexing. Double quotes are string delimiters above.
                 while i < bytes.len() && bytes[i] != '\n' {
                     i += 1;
                 }

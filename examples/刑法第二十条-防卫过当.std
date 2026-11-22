@@ -48,14 +48,14 @@ rule 认定正当防卫 :
   premise 造成损害 a x
   premise 是侵害人 x e
   conclude 正当防卫 a
-  source 刑法 第二十条 (version 2020)
+  source text "刑法" locator "第二十条" version "2020"
 
 rule 正当防卫不负刑责 :
   params a : 行为
   premise 正当防卫 a
   conclude 不负刑事责任 a
   unless 防卫过当 a
-  source 刑法 第二十条 (version 2020)
+  source text "刑法" locator "第二十条" version "2020"
 
 rule 认定防卫过当 :
   params a : 行为
@@ -63,10 +63,10 @@ rule 认定防卫过当 :
   premise 超过必要限度 a
   premise 重大损害 a
   conclude 防卫过当 a
-  source 刑法 第二十条 (version 2020)
+  source text "刑法" locator "第二十条" version "2020"
 
 rule 防卫过当应负刑责 :
   params a : 行为
   premise 防卫过当 a
   conclude 应当负刑事责任 a
-  source 刑法 第二十条 (version 2020)
+  source text "刑法" locator "第二十条" version "2020"

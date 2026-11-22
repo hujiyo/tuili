@@ -12,9 +12,9 @@ use std_deduce_kernel::env::SourceRef;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
-    /// The cited text, for example the article's wording.
+    /// The file or law name, for example `中华人民共和国宪法`.
     pub text: String,
-    /// Where the text lives, for example `刑法第二十条`.
+    /// The article or section within `text`, for example `第三十九条`.
     pub locator: String,
     /// The version of the cited instrument, if known.
     #[serde(default)]
@@ -25,17 +25,29 @@ pub struct Source {
     /// Why the citation was formalised this way, when that is not obvious.
     #[serde(default)]
     pub note: String,
+    /// The quoted wording of the provision.
+    #[serde(default)]
+    pub quote: String,
+    /// Where the cited text can be retrieved.
+    #[serde(default)]
+    pub url: String,
+    /// The jurisdiction the cited instrument belongs to.
+    #[serde(default)]
+    pub jurisdiction: String,
+    /// When the citation was retrieved.
+    #[serde(default)]
+    pub retrieved_at: String,
+    /// A content hash of the retrieved text, when recorded.
+    #[serde(default)]
+    pub hash: String,
 }
 
 impl Source {
     /// The citation in one line: `「<text><locator>」`, followed by
-    /// `（<version>）` when a version is recorded.
+    /// `（<version>）` when a version is recorded. Delegating to the kernel
+    /// keeps the certificate and the ledger rendering byte-for-byte equal.
     pub fn one_line(&self) -> String {
-        let mut line = format!("「{}{}」", self.text, self.locator);
-        if !self.version.is_empty() {
-            line.push_str(&format!("（{}）", self.version));
-        }
-        line
+        SourceRef::from(self).one_line()
     }
 }
 
@@ -47,6 +59,11 @@ impl From<&SourceRef> for Source {
             version: source.version.clone(),
             effective: source.effective.clone(),
             note: source.note.clone(),
+            quote: source.quote.clone(),
+            url: source.url.clone(),
+            jurisdiction: source.jurisdiction.clone(),
+            retrieved_at: source.retrieved_at.clone(),
+            hash: source.hash.clone(),
         }
     }
 }
@@ -65,6 +82,11 @@ impl From<&Source> for SourceRef {
             version: source.version.clone(),
             effective: source.effective.clone(),
             note: source.note.clone(),
+            quote: source.quote.clone(),
+            url: source.url.clone(),
+            jurisdiction: source.jurisdiction.clone(),
+            retrieved_at: source.retrieved_at.clone(),
+            hash: source.hash.clone(),
         }
     }
 }

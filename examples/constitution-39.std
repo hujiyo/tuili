@@ -34,7 +34,7 @@ rule 非法搜查即侵犯 :
   params p : 公民, h : 住宅
   premise 非法搜查 p h
   conclude 不受侵犯 p h
-  source 宪法 第三十九条
+  source text "宪法" locator "第三十九条"
 
 -- 规则 2：依法搜查不构成侵犯。
 -- 这里的 `unless 非法搜查 p h` 只在"非法搜查"被**证明**时才阻断规则；
@@ -44,4 +44,4 @@ rule 依法搜查不侵犯 :
   premise 依法搜查 p h
   conclude 不受侵犯 p h
   unless 非法搜查 p h
-  source 宪法 第三十九条
+  source text "宪法" locator "第三十九条"

@@ -110,14 +110,14 @@ rule 特有信息一致即实质性相似 :
   premise 安装于 s m
   conclude 复制 s m
   unless 举证证明无实质性相似 m
-  source 最高人民法院 2020最高法知民终155号 (version 2020) (note 裁判要点一一般无需代码比对)
+  source text "最高人民法院" locator "2020最高法知民终155号" version "2020" note "裁判要点一一般无需代码比对"
 
 -- 复制 → 侵害复制权（著作权法第十条第四项、第四十八条）。
 rule 复制侵害著作权 :
   params s : 软件, p : 主体
   premise 复制 s p
   conclude 侵害复制权 s p
-  source 中华人民共和国著作权法 第十条 第四十八条 (version 2010)
+  source text "中华人民共和国著作权法" locator "第十条第四十八条" version "2010"
 
 -- ===== 二、赔偿数额的认定 =====
 
@@ -134,7 +134,7 @@ rule 妨害保全的不利推定 :
   premise 法院已释明后果 p
   premise 已保全查明 p s
   conclude 推定亦安装 p s
-  source 最高人民法院关于民事诉讼证据的若干规定 第九十五条 (version 2019)
+  source text "最高人民法院关于民事诉讼证据的若干规定" locator "第九十五条" version "2019"
 
 -- 推定 → 侵权数量计入未保全部分。
 -- 判决：推定 9 台未保全电脑各装 1 套，加上已保全查明的 13 套，
@@ -144,7 +144,7 @@ rule 推定计入侵权数量 :
   premise 已保全查明 p s
   premise 推定亦安装 p s
   conclude 侵权数量至少 p s
-  source 最高人民法院 2020最高法知民终155号 (version 2020) (note 至少复制了22套)
+  source text "最高人民法院" locator "2020最高法知民终155号" version "2020" note "至少复制了22套"
 
 -- 侵权数量大 + 情节严重 + 软件价值高 → 实际损失超过法定 50 万上限。
 rule 实际损失超过法定上限 :
@@ -153,18 +153,18 @@ rule 实际损失超过法定上限 :
   premise 侵权情节严重 p
   premise 软件经济价值高 s
   conclude 超过法定赔偿上限 p s
-  source 中华人民共和国著作权法 第四十九条 (version 2010)
+  source text "中华人民共和国著作权法" locator "第四十九条" version "2010"
 
 -- 超过上限且主张有事实与法律依据 → 全额支持。
 rule 超过上限则全额支持 :
   params p : 主体, s : 软件
   premise 超过法定赔偿上限 p s
   conclude 全额支持损失 p s
-  source 最高人民法院 2020最高法知民终155号 (version 2020) (note 予以全额支持)
+  source text "最高人民法院" locator "2020最高法知民终155号" version "2020" note "予以全额支持"
 
 -- 妨害保全同时是「侵权情节较为严重」的认定依据。
 rule 妨害保全情节严重 :
   params p : 主体
   premise 妨害证据保全 p
   conclude 侵权情节严重 p
-  source 最高人民法院 2020最高法知民终155号 (version 2020) (note 妨害证据保全作为侵权情节予以考量)
+  source text "最高人民法院" locator "2020最高法知民终155号" version "2020" note "妨害证据保全作为侵权情节予以考量"

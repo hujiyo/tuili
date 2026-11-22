@@ -591,5 +591,10 @@ fn to_source(s: crate::ast::SourceSpec) -> SourceRef {
         version: s.version,
         effective: s.effective,
         note: s.note,
+        quote: s.quote,
+        url: s.url,
+        jurisdiction: s.jurisdiction,
+        retrieved_at: s.retrieved_at,
+        hash: s.hash,
     }
 }

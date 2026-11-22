@@ -24,7 +24,7 @@ rule r :
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
 
 /// The same rule as `THEORY`, plus an environment axiom that proves its
@@ -44,7 +44,7 @@ rule r :
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
 
 /// Rules whose premise binder (`premise h : ...`) is referenced by a later
@@ -84,14 +84,14 @@ rule 推定无辜 :
   params p : 公民
   premise 有罪 p
   conclude 无辜 p
-  source 测试 二
+  source text "测试" locator "二"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
 
 /// The blocker is only reachable through a chain of environment rules, so a

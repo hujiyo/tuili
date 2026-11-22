@@ -12,7 +12,7 @@ rule 规则 :
   params p : 公民, h : 公民
   premise 非法搜查 p h
   conclude 非法搜查 p h
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let mut lib = Library::new();
     match lib.load("t", src) {

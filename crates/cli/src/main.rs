@@ -182,6 +182,9 @@ impl Session {
                         writeln!(out, "  {kind} {} : {}", decl.name, print_expr(&decl.ty)).ok();
                         for s in &decl.sources {
                             writeln!(out, "       ← {}", s.one_line()).ok();
+                            for line in s.full().lines() {
+                                writeln!(out, "         {line}").ok();
+                            }
                         }
                     }
                     Ok(Outcome::Proved)

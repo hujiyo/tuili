@@ -23,7 +23,7 @@
    矛盾由 `contrary` / `unique` 显式声明，裁决只认 `defeated_by` / `prefer`；没有优先级时两条结论都不进事实库，
    但两条推导都会打印出来，查询以非零退出码结束。
 3. **没有 `sorry`。** 推不出的目标生成一个**缺口节点**，列出候选规则和缺哪些前提。洞是显示的，不是关掉的。
-4. **出处是第一等公民。** 每条规则、每个事实都带着 `source` 字段（文本 / 条号 / 版本），推导树的每个节点都打印它来自哪一条。
+4. **出处是第一等公民。** 每条规则、每个事实都带着 `source` 字段（文本 / 条号 / 版本 / 引文 / 链接 / 管辖 / 抓取时间 / 哈希 / 备注），推导树的每个节点都打印它来自哪一条。
    字段存在，但加载器还没有强制填写；缺出处时打印成空括号 `「」`，这条缺口记在「其余已确认缺陷」里。
 
 ## 推理语义：最小不动点
@@ -72,7 +72,7 @@ cargo run -p std-deduce-cli
 | 命令 | 作用 |
 |---|---|
 | `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚） |
-| `:inspect` | 打印声明台账（含出处） |
+| `:inspect` | 打印声明台账（含出处与全部来源字段） |
 | `:given <命题>` | 手工登记一条已知事实 |
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导 |
 | `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告 |
@@ -198,7 +198,11 @@ rule 住宅不受侵犯 :
   conclude 不受侵犯 p h           -- 结论
   unless 依法搜查 p h             -- 只有被"推出"时才阻断
   defeated_by 另一条规则           -- 冲突时败给它；prefer 则相反
-  source 宪法 第三十九条 (version 2018)
+  source text "宪法" locator "第三十九条" version "2018"
+         effective "1982-12-04" jurisdiction "CN"
+         quote "中华人民共和国公民的住宅不受侵犯。禁止非法搜查或者非法侵入公民的住宅。"
+         url "https://www.npc.gov.cn/..." retrieved_at "2026-11-21"
+         hash "sha256:..." note "..."
 
 contrary 批准 不批准               -- 声明的互补谓词：同一组参数不能同时成立
 unique 应适用 1                    -- 第 1 个参数单值：同一案件只能适用一条规范
@@ -225,6 +229,8 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
   无法编码成证书表达式的项会报错，不会丢弃。
 - **`crates/cert`**：证书的数据模型、JSON 序列化、从证书渲染推导树的 `render`、逻辑检查器 `check`
   与内核证明项构造 `kernel_proof`（版本化格式，反序列化拒绝未知版本与未知字段）。
+  当前格式版本为 2；v1 证书会被拒绝（`unsupported certificate format version 1`），
+  需要按当前理论重新生成。
   `render` 只读证书：从根递归打印；没有根时打印没有被其他规则步骤当作前提的节点和全部缺口，
   多个根之间空一行；引用索引越界或节点图成环会报出节点编号，不 panic，也不打印占位符冒充成功。
   `check` 从规则声明、记录的绑定和引用的前提重建每一步，
@@ -290,7 +296,9 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
 - **否定没有作为连接词。** `¬P` 仍由"另立一个互补谓词 + `contrary` 声明"表达。要给系统一个真正的否定算子，需要先决定：它是经典的、直觉主义的，还是"有理由的否定"（如缺省逻辑）。对法律而言最后一种更合理。
 - **规则匹配是链前的**：前提按书写顺序依次匹配已推出的事实。这够用，但对多前提交叉约束的规则（例如"同一行为在两个条款下"）需要更强的合一。
 - **优先级只有 `defeated_by` / `prefer`，且作用在规则名上。** 它们只在冲突时参与裁决。真实法体系里还有"特别法优于一般法""上位法优于下位法"：可以写成带出处的规则间优先级，但尚未区分到规则实例级，也没有处理优先级环。
-- **时间和地域不是一等公民。** `source` 里有 `effective` 字段，但查询还没有"在 T 时刻"这个参数；`source` 和规则也没有管辖或地域范围，推理器不检查案件发生地。事实本身也没有发生时间、发生地点。
+- **时间和地域不是一等公民。** `source` 里有 `effective` / `jurisdiction` / `retrieved_at` 字段，
+  但它们只是记录：查询还没有"在 T 时刻""在 X 地"这样的参数，推理器也不检查案件发生地或时间。
+  事实本身没有发生时间、发生地点。
 
 ### 宇宙：Prop 不可预测，Type 层可预测
 
@@ -360,18 +368,23 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 262 个：kernel 15、lang 6、reason 39、cert 92、cli 58、lawpack 52（含 1 个 doc test）。
+`cargo test --workspace` 共 278 个：kernel 17、lang 17、reason 39、cert 94、cli 59、lawpack 52（含 1 个 doc test）。
 
-- `crates/kernel/tests/kernel.rs`（15）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
+- `crates/kernel/tests/kernel.rs`（17）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
   `types_stay_predicative`（Type 层不许自包含），以及规则常量的两条：
   类型是 `∀ 参数, 前提 → 结论`，应用到全部参数与前提后正好得到结论；
   少给一个前提时剩下的是函数类型而不是结论，证明本身也不能当命题用。
-  另有一条固定的加载期拒绝：参数与前提 binder 重名。
+  另有一条固定的加载期拒绝：参数与前提 binder 重名；以及来源渲染的两条：
+  `one_line` 保持旧格式并转义控制字符，`full` 逐行列出全部非空字段并转义控制字符。
 - `crates/lang/tests/lang.rs`（6）：最小规则和 `contrary` 声明能加载；参数/前提 binder 重名、
   未命名前提生成的 `_p{i}` 重名、参数只出现在 `unless` 里、以及完全未使用的参数都拒绝加载。
-- `crates/cert/tests/json.rs`（13）：证书 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
-  快照比对、字段名与节点标签固定、未知版本或未知字段被拒，以及内核表达式与 `CertExpr` 的双向转换。
+- `crates/lang/tests/source.rs`（11）：字符串字面量的转义、CJK/URL 字符、未闭合/未知转义/裸换行的
+  行列号；source 全字段按任意顺序跨行解析；重复键、未知键、缺/空 `text`/`locator` 与旧位置式写法都拒绝。
+- `crates/cert/tests/json.rs`（15）：证书 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
+  快照比对、字段名与节点标签固定、未知版本或未知字段被拒、v1 证书因版本不符被拒并报告版本，
+  全部来源字段（含引文、链接、管辖、抓取时间、哈希）的 JSON 往返，以及内核表达式与 `CertExpr`
+  的双向转换。
 - `crates/cert/tests/render.rs`（9）：从证书渲染推导树——假设与规则树（label、source、note、bindings、
   多前提）、缺口与候选（缺失前提、阻断条件）、无根时的多根与空行、`Source::one_line` 与内核格式一致，
   以及越界根/越界假设/越界前提和可达、不可达的节点环都返回带节点编号的错误。
@@ -403,9 +416,10 @@ cargo test --workspace
   `unique_declaration_makes_same_predicate_instances_conflict`（同一谓词不同参数互斥）、
   `unique_does_not_conflict_when_the_other_arguments_differ`（其余参数不同则相容），
   以及五条加载期拒绝（未知谓词、参数个数不同、重复 contrary、越界 unique、重复 unique）。
-- `crates/cli/tests/examples.rs`（15）：`examples/` 下每个 `.std` 一条端到端用例——
+- `crates/cli/tests/examples.rs`（16）：`examples/` 下每个 `.std` 一条端到端用例——
   加载文件、执行查询，断言退出码（证成 0，缺口 / 冲突 1）和关键输出；另有两条例外路径：
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
+  另有一条 `:inspect` 用例：结构化来源字段逐行输出，引文中的换行被转义、不会破坏行结构。
 - `crates/cli/tests/cert.rs`（19）：`:cert` / `:check` 端到端——导出的 JSON 往返并通过检查器；
   `:check` 分行报告逻辑与内核两段；缺口证书退出 `1` 且产生 `MissingPremise`；
   未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在逻辑层失败；

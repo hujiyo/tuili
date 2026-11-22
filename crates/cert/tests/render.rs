@@ -30,6 +30,11 @@ fn source(text: &str, locator: &str, version: &str, note: &str) -> Source {
         version: version.to_owned(),
         effective: None,
         note: note.to_owned(),
+        quote: String::new(),
+        url: String::new(),
+        jurisdiction: String::new(),
+        retrieved_at: String::new(),
+        hash: String::new(),
     }
 }
 

@@ -461,6 +461,43 @@ rule r :
     );
 }
 
+/// `:inspect` keeps the one-line citation and adds the structured fields.
+/// Control characters in a quotation are rendered as escapes, so a quotation
+/// that spans lines cannot forge extra output lines.
+#[test]
+fn inspect_prints_the_structured_source_fields_on_one_line_each() {
+    let theory = TempTheory::new(
+        "inspect-structured-source",
+        r#"
+sort 公民
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+axiom 事实 : 违法 张三
+  source text "宪法" locator "第三十九条" version "2018" effective "1982-12-04"
+         quote "第一行\n第二行" url "https://www.npc.gov.cn/law?article=39&lang=zh"
+         jurisdiction "CN" retrieved_at "2026-11-21" hash "sha256:abc" note "备注"
+"#,
+    );
+    let output = check(
+        session_with_theory(&theory, &[":inspect"]),
+        PROVED,
+        &[
+            "← 「宪法第三十九条」（2018）",
+            "引文：第一行\\n第二行",
+            "链接：https://www.npc.gov.cn/law?article=39&lang=zh",
+            "管辖：CN",
+            "抓取时间：2026-11-21",
+            "哈希：sha256:abc",
+            "备注：备注",
+        ],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("第一行\n第二行"),
+        "an escaped newline in a quote must not split the output line:\n{out}"
+    );
+}
+
 /// Every example file that has a regression test above. The guard below keeps
 /// this table in step with the contents of `examples/`.
 const COVERED_EXAMPLES: &[&str] = &[

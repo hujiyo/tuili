@@ -23,7 +23,7 @@
 //!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 1. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 2. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.

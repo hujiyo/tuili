@@ -32,10 +32,10 @@ obj 河南省农作物种子管理条例 : 规范
 -- 案件事实：两条规范对同一赔偿计算方式作了不同规定。
 -- 种子法第三十二条规定价格由市场形成；河南省条例第三十七条按政府指导价。
 axiom 本案存在不一致 : 不一致 种子法 河南省农作物种子管理条例
-  source 争议焦点 赔偿计算方式 (version 2003) (note 种子法第三十二条与河南省条例第三十七条)
+  source text "争议焦点" locator "赔偿计算方式" version "2003" note "种子法第三十二条与河南省条例第三十七条"
 
 axiom 本案已受理 : 是本案 汝阳种子公司案
-  source 洛阳市中级人民法院 立案 (version 2003)
+  source text "洛阳市中级人民法院" locator "立案" version "2003"
 
 -- 汝阳公司的主张。
 rule 主张适用种子法 :
@@ -43,7 +43,7 @@ rule 主张适用种子法 :
   premise 是本案 x
   premise 不一致 种子法 河南省农作物种子管理条例
   conclude 应适用 种子法 x
-  source 种子法 第三十二条 (version 2000)
+  source text "种子法" locator "第三十二条" version "2000"
 
 -- 伊川公司的主张。两条规则都推得出「应适用」，参数不同，
 -- 因此只有 unique 声明才能看出它们不能并存。
@@ -52,4 +52,4 @@ rule 主张适用省条例 :
   premise 是本案 x
   premise 不一致 种子法 河南省农作物种子管理条例
   conclude 应适用 河南省农作物种子管理条例 x
-  source 河南省农作物种子管理条例 第三十七条 (version 1997)
+  source text "河南省农作物种子管理条例" locator "第三十七条" version "1997"

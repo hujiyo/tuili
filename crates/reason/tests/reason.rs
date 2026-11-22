@@ -49,7 +49,7 @@ rule r :
   params p : 公民, h : 住宅
   premise 非法搜查 p h
   conclude 不受侵犯 p h
-  source 宪法 第三十九条
+  source text "宪法" locator "第三十九条"
 "#;
     let lib = load(src);
     let goal = Expr::apps(p("不受侵犯"), [p("张三"), p("甲宅")]);
@@ -72,7 +72,7 @@ rule r :
   params p : 公民, h : 住宅
   premise 非法搜查 p h
   conclude 不受侵犯 p h
-  source 宪法 第三十九条
+  source text "宪法" locator "第三十九条"
 "#;
     let lib = load(src);
     let goal = Expr::apps(p("不受侵犯"), [p("张三"), p("甲宅")]);
@@ -102,7 +102,7 @@ rule 依法搜查不侵犯 :
   premise 依法搜查 p h
   conclude 不受侵犯 p h
   unless 非法搜查 p h
-  source 宪法 第三十九条
+  source text "宪法" locator "第三十九条"
 "#;
     let lib = load(base);
     let goal = Expr::apps(p("不受侵犯"), [p("张三"), p("甲宅")]);
@@ -139,7 +139,7 @@ rule r :
   params p : 公民, h : 住宅
   premise 非法搜查 p h
   conclude 不受侵犯 p h
-  source 宪法 第三十九条
+  source text "宪法" locator "第三十九条"
 "#;
     let lib = load(src);
     let goal = Expr::apps(p("不受侵犯"), [p("张三"), p("甲宅")]);
@@ -166,7 +166,7 @@ rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let lib = load(src);
     // A step that cites no premise at all cannot be an instance of a rule
@@ -212,7 +212,7 @@ rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let lib = load(src);
     let mut d = Derivation::default();
@@ -249,7 +249,7 @@ rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let lib = load(src);
     let mut d = Derivation::default();
@@ -287,7 +287,7 @@ rule r :
   premise 侵占 p
   conclude 违法 p
   unless 例外 p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let lib = load(src);
     let mut d = Derivation::default();
@@ -330,7 +330,7 @@ rule r :
   premise 侵占 p
   conclude 违法 p
   unless 可信 (∀ (y : 公民), 侵占 y)
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let lib = load(src);
     let mut d = Derivation::default();
@@ -409,7 +409,7 @@ rule bad :
   params p : 公民
   premise 侵占 p
   conclude p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let mut lib = Library::new();
     // `p` is an individual, not a proposition.
@@ -436,7 +436,7 @@ rule r :
   params p : 公民, z : 证件
   premise 持有 p z
   conclude 有证资格 p
-  source 测试 二
+  source text "测试" locator "二"
 "#;
     let lib = load(src);
     let goal = Expr::app(p("有证资格"), p("张三"));
@@ -464,7 +464,7 @@ rule r :
   params p : 公民, z : 证件
   premise 持有 p z
   conclude 有证资格 p
-  source 测试 二
+  source text "测试" locator "二"
 "#;
     let lib = load(src);
     let goal = Expr::app(p("有证资格"), p("张三"));
@@ -850,7 +850,7 @@ rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let lib = load(src);
     let rule = lib.env.get("r").expect("the rule must be in the ledger");
@@ -973,7 +973,7 @@ rule r :
   premise 侵占 p
   conclude 违法 p
   unless 可信 (∀ (y : 公民), 侵占 y)
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let lib = load(src);
     let goal = Expr::app(p("违法"), p("张三"));
@@ -1018,7 +1018,7 @@ rule r :
   premise 侵占 p
   conclude 违法 p
   unless 可信 (λ (x : 公民) := 侵占 x)
-  source 测试 一
+  source text "测试" locator "一"
 "#;
     let lib = load(src);
     let goal = Expr::app(p("违法"), p("张三"));

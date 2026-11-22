@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "assumptions": [
     {
       "proposition": {
@@ -19,7 +19,12 @@
           "locator": "中华人民共和国刑法第二十条第一款",
           "version": "2020年修正",
           "effective": "2021-03-01",
-          "note": "按现行条文形式化"
+          "note": "按现行条文形式化",
+          "quote": "条文原文",
+          "url": "https://example.test/law?article=20",
+          "jurisdiction": "CN",
+          "retrieved_at": "2026-11-21",
+          "hash": "sha256:abc"
         }
       ],
       "label": "事实：不法侵害正在进行"
@@ -62,7 +67,12 @@
           "locator": "中华人民共和国刑法第二十条第一款",
           "version": "2020年修正",
           "effective": "2021-03-01",
-          "note": "按现行条文形式化"
+          "note": "按现行条文形式化",
+          "quote": "条文原文",
+          "url": "https://example.test/law?article=20",
+          "jurisdiction": "CN",
+          "retrieved_at": "2026-11-21",
+          "hash": "sha256:abc"
         }
       ]
     },
@@ -102,7 +112,12 @@
               "locator": "中华人民共和国民法典第一千一百六十五条",
               "version": "2020年修正",
               "effective": "2021-03-01",
-              "note": "按现行条文形式化"
+              "note": "按现行条文形式化",
+              "quote": "条文原文",
+              "url": "https://example.test/law?article=20",
+              "jurisdiction": "CN",
+              "retrieved_at": "2026-11-21",
+              "hash": "sha256:abc"
             }
           ]
         }

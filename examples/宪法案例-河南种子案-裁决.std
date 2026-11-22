@@ -32,16 +32,16 @@ obj 种子法 : 规范
 obj 河南省农作物种子管理条例 : 规范
 
 axiom 本案存在不一致 : 不一致 种子法 河南省农作物种子管理条例
-  source 争议焦点 赔偿计算方式 (version 2003) (note 种子法第三十二条与河南省条例第三十七条)
+  source text "争议焦点" locator "赔偿计算方式" version "2003" note "种子法第三十二条与河南省条例第三十七条"
 
 axiom 本案已受理 : 是本案 汝阳种子公司案
-  source 洛阳市中级人民法院 立案 (version 2003)
+  source text "洛阳市中级人民法院" locator "立案" version "2003"
 
 -- 「法律的效力高于行政法规、地方性法规、规章」
 -- ——立法法第七十九条（2000 年版；2023 年版为第九十九条）。
 -- 最高人民法院 2004 年 3 月 30 日的答复亦援引此条。
 axiom 种子法位阶高于省条例 : 优先于 种子法 河南省农作物种子管理条例
-  source 立法法 第七十九条 (version 2000) (note 最高人民法院2004年答复亦援引此条)
+  source text "立法法" locator "第七十九条" version "2000" note "最高人民法院2004年答复亦援引此条"
 
 -- 位阶规则：只要有位阶判断和规范冲突，就推出应适用上位法。
 rule 位阶决定应适用 :
@@ -50,7 +50,7 @@ rule 位阶决定应适用 :
   premise 不一致 a b
   premise 是本案 x
   conclude 应适用 a x
-  source 立法法 第七十九条 (version 2000)
+  source text "立法法" locator "第七十九条" version "2000"
 
 -- 省条例的主张仍然写在这里，但显式声明败给位阶规则。
 -- 没有这一行，两条结论会冲突未决；有了它，冲突被裁决，败方不进事实库。
@@ -60,4 +60,4 @@ rule 主张适用省条例 :
   premise 不一致 种子法 河南省农作物种子管理条例
   conclude 应适用 河南省农作物种子管理条例 x
   defeated_by 位阶决定应适用
-  source 河南省农作物种子管理条例 第三十七条 (version 1997)
+  source text "河南省农作物种子管理条例" locator "第三十七条" version "1997"

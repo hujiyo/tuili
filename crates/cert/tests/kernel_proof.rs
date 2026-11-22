@@ -26,7 +26,7 @@ rule r :
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
-  source 测试 一
+  source text "测试" locator "一"
 "#;
 
 const TWO_PREMISES: &str = r#"
@@ -43,7 +43,7 @@ rule 资格 :
   premise 持有 p z
   premise 有效 z
   conclude 有资格 p
-  source 测试 二
+  source text "测试" locator "二"
 "#;
 
 fn env(source: &str) -> Env {

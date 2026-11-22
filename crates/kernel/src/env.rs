@@ -14,12 +14,21 @@ use crate::term::{Expr, Name};
 /// Where a declaration comes from.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct SourceRef {
+    /// The file or law name, for example `中华人民共和国宪法`.
     pub text: String,
+    /// The article or section within `text`, for example `第三十九条`.
     pub locator: String,
     pub version: String,
     pub effective: Option<String>,
     /// Why we formalised the article this way, when that is not obvious.
     pub note: String,
+    /// The quoted wording of the provision. `text` is the instrument name;
+    /// this is the article's text.
+    pub quote: String,
+    pub url: String,
+    pub jurisdiction: String,
+    pub retrieved_at: String,
+    pub hash: String,
 }
 
 impl SourceRef {
@@ -38,13 +47,82 @@ impl SourceRef {
         self.effective = Some(v.into());
         self
     }
+    pub fn with_quote(mut self, v: impl Into<String>) -> Self {
+        self.quote = v.into();
+        self
+    }
+    pub fn with_url(mut self, v: impl Into<String>) -> Self {
+        self.url = v.into();
+        self
+    }
+    pub fn with_jurisdiction(mut self, v: impl Into<String>) -> Self {
+        self.jurisdiction = v.into();
+        self
+    }
+    pub fn with_retrieved_at(mut self, v: impl Into<String>) -> Self {
+        self.retrieved_at = v.into();
+        self
+    }
+    pub fn with_hash(mut self, v: impl Into<String>) -> Self {
+        self.hash = v.into();
+        self
+    }
+    /// The citation in one line: `「<text><locator>」`, followed by
+    /// `（<version>）` when a version is recorded. Control characters are
+    /// escaped, so the result is always exactly one line.
     pub fn one_line(&self) -> String {
-        let mut s = format!("「{}{}」", self.text, self.locator);
+        let mut s = format!(
+            "「{}{}」",
+            escape_control(&self.text),
+            escape_control(&self.locator)
+        );
         if !self.version.is_empty() {
-            s.push_str(&format!("（{}）", self.version));
+            s.push_str(&format!("（{}）", escape_control(&self.version)));
         }
         s
     }
+
+    /// Every non-empty field on its own line, with control characters
+    /// escaped. Empty optional fields are omitted rather than printed blank.
+    pub fn full(&self) -> String {
+        let mut lines = Vec::new();
+        for (label, value) in [
+            ("文本", self.text.as_str()),
+            ("条号", self.locator.as_str()),
+            ("版本", self.version.as_str()),
+            ("生效", self.effective.as_deref().unwrap_or("")),
+            ("引文", self.quote.as_str()),
+            ("链接", self.url.as_str()),
+            ("管辖", self.jurisdiction.as_str()),
+            ("抓取时间", self.retrieved_at.as_str()),
+            ("哈希", self.hash.as_str()),
+            ("备注", self.note.as_str()),
+        ] {
+            if !value.is_empty() {
+                lines.push(format!("{label}：{}", escape_control(value)));
+            }
+        }
+        lines.join("\n")
+    }
+}
+
+/// Escape control characters so a source field cannot inject another output
+/// line or a terminal control sequence. Newline, carriage return and tab get
+/// their short forms; every other control character becomes `\u{XXXX}`.
+fn escape_control(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => {
+                escaped.push_str(&format!("\\u{{{:04X}}}", ch as u32));
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[derive(Debug, Clone, PartialEq)]

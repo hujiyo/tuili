@@ -8,7 +8,7 @@ use std_deduce_cert::{
 use std_deduce_kernel::env::SourceRef;
 use std_deduce_kernel::{name, Expr};
 
-const SNAPSHOT: &str = include_str!("fixtures/certificate_v1.json");
+const SNAPSHOT: &str = include_str!("fixtures/certificate_v2.json");
 
 fn constant(text: &str) -> CertExpr {
     CertExpr::Const {
@@ -30,6 +30,11 @@ fn source(text: &str, locator: &str) -> Source {
         version: "2020年修正".to_owned(),
         effective: Some("2021-03-01".to_owned()),
         note: "按现行条文形式化".to_owned(),
+        quote: "条文原文".to_owned(),
+        url: "https://example.test/law?article=20".to_owned(),
+        jurisdiction: "CN".to_owned(),
+        retrieved_at: "2026-11-21".to_owned(),
+        hash: "sha256:abc".to_owned(),
     }
 }
 
@@ -139,7 +144,7 @@ fn field_names_are_stable() {
         assert!(object.contains_key(field), "missing field `{field}`");
     }
 
-    assert_eq!(value["format_version"], 1);
+    assert_eq!(value["format_version"], 2);
     assert_eq!(value["nodes"][0]["kind"], "assumption");
     assert_eq!(value["nodes"][1]["kind"], "rule_application");
     assert_eq!(value["nodes"][2]["kind"], "gap");
@@ -148,6 +153,17 @@ fn field_names_are_stable() {
         value["assumptions"][0]["sources"][0]["locator"],
         "中华人民共和国刑法第二十条第一款"
     );
+    assert_eq!(value["assumptions"][0]["sources"][0]["quote"], "条文原文");
+    assert_eq!(
+        value["assumptions"][0]["sources"][0]["url"],
+        "https://example.test/law?article=20"
+    );
+    assert_eq!(value["assumptions"][0]["sources"][0]["jurisdiction"], "CN");
+    assert_eq!(
+        value["assumptions"][0]["sources"][0]["retrieved_at"],
+        "2026-11-21"
+    );
+    assert_eq!(value["assumptions"][0]["sources"][0]["hash"], "sha256:abc");
     assert_eq!(value["conflicts"][0]["left_by"]["kind"], "rules");
     assert_eq!(value["conflicts"][0]["resolution"]["kind"], "defeated");
     assert_eq!(value["conflicts"][0]["resolution"]["winner"], "left");
@@ -158,8 +174,38 @@ fn field_names_are_stable() {
 }
 
 #[test]
+fn a_v1_certificate_is_rejected_with_a_version_error() {
+    let text = SNAPSHOT.replace("\"format_version\": 2", "\"format_version\": 1");
+    let error = Certificate::from_json(&text).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported certificate format version 1"),
+        "{message}"
+    );
+    assert!(message.contains("supports 2"), "{message}");
+}
+
+#[test]
+fn every_source_field_survives_a_json_round_trip() {
+    let certificate = sample_certificate();
+    let json = certificate.to_json_pretty().unwrap();
+    let decoded = Certificate::from_json(&json).unwrap();
+    let source = &decoded.assumptions[0].sources[0];
+    assert_eq!(source.text, "为了使国家、公共利益、本人或者他人的人身、财产和其他权利免受正在进行的不法侵害，而采取的制止不法侵害的行为，对不法侵害人造成损害的，属于正当防卫，不负刑事责任。");
+    assert_eq!(source.locator, "中华人民共和国刑法第二十条第一款");
+    assert_eq!(source.version, "2020年修正");
+    assert_eq!(source.effective.as_deref(), Some("2021-03-01"));
+    assert_eq!(source.note, "按现行条文形式化");
+    assert_eq!(source.quote, "条文原文");
+    assert_eq!(source.url, "https://example.test/law?article=20");
+    assert_eq!(source.jurisdiction, "CN");
+    assert_eq!(source.retrieved_at, "2026-11-21");
+    assert_eq!(source.hash, "sha256:abc");
+}
+
+#[test]
 fn unknown_format_version_is_rejected() {
-    let text = SNAPSHOT.replace("\"format_version\": 1", "\"format_version\": 999");
+    let text = SNAPSHOT.replace("\"format_version\": 2", "\"format_version\": 999");
     let error = Certificate::from_json(&text).unwrap_err();
     assert!(
         error

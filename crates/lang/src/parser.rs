@@ -16,7 +16,9 @@
 //!           | 'unless' term
 //!           | 'defeated_by' IDENT
 //!           | 'prefer' IDENT
-//!           | 'source' STRING (STRING ('(' IDENT ')')?)?
+//!           | 'source' (source_key STRING)+
+//! source_key := 'text' | 'locator' | 'version' | 'effective' | 'quote' | 'url'
+//!           | 'jurisdiction' | 'retrieved_at' | 'hash' | 'note'
 //! term     := arrow
 //! arrow    := app ('→' term)?
 //! app      := atom atom*
@@ -51,6 +53,24 @@ impl std::fmt::Display for ParseError {
     }
 }
 impl std::error::Error for ParseError {}
+
+/// The keys a structured `source` clause accepts.
+const SOURCE_KEYS: &[&str] = &[
+    "text",
+    "locator",
+    "version",
+    "effective",
+    "quote",
+    "url",
+    "jurisdiction",
+    "retrieved_at",
+    "hash",
+    "note",
+];
+
+fn is_source_key(name: &str) -> bool {
+    SOURCE_KEYS.contains(&name)
+}
 
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Self {
@@ -393,57 +413,71 @@ impl Parser {
         }
     }
 
-    /// `source "宪法" "第三十九条" (version "2018") (effective "1982")`
+    /// `source text "宪法" locator "第三十九条" version "2018"`
+    ///
+    /// Fields may be separated by newlines. The clause ends before the first
+    /// token that is not one of the known keys; that token is left for the
+    /// caller. `text` and `locator` must be present and non-empty.
     fn source_spec(&mut self) -> PResult<SourceSpec> {
         self.bump(); // 'source'
         let mut s = SourceSpec::default();
-        // At least one string-like token: identifiers or quoted chunks are
-        // not distinguished; take everything up to a newline or a clause
-        // keyword.
-        let mut parts = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        let mut first = true;
         loop {
-            match self.peek().clone() {
-                Tok::Ident(_) if !self.is_clause_keyword() => {
-                    let t = self.ident()?;
-                    parts.push(t);
-                }
-                Tok::LParen => {
-                    // `(version "2018")`
-                    self.bump();
-                    let k = self.ident()?;
-                    let v = self.ident()?;
-                    self.expect(&Tok::RParen, "`)`")?;
-                    match k.as_str() {
-                        "version" => s.version = v,
-                        "effective" => s.effective = Some(v),
-                        "note" => s.note = v,
-                        _ => {}
+            // A newline belongs to the source clause only when a known key
+            // follows it. Otherwise restore it so the caller decides.
+            let save = self.pos;
+            self.skip_newlines();
+            let key = match self.peek().clone() {
+                Tok::Ident(key) if is_source_key(&key) => key,
+                other => {
+                    if first {
+                        return self.err(format!(
+                            "source 子句期望已知键（text、locator 等），实际是 `{other:?}`"
+                        ));
                     }
+                    self.pos = save;
+                    break;
                 }
-                _ => break,
+            };
+            self.bump();
+            if seen.contains(&key) {
+                return self.err(format!("source 子句的键 `{key}` 重复"));
             }
+            seen.push(key.clone());
+            let value = match self.peek().clone() {
+                Tok::Str(value) => {
+                    self.bump();
+                    value
+                }
+                other => {
+                    return self.err(format!(
+                        "键 `{key}` 的值必须是双引号字符串字面量，实际是 `{other:?}`"
+                    ))
+                }
+            };
+            match key.as_str() {
+                "text" => s.text = value,
+                "locator" => s.locator = value,
+                "version" => s.version = value,
+                "effective" => s.effective = Some(value),
+                "quote" => s.quote = value,
+                "url" => s.url = value,
+                "jurisdiction" => s.jurisdiction = value,
+                "retrieved_at" => s.retrieved_at = value,
+                "hash" => s.hash = value,
+                "note" => s.note = value,
+                _ => unreachable!("is_source_key accepts only the keys above"),
+            }
+            first = false;
         }
-        if let Some(first) = parts.first() {
-            s.text = first.clone();
+        if s.text.is_empty() {
+            return self.err("source 子句缺少非空的 `text`");
         }
-        // The rest of the parts concatenate into the locator, which may be
-        // split across tokens such as `第十三` `条`.
-        s.locator = parts.into_iter().skip(1).collect::<Vec<_>>().join("");
-        if s.locator.is_empty() && !s.text.is_empty() {
-            // `source 第三十九条` — treat the single part as the locator and
-            // leave the text blank; the caller may fill it in from a module.
-            s.locator = std::mem::take(&mut s.text);
+        if s.locator.is_empty() {
+            return self.err("source 子句缺少非空的 `locator`");
         }
         Ok(s)
-    }
-
-    fn is_clause_keyword(&self) -> bool {
-        matches!(self.peek(), Tok::Ident(s) if matches!(s.as_str(),
-            "params" | "premise" | "premises" | "pre" | "conclude" | "conclusion"
-            | "unless" | "defeated_by" | "defeated" | "prefer" | "source"
-            | "rule" | "sort" | "pred" | "axiom" | "def" | "interpret"
-            | "interpretation" | "contrary" | "unique" | "obj" | "object" | "individual"
-            | "#check" | "#why" | "#gap" | "#assert" | "#show"))
     }
 
     // ---------------- terms ----------------

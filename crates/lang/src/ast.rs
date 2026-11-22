@@ -125,12 +125,22 @@ pub enum Defeater {
     Prefer(String),
 }
 
-/// A provenance annotation, parsed from `source "宪法" "第三十九条"`.
+/// A provenance annotation, parsed from
+/// `source text "宪法" locator "第三十九条"`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SourceSpec {
+    /// The file or instrument name.
     pub text: String,
+    /// The article or section within `text`.
     pub locator: String,
     pub version: String,
     pub effective: Option<String>,
+    /// The quoted wording of the provision.
+    pub quote: String,
+    pub url: String,
+    pub jurisdiction: String,
+    pub retrieved_at: String,
+    pub hash: String,
+    /// Why we formalised the source this way, when that is not obvious.
     pub note: String,
 }
