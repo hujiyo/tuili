@@ -38,6 +38,30 @@ fn source(text: &str, locator: &str) -> Source {
     }
 }
 
+/// Remove the fields added in certificate v2 from every source object, so a
+/// test can construct a true v1 payload or a v2 payload written by an older
+/// reader.
+fn strip_new_source_fields(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if object.contains_key("text") && object.contains_key("locator") {
+                for field in ["quote", "url", "jurisdiction", "retrieved_at", "hash"] {
+                    object.remove(field);
+                }
+            }
+            for child in object.values_mut() {
+                strip_new_source_fields(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_new_source_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn sample_certificate() -> Certificate {
     let defence = app(constant("不法侵害"), constant("张三"));
     let justified = app(constant("不负刑事责任"), constant("张三"));
@@ -174,15 +198,32 @@ fn field_names_are_stable() {
 }
 
 #[test]
-fn a_v1_certificate_is_rejected_with_a_version_error() {
-    let text = SNAPSHOT.replace("\"format_version\": 2", "\"format_version\": 1");
-    let error = Certificate::from_json(&text).unwrap_err();
+fn a_true_v1_certificate_is_rejected_with_a_version_error() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    strip_new_source_fields(&mut value);
+    value["format_version"] = Value::from(1);
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
     let message = error.to_string();
     assert!(
         message.contains("unsupported certificate format version 1"),
         "{message}"
     );
     assert!(message.contains("supports 2"), "{message}");
+}
+
+#[test]
+fn a_v2_certificate_without_the_new_source_fields_uses_defaults() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    strip_new_source_fields(&mut value);
+    assert_eq!(value["format_version"], 2);
+    let certificate = Certificate::from_json(&value.to_string())
+        .expect("v2 fields added with #[serde(default)] may be omitted");
+    let source = &certificate.assumptions[0].sources[0];
+    assert!(source.quote.is_empty());
+    assert!(source.url.is_empty());
+    assert!(source.jurisdiction.is_empty());
+    assert!(source.retrieved_at.is_empty());
+    assert!(source.hash.is_empty());
 }
 
 #[test]

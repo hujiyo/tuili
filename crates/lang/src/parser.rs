@@ -440,9 +440,17 @@ impl Parser {
                     break;
                 }
             };
+            let (key_line, key_col) = {
+                let key_token = self.here();
+                (key_token.line, key_token.col)
+            };
             self.bump();
             if seen.contains(&key) {
-                return self.err(format!("source 子句的键 `{key}` 重复"));
+                return Err(ParseError {
+                    msg: format!("source 子句的键 `{key}` 重复"),
+                    line: key_line,
+                    col: key_col,
+                });
             }
             seen.push(key.clone());
             let value = match self.peek().clone() {

@@ -1,5 +1,6 @@
 //! Pretty printing, mirroring the surface syntax.
 
+use crate::env::escape_control;
 use crate::term::{Expr, Name};
 
 pub fn print_expr(e: &Expr) -> String {
@@ -22,7 +23,7 @@ fn go(e: &Expr, prec: u8, out: &mut String, names: &mut Vec<String>) {
                 out.push_str(&format!("?{i}"));
             }
         }
-        Expr::Const(n) => out.push_str(n),
+        Expr::Const(n) => out.push_str(&escape_control(n)),
         Expr::Pi {
             name,
             domain,
@@ -106,7 +107,7 @@ fn go(e: &Expr, prec: u8, out: &mut String, names: &mut Vec<String>) {
 
 fn label(n: &Option<Name>, depth: usize) -> String {
     match n {
-        Some(n) => n.to_string(),
+        Some(n) => escape_control(n),
         None => format!("x{depth}"),
     }
 }

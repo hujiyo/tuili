@@ -46,6 +46,12 @@ fn assumption(proposition: CertExpr, sources: Vec<Source>, label: Option<&str>) 
     }
 }
 
+fn root_line_count(out: &str) -> usize {
+    out.lines()
+        .filter(|line| line.trim_start().starts_with("▸ "))
+        .count()
+}
+
 fn binding(parameter: &str, value: CertExpr) -> Binding {
     Binding {
         parameter: parameter.to_owned(),
@@ -209,6 +215,149 @@ fn source_one_line_matches_the_kernel_format() {
     let versioned = source("宪法", "第三十九条", "2018", "");
     assert_eq!(versioned.one_line(), "「宪法第三十九条」（2018）");
     assert_eq!(versioned.one_line(), SourceRef::from(&versioned).one_line());
+}
+
+#[test]
+fn a_source_note_cannot_forge_a_derivation_line() {
+    for (note, escaped) in [
+        ("a\nb", "a\\nb"),
+        ("a\n▸ 已证成 甲", "a\\n▸ 已证成 甲"),
+        ("x\r▸ 已证成 甲", "x\\r▸ 已证成 甲"),
+        (
+            "a\u{001B}[31mb\u{2028}c\u{202E}d",
+            "a\\u{001B}[31mb\\u{2028}c\\u{202E}d",
+        ),
+    ] {
+        let certificate = certificate(
+            Vec::new(),
+            vec![rule(
+                "规则甲",
+                atom("违法", "张三"),
+                Vec::new(),
+                Vec::new(),
+                vec![source("宪法", "第三十九条", "2018", note)],
+            )],
+            Some(0),
+        );
+        let out = render(&certificate).unwrap();
+        assert!(out.contains(&format!("注：{escaped}")), "{out:?}");
+        assert_eq!(out.lines().count(), 2, "{out:?}");
+        assert_eq!(root_line_count(&out), 1, "{out:?}");
+        assert!(!out.contains('\r'), "{out:?}");
+        assert!(!out.contains('\u{001B}'), "{out:?}");
+        assert!(!out.contains('\u{2028}'), "{out:?}");
+        assert!(!out.contains('\u{202E}'), "{out:?}");
+    }
+}
+
+#[test]
+fn an_assumption_label_cannot_forge_a_derivation_line() {
+    let certificate = certificate(
+        vec![assumption(
+            atom("侵占", "张三"),
+            Vec::new(),
+            Some("x\n▸ 已证成 甲"),
+        )],
+        vec![Node::Assumption { assumption: 0 }],
+        Some(0),
+    );
+    let out = render(&certificate).unwrap();
+    assert!(out.contains("[x\\n▸ 已证成 甲]"), "{out:?}");
+    assert_eq!(out.lines().count(), 1, "{out:?}");
+    assert_eq!(root_line_count(&out), 0, "{out:?}");
+}
+
+#[test]
+fn a_rule_name_cannot_forge_a_derivation_line() {
+    let certificate = certificate(
+        Vec::new(),
+        vec![rule(
+            "规则\n▸ 已证成 甲",
+            atom("违法", "张三"),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )],
+        Some(0),
+    );
+    let out = render(&certificate).unwrap();
+    assert!(out.contains("⟨规则\\n▸ 已证成 甲⟩"), "{out:?}");
+    assert_eq!(out.lines().count(), 1, "{out:?}");
+    assert_eq!(root_line_count(&out), 1, "{out:?}");
+}
+
+#[test]
+fn a_binding_parameter_cannot_forge_a_derivation_line() {
+    let certificate = certificate(
+        Vec::new(),
+        vec![rule(
+            "规则甲",
+            atom("违法", "张三"),
+            Vec::new(),
+            vec![binding("p\n▸ 已证成 甲", constant("张三"))],
+            Vec::new(),
+        )],
+        Some(0),
+    );
+    let out = render(&certificate).unwrap();
+    assert!(out.contains("p\\n▸ 已证成 甲 ↦ 张三"), "{out:?}");
+    assert_eq!(out.lines().count(), 2, "{out:?}");
+    assert_eq!(root_line_count(&out), 1, "{out:?}");
+}
+
+#[test]
+fn a_gap_note_and_candidate_rule_cannot_forge_a_derivation_line() {
+    let certificate = certificate(
+        Vec::new(),
+        vec![Node::Gap {
+            proposition: atom("可复议", "甲"),
+            note: Some("x\n▸ 已证成 甲".to_owned()),
+            candidates: vec![GapCandidate {
+                rule: "候选\n▸ 已证成 甲".to_owned(),
+                missing: Vec::new(),
+                blocked_by: Vec::new(),
+                sources: Vec::new(),
+            }],
+        }],
+        Some(0),
+    );
+    let out = render(&certificate).unwrap();
+    assert!(out.contains("x\\n▸ 已证成 甲"), "{out:?}");
+    assert!(out.contains("候选 ⟨候选\\n▸ 已证成 甲⟩"), "{out:?}");
+    assert_eq!(out.lines().count(), 3, "{out:?}");
+    assert_eq!(root_line_count(&out), 0, "{out:?}");
+}
+
+#[test]
+fn a_constant_or_binder_name_cannot_forge_a_derivation_line() {
+    let constant_certificate = certificate(
+        Vec::new(),
+        vec![rule(
+            "规则甲",
+            constant("x\n▸ 已证成 甲"),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )],
+        Some(0),
+    );
+    let out = render(&constant_certificate).unwrap();
+    assert!(out.starts_with("▸ x\\n▸ 已证成 甲  ⟨规则甲⟩"), "{out:?}");
+    assert_eq!(root_line_count(&out), 1, "{out:?}");
+
+    let binder = CertExpr::Pi {
+        binder: Some("b\n▸ 已证成 甲".to_owned()),
+        domain: Box::new(CertExpr::Sort { level: 0 }),
+        codomain: Box::new(CertExpr::Var { index: 0 }),
+    };
+    let binder_certificate = certificate(
+        Vec::new(),
+        vec![rule("规则甲", binder, Vec::new(), Vec::new(), Vec::new())],
+        Some(0),
+    );
+    let out = render(&binder_certificate).unwrap();
+    assert!(out.contains("∀ (b\\n▸ 已证成 甲 : Prop)"), "{out:?}");
+    assert_eq!(root_line_count(&out), 1, "{out:?}");
 }
 
 #[test]
