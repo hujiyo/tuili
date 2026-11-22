@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use std_deduce_kernel::env::escape_control;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     /// A bare identifier or keyword. `(`/`)` etc. are their own tokens.
@@ -330,10 +332,16 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             }
             other => {
                 return Err(LexError {
-                    msg: format!("无法识别的字符 `{other}`"),
+                    // A raw character in a diagnostic can forge a line or drive
+                    // the terminal. `char`'s Debug escapes it, but as a
+                    // lowercase, unpadded code point (`'\u{1b}'`); reuse the
+                    // shared escaping so this message spells control and
+                    // format characters as `'\u{001B}'`, like the rest of the
+                    // tool.
+                    msg: format!("无法识别的字符 '{}'", escape_control(&other.to_string())),
                     line,
                     col,
-                })
+                });
             }
         }
     }

@@ -297,3 +297,108 @@ fn repl_does_not_silently_ignore_extra_arguments() {
     let err = stderr(&output);
     assert!(err.contains("用法"), "{err}");
 }
+
+#[test]
+fn an_option_after_a_file_is_a_usage_error_not_silently_ignored() {
+    let output = run(&[example("constitution-39.std"), "--help".to_owned()]);
+    assert_exit(&output, USAGE_ERROR);
+    let err = stderr(&output);
+    assert!(
+        err.contains("未知选项"),
+        "stderr must name the unknown option:\n{err}"
+    );
+    assert!(
+        err.contains(":why"),
+        "the hint must point at :why / :gap:\n{err}"
+    );
+    assert!(!err.contains("读取失败"), "an option is not a file:\n{err}");
+    let out = stdout(&output);
+    assert!(
+        out.contains("已加载"),
+        "the file itself loaded before the usage error:\n{out}"
+    );
+}
+
+#[test]
+fn an_unknown_first_option_is_a_usage_error_not_a_file() {
+    for option in ["--foo", "--help=foo"] {
+        let output = run(&[option.to_owned()]);
+        assert_exit(&output, USAGE_ERROR);
+        let err = stderr(&output);
+        assert!(err.contains("未知选项"), "{option}: {err}");
+        assert!(
+            !err.contains("读取失败"),
+            "{option} must not be read as a file: {err}"
+        );
+        assert!(
+            stdout(&output).is_empty(),
+            "{option} must not print a load report"
+        );
+    }
+}
+
+#[test]
+fn check_does_not_treat_an_option_as_a_file() {
+    let output = run(&["check".to_owned(), "--help".to_owned()]);
+    assert_exit(&output, USAGE_ERROR);
+    let err = stderr(&output);
+    assert!(err.contains("未知选项"), "{err}");
+    assert!(!err.contains("读取失败"), "{err}");
+}
+
+#[test]
+fn a_repl_option_line_is_not_silently_ignored() {
+    let output = run_with_stdin(&[], "--foo\n:quit\n");
+    assert_exit(&output, USAGE_ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("未知选项"), "{out}");
+    assert!(out.contains("错误："), "{out}");
+}
+
+#[test]
+fn a_failed_load_path_with_control_characters_prints_one_escaped_line() {
+    let dir = TempDir::new("escaped-path");
+    let missing = dir.path.join("坏\u{001B}\u{202E}\n文件.std");
+    let path = missing.display().to_string();
+    let output = run(std::slice::from_ref(&path));
+    assert_exit(&output, LOAD_ERROR);
+    let err = stderr(&output);
+    assert_eq!(
+        err.lines().count(),
+        1,
+        "exactly one diagnostic line:\n{err:?}"
+    );
+    assert!(
+        !err.trim_end_matches('\n').contains('\n'),
+        "the raw newline must not reach stderr:\n{err:?}"
+    );
+    assert!(err.contains("\\n"), "the newline must be escaped:\n{err:?}");
+    assert!(err.contains("\\u{001B}"), "ESC must be escaped:\n{err:?}");
+    assert!(
+        err.contains("\\u{202E}"),
+        "U+202E must be escaped:\n{err:?}"
+    );
+    assert!(!err.contains('\u{001B}'), "{err:?}");
+    assert!(!err.contains('\u{202E}'), "{err:?}");
+}
+
+#[test]
+fn a_windows_path_in_a_load_error_is_not_backslash_doubled() {
+    let dir = TempDir::new("backslash");
+    let file = dir.write("坏文件.std", BAD_THEORY);
+    let path = file.display().to_string();
+    let output = run(std::slice::from_ref(&path));
+    assert_exit(&output, LOAD_ERROR);
+    let err = stderr(&output);
+    assert_eq!(err.lines().count(), 1, "{err:?}");
+    assert!(
+        err.starts_with(&path),
+        "the escaped path must stay readable:\n{err}\npath: {path}"
+    );
+    if path.contains('\\') {
+        assert!(
+            !err.contains(&path.replace('\\', "\\\\")),
+            "a Windows separator must not be doubled:\n{err}\npath: {path}"
+        );
+    }
+}

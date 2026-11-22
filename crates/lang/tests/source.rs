@@ -91,6 +91,29 @@ fn raw_control_characters_inside_a_string_are_rejected() {
 }
 
 #[test]
+fn an_unrecognized_character_is_escaped_in_the_error() {
+    for (character, escaped) in [
+        ('\u{001B}', r"'\u{001B}'"),
+        ('\u{202E}', r"'\u{202E}'"),
+        ('\u{FEFF}', r"'\u{FEFF}'"),
+    ] {
+        let error =
+            lex(&character.to_string()).expect_err("an unrecognized character is a lex error");
+        assert!(
+            error.msg.contains(escaped),
+            "U+{:04X} must render as {escaped}: {:?}",
+            character as u32,
+            error.msg
+        );
+        assert!(
+            !error.msg.contains(character),
+            "the raw character must not reach the diagnostic: {:?}",
+            error.msg
+        );
+    }
+}
+
+#[test]
 fn crlf_input_still_lexes_and_parses() {
     let toks = lex("\"a\"\r\n\"b\"").expect("CRLF between strings is whitespace");
     let strings: Vec<&str> = toks

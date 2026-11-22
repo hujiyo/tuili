@@ -425,6 +425,31 @@ fn verify_cert_rejects_missing_and_malformed_files() {
 }
 
 #[test]
+fn verify_cert_escapes_a_read_failure_path_onto_one_line() {
+    let missing = temp_path("坏\u{001B}\u{202E}\n路径");
+    let checked = session(
+        "constitution-39.std",
+        &[format!(":verify-cert \"{}\"", missing.display())],
+    );
+    assert_exit(&checked, ERROR);
+    let err = stderr(&checked);
+    assert_eq!(
+        err.lines().count(),
+        1,
+        "exactly one diagnostic line:\n{err:?}"
+    );
+    assert!(err.contains("读取证书"), "{err:?}");
+    assert!(err.contains("\\u{001B}"), "ESC must be escaped:\n{err:?}");
+    assert!(
+        err.contains("\\u{202E}"),
+        "U+202E must be escaped:\n{err:?}"
+    );
+    assert!(err.contains("\\n"), "the newline must be escaped:\n{err:?}");
+    assert!(!err.contains('\u{001B}'), "{err:?}");
+    assert!(!err.contains('\u{202E}'), "{err:?}");
+}
+
+#[test]
 fn verify_cert_requires_a_loaded_environment() {
     let certificate = Certificate::from_json(r#"{"format_version": 2, "nodes": [], "root": null}"#)
         .expect("a minimal valid certificate");

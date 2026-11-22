@@ -527,6 +527,41 @@ pub struct LoadReport {
     pub shown: Vec<String>,
 }
 
+/// Escape a path for a one-line diagnostic.
+///
+/// Newline, carriage return and tab get their short forms; other control
+/// characters, U+2028/U+2029 and the bidi/format characters listed in
+/// [`std_deduce_kernel::env::escape_control`] become `\u{XXXX}`. A literal
+/// backslash is kept as is, so a Windows path stays readable instead of being
+/// doubled.
+pub fn escape_path(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control()
+                || matches!(
+                    ch,
+                    '\u{061C}'
+                        | '\u{180E}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{2028}'
+                        | '\u{2029}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{206F}'
+                        | '\u{FEFF}'
+                ) =>
+            {
+                escaped.push_str(&format!("\\u{{{:04X}}}", ch as u32));
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// A failed load. The message is independent of where the error was found:
 /// `msg` is the text shown to the user, and the optional line/column is a
 /// source position when the loader has one.
@@ -565,8 +600,10 @@ impl LoadError {
     /// Render the error in Lean style. A positioned error is
     /// `path:line:col: error: msg`; one without a position is
     /// `path: error: msg`. The line/column is never invented for errors that
-    /// do not carry one.
+    /// do not carry one. The path is escaped, so it cannot inject a second
+    /// diagnostic line or a terminal control sequence.
     pub fn render(&self, path: &str) -> String {
+        let path = escape_path(path);
         match self.position() {
             Some((line, col)) => format!("{path}:{line}:{col}: error: {}", self.msg),
             None => format!("{path}: error: {}", self.msg),
@@ -902,7 +939,7 @@ fn to_source(s: crate::ast::SourceSpec) -> SourceRef {
 
 #[cfg(test)]
 mod tests {
-    use super::LoadError;
+    use super::{escape_path, LoadError};
 
     #[test]
     fn a_positioned_error_renders_lean_style() {
@@ -919,5 +956,35 @@ mod tests {
         assert_eq!(err.position(), None);
         assert_eq!(err.render("x.std"), "x.std: error: 未知名称");
         assert_eq!(err.to_string(), "未知名称");
+    }
+
+    #[test]
+    fn escape_path_keeps_backslashes_and_escapes_diagnostic_characters() {
+        // A literal backslash is a Windows separator, not an escape to double.
+        let path = "C:\\案卷\\a\nb\r\t\u{001B}\u{202E}\u{2028}\u{FEFF}.std";
+        let escaped = escape_path(path);
+        assert_eq!(
+            escaped,
+            "C:\\案卷\\a\\nb\\r\\t\\u{001B}\\u{202E}\\u{2028}\\u{FEFF}.std"
+        );
+        assert!(!escaped.contains('\n'), "{escaped:?}");
+        assert!(!escaped.contains('\r'), "{escaped:?}");
+        assert!(!escaped.contains('\t'), "{escaped:?}");
+        assert!(!escaped.contains('\u{001B}'), "{escaped:?}");
+        assert!(!escaped.contains('\u{202E}'), "{escaped:?}");
+        assert!(!escaped.contains("\\\\"), "backslashes must not be doubled");
+    }
+
+    #[test]
+    fn a_load_error_render_escapes_the_path_onto_one_line() {
+        let err = LoadError::at("坏声明", 1, 2);
+        let rendered = err.render("C:\\案卷\\a\nb\u{001B}\u{202E}.std");
+        assert_eq!(
+            rendered,
+            "C:\\案卷\\a\\nb\\u{001B}\\u{202E}.std:1:2: error: 坏声明"
+        );
+        assert_eq!(rendered.lines().count(), 1, "{rendered:?}");
+        assert!(!rendered.contains('\u{001B}'), "{rendered:?}");
+        assert!(!rendered.contains('\u{202E}'), "{rendered:?}");
     }
 }

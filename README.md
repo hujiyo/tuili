@@ -77,10 +77,15 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 
 二进制名是 `std-deduce`，包名仍是 `std-deduce-cli`。加载失败时的诊断采用 Lean 风格：
 解析错误带源码行列，输出 `路径:行:列: error: ...`；精化与内核错误没有 AST span，
-不伪造位置，输出 `路径: error: ...`。批处理入口把这条诊断原样写到 stderr 并以 `1`
+不伪造位置，输出 `路径: error: ...`。诊断里的路径会先转义换行、控制与不可见格式字符
+（如 `\n`、`\u{202E}`），字面反斜杠保持单写，一条失败只占一行。
+批处理入口把这条诊断原样写到 stderr 并以 `1`
 退出，不再重复路径或另加前缀；`:load` 命令仍以 `错误：` 前缀报告同一条诊断。
 `std-deduce check <文件.std>` 与直接给文件等价；`std-deduce repl` 显式进入 REPL；
 `--help` / `-h` 打印用法，`--version` / `-V` 打印 `std-deduce <版本>`。
+除单独使用的这四个选项外，首参或文件后的剩余参数只要以 `-` 开头就按未知选项报用法错误
+（`2`），不会被当成文件读取，也不会被静默忽略；`std-deduce check --help` 同样是用法错误。
+文件名本身以 `-` 开头时写 `./-名字`。
 
 交互命令：
 
@@ -117,7 +122,7 @@ cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':verify-
 | `:packs` | 扫描成功；空目录也是成功 | 当前没有 `1` 的结局 | 目录不存在/不可读、坏清单/坏目录项，或 `std.lock` 校验失败（好包仍会列出） |
 | `:lock` | 所有包成功扫描并写入锁 | 当前没有 `1` 的结局 | 目录/清单/包内文件错误、重复包名或写锁失败；不写部分锁 |
 | `:audit` | 至少一条带引文来源，且全部命中 | 没有带引文来源（没有可核对的引文），或有引文来源未命中/未核对 | 尚未 `:load`，或语料本身坏了（坏布局、坏 JSON、重复 `(law, version)`） |
-| `std-deduce <文件.std>` | 文件加载成功，且后续命令全部成功 | 文件加载失败，或后续查询是缺口/未决冲突 | 后续命令错误或用法错误 |
+| `std-deduce <文件.std>` | 文件加载成功，且后续命令全部成功 | 文件加载失败，或后续查询是缺口/未决冲突 | 后续命令错误、未知选项或用法错误 |
 
 也可以一次性执行：
 
@@ -388,7 +393,9 @@ rule cn.constitution.非法搜查即侵犯 :
   不重算也不校验。该 crate 依赖 `serde` / `serde_json` / `toml` / `sha2`。
 - **`crates/cli`**：`std-deduce` 二进制的批处理入口把第一个文件参数交给与 `:load` 相同的加载路径，
   成功后执行剩余命令；加载失败打印 `路径:行:列: error: ...`（无位置时 `路径: error: ...`）
-  并退出 `1`。会话命令里，`:why` 生成证书、从证书渲染
+  并退出 `1`。诊断路径先转义换行、控制与格式字符，字面反斜杠保持单写；除单独使用的
+  `--help`/`-h`/`--version`/`-V` 外，首参或剩余命令中以 `-` 开头的参数按未知选项退出 `2`，
+  不当作文件读取，也不作为注释静默忽略。会话命令里，`:why` 生成证书、从证书渲染
   推导树，并对同一份证书依次运行 `cert::check` 与 `cert::kernel_proof`；冲突分支展示的推导同样从证书渲染
   并用 `cert::check` 复核。`:cert` 导出证书，`:verify-cert` 依次运行 `cert::check` 与 `cert::kernel_proof`，
   把逻辑、内核、侧条件和需人判断分成四行报告；
@@ -513,7 +520,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 427 个：kernel 19、lang 57、reason 41、cert 101、cli 108、lawpack 101（含 1 个 doc test）。
+`cargo test --workspace` 共 437 个：kernel 19、lang 60、reason 41、cert 101、cli 115、lawpack 101（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -528,10 +535,13 @@ cargo test --workspace
   缺来源先于类型错误报告，失败的加载不改变库内容；
   `sort`/`pred`/`obj`/`def`/`contrary`/`unique` 无来源仍可加载；解析错误把行列保留在
   `LoadError` 里，消息不再内嵌“第 X 行第 Y 列”，`render` 输出 Lean 风格诊断。
-- `crates/lang/src/module.rs`（2 个单元测试）：`LoadError` 的 Lean 风格渲染——有位置时
-  `x.std:2:3: error: ...`，无位置时 `x.std: error: ...`；`Display` 始终只输出消息本身。
-- `crates/lang/tests/source.rs`（14）：字符串字面量的转义、CJK/URL 字符、未闭合/未知转义/裸换行与
-  裸控制字符的行列号；source 全字段按任意顺序跨行解析；重复键的报错列指向键；CRLF 输入、注释中的引号；
+- `crates/lang/src/module.rs`（4 个单元测试）：`LoadError` 的 Lean 风格渲染——有位置时
+  `x.std:2:3: error: ...`，无位置时 `x.std: error: ...`；`Display` 始终只输出消息本身；
+  `escape_path` 保留 Windows 反斜杠，把换行/回车/制表符与控制、格式字符写成短转义或
+  `\u{XXXX}`，`render` 用它将路径压成一行。
+- `crates/lang/tests/source.rs`（15）：字符串字面量的转义、CJK/URL 字符、未闭合/未知转义/裸换行与
+  裸控制字符的行列号；“无法识别的字符”把 ESC/U+202E/BOM 写成 `\u{...}` 而不是原样回显；
+  source 全字段按任意顺序跨行解析；重复键的报错列指向键；CRLF 输入、注释中的引号；
   缺/空 `text`/`locator` 与旧位置式写法都拒绝。
 - `crates/lang/tests/namespace.rs`（22）：限定名词法/解析、`namespace` 第一条/唯一/格式与缺参位置；
   模块声明前缀与空段、未限定类型/结论/unless/`defeated_by`/`prefer`/`contrary`/`unique`/解释/`def`
@@ -585,21 +595,24 @@ cargo test --workspace
 - `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
   `[ns]` 后缀；限定名 `:why` 通过证书复核；`a` 的事实不满足 `b` 的目标；交换两个模块的加载顺序后
   `:why` / `:cert` 结果一致；模块内未限定引用加载失败。
-- `crates/cli/tests/cert.rs`（20）：`:cert` / `:verify-cert` 端到端——导出的 JSON 往返并通过检查器；
+- `crates/cli/tests/cert.rs`（21）：`:cert` / `:verify-cert` 端到端——导出的 JSON 往返并通过检查器；
   `:verify-cert` 分行报告逻辑与内核两段；缺口证书退出 `1` 且产生 `MissingPremise`；
   未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在逻辑层失败；
   逻辑层接受、内核因绑定类型不符拒绝时退出 `2` 并给出节点；证书不存在、不是 JSON、未 `:load` 时失败。
   另含目标绑定与单点变异：删前提、换绑定、换结论、复用错误节点、追加已成立 blocker、
   改根后带目标失败/不带目标仍合法、合法目标通过、缺口根不能绑定目标、定义等价目标通过；
   以及含空格路径（不加引号只当路径、加引号可带目标）、缺根、目标无法解析；
+  读证书失败的路径把换行/ESC/U+202E 转义成一行诊断；
   旧 `:check` 不再作为别名，报改名错误并退出 `2`。
-- `crates/cli/tests/entry.rs`（13）：二进制入口端到端——批处理加载成功退出 `0` 并打印加载报告；
+- `crates/cli/tests/entry.rs`（19）：二进制入口端到端——批处理加载成功退出 `0` 并打印加载报告；
   坏文件退出 `1`，stderr 带路径与错误且不执行后续命令；坏语法批处理输出 `路径:行:列: error:`
   且路径只出现一次、不出现 `错误：` 前缀；`:load` 坏语法保留 `错误：` 前缀并带同样位置；
   精化错误没有 AST span 时输出 `路径: error: ...`，不伪造行列号；含空格路径按单个参数加载；
   `check` 子命令与直接给文件输出一致；加载后继续执行 `:why`；`--help` / `-h` 列出批处理与
   `:verify-cert`；`--version` / `-V` 输出 `std-deduce <版本>`；无参数与 `repl` 都进入 REPL；
-  `check` 缺文件与 `repl` 带多余参数报用法错误（`2`）。
+  `check` 缺文件与 `repl` 带多余参数报用法错误（`2`）；文件后的 `--help`、首参未知选项、
+  `check --help` 与 REPL 中的 `--foo` 都按未知选项退出 `2`，不静默忽略也不当文件；
+  加载失败路径中的换行/ESC/U+202E 只产生一行转义诊断，Windows 反斜杠不被双写。
 - `crates/cli/tests/audit.rs`（29）：`:audit` 端到端——带引文来源命中与正确哈希退出 `0`；规则带正确 `quote`
   加事实 `axiom` 无 `quote` 时仍退出 `0`（1 命中、1 无引文）；只有无引文来源时退出 `1` 并报“没有可核对的引文”，
   但仍打印覆盖声明；改一个字、哈希不符或格式非法、版本不符、无条号、多版本歧义、无对应语料、管辖不符退出 `1`；

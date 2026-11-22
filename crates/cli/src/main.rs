@@ -17,7 +17,11 @@
 //! stderr when the loader knows a source position, or `path: error: ...`
 //! otherwise (refinement and kernel errors carry no position yet), and exits
 //! `1`; the remaining commands are not run. A malformed invocation is still a
-//! usage error (`2`). Commands are line-oriented:
+//! usage error (`2`): an argument that looks like an option (`-…`) where a
+//! command or a file is expected is an unknown option, not a comment and not a
+//! file. Only the standalone `--help`/`-h`/`--version`/`-V` are options; a file
+//! whose name starts with `-` is passed as `./-名字`. Commands are
+//! line-oriented:
 //!
 //! ```text
 //! :load <file>            load a theory file
@@ -143,6 +147,7 @@ use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
+use std_deduce_lang::module::escape_path;
 use std_deduce_lang::{elab, Library};
 use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus};
 use std_deduce_lawpack::{PackInfo, LOCK_FILE};
@@ -194,8 +199,8 @@ impl Session {
     /// any. The library load is all-or-nothing; `loaded` and `lib` change only
     /// after a full success.
     fn load_theory(&mut self, path: &str, out: &mut impl Write) -> Result<Outcome, String> {
-        let src =
-            std::fs::read_to_string(path).map_err(|e| format!("{path}: error: 读取失败：{e}"))?;
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: error: 读取失败：{e}", escape_path(path)))?;
         let report = self.lib.load(path, &src).map_err(|e| e.render(path))?;
         self.loaded = true;
         writeln!(out, "已加载 `{path}`。").ok();
@@ -213,8 +218,17 @@ impl Session {
 
     fn handle(&mut self, line: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("--") {
+        if line.is_empty() {
             return Ok(Outcome::Proved);
+        }
+        if line.starts_with('-') {
+            // A bare line is normally a colon command. An option-looking line
+            // is not a command and is never a comment: silently accepting it
+            // would turn `std-deduce file.std --help` into a success.
+            return Err(unknown_option_message(
+                line,
+                "它不是命令；查询请用 :why / :gap",
+            ));
         }
         if let Some(rest) = line.strip_prefix(':') {
             let (cmd, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
@@ -569,14 +583,17 @@ impl Session {
             Ok(text) => text,
             Err(e) => {
                 write_verify_cert_not_run(out, "读取证书失败");
-                return Err(format!("读取证书 `{path}` 失败：{e}"));
+                return Err(format!("读取证书 `{}` 失败：{e}", escape_path(path)));
             }
         };
         let certificate = match Certificate::from_json(&text) {
             Ok(certificate) => certificate,
             Err(e) => {
                 write_verify_cert_not_run(out, "证书 JSON 无效");
-                return Err(format!("证书 `{path}` 不是有效的证书 JSON：{e}"));
+                return Err(format!(
+                    "证书 `{}` 不是有效的证书 JSON：{e}",
+                    escape_path(path)
+                ));
             }
         };
 
@@ -763,7 +780,7 @@ impl Session {
                 info.jurisdiction,
                 info.territory,
                 effective_range(info),
-                escape_path(&pack.dir)
+                escape_display_path(&pack.dir)
             )
             .ok();
             if let Some(description) = &info.description {
@@ -846,7 +863,7 @@ impl Session {
         writeln!(
             out,
             "已写入 {}（{} 个包）",
-            escape_path(&path),
+            escape_display_path(&path),
             lockfile.pack.len()
         )
         .ok();
@@ -891,7 +908,7 @@ impl Session {
                     return Err(format!("{} 个语料错误，未进行核对", scan.errors.len()));
                 }
                 if scan.corpora.is_empty() {
-                    writeln!(out, "语料目录中没有语料：{}", escape_path(&root)).ok();
+                    writeln!(out, "语料目录中没有语料：{}", escape_display_path(&root)).ok();
                 }
                 scan.corpora
                     .into_iter()
@@ -1109,8 +1126,25 @@ fn fail_goal_binding(out: &mut impl Write, detail: impl std::fmt::Display) -> Re
     Err(format!("目标绑定失败：{detail}"))
 }
 
-fn escape_path(path: &Path) -> String {
+/// Render a path for a command's multi-line report.
+///
+/// Listing output escapes a literal backslash (via `escape_control`), unlike
+/// the one-line load and certificate diagnostics, which use
+/// [`escape_path`] so a Windows path keeps its separators single.
+fn escape_display_path(path: &Path) -> String {
     escape_control(&path.display().to_string())
+}
+
+/// The usage error for an option where a command or a file was expected.
+///
+/// The option itself is escaped, so it cannot forge a diagnostic line either.
+/// The hint names the escape hatch for a file whose name really starts with
+/// `-`.
+fn unknown_option_message(option: &str, expected: &str) -> String {
+    format!(
+        "未知选项 `{}`：{expected}；文件名以 - 开头时请写 ./-名字，帮助用 std-deduce --help",
+        escape_path(option)
+    )
 }
 
 /// Render a pack's effective date range. A missing endpoint is shown as
@@ -1410,8 +1444,9 @@ fn print_version(out: &mut impl Write) {
 
 /// Run every argument as a colon command and return the process exit code.
 ///
-/// The worst outcome wins. A command error (including the removed `:check`)
-/// stops the run and is a usage error (`2`).
+/// The worst outcome wins. A command error — including the removed `:check`
+/// and an option-looking argument such as `--help` after a file — stops the
+/// run and is a usage error (`2`). Options are never silently ignored.
 fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write) -> i32 {
     let mut worst = 0;
     for command in commands {
@@ -1499,12 +1534,33 @@ fn main() {
             eprintln!("错误：用法：std-deduce repl（不接受额外参数）");
             2
         }
-        Some("check") if args.len() >= 2 => run_batch(&mut session, &args[1], &args[2..], &mut out),
+        Some("check") if args.len() >= 2 => {
+            if args[1].starts_with('-') {
+                // `check --help` must not be read as a file: the invocation is
+                // malformed, not a failed load.
+                eprintln!(
+                    "错误：{}",
+                    unknown_option_message(&args[1], "std-deduce check 的第一个参数必须是文件")
+                );
+                2
+            } else {
+                run_batch(&mut session, &args[1], &args[2..], &mut out)
+            }
+        }
         Some("check") => {
             eprintln!("错误：用法：std-deduce check <文件.std> [命令...]");
             2
         }
         Some(first) if first.starts_with(':') => run_commands(&mut session, &args, &mut out),
+        Some(first) if first.starts_with('-') => {
+            // Without this arm the last branch would read `--foo` as a file and
+            // report a read failure (exit `1`) instead of a usage error.
+            eprintln!(
+                "错误：{}",
+                unknown_option_message(first, "std-deduce 的第一个参数必须是文件或命令")
+            );
+            2
+        }
         Some(_) => run_batch(&mut session, &args[0], &args[1..], &mut out),
     };
     if code != 0 {
