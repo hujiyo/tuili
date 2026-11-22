@@ -31,14 +31,21 @@ obj 甲侵害 : 侵害
 obj 乙行为 : 行为
 
 axiom 侵害是不法的 : 不法 甲侵害
+  source text "示例案情" locator "侵害状态" note "教学示例事实，非真实证据"
 axiom 侵害正在进行 : 正在进行 甲侵害
+  source text "示例案情" locator "侵害状态" note "教学示例事实，非真实证据"
 axiom 李四是侵害人 : 是侵害人 李四 甲侵害
+  source text "示例案情" locator "侵害人" note "教学示例事实，非真实证据"
 axiom 乙是为了制止 : 制止 乙行为 甲侵害
+  source text "示例案情" locator "防卫行为" note "教学示例事实，非真实证据"
 axiom 乙造成了损害 : 造成损害 乙行为 李四
+  source text "示例案情" locator "损害结果" note "教学示例事实，非真实证据"
 
 -- 第二款的加重事实：防卫行为明显超过必要限度、造成重大损害。
 axiom 超过限度 : 超过必要限度 乙行为
+  source text "示例案情" locator "防卫限度" note "教学示例事实，非真实证据"
 axiom 损害重大 : 重大损害 乙行为
+  source text "示例案情" locator "损害结果" note "教学示例事实，非真实证据"
 
 rule 认定正当防卫 :
   params a : 行为, e : 侵害, x : 人

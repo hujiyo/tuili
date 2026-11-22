@@ -130,6 +130,19 @@ impl Library {
                     ty,
                     source,
                 } => {
+                    // An asserted fact without provenance is not auditable: it
+                    // would enter the fact base as if it had been proved. A
+                    // source made only of whitespace names nothing and is not
+                    // provenance either. This is checked before elaboration so
+                    // a missing source is not masked by an unrelated type
+                    // error.
+                    if !source.as_ref().is_some_and(usable_source) {
+                        return Err(LoadError {
+                            msg: format!(
+                                "axiom `{n}` 缺少 source 或来源为空白；断言事实必须有出处（法律名称 + 条号，或案件材料）"
+                            ),
+                        });
+                    }
                     let ety = elab::elab_top(&next.env, &ty).map_err(|e| LoadError {
                         msg: format!("`axiom {n}`：{}", e.msg),
                     })?;
@@ -291,6 +304,19 @@ impl Library {
                     defeaters,
                     sources,
                 } => {
+                    // A rule is the bridge from a legal provision to a
+                    // conclusion; without a source the bridge cannot be
+                    // audited. A source made only of whitespace names nothing
+                    // and is rejected as well. This runs before every
+                    // elaboration step so a missing source is reported as
+                    // such, not as a type error.
+                    if !sources.iter().any(usable_source) {
+                        return Err(LoadError {
+                            msg: format!(
+                                "规则 `{n}` 缺少 source 或来源为空白；规则必须有出处（法律名称 + 条号，或案件材料）"
+                            ),
+                        });
+                    }
                     // Every telescope binder is opened by the kernel as the
                     // constant `?<binder>`. Two binders with the same name
                     // would become one constant, so the reasoner could take a
@@ -582,6 +608,13 @@ fn pred_arity(env: &Env, name: &std_deduce_kernel::Name) -> Option<usize> {
         }
     }
     Some(n)
+}
+
+/// Whether a parsed source names something: both its text and its locator
+/// must contain a non-whitespace character. Whitespace-only strings parse as
+/// non-empty but are not provenance.
+fn usable_source(source: &crate::ast::SourceSpec) -> bool {
+    !source.text.trim().is_empty() && !source.locator.trim().is_empty()
 }
 
 fn to_source(s: crate::ast::SourceSpec) -> SourceRef {

@@ -344,7 +344,7 @@ fn tampered_conclusion_or_binding_is_rejected() {
     // must exit 2 and name the node, never report a valid certificate.
     let theory = TempFile::new(
         "kernel-node-theory",
-        "sort 人\nsort 物\nobj 张三 : 人\nobj 甲 : 物\naxiom 真 : Prop\ndef 恒 : 人 → Prop := λ (u : 人) := 真\nrule 恒真 :\n  params x : 人\n  premise 恒 x\n  conclude 真\n",
+        "sort 人\nsort 物\nobj 张三 : 人\nobj 甲 : 物\naxiom 真 : Prop\n  source text \"测试\" locator \"夹具\"\ndef 恒 : 人 → Prop := λ (u : 人) := 真\nrule 恒真 :\n  params x : 人\n  premise 恒 x\n  conclude 真\n  source text \"测试\" locator \"夹具\"\n",
     );
     let truth = CertExpr::Const {
         name: "真".to_owned(),
@@ -647,7 +647,8 @@ fn goal_binding_uses_kernel_conversion_not_printed_text() {
          obj 张三 : 人\n\
          pred 好人 : 人 → Prop\n\
          def 善 : 人 → Prop := λ (x : 人) := 好人 x\n\
-         axiom 张三是好人 : 好人 张三\n",
+         axiom 张三是好人 : 好人 张三\n\
+           source text \"测试\" locator \"夹具\"\n",
     );
     let generated = run(vec![
         format!(":load {}", theory.path.display()),

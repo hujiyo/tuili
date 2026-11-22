@@ -436,15 +436,18 @@ pred 违法 : 公民 → Prop
 pred 无辜 : 公民 → Prop
 pred 佐证 : 侵占 李四 → Prop
 axiom 侵占事实 : 侵占 张三
+  source text "测试" locator "夹具"
 rule 依赖推定 :
   premise h : 侵占 李四
   unless 佐证 h
   conclude 无辜 张三
+  source text "测试" locator "夹具"
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#,
     );
     let output = session_with_theory(&theory, &[":why 违法 张三"]);
@@ -496,6 +499,62 @@ axiom 事实 : 违法 张三
         !out.contains("第一行\n第二行"),
         "an escaped newline in a quote must not split the output line:\n{out}"
     );
+}
+
+/// A fact entered by hand is a user/session assertion. Its recorded source
+/// must say so, and `:inspect` must never print an empty citation.
+#[test]
+fn given_facts_carry_a_user_session_source() {
+    let theory = TempTheory::new(
+        "given-source",
+        r#"
+sort 公民
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+"#,
+    );
+    let output = check(
+        session_with_theory(&theory, &[":given 违法 张三", ":inspect"]),
+        PROVED,
+        &["← 「用户输入交互会话」"],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("「」"),
+        "a given fact must not print an empty source:\n{out}"
+    );
+}
+
+/// The same provenance rule applies when commands arrive on stdin instead of
+/// argv: an interactive `:given` is still a user/session assertion.
+#[test]
+fn given_through_stdin_uses_the_interactive_session_source() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let theory = TempTheory::new(
+        "given-stdin",
+        r#"
+sort 公民
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+"#,
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_std-deduce-cli"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the CLI");
+    {
+        let stdin = child.stdin.as_mut().expect("piped stdin");
+        writeln!(stdin, ":load {}", theory.path.display()).unwrap();
+        writeln!(stdin, ":given 违法 张三").unwrap();
+        writeln!(stdin, ":inspect").unwrap();
+        writeln!(stdin, ":quit").unwrap();
+    }
+    let output = child.wait_with_output().expect("the CLI exits");
+    check(output, PROVED, &["← 「用户输入交互会话」"]);
 }
 
 /// Every example file that has a regression test above. The guard below keeps

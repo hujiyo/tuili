@@ -39,10 +39,15 @@ obj 甲侵害 : 侵害
 obj 乙行为 : 行为
 
 axiom 侵害是不法的 : 不法 甲侵害
+  source text "示例案情" locator "侵害状态" note "教学示例事实，非真实证据"
 axiom 侵害正在进行 : 正在进行 甲侵害
+  source text "示例案情" locator "侵害状态" note "教学示例事实，非真实证据"
 axiom 李四是侵害人 : 是侵害人 李四 甲侵害
+  source text "示例案情" locator "侵害人" note "教学示例事实，非真实证据"
 axiom 乙是为了制止 : 制止 乙行为 甲侵害
+  source text "示例案情" locator "防卫行为" note "教学示例事实，非真实证据"
 axiom 乙造成了损害 : 造成损害 乙行为 李四
+  source text "示例案情" locator "损害结果" note "教学示例事实，非真实证据"
 
 -- ===== 规则 =====
 

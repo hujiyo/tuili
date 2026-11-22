@@ -223,7 +223,7 @@ impl Session {
                         ty: e,
                         sources: vec![SourceRef {
                             text: "用户输入".into(),
-                            locator: String::new(),
+                            locator: "交互会话".into(),
                             ..Default::default()
                         }],
                         index: 0,

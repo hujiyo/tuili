@@ -14,8 +14,10 @@ pred 下雨 : 天气 → Prop
 obj 今天 : 天气
 
 axiom 今天确实下雨 : 下雨 今天
+  source text "教学示例" locator "天气事实" note "教学示例事实，非真实观测"
 
 axiom 假 : Prop
+  source text "经典逻辑" locator "假常量" note "只声明命题常量，不断言它成立"
 
 def 非 : Prop → Prop := λ (p : Prop) := p → 假
 

@@ -5,6 +5,7 @@
 -- 没有构造，就没有定理。想要它，只能加公理。
 
 axiom 假 : Prop
+  source text "经典逻辑" locator "假常量" note "只声明命题常量，不断言它成立"
 def 非 : Prop → Prop := λ (p : Prop) := p → 假
 
 -- 伪证明：想从 ¬¬p 直接得到 p。

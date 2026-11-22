@@ -38,6 +38,7 @@ pred 无辜 : 公民 → Prop
 obj 张三 : 公民
 
 axiom 无辜事实 : 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
@@ -60,11 +61,13 @@ rule 依赖阻断 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 违法 张三
+  source text "测试" locator "夹具"
 
 rule 依赖前提 :
   premise h : 侵占 张三
   premise e : 佐证 h
   conclude 违法 张三
+  source text "测试" locator "夹具"
 "#;
 
 /// An environment rule derives the blocker `无辜 张三` from an axiom. A
@@ -78,7 +81,9 @@ pred 无辜 : 公民 → Prop
 pred 有罪 : 公民 → Prop
 obj 张三 : 公民
 axiom 有罪事实 : 有罪 张三
+  source text "测试" locator "夹具"
 axiom 侵占事实 : 侵占 张三
+  source text "测试" locator "夹具"
 
 rule 推定无辜 :
   params p : 公民
@@ -105,22 +110,26 @@ pred 有罪 : 公民 → Prop
 pred 可罚 : 公民 → Prop
 obj 张三 : 公民
 axiom 有罪事实 : 有罪 张三
+  source text "测试" locator "夹具"
 
 rule 有罪则可罚 :
   params p : 公民
   premise 有罪 p
   conclude 可罚 p
+  source text "测试" locator "夹具"
 
 rule 可罚则无辜 :
   params p : 公民
   premise 可罚 p
   conclude 无辜 p
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#;
 
 /// The environment can derive `无辜 李四`, but the certificate is about
@@ -134,17 +143,20 @@ pred 有罪 : 公民 → Prop
 obj 张三 : 公民
 obj 李四 : 公民
 axiom 李四有罪 : 有罪 李四
+  source text "测试" locator "夹具"
 
 rule 推定无辜 :
   params p : 公民
   premise 有罪 p
   conclude 无辜 p
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#;
 
 /// A rule concludes `无辜`, but its premise matches no fact: it derives
@@ -161,12 +173,14 @@ rule 推定无辜 :
   params p : 公民
   premise 有罪 p
   conclude 无辜 p
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#;
 
 /// A rule whose `unless` references a premise binder cannot be evaluated
@@ -184,12 +198,14 @@ rule 依赖推定 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#;
 
 /// An opaque rule concludes `中间 张三`; the rule `中间 p → 无辜 p` propagates
@@ -207,17 +223,20 @@ rule 依赖中间 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 中间 张三
+  source text "测试" locator "夹具"
 
 rule 中间推无辜 :
   params p : 公民
   premise 中间 p
   conclude 无辜 p
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#;
 
 /// A two-hop chain: one propagation pass is not enough to reach the blocker.
@@ -235,22 +254,26 @@ rule 依赖中间 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 中间 张三
+  source text "测试" locator "夹具"
 
 rule 中间推第二 :
   params p : 公民
   premise 中间 p
   conclude 第二中间 p
+  source text "测试" locator "夹具"
 
 rule 第二推无辜 :
   params p : 公民
   premise 第二中间 p
   conclude 无辜 p
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#;
 
 /// Two opaque rules in a row: the second one's premise consumes the first
@@ -269,18 +292,21 @@ rule 依赖中间 :
   premise h : 侵占 张三
   conclude 中间 张三
   unless 佐证 h
+  source text "测试" locator "夹具"
 
 rule 依赖无辜 :
   premise h : 侵占 张三
   premise m : 中间 张三
   conclude 无辜 张三
   unless 佐证 h
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#;
 
 /// Like [`OPAQUE_CHAIN_THEORY`], but the opaque conclusion appears nested
@@ -299,17 +325,20 @@ rule 依赖中间 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 中间 张三
+  source text "测试" locator "夹具"
 
 rule 嵌套推无辜 :
   params p : 公民
   premise 可信 (中间 p)
   conclude 无辜 p
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#;
 
 /// A rule whose premise head is a parameter (`?p 甲`) consumes an opaque
@@ -328,17 +357,20 @@ rule 依赖中间 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 中间 甲
+  source text "测试" locator "夹具"
 
 rule 任意谓词推无辜 :
   params p : 公民 → Prop
   premise p 甲
   conclude 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 p
+  source text "测试" locator "夹具"
 "#;
 
 /// The blocker is a quantified proposition, so it has no predicate head the
@@ -355,6 +387,7 @@ rule r :
   premise 侵占 p
   conclude 违法 p
   unless ∀ (x : 公民), 无辜 x
+  source text "测试" locator "夹具"
 "#;
 
 /// The environment derives a blocker whose only difference from `r`'s
@@ -367,16 +400,19 @@ pred 违法 : 公民 → Prop
 pred 可信 : Prop → Prop
 obj 张三 : 公民
 axiom 侵占事实 : 侵占 张三
+  source text "测试" locator "夹具"
 
 rule 引入可信 :
   premise 侵占 张三
   conclude 可信 (∀ (z : 公民), 侵占 z)
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 可信 (∀ (y : 公民), 侵占 y)
+  source text "测试" locator "夹具"
 "#;
 
 /// `可信 侵占` and `可信 (λ x := 侵占 x)` are η-equivalent, but their
@@ -388,16 +424,19 @@ pred 违法 : 公民 → Prop
 pred 可信 : (公民 → Prop) → Prop
 obj 张三 : 公民
 axiom 侵占事实 : 侵占 张三
+  source text "测试" locator "夹具"
 
 rule 引入可信 :
   premise 侵占 张三
   conclude 可信 侵占
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 可信 (λ (x : 公民) := 侵占 x)
+  source text "测试" locator "夹具"
 "#;
 
 /// An opaque rule concludes the ground proposition `无辜 李四`. It must block
@@ -415,18 +454,21 @@ rule 依赖推定 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 无辜 李四
+  source text "测试" locator "夹具"
 
 rule r张三 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r李四 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 李四
+  source text "测试" locator "夹具"
 "#;
 
 /// The opaque rule concludes `无辜 p`, so its schema is `无辜 ?p`: every
@@ -446,18 +488,21 @@ rule 依赖推定 :
   premise e : 侵占 p
   unless 佐证 h
   conclude 无辜 p
+  source text "测试" locator "夹具"
 
 rule r张三 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r李四 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 李四
+  source text "测试" locator "夹具"
 "#;
 
 /// An opaque ground conclusion `中间 李四` feeds the evaluable rule
@@ -476,23 +521,27 @@ rule 依赖中间 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 中间 李四
+  source text "测试" locator "夹具"
 
 rule 中间推无辜 :
   params p : 公民
   premise 中间 p
   conclude 无辜 p
+  source text "测试" locator "夹具"
 
 rule r张三 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r李四 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 李四
+  source text "测试" locator "夹具"
 "#;
 
 /// The intermediate predicate sits inside another predicate's argument:
@@ -513,23 +562,27 @@ rule 依赖中间 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 中间 李四
+  source text "测试" locator "夹具"
 
 rule 嵌套推无辜 :
   params p : 公民
   premise 可信 (中间 p)
   conclude 无辜 p
+  source text "测试" locator "夹具"
 
 rule r张三 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r李四 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 李四
+  source text "测试" locator "夹具"
 "#;
 
 /// A premise whose head is a rule parameter (`?f 甲`) consumes the opaque
@@ -549,23 +602,27 @@ rule 依赖中间 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 中间 甲
+  source text "测试" locator "夹具"
 
 rule 任意谓词推无辜 :
   params f : 公民 → Prop
   premise f 甲
   conclude 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r张三 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r李四 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 李四
+  source text "测试" locator "夹具"
 "#;
 
 /// The opaque conclusion is an application of a function parameter,
@@ -589,18 +646,21 @@ rule 依赖任意 :
   premise e : 任意 f
   unless 佐证 h
   conclude f 甲
+  source text "测试" locator "夹具"
 
 rule r二元 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 任二 甲 乙
+  source text "测试" locator "夹具"
 
 rule r二元同参 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 任二 甲 甲
+  source text "测试" locator "夹具"
 "#;
 
 /// The opaque conclusion is `可信 (中间 李四)`. Rules whose blocker shares
@@ -620,24 +680,28 @@ rule 依赖可信 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 可信 (中间 李四)
+  source text "测试" locator "夹具"
 
 rule r另一参数 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 可信 (中间 张三)
+  source text "测试" locator "夹具"
 
 rule r另一层 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 可信 (可信 (中间 李四))
+  source text "测试" locator "夹具"
 
 rule r自身 :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 可信 (中间 李四)
+  source text "测试" locator "夹具"
 "#;
 
 /// A rule conclusion contains a literal beta-redex, so the reasoner stores a
@@ -653,21 +717,25 @@ obj 张三 : 公民
 obj 甲 : 公民
 
 axiom 侵占事实 : 侵占 张三
+  source text "测试" locator "夹具"
 
 rule 产生应用 :
   premise 侵占 张三
   conclude 应用 ((λ (x : 公民) := 侵占 张三) 甲)
+  source text "测试" locator "夹具"
 
 rule 应用推无辜 :
   params g : 公民 → Prop
   premise 应用 (g 甲)
   conclude 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 张三
+  source text "测试" locator "夹具"
 "#;
 
 /// The opaque conclusion applies a function parameter under a binder, so an
@@ -685,6 +753,7 @@ obj 张三 : 公民
 pred 佐证 : 侵占 张三 → Prop
 
 axiom 任意事实 : 任意 (λ (x : 公民) := x)
+  source text "测试" locator "夹具"
 
 rule 依赖全称 :
   params g : 公民 → 公民
@@ -692,12 +761,14 @@ rule 依赖全称 :
   premise e : 任意 g
   unless 佐证 h
   conclude 可信 (∀ (x : 公民), 应用 (g x))
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 可信 (∀ (x : 公民), 应用 x)
+  source text "测试" locator "夹具"
 "#;
 
 /// The opaque rule concludes `可信 侵占`; the gating rule asks for its
@@ -715,12 +786,14 @@ rule 依赖可信 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 可信 侵占
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 可信 (λ (x : 公民) := 侵占 x)
+  source text "测试" locator "夹具"
 "#;
 
 /// The opaque rule concludes an eta-expanded `可信 (λ x, 侵占 x)`; the next
@@ -739,17 +812,20 @@ rule 依赖展开 :
   premise h : 侵占 张三
   unless 佐证 h
   conclude 可信 (λ (x : 公民) := 侵占 x)
+  source text "测试" locator "夹具"
 
 rule 展开推无辜 :
   params f : 公民 → Prop
   premise 可信 (λ (x : 公民) := f x)
   conclude 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
   premise 侵占 p
   conclude 违法 p
   unless 无辜 张三
+  source text "测试" locator "夹具"
 "#;
 
 fn env_from(name: &str, source: &str) -> Env {
@@ -917,13 +993,16 @@ fn many_facts_env() -> Env {
            premise P a\n\
            premise P b\n\
            premise P c\n\
-           conclude Q a b c\n",
+           conclude Q a b c\n\
+           source text \"测试\" locator \"夹具\"\n",
     );
     for i in 0..120 {
         source.push_str(&format!("obj c{i} : 公民\n"));
     }
     for i in 0..120 {
-        source.push_str(&format!("axiom p{i} : P c{i}\n"));
+        source.push_str(&format!(
+            "axiom p{i} : P c{i}\n  source text \"测试\" locator \"夹具\"\n"
+        ));
     }
     env_from("cert-check-many-facts", &source)
 }
@@ -1834,17 +1913,20 @@ rule A同 :
   premise h : Q x0
   unless 佐证 h
   conclude P (λ (z : 人) := z)
+  source text "测试" locator "夹具"
 
 rule Z常 :
   premise h : Q x0
   unless 佐证 h
   conclude P (λ (z : 人) := x0)
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 人
   premise Q p
   conclude Q p
   unless P (λ (z : 人) := z)
+  source text "测试" locator "夹具"
 "#,
     );
     let error = check(&env, &o_identity_certificate())
@@ -1873,17 +1955,20 @@ rule 依赖 :
   premise h : Q 甲
   unless 佐证 h
   conclude P 甲
+  source text "测试" locator "夹具"
 
 rule 生长 :
   params x : 人
   premise P x
   conclude P (F x x)
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 人
   premise Q p
   conclude Q p
   unless P 甲
+  source text "测试" locator "夹具"
 "#,
     );
     let cert = certificate(
@@ -1912,20 +1997,24 @@ def 我 : 人 := x0
 pred Q : 人 → Prop
 pred P : (人 → 人) → Prop
 axiom Q事实 : Q x0
+  source text "测试" locator "夹具"
 
 rule A常 :
   premise Q x0
   conclude P (λ (x0 : 人) := 我)
+  source text "测试" locator "夹具"
 
 rule Z同 :
   premise Q x0
   conclude P (λ (x0 : 人) := x0)
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 人
   premise Q p
   conclude Q p
   unless P (λ (x0 : 人) := x0)
+  source text "测试" locator "夹具"
 "#,
     );
     let error = check(&env, &o_identity_certificate())

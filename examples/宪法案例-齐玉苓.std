@@ -35,7 +35,9 @@ obj 顶替 : 行为
 obj 济宁商校 : 学校
 
 axiom 齐玉苓是公民 : 是公民 齐玉苓
+  source text "示例案情" locator "当事人身份" note "教学示例事实，非真实证据"
 axiom 陈晓琪冒名顶替 : 冒名顶替 顶替 齐玉苓 济宁商校
+  source text "示例案情" locator "冒名顶替行为" note "教学示例事实，非真实证据"
 
 rule 宪法第四十六条 :
   params p : 公民
