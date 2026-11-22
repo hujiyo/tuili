@@ -105,8 +105,8 @@ fn the_official_pack_is_listed_and_its_lock_verifies() {
         run_in_repo(&[":packs lawpacks".to_string()]),
         PROVED,
         &[
-            "cn.constitution 0.2.0",
-            "中华人民共和国宪法官方包 v1（第三十三、三十五、三十七、三十九、四十六条；非完整形式化）",
+            "cn.constitution 0.3.0",
+            "中华人民共和国宪法官方包 v0.3.0（第三十三至四十六条中的选定基本权利；非完整形式化）",
             "文件 1 个",
             "锁定校验：通过（1 个包）",
         ],
@@ -125,14 +125,14 @@ fn inspect_marks_pack_declarations_with_the_pack_version() {
         &[
             "rule  cn.constitution.非法搜查侵犯住宅",
             "pred  cn.constitution.公民 : cn.constitution.人 → Prop",
-            "[cn.constitution@0.2.0]",
+            "[cn.constitution@0.3.0]",
             "引文：中华人民共和国公民的住宅不受侵犯。禁止非法搜查或者非法侵入公民的住宅。",
         ],
     );
     let out = stdout(&output);
-    // v1 contributes 2 sorts + 20 predicates + 17 rules = 39 declarations, all
-    // marked with the locked version; the case objects are not.
-    assert_eq!(out.matches("[cn.constitution@0.2.0]").count(), 39, "{out}");
+    // The pack contributes 2 sorts + 53 predicates + 41 rules = 96 declarations,
+    // all marked with the locked version; the case objects are not.
+    assert_eq!(out.matches("[cn.constitution@0.3.0]").count(), 96, "{out}");
 }
 
 /// A user file may not declare into the official pack's namespace. The ledger
@@ -167,9 +167,9 @@ fn a_file_cannot_declare_into_a_loaded_pack_namespace() {
         "a rejected declaration must not enter the ledger:\n{out}"
     );
     assert_eq!(
-        out.matches("[cn.constitution@0.2.0]").count(),
-        39,
-        "the pack's 39 declarations still carry the pack suffix:\n{out}"
+        out.matches("[cn.constitution@0.3.0]").count(),
+        96,
+        "the pack's 96 declarations still carry the pack suffix:\n{out}"
     );
 }
 
@@ -180,14 +180,23 @@ fn audit_matches_the_quotations_inside_the_official_pack() {
         PROVED,
         &[
             "✓ 「宪法第三十三条」← cn.constitution@2018",
+            "✓ 「宪法第三十四条」← cn.constitution@2018",
             "✓ 「宪法第三十五条」← cn.constitution@2018",
+            "✓ 「宪法第三十六条」← cn.constitution@2018",
             "✓ 「宪法第三十七条」← cn.constitution@2018",
+            "✓ 「宪法第三十八条」← cn.constitution@2018",
             "✓ 「宪法第三十九条」← cn.constitution@2018",
+            "✓ 「宪法第四十条」← cn.constitution@2018",
+            "✓ 「宪法第四十一条」← cn.constitution@2018",
+            "✓ 「宪法第四十二条」← cn.constitution@2018",
+            "✓ 「宪法第四十三条」← cn.constitution@2018",
+            "✓ 「宪法第四十四条」← cn.constitution@2018",
+            "✓ 「宪法第四十五条」← cn.constitution@2018",
             "✓ 「宪法第四十六条」← cn.constitution@2018",
-            "核对 17 条带引文来源：命中 17，不一致 0，未核对 0；另有 2 条来源无引文（不参与核对）。",
-            "条文哈希：17 条已固定并核验，0 条未固定，0 条未核验或格式非法。",
-            "覆盖 cn.constitution@2018：形式化 5 条 / 索引 138 条 / 开放概念 12 个",
-            "  形式化：「第三十三条」、「第三十五条」、「第三十七条」、「第三十九条」、「第四十六条」",
+            "核对 41 条带引文来源：命中 41，不一致 0，未核对 0；另有 2 条来源无引文（不参与核对）。",
+            "条文哈希：41 条已固定并核验，0 条未固定，0 条未核验或格式非法。",
+            "覆盖 cn.constitution@2018：形式化 14 条 / 索引 129 条 / 开放概念 29 个",
+            "  形式化：「第三十三条」、「第三十四条」、「第三十五条」、「第三十六条」、「第三十七条」、「第三十八条」、「第三十九条」、「第四十条」、「第四十一条」、「第四十二条」、「第四十三条」、「第四十四条」、「第四十五条」、「第四十六条」",
         ],
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
@@ -248,6 +257,149 @@ axiom 张三住宅遭非法搜查 : cn.constitution.非法搜查 张三 甲宅
         out.matches("推导已通过独立校验。").count(),
         7,
         "all seven queries must pass both certificate checks:\n{out}"
+    );
+}
+
+/// The second-chapter batch adds rights whose conditions are explicit facts:
+/// age, religious coercion, defamation, communication checks, state-inflicted
+/// loss, employment, retirement and old age. Each article must reach its
+/// conclusion through its own pack rule and pass both certificate checks.
+#[test]
+fn a_facts_only_case_proves_the_first_batch_of_chapter_two_rights() {
+    let temp = TempDir::new("chapter-two-rights");
+    let case = temp.path().join("case.std");
+    fs::write(
+        &case,
+        r#"import cn.constitution
+
+obj 张三 : cn.constitution.人
+
+axiom 张三有中国国籍 : cn.constitution.中国国籍 张三
+  source text "测试案情" locator "国籍"
+
+axiom 张三年满十八周岁 : cn.constitution.年满十八周岁 张三
+  source text "测试案情" locator "年龄"
+
+axiom 张三被强制不信仰宗教 : cn.constitution.被强制不信仰宗教 张三
+  source text "测试案情" locator "信仰"
+
+axiom 张三受侮辱 : cn.constitution.侮辱 张三
+  source text "测试案情" locator "侮辱"
+
+axiom 张三被非法检查通信 : cn.constitution.非法检查通信 张三
+  source text "测试案情" locator "通信"
+
+axiom 张三因国家机关侵权受损失 : cn.constitution.因国家机关侵权受损失 张三
+  source text "测试案情" locator "损失"
+
+axiom 张三是劳动者 : cn.constitution.劳动者 张三
+  source text "测试案情" locator "劳动者"
+
+axiom 张三是退休人员 : cn.constitution.退休人员 张三
+  source text "测试案情" locator "退休"
+
+axiom 张三年老 : cn.constitution.年老 张三
+  source text "测试案情" locator "年老"
+"#,
+    )
+    .expect("write the case file");
+
+    let output = check(
+        run_in(
+            &repo_root(),
+            &[
+                case.display().to_string(),
+                ":why cn.constitution.选举权 张三".to_string(),
+                ":why cn.constitution.被选举权 张三".to_string(),
+                ":why cn.constitution.宗教信仰自由 张三".to_string(),
+                ":why cn.constitution.宗教信仰自由受侵犯 张三".to_string(),
+                ":why cn.constitution.人格尊严受侵犯 张三".to_string(),
+                ":why cn.constitution.通信自由和通信秘密受侵犯 张三".to_string(),
+                ":why cn.constitution.批评建议权 张三".to_string(),
+                ":why cn.constitution.申诉权 张三".to_string(),
+                ":why cn.constitution.控告权 张三".to_string(),
+                ":why cn.constitution.检举权 张三".to_string(),
+                ":why cn.constitution.取得赔偿权 张三".to_string(),
+                ":why cn.constitution.劳动权 张三".to_string(),
+                ":why cn.constitution.劳动义务 张三".to_string(),
+                ":why cn.constitution.休息权 张三".to_string(),
+                ":why cn.constitution.退休生活受保障 张三".to_string(),
+                ":why cn.constitution.物质帮助权 张三".to_string(),
+            ],
+        ),
+        PROVED,
+        &[
+            "▸ cn.constitution.选举权 张三  ⟨cn.constitution.公民有选举权⟩",
+            "▸ cn.constitution.被选举权 张三  ⟨cn.constitution.公民有被选举权⟩",
+            "▸ cn.constitution.宗教信仰自由 张三  ⟨cn.constitution.公民有宗教信仰自由⟩",
+            "▸ cn.constitution.宗教信仰自由受侵犯 张三  ⟨cn.constitution.被强制不信仰宗教侵犯宗教信仰自由⟩",
+            "▸ cn.constitution.人格尊严受侵犯 张三  ⟨cn.constitution.侮辱侵犯人格尊严⟩",
+            "▸ cn.constitution.通信自由和通信秘密受侵犯 张三  ⟨cn.constitution.非法检查通信侵犯通信自由和通信秘密⟩",
+            "▸ cn.constitution.批评建议权 张三  ⟨cn.constitution.公民有批评建议权⟩",
+            "▸ cn.constitution.申诉权 张三  ⟨cn.constitution.公民有申诉权⟩",
+            "▸ cn.constitution.控告权 张三  ⟨cn.constitution.公民有控告权⟩",
+            "▸ cn.constitution.检举权 张三  ⟨cn.constitution.公民有检举权⟩",
+            "▸ cn.constitution.取得赔偿权 张三  ⟨cn.constitution.因国家机关侵权受损失取得赔偿权⟩",
+            "▸ cn.constitution.劳动权 张三  ⟨cn.constitution.公民有劳动权⟩",
+            "▸ cn.constitution.劳动义务 张三  ⟨cn.constitution.公民有劳动义务⟩",
+            "▸ cn.constitution.休息权 张三  ⟨cn.constitution.劳动者有休息权⟩",
+            "▸ cn.constitution.退休生活受保障 张三  ⟨cn.constitution.退休人员生活受保障⟩",
+            "▸ cn.constitution.物质帮助权 张三  ⟨cn.constitution.年老公民有物质帮助权⟩",
+        ],
+    );
+    let out = stdout(&output);
+    assert_eq!(
+        out.matches("推导已通过独立校验。").count(),
+        16,
+        "all sixteen queries must pass both certificate checks:\n{out}"
+    );
+}
+
+/// Article 34's `unless` clause blocks the electoral right only when the legal
+/// deprivation is actually proved; the blocked query stays a gap, never a
+/// negation.
+#[test]
+fn article_34_electoral_right_is_blocked_by_a_legal_deprivation() {
+    let temp = TempDir::new("chapter-two-deprivation");
+    let case = temp.path().join("case.std");
+    fs::write(
+        &case,
+        r#"import cn.constitution
+
+obj 李四 : cn.constitution.人
+
+axiom 李四有中国国籍 : cn.constitution.中国国籍 李四
+  source text "测试案情" locator "国籍"
+
+axiom 李四年满十八周岁 : cn.constitution.年满十八周岁 李四
+  source text "测试案情" locator "年龄"
+
+axiom 李四依法被剥夺政治权利 : cn.constitution.依法被剥夺政治权利 李四
+  source text "测试案情" locator "剥夺政治权利"
+"#,
+    )
+    .expect("write the case file");
+
+    let output = check(
+        run_in(
+            &repo_root(),
+            &[
+                case.display().to_string(),
+                ":why cn.constitution.选举权 李四".to_string(),
+            ],
+        ),
+        LOAD_FAILED,
+        &[
+            "? cn.constitution.选举权 李四  【未闭合】",
+            "候选 ⟨cn.constitution.公民有选举权⟩ ← 「宪法第三十四条」（2018）",
+            "被阻断：「cn.constitution.依法被剥夺政治权利 李四」已成立",
+            "证书有效，但根为缺口，结论未被证明。",
+        ],
+    );
+    assert!(
+        !stdout(&output).contains("推导已通过独立校验。"),
+        "a blocked right must not be reported as proved:\n{}",
+        stdout(&output)
     );
 }
 

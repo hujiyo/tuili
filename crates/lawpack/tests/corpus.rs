@@ -985,9 +985,18 @@ fn the_repository_constitution_corpus_parses() {
         coverage.formalized,
         [
             "第三十三条",
+            "第三十四条",
             "第三十五条",
+            "第三十六条",
             "第三十七条",
+            "第三十八条",
             "第三十九条",
+            "第四十条",
+            "第四十一条",
+            "第四十二条",
+            "第四十三条",
+            "第四十四条",
+            "第四十五条",
             "第四十六条"
         ]
     );
@@ -1006,6 +1015,23 @@ fn the_repository_constitution_corpus_parses() {
             "示威自由",
             "受教育权",
             "中国国籍",
+            "年满十八周岁",
+            "依法被剥夺政治权利",
+            "正常宗教活动",
+            "侮辱",
+            "诽谤",
+            "诬告陷害",
+            "通信自由",
+            "通信秘密",
+            "国家安全",
+            "批评建议",
+            "申诉控告检举",
+            "违法失职",
+            "劳动能力",
+            "退休",
+            "物质帮助",
+            "年老",
+            "疾病",
         ]
     );
     assert!(
@@ -1013,10 +1039,16 @@ fn the_repository_constitution_corpus_parses() {
         "article 5 is indexed, not formalized in the official pack"
     );
     assert!(
-        coverage
-            .notes
-            .as_deref()
-            .is_some_and(|notes| notes.contains("M2-16")),
+        !coverage
+            .formalized
+            .iter()
+            .any(|number| number == "第四十七条"),
+        "article 47 belongs to the next batch and is not formalized yet"
+    );
+    assert!(
+        coverage.notes.as_deref().is_some_and(
+            |notes| notes.contains("第二章第一批") && notes.contains("第四十七至五十六条")
+        ),
         "{:?}",
         coverage.notes
     );

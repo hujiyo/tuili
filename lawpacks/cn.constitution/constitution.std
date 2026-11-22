@@ -1,5 +1,6 @@
--- 中华人民共和国宪法官方包 v1：形式化第三十三、三十五、三十七、三十九、四十六条的选定句子。
--- 不是整条或整部宪法的完整形式化；"非法""住宅""侵犯"等概念由案件事实或人的判断提供。
+-- 中华人民共和国宪法官方包 v0.3.0：形式化第三十三至四十六条中的选定基本权利。
+-- 第二章第一批为第三十四、三十六、三十八、四十至四十五条；第四十七至五十六条与国家机构章尚未形式化。
+-- 不是整条或整部宪法的完整形式化；"非法""住宅""侵犯""年满十八周岁"等概念由案件事实或人的判断提供。
 namespace cn.constitution
 
 sort cn.constitution.人
@@ -209,3 +210,296 @@ rule cn.constitution.公民有受教育义务 :
          url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
          jurisdiction "CN" retrieved_at "2026-11-22"
          hash "sha256:01c339fdc07c5fdc5e4f22f81b020464dd198c44a8a12a98694a1e17a4571435"
+
+-- 第三十四条：选举权和被选举权；依照法律被剥夺政治权利的人除外。
+pred cn.constitution.年满十八周岁 : cn.constitution.人 → Prop
+pred cn.constitution.依法被剥夺政治权利 : cn.constitution.人 → Prop
+pred cn.constitution.选举权 : cn.constitution.人 → Prop
+pred cn.constitution.被选举权 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有选举权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.年满十八周岁 x
+  conclude cn.constitution.选举权 x
+  unless cn.constitution.依法被剥夺政治权利 x
+  source text "宪法" locator "第三十四条" version "2018"
+         quote "中华人民共和国年满十八周岁的公民，不分民族、种族、性别、职业、家庭出身、宗教信仰、教育程度、财产状况、居住期限，都有选举权和被选举权；但是依照法律被剥夺政治权利的人除外。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:bcb45ff1d4620c5a90338579ecb78ebbaae1084f4378bf673ce613ffe61072fb"
+rule cn.constitution.公民有被选举权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.年满十八周岁 x
+  conclude cn.constitution.被选举权 x
+  unless cn.constitution.依法被剥夺政治权利 x
+  source text "宪法" locator "第三十四条" version "2018"
+         quote "中华人民共和国年满十八周岁的公民，不分民族、种族、性别、职业、家庭出身、宗教信仰、教育程度、财产状况、居住期限，都有选举权和被选举权；但是依照法律被剥夺政治权利的人除外。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:bcb45ff1d4620c5a90338579ecb78ebbaae1084f4378bf673ce613ffe61072fb"
+
+-- 第三十六条：宗教信仰自由；禁止强制信仰和信仰歧视。
+pred cn.constitution.宗教信仰自由 : cn.constitution.人 → Prop
+pred cn.constitution.被强制信仰宗教 : cn.constitution.人 → Prop
+pred cn.constitution.被强制不信仰宗教 : cn.constitution.人 → Prop
+pred cn.constitution.因信仰宗教受歧视 : cn.constitution.人 → Prop
+pred cn.constitution.因不信仰宗教受歧视 : cn.constitution.人 → Prop
+pred cn.constitution.宗教信仰自由受侵犯 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有宗教信仰自由 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.宗教信仰自由 x
+  source text "宪法" locator "第三十六条" version "2018"
+         quote "中华人民共和国公民有宗教信仰自由。\n任何国家机关、社会团体和个人不得强制公民信仰宗教或者不信仰宗教，不得歧视信仰宗教的公民和不信仰宗教的公民。\n国家保护正常的宗教活动。任何人不得利用宗教进行破坏社会秩序、损害公民身体健康、妨碍国家教育制度的活动。\n宗教团体和宗教事务不受外国势力的支配。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:1ec4372db0670f390ac2d375f4ad1d07cb4e74cafdf96aabcffa966188e2eae5"
+rule cn.constitution.被强制信仰宗教侵犯宗教信仰自由 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.被强制信仰宗教 x
+  conclude cn.constitution.宗教信仰自由受侵犯 x
+  source text "宪法" locator "第三十六条" version "2018"
+         quote "中华人民共和国公民有宗教信仰自由。\n任何国家机关、社会团体和个人不得强制公民信仰宗教或者不信仰宗教，不得歧视信仰宗教的公民和不信仰宗教的公民。\n国家保护正常的宗教活动。任何人不得利用宗教进行破坏社会秩序、损害公民身体健康、妨碍国家教育制度的活动。\n宗教团体和宗教事务不受外国势力的支配。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:1ec4372db0670f390ac2d375f4ad1d07cb4e74cafdf96aabcffa966188e2eae5"
+rule cn.constitution.被强制不信仰宗教侵犯宗教信仰自由 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.被强制不信仰宗教 x
+  conclude cn.constitution.宗教信仰自由受侵犯 x
+  source text "宪法" locator "第三十六条" version "2018"
+         quote "中华人民共和国公民有宗教信仰自由。\n任何国家机关、社会团体和个人不得强制公民信仰宗教或者不信仰宗教，不得歧视信仰宗教的公民和不信仰宗教的公民。\n国家保护正常的宗教活动。任何人不得利用宗教进行破坏社会秩序、损害公民身体健康、妨碍国家教育制度的活动。\n宗教团体和宗教事务不受外国势力的支配。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:1ec4372db0670f390ac2d375f4ad1d07cb4e74cafdf96aabcffa966188e2eae5"
+rule cn.constitution.因信仰宗教受歧视侵犯宗教信仰自由 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.因信仰宗教受歧视 x
+  conclude cn.constitution.宗教信仰自由受侵犯 x
+  source text "宪法" locator "第三十六条" version "2018"
+         quote "中华人民共和国公民有宗教信仰自由。\n任何国家机关、社会团体和个人不得强制公民信仰宗教或者不信仰宗教，不得歧视信仰宗教的公民和不信仰宗教的公民。\n国家保护正常的宗教活动。任何人不得利用宗教进行破坏社会秩序、损害公民身体健康、妨碍国家教育制度的活动。\n宗教团体和宗教事务不受外国势力的支配。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:1ec4372db0670f390ac2d375f4ad1d07cb4e74cafdf96aabcffa966188e2eae5"
+rule cn.constitution.因不信仰宗教受歧视侵犯宗教信仰自由 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.因不信仰宗教受歧视 x
+  conclude cn.constitution.宗教信仰自由受侵犯 x
+  source text "宪法" locator "第三十六条" version "2018"
+         quote "中华人民共和国公民有宗教信仰自由。\n任何国家机关、社会团体和个人不得强制公民信仰宗教或者不信仰宗教，不得歧视信仰宗教的公民和不信仰宗教的公民。\n国家保护正常的宗教活动。任何人不得利用宗教进行破坏社会秩序、损害公民身体健康、妨碍国家教育制度的活动。\n宗教团体和宗教事务不受外国势力的支配。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:1ec4372db0670f390ac2d375f4ad1d07cb4e74cafdf96aabcffa966188e2eae5"
+
+-- 第三十八条：人格尊严不受侵犯；禁止侮辱、诽谤和诬告陷害。
+pred cn.constitution.侮辱 : cn.constitution.人 → Prop
+pred cn.constitution.诽谤 : cn.constitution.人 → Prop
+pred cn.constitution.诬告陷害 : cn.constitution.人 → Prop
+pred cn.constitution.人格尊严受侵犯 : cn.constitution.人 → Prop
+
+rule cn.constitution.侮辱侵犯人格尊严 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.侮辱 x
+  conclude cn.constitution.人格尊严受侵犯 x
+  source text "宪法" locator "第三十八条" version "2018"
+         quote "中华人民共和国公民的人格尊严不受侵犯。禁止用任何方法对公民进行侮辱、诽谤和诬告陷害。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:ec923f5c79a3ec89a8783e7fc0ad32e408b0e6655a501e7107bf48567fdeb016"
+rule cn.constitution.诽谤侵犯人格尊严 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.诽谤 x
+  conclude cn.constitution.人格尊严受侵犯 x
+  source text "宪法" locator "第三十八条" version "2018"
+         quote "中华人民共和国公民的人格尊严不受侵犯。禁止用任何方法对公民进行侮辱、诽谤和诬告陷害。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:ec923f5c79a3ec89a8783e7fc0ad32e408b0e6655a501e7107bf48567fdeb016"
+rule cn.constitution.诬告陷害侵犯人格尊严 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.诬告陷害 x
+  conclude cn.constitution.人格尊严受侵犯 x
+  source text "宪法" locator "第三十八条" version "2018"
+         quote "中华人民共和国公民的人格尊严不受侵犯。禁止用任何方法对公民进行侮辱、诽谤和诬告陷害。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:ec923f5c79a3ec89a8783e7fc0ad32e408b0e6655a501e7107bf48567fdeb016"
+
+-- 第四十条：通信自由和通信秘密受法律保护。
+pred cn.constitution.非法检查通信 : cn.constitution.人 → Prop
+pred cn.constitution.非法侵犯通信 : cn.constitution.人 → Prop
+pred cn.constitution.通信自由和通信秘密受侵犯 : cn.constitution.人 → Prop
+
+rule cn.constitution.非法检查通信侵犯通信自由和通信秘密 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.非法检查通信 x
+  conclude cn.constitution.通信自由和通信秘密受侵犯 x
+  source text "宪法" locator "第四十条" version "2018"
+         quote "中华人民共和国公民的通信自由和通信秘密受法律的保护。除因国家安全或者追查刑事犯罪的需要，由公安机关或者检察机关依照法律规定的程序对通信进行检查外，任何组织或者个人不得以任何理由侵犯公民的通信自由和通信秘密。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:449aebeb1f4aea5a9c2dad27bd477c0f5f77b0e81ce996c6cbefde46d9621f51"
+rule cn.constitution.非法侵犯通信侵犯通信自由和通信秘密 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.非法侵犯通信 x
+  conclude cn.constitution.通信自由和通信秘密受侵犯 x
+  source text "宪法" locator "第四十条" version "2018"
+         quote "中华人民共和国公民的通信自由和通信秘密受法律的保护。除因国家安全或者追查刑事犯罪的需要，由公安机关或者检察机关依照法律规定的程序对通信进行检查外，任何组织或者个人不得以任何理由侵犯公民的通信自由和通信秘密。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:449aebeb1f4aea5a9c2dad27bd477c0f5f77b0e81ce996c6cbefde46d9621f51"
+
+-- 第四十一条：批评建议、申诉控告检举和取得赔偿的权利。
+pred cn.constitution.批评建议权 : cn.constitution.人 → Prop
+pred cn.constitution.申诉权 : cn.constitution.人 → Prop
+pred cn.constitution.控告权 : cn.constitution.人 → Prop
+pred cn.constitution.检举权 : cn.constitution.人 → Prop
+pred cn.constitution.因国家机关侵权受损失 : cn.constitution.人 → Prop
+pred cn.constitution.取得赔偿权 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有批评建议权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.批评建议权 x
+  source text "宪法" locator "第四十一条" version "2018"
+         quote "中华人民共和国公民对于任何国家机关和国家工作人员，有提出批评和建议的权利；对于任何国家机关和国家工作人员的违法失职行为，有向有关国家机关提出申诉、控告或者检举的权利，但是不得捏造或者歪曲事实进行诬告陷害。\n对于公民的申诉、控告或者检举，有关国家机关必须查清事实，负责处理。任何人不得压制和打击报复。\n由于国家机关和国家工作人员侵犯公民权利而受到损失的人，有依照法律规定取得赔偿的权利。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:d2593424713786411eb878b84dfaa6c076dc287ae2c10d9c9ceb6aa97707cd84"
+rule cn.constitution.公民有申诉权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.申诉权 x
+  source text "宪法" locator "第四十一条" version "2018"
+         quote "中华人民共和国公民对于任何国家机关和国家工作人员，有提出批评和建议的权利；对于任何国家机关和国家工作人员的违法失职行为，有向有关国家机关提出申诉、控告或者检举的权利，但是不得捏造或者歪曲事实进行诬告陷害。\n对于公民的申诉、控告或者检举，有关国家机关必须查清事实，负责处理。任何人不得压制和打击报复。\n由于国家机关和国家工作人员侵犯公民权利而受到损失的人，有依照法律规定取得赔偿的权利。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:d2593424713786411eb878b84dfaa6c076dc287ae2c10d9c9ceb6aa97707cd84"
+rule cn.constitution.公民有控告权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.控告权 x
+  source text "宪法" locator "第四十一条" version "2018"
+         quote "中华人民共和国公民对于任何国家机关和国家工作人员，有提出批评和建议的权利；对于任何国家机关和国家工作人员的违法失职行为，有向有关国家机关提出申诉、控告或者检举的权利，但是不得捏造或者歪曲事实进行诬告陷害。\n对于公民的申诉、控告或者检举，有关国家机关必须查清事实，负责处理。任何人不得压制和打击报复。\n由于国家机关和国家工作人员侵犯公民权利而受到损失的人，有依照法律规定取得赔偿的权利。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:d2593424713786411eb878b84dfaa6c076dc287ae2c10d9c9ceb6aa97707cd84"
+rule cn.constitution.公民有检举权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.检举权 x
+  source text "宪法" locator "第四十一条" version "2018"
+         quote "中华人民共和国公民对于任何国家机关和国家工作人员，有提出批评和建议的权利；对于任何国家机关和国家工作人员的违法失职行为，有向有关国家机关提出申诉、控告或者检举的权利，但是不得捏造或者歪曲事实进行诬告陷害。\n对于公民的申诉、控告或者检举，有关国家机关必须查清事实，负责处理。任何人不得压制和打击报复。\n由于国家机关和国家工作人员侵犯公民权利而受到损失的人，有依照法律规定取得赔偿的权利。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:d2593424713786411eb878b84dfaa6c076dc287ae2c10d9c9ceb6aa97707cd84"
+rule cn.constitution.因国家机关侵权受损失取得赔偿权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.因国家机关侵权受损失 x
+  conclude cn.constitution.取得赔偿权 x
+  source text "宪法" locator "第四十一条" version "2018"
+         quote "中华人民共和国公民对于任何国家机关和国家工作人员，有提出批评和建议的权利；对于任何国家机关和国家工作人员的违法失职行为，有向有关国家机关提出申诉、控告或者检举的权利，但是不得捏造或者歪曲事实进行诬告陷害。\n对于公民的申诉、控告或者检举，有关国家机关必须查清事实，负责处理。任何人不得压制和打击报复。\n由于国家机关和国家工作人员侵犯公民权利而受到损失的人，有依照法律规定取得赔偿的权利。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:d2593424713786411eb878b84dfaa6c076dc287ae2c10d9c9ceb6aa97707cd84"
+
+-- 第四十二条：劳动的权利和义务。
+pred cn.constitution.劳动权 : cn.constitution.人 → Prop
+pred cn.constitution.劳动义务 : cn.constitution.人 → Prop
+
+rule cn.constitution.公民有劳动权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.劳动权 x
+  source text "宪法" locator "第四十二条" version "2018"
+         quote "中华人民共和国公民有劳动的权利和义务。\n国家通过各种途径，创造劳动就业条件，加强劳动保护，改善劳动条件，并在发展生产的基础上，提高劳动报酬和福利待遇。\n劳动是一切有劳动能力的公民的光荣职责。国有企业和城乡集体经济组织的劳动者都应当以国家主人翁的态度对待自己的劳动。国家提倡社会主义劳动竞赛，奖励劳动模范和先进工作者。国家提倡公民从事义务劳动。\n国家对就业前的公民进行必要的劳动就业训练。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:94664374d68c8358baab4d25d5bdbb68ffaddcaeea6d39b14cc5af986690db63"
+rule cn.constitution.公民有劳动义务 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  conclude cn.constitution.劳动义务 x
+  source text "宪法" locator "第四十二条" version "2018"
+         quote "中华人民共和国公民有劳动的权利和义务。\n国家通过各种途径，创造劳动就业条件，加强劳动保护，改善劳动条件，并在发展生产的基础上，提高劳动报酬和福利待遇。\n劳动是一切有劳动能力的公民的光荣职责。国有企业和城乡集体经济组织的劳动者都应当以国家主人翁的态度对待自己的劳动。国家提倡社会主义劳动竞赛，奖励劳动模范和先进工作者。国家提倡公民从事义务劳动。\n国家对就业前的公民进行必要的劳动就业训练。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:94664374d68c8358baab4d25d5bdbb68ffaddcaeea6d39b14cc5af986690db63"
+
+-- 第四十三条：劳动者的休息权。
+pred cn.constitution.劳动者 : cn.constitution.人 → Prop
+pred cn.constitution.休息权 : cn.constitution.人 → Prop
+
+rule cn.constitution.劳动者有休息权 :
+  params x : cn.constitution.人
+  premise cn.constitution.劳动者 x
+  conclude cn.constitution.休息权 x
+  source text "宪法" locator "第四十三条" version "2018"
+         quote "中华人民共和国劳动者有休息的权利。\n国家发展劳动者休息和休养的设施，规定职工的工作时间和休假制度。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:373d1d188d7453e7bab67ca991eae0b480c11ab4ed079aa50c0494e029f26c20"
+
+-- 第四十四条：退休人员的生活保障。
+pred cn.constitution.退休人员 : cn.constitution.人 → Prop
+pred cn.constitution.退休生活受保障 : cn.constitution.人 → Prop
+
+rule cn.constitution.退休人员生活受保障 :
+  params x : cn.constitution.人
+  premise cn.constitution.退休人员 x
+  conclude cn.constitution.退休生活受保障 x
+  source text "宪法" locator "第四十四条" version "2018"
+         quote "国家依照法律规定实行企业事业组织的职工和国家机关工作人员的退休制度。退休人员的生活受到国家和社会的保障。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:7d22b1bc38a18b471c724305fce5ccc113dc8890b59c944ec66f80181b81aa91"
+
+-- 第四十五条：年老、疾病或者丧失劳动能力时的物质帮助权。
+pred cn.constitution.年老 : cn.constitution.人 → Prop
+pred cn.constitution.疾病 : cn.constitution.人 → Prop
+pred cn.constitution.丧失劳动能力 : cn.constitution.人 → Prop
+pred cn.constitution.物质帮助权 : cn.constitution.人 → Prop
+
+rule cn.constitution.年老公民有物质帮助权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.年老 x
+  conclude cn.constitution.物质帮助权 x
+  source text "宪法" locator "第四十五条" version "2018"
+         quote "中华人民共和国公民在年老、疾病或者丧失劳动能力的情况下，有从国家和社会获得物质帮助的权利。国家发展为公民享受这些权利所需要的社会保险、社会救济和医疗卫生事业。\n国家和社会保障残废军人的生活，抚恤烈士家属，优待军人家属。\n国家和社会帮助安排盲、聋、哑和其他有残疾的公民的劳动、生活和教育。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:d2e97b273880079c3caa14fe4d4a099643bc7bd8c97ec02b83b23424077c5439"
+rule cn.constitution.疾病公民有物质帮助权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.疾病 x
+  conclude cn.constitution.物质帮助权 x
+  source text "宪法" locator "第四十五条" version "2018"
+         quote "中华人民共和国公民在年老、疾病或者丧失劳动能力的情况下，有从国家和社会获得物质帮助的权利。国家发展为公民享受这些权利所需要的社会保险、社会救济和医疗卫生事业。\n国家和社会保障残废军人的生活，抚恤烈士家属，优待军人家属。\n国家和社会帮助安排盲、聋、哑和其他有残疾的公民的劳动、生活和教育。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:d2e97b273880079c3caa14fe4d4a099643bc7bd8c97ec02b83b23424077c5439"
+rule cn.constitution.丧失劳动能力的公民有物质帮助权 :
+  params x : cn.constitution.人
+  premise cn.constitution.公民 x
+  premise cn.constitution.丧失劳动能力 x
+  conclude cn.constitution.物质帮助权 x
+  source text "宪法" locator "第四十五条" version "2018"
+         quote "中华人民共和国公民在年老、疾病或者丧失劳动能力的情况下，有从国家和社会获得物质帮助的权利。国家发展为公民享受这些权利所需要的社会保险、社会救济和医疗卫生事业。\n国家和社会保障残废军人的生活，抚恤烈士家属，优待军人家属。\n国家和社会帮助安排盲、聋、哑和其他有残疾的公民的劳动、生活和教育。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:d2e97b273880079c3caa14fe4d4a099643bc7bd8c97ec02b83b23424077c5439"
