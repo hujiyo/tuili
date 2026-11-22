@@ -291,12 +291,32 @@ contrary 批准 不批准               -- 声明的互补谓词：同一组参�
 unique 应适用 1                    -- 第 1 个参数单值：同一案件只能适用一条规范
 ```
 
+模块文件的第一条可以是 `namespace`：
+
+```
+namespace cn.constitution
+sort cn.constitution.公民
+pred cn.constitution.非法搜查 : cn.constitution.公民 → cn.constitution.住宅 → Prop
+
+rule cn.constitution.非法搜查即侵犯 :
+  params p : cn.constitution.公民, h : cn.constitution.住宅
+  premise cn.constitution.非法搜查 p h
+  conclude cn.constitution.不受侵犯 p h
+  source text "宪法" locator "第三十九条"
+```
+
+`namespace` 只能出现一次，之后所有声明名（`sort` / `obj` / `pred` / `axiom` / `def` / `rule` /
+`interpret`）和所有对声明的引用都必须带 `<namespace>.` 前缀。规则参数、前提 binder 和
+`λ` / `∀` 的 binder 是局部名，不带前缀。不同模块可以用相同的后缀（`a.违法` 与 `b.违法`
+可以同时存在），加载顺序不影响结果。没有 `namespace` 的文件是案件/示例文件：它可以引用
+`a.违法` 这样的限定名，但不能自己声明带 `.` 的名字。
+
 出处要求的当前范围：
 
 - `rule` 与 `axiom` 必须有 `source`，且至少一条来源的 `text` 与 `locator` 去掉空白后都非空；否则加载失败，错误指出声明名。
 - `sort` / `pred` / `obj` / `def` 豁免：类型、词汇与定义不是断言，其来源由法律包清单与审计层承担。
 - `contrary` / `unique` 豁免：冲突与唯一性声明不是事实断言，来源核验留给审计层。
-- `interpret` 不改：解释语义尚未实现。
+- `interpret` 可以解析，但加载期显式拒绝：解释语义尚未实现（M2-8），推理器不消费解释。
 
 ## 架构与职责边界
 
@@ -432,10 +452,9 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
 
 ### 其余已确认缺陷
 
-- **`interpret` 声明不能用。** 解析器用 `term()` 解析 `from`，而 `term()` 会把整条箭头链
-  一次吃光，随后等 `→` 时必然撞上换行，所以带箭头的解释声明加载即失败。
-  即便解析成功，推理器也不读取解释声明（`Env::interpretations()` 没有调用点），
-  `:inspect` 只能把它当作账本条目列出来。目前只有词法和语法上的占位。
+- **`interpret` 只有语法，没有语义。** 解析器能读 `interpret 名称 : from → to`，但加载期
+  显式拒绝，错误说明“解释语义尚未实现（M2-8），推理器不消费解释”。`Env::interpretations()`
+  没有调用点，M2-8 实现解释语义后再放开加载。
 - **规则参数必须被前提约束。** 出现在结论却没有出现在任何前提里的参数，
   加载时即被拒绝——否则实例化后结论会是 `?x`，那是一个不闭合的洞。
   代价是「凡公民皆有 X」这类无条件规则暂时写不了；它需要量词公理的实例化支持。
@@ -470,7 +489,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 379 个：kernel 19、lang 27、reason 41、cert 101、cli 90、lawpack 101（含 1 个 doc test）。
+`cargo test --workspace` 共 404 个：kernel 19、lang 48、reason 41、cert 101、cli 94、lawpack 101（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -487,6 +506,11 @@ cargo test --workspace
 - `crates/lang/tests/source.rs`（14）：字符串字面量的转义、CJK/URL 字符、未闭合/未知转义/裸换行与
   裸控制字符的行列号；source 全字段按任意顺序跨行解析；重复键的报错列指向键；CRLF 输入、注释中的引号；
   缺/空 `text`/`locator` 与旧位置式写法都拒绝。
+- `crates/lang/tests/namespace.rs`（21）：限定名词法/解析、`namespace` 第一条/唯一/格式与缺参位置；
+  模块声明前缀与空段、未限定类型/结论/unless/`defeated_by`/`prefer`/`contrary`/`unique`/解释/`def`
+  体/`obj`/`axiom`/`#check`/`#show` 的拒绝、局部 binder 豁免；两模块同名后缀与加载顺序无关；
+  案件文件不能声明带点名字但仍可引用限定名；同名 theory 的 namespace 冲突；`defeated_by`/`prefer`
+  目标必须存在且是规则并允许同文件前向引用；`interpret` 可解析但加载期拒绝；`LoadReport` 不含 namespace。
 - `crates/cert/tests/json.rs`（16）：证书 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
   快照比对、字段名与节点标签固定、未知版本或未知字段被拒、真正的 v1 证书因版本不符被拒并报告版本，
   缺少 v2 新字段的 v2 证书按默认值解析；全部来源字段（含引文、链接、管辖、抓取时间、哈希）的 JSON
@@ -531,6 +555,9 @@ cargo test --workspace
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
   另有一条 `:inspect` 用例：结构化来源字段逐行输出，引文中的换行被转义、不会破坏行结构；
   两条 `:given` 用例（argv 与 stdin 交互）：登记事实的来源显示为「用户输入交互会话」，不出现空 `「」`。
+- `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
+  `[ns]` 后缀；限定名 `:why` 通过证书复核；`a` 的事实不满足 `b` 的目标；交换两个模块的加载顺序后
+  `:why` / `:cert` 结果一致；模块内未限定引用加载失败。
 - `crates/cli/tests/cert.rs`（19）：`:cert` / `:check` 端到端——导出的 JSON 往返并通过检查器；
   `:check` 分行报告逻辑与内核两段；缺口证书退出 `1` 且产生 `MissingPremise`；
   未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在逻辑层失败；

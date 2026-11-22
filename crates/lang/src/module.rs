@@ -57,8 +57,25 @@ impl Library {
         };
         if let Some(ns) = namespace.as_deref() {
             check_module_names(ns, &items).map_err(|msg| LoadError { msg })?;
+        } else {
+            // A file without a namespace is a case/example file: it may
+            // *reference* qualified names from modules, but it must not
+            // declare one, or it could squat on a module's name.
+            check_case_decl_names(&items).map_err(|msg| LoadError { msg })?;
         }
         let theory_name = namespace.clone().unwrap_or_else(|| name.to_string());
+        if let Some(existing) = self.theories.iter().find(|t| t.name == theory_name) {
+            if existing.namespace != namespace {
+                return Err(LoadError {
+                    msg: format!(
+                        "理论 `{theory_name}` 已存在，但 namespace 不一致（已有 {}，本次 {}）；\
+                         同名理论只有 namespace 相同才能合并",
+                        namespace_label(&existing.namespace),
+                        namespace_label(&namespace)
+                    ),
+                });
+            }
+        }
         let mut next = self.clone();
         let mut theory = Theory {
             name: theory_name.clone(),
@@ -469,57 +486,15 @@ impl Library {
                     theory.rules.push(n.clone());
                     report.declared.push(n);
                 }
-                Item::Interpretation {
-                    name: n,
-                    from,
-                    to,
-                    sources,
-                } => {
-                    let ef = elab::elab_top(&next.env, &from).map_err(|e| LoadError {
-                        msg: format!("`interpret {n}`：{}", e.msg),
-                    })?;
-                    let et = elab::elab_top(&next.env, &to).map_err(|e| LoadError {
-                        msg: format!("`interpret {n}`：{}", e.msg),
-                    })?;
-                    std_deduce_kernel::check::check(
-                        &next.env,
-                        &std_deduce_kernel::Ctx::new(),
-                        &ef,
-                        &std_deduce_kernel::Expr::Sort(0),
-                    )
-                    .map_err(|e| LoadError {
-                        msg: format!("`interpret {n}` 的 from 不是命题：{e}"),
-                    })?;
-                    std_deduce_kernel::check::check(
-                        &next.env,
-                        &std_deduce_kernel::Ctx::new(),
-                        &et,
-                        &std_deduce_kernel::Expr::Sort(0),
-                    )
-                    .map_err(|e| LoadError {
-                        msg: format!("`interpret {n}` 的 to 不是命题：{e}"),
-                    })?;
-                    let decl = Decl {
-                        name: std_deduce_kernel::name(&n),
-                        kind: std_deduce_kernel::DeclKind::Interpretation(Box::new(
-                            std_deduce_kernel::env::Interpretation {
-                                name: std_deduce_kernel::name(&n),
-                                from: ef,
-                                to: et,
-                                sources: sources.iter().map(|s| to_source(s.clone())).collect(),
-                            },
-                        )),
-                        ty: std_deduce_kernel::Expr::Sort(0),
-                        sources: sources.iter().map(|s| to_source(s.clone())).collect(),
-                        index: 0,
-                    };
-                    next.env
-                        .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError {
-                            msg: format!("`interpret {n}`：{e}"),
-                        })?;
-                    theory.decls.push(n.clone());
-                    report.declared.push(n);
+                Item::Interpretation { name: n, .. } => {
+                    // The parser accepts an interpretation declaration, but
+                    // nothing in the reasoner or the certificate layer reads
+                    // it. Letting it into the ledger would make `:why` show a
+                    // gap while `:inspect` claims an interpretation exists;
+                    // refuse it explicitly until M2-8 implements the semantics.
+                    return Err(LoadError {
+                        msg: format!("`interpret {n}`：解释语义尚未实现（M2-8），推理器不消费解释"),
+                    });
                 }
                 Item::Check(t) => {
                     let e = elab::elab_top(&next.env, &t).map_err(|e| LoadError { msg: e.msg })?;
@@ -572,6 +547,12 @@ impl Library {
             }
         }
 
+        // A `defeated_by` / `prefer` name is stored as an opaque string, so a
+        // typo would silently disable the intended priority. Validate the
+        // targets after the whole file is in the environment, which allows a
+        // rule to name a rule declared later in the same file.
+        check_rule_targets(&next.env, &theory.rules).map_err(|msg| LoadError { msg })?;
+
         // Commit only if everything above succeeded.
         if let Some(existing) = next.theories.iter_mut().find(|t| t.name == theory_name) {
             existing.decls.extend(theory.decls);
@@ -622,12 +603,95 @@ fn has_namespace_prefix(ns: &str, name: &str) -> bool {
 }
 
 fn require_decl_name(ns: &str, kind: &str, name: &str) -> Result<(), String> {
-    if has_namespace_prefix(ns, name) {
-        Ok(())
-    } else {
-        Err(format!(
+    if !has_namespace_prefix(ns, name) {
+        return Err(format!(
             "`{kind} {name}`：模块 `{ns}` 的声明名必须以 `{ns}.` 开头"
-        ))
+        ));
+    }
+    let rest = name
+        .strip_prefix(ns)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .unwrap_or_default();
+    if rest.split('.').any(|part| part.is_empty()) {
+        return Err(format!(
+            "`{kind} {name}`：声明名 `{ns}.` 之后不能有空段（`.` 之间必须有内容）"
+        ));
+    }
+    Ok(())
+}
+
+/// A non-namespaced file is a case/example file. Its declarations keep the
+/// old unprefixed form, but a dotted declaration name would squat on a
+/// module's qualified name and could collide with it later. References may
+/// still be dotted; only declaration names are checked here.
+fn check_case_decl_names(items: &[Item]) -> Result<(), String> {
+    for item in items {
+        let (kind, name) = match item {
+            Item::Sort { name, .. } => ("sort", name),
+            Item::Obj { name, .. } => ("obj", name),
+            Item::Pred { name, .. } => ("pred", name),
+            Item::Axiom { name, .. } => ("axiom", name),
+            Item::Def { name, .. } => ("def", name),
+            Item::Rule { name, .. } => ("rule", name),
+            Item::Interpretation { name, .. } => ("interpret", name),
+            Item::Namespace(_)
+            | Item::Contrary { .. }
+            | Item::Unique { .. }
+            | Item::Check(_)
+            | Item::Why(_)
+            | Item::Gap(_)
+            | Item::Assert(_)
+            | Item::Show(_) => continue,
+        };
+        if name.contains('.') {
+            return Err(format!(
+                "`{kind} {name}`：没有 namespace 的案件/示例文件不能声明带 `.` 的名字；\
+                 带点名字只能由模块文件在 namespace 下声明"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate every `defeated_by` / `prefer` target of the rules just loaded.
+/// The targets are checked against the completed environment, so a forward
+/// reference to a rule later in the same file is legal.
+fn check_rule_targets(env: &Env, rules: &[String]) -> Result<(), String> {
+    for rule_name in rules {
+        let Some(decl) = env.get(rule_name) else {
+            continue;
+        };
+        let std_deduce_kernel::DeclKind::Rule(rule) = &decl.kind else {
+            continue;
+        };
+        for (clause, targets) in [("defeated_by", &rule.exceptions), ("prefer", &rule.prefers)] {
+            for target in targets {
+                match env.get(target) {
+                    Some(target_decl)
+                        if matches!(target_decl.kind, std_deduce_kernel::DeclKind::Rule(_)) => {}
+                    Some(_) => {
+                        return Err(format!(
+                            "`rule {rule_name}` 的 {clause} 目标 `{target}` 不是规则；\
+                             defeated_by/prefer 必须指向规则"
+                        ))
+                    }
+                    None => {
+                        return Err(format!(
+                            "`rule {rule_name}` 的 {clause} 目标 `{target}` 不存在；\
+                             defeated_by/prefer 必须指向已加载或同文件后声明的规则"
+                        ))
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn namespace_label(namespace: &Option<String>) -> String {
+    match namespace {
+        Some(ns) => format!("`{ns}`"),
+        None => "无 namespace（案件/示例文件）".into(),
     }
 }
 

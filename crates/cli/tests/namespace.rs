@@ -190,6 +190,40 @@ fn a_fact_from_one_namespace_does_not_satisfy_another_namespace() {
 }
 
 #[test]
+fn module_load_order_does_not_change_why_or_cert_results() {
+    let (_dir, a, b, case) = namespaced_fixture("order");
+    let tail = [
+        ":why a.不受侵犯 张三 甲宅".to_string(),
+        ":cert a.不受侵犯 张三 甲宅".to_string(),
+    ];
+
+    let mut ab = vec![load(&a), load(&b), load(&case)];
+    ab.extend(tail.iter().cloned());
+    let mut ba = vec![load(&b), load(&a), load(&case)];
+    ba.extend(tail.iter().cloned());
+
+    let output_ab = run(ab);
+    let output_ba = run(ba);
+    let out_ab = stdout(&output_ab);
+    let out_ba = stdout(&output_ba);
+    assert_eq!(output_ab.status.code(), Some(0));
+    assert_eq!(output_ba.status.code(), Some(0));
+
+    fn result(out: &str) -> &str {
+        let start = out
+            .find("▸ a.不受侵犯")
+            .unwrap_or_else(|| panic!("no derivation output:\n{out}"));
+        &out[start..]
+    }
+    assert_eq!(
+        result(&out_ab),
+        result(&out_ba),
+        "swapping module load order changed the `:why` / `:cert` result"
+    );
+    assert!(result(&out_ab).contains("推导已通过独立校验。"));
+}
+
+#[test]
 fn a_module_with_an_unqualified_reference_fails_to_load() {
     let dir = TempDir::new("bad-module");
     let bad = dir.write(

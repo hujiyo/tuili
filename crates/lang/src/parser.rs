@@ -227,7 +227,21 @@ impl Parser {
                     let token = self.here();
                     (token.line, token.col)
                 };
-                let ns = self.ident()?;
+                let ns = match self.peek().clone() {
+                    Tok::Ident(ns) => {
+                        self.bump();
+                        ns
+                    }
+                    other => {
+                        // Report the position of the namespace line, not the
+                        // token on the following line.
+                        return Err(ParseError {
+                            msg: format!("期望命名空间标识符，实际是 `{other:?}`"),
+                            line,
+                            col,
+                        });
+                    }
+                };
                 if let Some(msg) = namespace_format_error(&ns) {
                     return Err(ParseError { msg, line, col });
                 }

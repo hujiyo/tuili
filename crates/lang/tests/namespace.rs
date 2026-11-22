@@ -148,6 +148,19 @@ fn parser_rejects_malformed_namespaces() {
 }
 
 #[test]
+fn a_namespace_without_a_name_reports_the_namespace_line() {
+    for src in ["namespace\nsort a.x\n", "namespace"] {
+        let err = parse(src).expect_err("a bare namespace must not parse");
+        assert_eq!(err.line, 1, "for {src:?}, got: {err}");
+        assert_eq!(err.col, 10, "for {src:?}, got: {err}");
+        assert!(
+            err.to_string().contains("期望命名空间标识符"),
+            "for {src:?}, got: {err}"
+        );
+    }
+}
+
+#[test]
 fn module_loads_declarations_under_its_namespace() {
     let lib = load(MODULE_A).expect("the module loads");
     let theory = lib.theory("a").expect("the namespace names the theory");
@@ -181,7 +194,7 @@ fn module_loads_declarations_under_its_namespace() {
 }
 
 #[test]
-fn every_declaration_kind_loads_when_qualified() {
+fn every_non_interpretation_declaration_kind_loads_when_qualified() {
     let src = r#"
 namespace a
 sort a.公民
@@ -198,9 +211,8 @@ axiom a.事实 : a.非法搜查 a.张三 a.甲宅
 def a.侵权 : a.公民 → Prop := λ (x : a.公民) := a.违法 x
 contrary a.违法 a.合法
 unique a.违法 1
-interpret a.解释 : a.P → a.Q
 "#;
-    let lib = load(src).expect("every qualified declaration kind must load");
+    let lib = load(src).expect("every supported declaration kind must load");
     for name in [
         "a.公民",
         "a.住宅",
@@ -213,13 +225,47 @@ interpret a.解释 : a.P → a.Q
         "a.甲宅",
         "a.事实",
         "a.侵权",
-        "a.解释",
     ] {
         assert!(lib.env.get(name).is_some(), "missing `{name}`");
     }
     assert_eq!(lib.env.contrary_pairs().len(), 1);
     assert_eq!(lib.env.unique_positions().len(), 1);
-    assert_eq!(lib.env.interpretations().len(), 1);
+    assert_eq!(
+        lib.env.interpretations().len(),
+        0,
+        "an interpretation must never reach the ledger"
+    );
+}
+
+#[test]
+fn interpretation_parses_but_is_rejected_at_load() {
+    let src = "namespace a\npred a.P : Prop\npred a.Q : Prop\ninterpret a.i : a.P → a.Q\n";
+    let items = parse(src).expect("the interpret syntax must parse");
+    assert!(
+        matches!(items.last(), Some(Item::Interpretation { .. })),
+        "the parser must still build an interpretation item for M2-8"
+    );
+
+    let err = load(src)
+        .expect_err("an interpretation must not reach the ledger")
+        .to_string();
+    assert!(err.contains("a.i"), "got: {err}");
+    assert!(err.contains("解释语义尚未实现（M2-8）"), "got: {err}");
+    assert!(err.contains("推理器不消费解释"), "got: {err}");
+
+    // A qualified declaration name does not bypass the check, but an
+    // unqualified reference is still reported first by the module pre-pass.
+    let err = load("namespace a\npred a.P : Prop\npred a.Q : Prop\ninterpret a.i : P → a.Q\n")
+        .expect_err("the unqualified reference must be refused")
+        .to_string();
+    assert!(err.contains("未限定"), "got: {err}");
+    assert!(err.contains("`P`"), "got: {err}");
+
+    // Case files reject interpretations too, even without any namespace.
+    let err = load("pred P : Prop\ninterpret 解释 : P → P\n")
+        .expect_err("a case-file interpretation must not load")
+        .to_string();
+    assert!(err.contains("解释语义尚未实现（M2-8）"), "got: {err}");
 }
 
 #[test]
@@ -303,6 +349,18 @@ fn module_references_must_be_fully_qualified() {
             "pred a.P",
             "公民",
         ),
+        (
+            "namespace a\nsort a.公民\nobj a.张三 : 公民\n",
+            "`obj a.张三`",
+            "公民",
+        ),
+        (
+            "namespace a\npred a.P : Prop\naxiom a.事实 : P\n",
+            "`axiom a.事实`",
+            "P",
+        ),
+        ("namespace a\npred a.P : Prop\n#check P\n", "`#check`", "P"),
+        ("namespace a\npred a.P : Prop\n#show P\n", "`#show`", "P"),
         (
             "namespace a\nsort a.公民\npred a.P : a.公民 → Prop\n\
              rule a.r :\n  params p : 公民\n  premise a.P p\n  conclude a.P p\n\
@@ -433,6 +491,169 @@ fn an_unloaded_qualified_reference_is_an_unknown_name() {
         .to_string();
     assert!(err.contains("未知名称"), "got: {err}");
     assert!(err.contains("missing.Sort"), "got: {err}");
+}
+
+#[test]
+fn a_case_file_cannot_declare_a_dotted_name_but_may_reference_one() {
+    for (src, declaration) in [
+        ("sort a.类别\n", "`sort a.类别`"),
+        ("obj a.张三 : Prop\n", "`obj a.张三`"),
+        ("pred a.违法 : Prop\n", "`pred a.违法`"),
+        ("axiom a.事实 : Prop\n", "`axiom a.事实`"),
+        ("def a.定义 : Prop := Prop\n", "`def a.定义`"),
+        (
+            "rule a.规则 :\n  premise Prop\n  conclude Prop\n  source text \"t\" locator \"l\"\n",
+            "`rule a.规则`",
+        ),
+        ("interpret a.解释 : Prop → Prop\n", "`interpret a.解释`"),
+    ] {
+        let err = load(src).expect_err("a case file must not declare a dotted name");
+        assert!(
+            err.contains(declaration),
+            "error should name the declaration {declaration}: {err}"
+        );
+        assert!(err.contains("不能声明带"), "got: {err}");
+    }
+
+    let mut lib = Library::new();
+    lib.load("a.std", MODULE_A).expect("the module loads");
+    let report = lib
+        .load(
+            "case.std",
+            "obj 张三 : a.公民\nobj 甲宅 : a.住宅\n\
+             axiom 事实 : a.非法搜查 张三 甲宅\n\
+             \x20 source text \"案件\" locator \"一\"\n\
+             #show a.非法搜查\n",
+        )
+        .expect("a case file may reference qualified names");
+    assert!(lib.env.get("事实").is_some());
+    assert!(
+        report.shown.iter().any(|line| line.contains("a.非法搜查")),
+        "`#show a.非法搜查` must resolve the module declaration: {:?}",
+        report.shown
+    );
+}
+
+#[test]
+fn a_theory_name_cannot_mix_namespaced_and_case_files() {
+    let case_src = "sort 案件\n";
+
+    let mut case_then_module = Library::new();
+    case_then_module
+        .load("a", case_src)
+        .expect("the case file loads");
+    let before = case_then_module.env.len();
+    let err = case_then_module
+        .load("a.std", MODULE_A)
+        .expect_err("a case theory named `a` must not absorb module namespace a")
+        .to_string();
+    assert!(err.contains("namespace 不一致"), "got: {err}");
+    assert!(err.contains("`a`"), "got: {err}");
+    assert_eq!(case_then_module.env.len(), before);
+    assert!(case_then_module.env.get("a.公民").is_none());
+
+    let mut module_then_case = Library::new();
+    module_then_case
+        .load("a.std", MODULE_A)
+        .expect("the module loads");
+    let before = module_then_case.env.len();
+    let err = module_then_case
+        .load("a", case_src)
+        .expect_err("module namespace a must not absorb a case theory named `a`")
+        .to_string();
+    assert!(err.contains("namespace 不一致"), "got: {err}");
+    assert!(err.contains("`a`"), "got: {err}");
+    assert_eq!(module_then_case.env.len(), before);
+    assert!(module_then_case.env.get("案件").is_none());
+    assert_eq!(
+        module_then_case.theory("a").unwrap().namespace.as_deref(),
+        Some("a")
+    );
+}
+
+#[test]
+fn defeated_by_and_prefer_targets_must_be_rules() {
+    for clause in ["defeated_by", "prefer"] {
+        let src = format!(
+            "namespace a\nsort a.公民\npred a.P : a.公民 → Prop\n\
+             rule a.r :\n  params p : a.公民\n  premise a.P p\n  conclude a.P p\n\
+             \x20 {clause} a.missing\n  source text \"t\" locator \"l\"\n"
+        );
+        let err = load(&src)
+            .expect_err("a ghost rule target must be refused")
+            .to_string();
+        assert!(err.contains("a.r"), "got: {err}");
+        assert!(err.contains("a.missing"), "got: {err}");
+        assert!(err.contains("不存在"), "got: {err}");
+    }
+
+    let non_rule = r#"
+namespace a
+sort a.公民
+pred a.P : a.公民 → Prop
+pred a.Q : Prop
+rule a.r :
+  params p : a.公民
+  premise a.P p
+  conclude a.P p
+  defeated_by a.Q
+  source text "测试" locator "一"
+"#;
+    let err = load(non_rule)
+        .expect_err("a non-rule target must be refused")
+        .to_string();
+    assert!(err.contains("a.r"), "got: {err}");
+    assert!(err.contains("a.Q"), "got: {err}");
+    assert!(err.contains("不是规则"), "got: {err}");
+
+    // A rule may name a rule declared later in the same file.
+    let forward = r#"
+namespace a
+sort a.公民
+pred a.P : a.公民 → Prop
+rule a.first :
+  params p : a.公民
+  premise a.P p
+  conclude a.P p
+  defeated_by a.second
+  source text "测试" locator "一"
+rule a.second :
+  params p : a.公民
+  premise a.P p
+  conclude a.P p
+  source text "测试" locator "二"
+"#;
+    let lib = load(forward).expect("a forward rule reference in the same file is legal");
+    assert!(lib.env.get("a.first").is_some());
+    assert!(lib.env.get("a.second").is_some());
+}
+
+#[test]
+fn a_namespaced_declaration_name_has_no_empty_dot_segment() {
+    for src in [
+        "namespace w\nsort w..P\n",
+        "namespace w\nsort w.P.\n",
+        "namespace w\nsort w.P..Q\n",
+    ] {
+        let err = load(src)
+            .expect_err("an empty dot segment in a declaration name must be refused")
+            .to_string();
+        assert!(err.contains("空段"), "for {src:?}, got: {err}");
+    }
+}
+
+#[test]
+fn a_load_report_contains_declarations_but_not_the_namespace() {
+    let mut lib = Library::new();
+    let report = lib.load("file.std", MODULE_A).expect("the module loads");
+    assert!(
+        !report.declared.iter().any(|name| name == "a"),
+        "the namespace itself is not a declaration: {:?}",
+        report.declared
+    );
+    assert!(report.declared.iter().any(|name| name == "a.公民"));
+    assert!(report.checked.is_empty());
+    assert!(report.shown.is_empty());
 }
 
 #[test]
