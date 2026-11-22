@@ -55,6 +55,16 @@ impl std::fmt::Display for ParseError {
 }
 impl std::error::Error for ParseError {}
 
+/// The retired `#assert` command must not stay as a silent alias: it only
+/// checked the term's type, so the old name suggested a proof that never
+/// happened. Parsing it now points at the renamed command and at what the
+/// renamed command does not do.
+const ASSERT_RENAMED: &str = concat!(
+    "`#assert` 已改名为 `#proposition`（裸 `assert` 相应改为 `proposition`）。",
+    "`#proposition` 只检查该项的类型是否为 Prop，不证明命题成立；",
+    "要断言成立请用事实（`axiom` / `:given`）或规则（`rule`）。"
+);
+
 /// The keys a structured `source` clause accepts.
 const SOURCE_KEYS: &[&str] = &[
     "text",
@@ -198,7 +208,7 @@ impl Parser {
             }
         };
         match kw.as_str() {
-            "check" | "why" | "gap" | "assert" | "show" if already_bumped => {
+            "check" | "why" | "gap" | "proposition" | "assert" | "show" if already_bumped => {
                 self.dispatch_command(&kw)
             }
             _ if already_bumped => self.err(format!("未知命令 `#{kw}`")),
@@ -211,7 +221,18 @@ impl Parser {
             "check" => Ok(Item::Check(self.term()?)),
             "why" => Ok(Item::Why(self.term()?)),
             "gap" => Ok(Item::Gap(self.term()?)),
-            "assert" => Ok(Item::Assert(self.term()?)),
+            "proposition" => Ok(Item::Proposition(self.term()?)),
+            "assert" => {
+                // `item` consumed the sigil and the command name, so the
+                // sigil sits two tokens back. Report there: the user needs to
+                // change the command, not its term.
+                let sigil = &self.toks[self.pos - 2];
+                Err(ParseError {
+                    msg: ASSERT_RENAMED.into(),
+                    line: sigil.line,
+                    col: sigil.col,
+                })
+            }
             "show" => Ok(Item::Show(self.ident()?)),
             other => self.err(format!("未知命令 `#{other}`")),
         }
@@ -364,10 +385,11 @@ impl Parser {
                 self.bump();
                 Ok(Item::Gap(self.term()?))
             }
-            "#assert" | "assert" => {
+            "#proposition" | "proposition" => {
                 self.bump();
-                Ok(Item::Assert(self.term()?))
+                Ok(Item::Proposition(self.term()?))
             }
+            "#assert" | "assert" => self.err(ASSERT_RENAMED),
             "#show" | "show" => {
                 self.bump();
                 Ok(Item::Show(self.ident()?))
@@ -446,10 +468,12 @@ impl Parser {
                 "source" => {
                     sources.push(self.source_spec()?);
                 }
-                // Another item starts here.
-                "namespace" | "rule" | "sort" | "pred" | "axiom" | "def" | "interpret"
+                // Another item starts here. `#` covers every sigiled command:
+                // the lexer splits the sigil from the command name, so the
+                // combined spellings never reach this match.
+                "#" | "namespace" | "rule" | "sort" | "pred" | "axiom" | "def" | "interpret"
                 | "interpretation" | "contrary" | "unique" | "obj" | "object" | "individual"
-                | "#check" | "#why" | "#gap" | "#assert" | "#show" => break,
+                | "check" | "why" | "gap" | "proposition" | "assert" | "show" => break,
                 other => return self.err(format!("规则 `{name}` 里未知的子句 `{other}`")),
             }
         }

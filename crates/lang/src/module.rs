@@ -510,7 +510,7 @@ impl Library {
                         std_deduce_kernel::pretty::print_expr(&ty)
                     ));
                 }
-                Item::Assert(t) => {
+                Item::Proposition(t) => {
                     let e = elab::elab_top(&next.env, &t).map_err(|e| LoadError { msg: e.msg })?;
                     std_deduce_kernel::check::check(
                         &next.env,
@@ -519,10 +519,10 @@ impl Library {
                         &std_deduce_kernel::Expr::Sort(0),
                     )
                     .map_err(|e| LoadError {
-                        msg: format!("断言不是命题：{e}"),
+                        msg: format!("`#proposition` 的项不是命题：{e}"),
                     })?;
                     report.checked.push(format!(
-                        "断言成立：{}",
+                        "命题：{}",
                         std_deduce_kernel::pretty::print_expr(&e)
                     ));
                 }
@@ -640,7 +640,7 @@ fn check_case_decl_names(items: &[Item]) -> Result<(), String> {
             | Item::Check(_)
             | Item::Why(_)
             | Item::Gap(_)
-            | Item::Assert(_)
+            | Item::Proposition(_)
             | Item::Show(_) => continue,
         };
         if name.contains('.') {
@@ -852,7 +852,7 @@ fn check_module_names(ns: &str, items: &[Item]) -> Result<(), String> {
             Item::Check(t) => check_term(ns, "`#check` 的项", &[], t)?,
             Item::Why(t) => check_term(ns, "`#why` 的项", &[], t)?,
             Item::Gap(t) => check_term(ns, "`#gap` 的项", &[], t)?,
-            Item::Assert(t) => check_term(ns, "`#assert` 的项", &[], t)?,
+            Item::Proposition(t) => check_term(ns, "`#proposition` 的项", &[], t)?,
             Item::Show(name) => require_qualified_ref(ns, "`#show`", name)?,
         }
     }

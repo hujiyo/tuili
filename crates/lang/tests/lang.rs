@@ -1,3 +1,4 @@
+use std_deduce_lang::parser::parse;
 use std_deduce_lang::Library;
 
 #[test]
@@ -320,5 +321,112 @@ rule r :
     assert!(
         msg.contains("参数 `q`") && msg.contains("没有出现在任何前提里") && msg.contains("空参数"),
         "error should name the empty parameter `q`, got: {msg}"
+    );
+}
+
+/// `#proposition` checks that its term is a proposition; it never proves it.
+/// Both the sigiled and the bare spelling are accepted, like `#check`.
+#[test]
+fn proposition_checks_a_prop_in_both_spellings() {
+    let src = r#"
+sort 公民
+obj 张三 : 公民
+pred 侵占 : 公民 → Prop
+
+#proposition 侵占 张三
+proposition 侵占 张三
+"#;
+    let mut lib = Library::new();
+    let report = lib.load("t", src).expect("a proposition check must load");
+    assert_eq!(
+        report.checked,
+        vec!["命题：侵占 张三", "命题：侵占 张三"],
+        "each spelling must confirm the term is a proposition"
+    );
+}
+
+/// A command is an item like any other: a rule block ends before it and the
+/// command is still parsed as a command.
+#[test]
+fn proposition_may_follow_a_rule_block() {
+    let src = r#"
+sort 公民
+obj 张三 : 公民
+pred 侵占 : 公民 → Prop
+
+rule 恒真 :
+  params p : 公民
+  premise 侵占 p
+  conclude 侵占 p
+  source text "测试" locator "夹具"
+
+#proposition 侵占 张三
+"#;
+    let mut lib = Library::new();
+    let report = lib
+        .load("t", src)
+        .expect("a command may follow a rule block");
+    assert_eq!(report.checked.len(), 1, "{:?}", report.checked);
+    assert!(
+        report.checked[0].contains("命题：侵占 张三"),
+        "{:?}",
+        report.checked
+    );
+}
+
+#[test]
+fn proposition_rejects_a_non_proposition() {
+    let src = r#"
+sort 公民
+obj 张三 : 公民
+#proposition 张三
+"#;
+    let err = Library::new()
+        .load("t", src)
+        .expect_err("an individual is not a proposition")
+        .to_string();
+    assert!(err.contains("`#proposition`"), "{err}");
+    assert!(err.contains("不是命题"), "{err}");
+}
+
+/// The old `#assert` must fail at the command itself and explain the rename.
+#[test]
+fn assert_reports_the_rename_at_the_command_position() {
+    let error = parse("sort 公民\n  #assert 公民\n").expect_err("`#assert` must be rejected");
+    assert_eq!((error.line, error.col), (2, 3), "{error}");
+    assert!(error.msg.contains("`#assert` 已改名"), "{error}");
+    assert!(error.msg.contains("`#proposition`"), "{error}");
+    assert!(error.msg.contains("不证明命题成立"), "{error}");
+    assert!(
+        error.msg.contains("事实") && error.msg.contains("规则"),
+        "{error}"
+    );
+
+    let bare = parse("sort 公民\nassert 公民\n").expect_err("bare `assert` must be rejected");
+    assert_eq!((bare.line, bare.col), (2, 1), "{bare}");
+    assert!(bare.msg.contains("`#assert` 已改名"), "{bare}");
+}
+
+/// `#check` and `#show` keep their behavior after the rename.
+#[test]
+fn check_and_show_keep_their_behavior() {
+    let src = r#"
+sort 公民
+obj 张三 : 公民
+pred 侵占 : 公民 → Prop
+
+#check 侵占 张三
+show 侵占
+"#;
+    let mut lib = Library::new();
+    let report = lib.load("t", src).expect("check and show must load");
+    assert_eq!(report.checked, vec!["侵占 张三 : Prop"]);
+    assert!(
+        report
+            .shown
+            .iter()
+            .any(|line| line.starts_with("侵占 :") && line.contains("→ Prop")),
+        "{:?}",
+        report.shown
     );
 }

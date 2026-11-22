@@ -107,8 +107,9 @@ pub enum Item {
     Why(Term),
     /// `#gap prop` — derive it and show what is missing.
     Gap(Term),
-    /// `#assert prop`
-    Assert(Term),
+    /// `#proposition prop` — check that the term is a proposition. This does
+    /// not prove the proposition.
+    Proposition(Term),
     /// `#show name` — print a declaration.
     Show(String),
 }

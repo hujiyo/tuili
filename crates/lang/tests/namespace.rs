@@ -440,6 +440,19 @@ fn module_references_must_be_fully_qualified() {
     }
 }
 
+/// A `#proposition` inside a module must still name declarations fully.
+#[test]
+fn proposition_in_a_namespaced_file_requires_a_qualified_term() {
+    let err = load("namespace a\npred a.P : Prop\n#proposition P\n")
+        .expect_err("an unqualified proposition reference must be refused");
+    assert!(err.contains("`#proposition`"), "got: {err}");
+    assert!(err.contains("未限定") && err.contains("`P`"), "got: {err}");
+
+    let lib = load("namespace a\npred a.P : Prop\n#proposition a.P\n")
+        .expect("a fully qualified proposition must load");
+    assert!(lib.env.get("a.P").is_some());
+}
+
 #[test]
 fn local_binders_do_not_need_a_namespace_prefix() {
     let src = r#"
