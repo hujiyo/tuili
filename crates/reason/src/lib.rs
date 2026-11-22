@@ -220,10 +220,14 @@ impl<'a> Reasoner<'a> {
         label: Option<String>,
     ) -> Result<(), String> {
         // A fact with no provenance is not an assumption that can be audited;
-        // accepting it would present an unsourced assertion as proved. There
-        // is deliberately no fallback source here.
-        if sources.is_empty() {
-            return Err("假设必须有来源：没有出处的“事实”不能被当作已证明".into());
+        // accepting it would present an unsourced assertion as proved. A
+        // whitespace-only source names nothing and is refused for the same
+        // reason. There is deliberately no fallback source here.
+        if !sources
+            .iter()
+            .any(|s| !s.text.trim().is_empty() && !s.locator.trim().is_empty())
+        {
+            return Err("假设必须有来源：来源不能是空白，没有出处的“事实”不能被当作已证明".into());
         }
         check::check(self.env, &Ctx::new(), prop, &Expr::Sort(0))
             .map_err(|e| format!("假设不是命题：{e}"))?;

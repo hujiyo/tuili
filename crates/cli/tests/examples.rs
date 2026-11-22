@@ -525,6 +525,38 @@ obj 张三 : 公民
     );
 }
 
+/// The same provenance rule applies when commands arrive on stdin instead of
+/// argv: an interactive `:given` is still a user/session assertion.
+#[test]
+fn given_through_stdin_uses_the_interactive_session_source() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let theory = TempTheory::new(
+        "given-stdin",
+        r#"
+sort 公民
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+"#,
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_std-deduce-cli"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the CLI");
+    {
+        let stdin = child.stdin.as_mut().expect("piped stdin");
+        writeln!(stdin, ":load {}", theory.path.display()).unwrap();
+        writeln!(stdin, ":given 违法 张三").unwrap();
+        writeln!(stdin, ":inspect").unwrap();
+        writeln!(stdin, ":quit").unwrap();
+    }
+    let output = child.wait_with_output().expect("the CLI exits");
+    check(output, PROVED, &["← 「用户输入交互会话」"]);
+}
+
 /// Every example file that has a regression test above. The guard below keeps
 /// this table in step with the contents of `examples/`.
 const COVERED_EXAMPLES: &[&str] = &[

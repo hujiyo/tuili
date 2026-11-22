@@ -172,6 +172,111 @@ axiom 无来源事实 : 侵占 张三
         .expect("the same axiom loads once it has a source");
 }
 
+/// A source made only of whitespace names nothing: it must be rejected just
+/// like a missing one, not printed as `「  」`.
+#[test]
+fn a_rule_with_a_blank_source_is_rejected() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+obj 张三 : 公民
+
+rule 空白来源规则 :
+  params p : 公民
+  premise 侵占 p
+  conclude 侵占 p
+  source text " " locator " "
+"#;
+    let err = Library::new()
+        .load("t", src)
+        .expect_err("a blank rule source must be refused")
+        .to_string();
+    assert!(err.contains("空白来源规则"), "got: {err}");
+    assert!(err.contains("空白"), "got: {err}");
+}
+
+#[test]
+fn an_axiom_with_a_blank_source_is_rejected() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+obj 张三 : 公民
+
+axiom 空白来源事实 : 侵占 张三
+  source text " " locator " "
+"#;
+    let err = Library::new()
+        .load("t", src)
+        .expect_err("a blank axiom source must be refused")
+        .to_string();
+    assert!(err.contains("空白来源事实"), "got: {err}");
+    assert!(err.contains("空白"), "got: {err}");
+}
+
+/// The source check runs before elaboration: a rule that would also fail to
+/// elaborate must report the missing source, naming the rule, not a type or
+/// name-resolution error.
+#[test]
+fn a_missing_source_is_reported_before_a_premise_that_does_not_elaborate() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+obj 张三 : 公民
+
+rule 缺来源坏前提 :
+  params p : 公民
+  premise 不存在的谓词 p
+  conclude 侵占 p
+"#;
+    let err = Library::new()
+        .load("t", src)
+        .expect_err("the rule must be refused")
+        .to_string();
+    assert!(err.contains("缺来源坏前提"), "got: {err}");
+    assert!(err.contains("缺少 source"), "got: {err}");
+    assert!(
+        !err.contains("未知名称") && !err.contains("不是命题"),
+        "the missing source must win over the elaboration error, got: {err}"
+    );
+}
+
+/// A failed load works on a clone and commits nothing: neither the new
+/// declarations nor the theory may appear in the library.
+#[test]
+fn a_failed_load_leaves_the_library_unchanged() {
+    let mut lib = Library::new();
+    lib.load("base", "sort 公民\npred 侵占 : 公民 → Prop\n")
+        .expect("the base theory loads");
+    let before = lib.env.len();
+
+    let bad = r#"
+sort 住宅
+pred 违法 : 公民 → Prop
+rule 坏规则 :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+"#;
+    let err = lib.load("bad", bad).unwrap_err().to_string();
+    assert!(
+        err.contains("坏规则") && err.contains("缺少 source"),
+        "got: {err}"
+    );
+    assert_eq!(
+        lib.env.len(),
+        before,
+        "the failed load must add no declaration"
+    );
+    assert!(
+        lib.env.get("住宅").is_none(),
+        "a partial declaration leaked"
+    );
+    assert!(
+        lib.theory("bad").is_none(),
+        "the failed theory was recorded"
+    );
+}
+
 /// Type, vocabulary and definition declarations are not assertions: they are
 /// exempt from the source requirement, and so are the conflict declarations
 /// whose provenance is checked by a later layer.

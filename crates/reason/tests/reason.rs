@@ -1169,10 +1169,35 @@ obj 张三 : 公民
         .assume(&prop, vec![], None)
         .expect_err("an assumption without a source must be refused");
     assert!(err.contains("假设必须有来源"), "got: {err}");
+    // `knows` only reports the settled fact base, so settle it before
+    // asserting that the refused assumption did not enter.
+    r.saturate().unwrap();
     assert!(!r.knows(&prop), "a refused assumption enters no fact base");
 
     r.assume(&prop, vec![SourceRef::new("测试", "夹具")], None)
         .expect("an assumption with a source is accepted");
     r.saturate().unwrap();
     assert!(r.knows(&prop), "the sourced assumption is usable");
+}
+
+/// Whitespace is not provenance: a blank source must be refused exactly like
+/// an absent one.
+#[test]
+fn an_assumption_with_a_blank_source_is_rejected() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+obj 张三 : 公民
+"#;
+    let lib = load(src);
+    let prop = Expr::app(p("侵占"), p("张三"));
+
+    let mut r = Reasoner::new(&lib.env);
+    let err = r
+        .assume(&prop, vec![SourceRef::new(" ", " ")], None)
+        .expect_err("a blank source must be refused");
+    assert!(err.contains("假设必须有来源"), "got: {err}");
+    assert!(err.contains("空白"), "got: {err}");
+    r.saturate().unwrap();
+    assert!(!r.knows(&prop), "a refused assumption enters no fact base");
 }
