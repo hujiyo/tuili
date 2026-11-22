@@ -544,6 +544,15 @@ fn coverage_enforces_status_specific_fields() {
             "{}",
         ),
         (
+            coverage_entry(
+                "第三十九条",
+                "partial",
+                r#""rules": ["cn.test.r"], "note": "\u200b""#,
+            ),
+            "note 不能为空",
+            "{}",
+        ),
+        (
             coverage_entry("第三十九条", "indexed", r#""rules": ["cn.test.r"]"#),
             "不能声明 rules",
             "{}",
@@ -620,6 +629,15 @@ fn coverage_rejects_duplicate_rule_names_and_unused_gaps() {
         constitution_with_coverage(r#"{ "number": "第三十九条", "status": "indexed" }"#);
     let error = parse_error(&no_formalized);
     assert!(error.contains("至少要有一条 formalized"), "{error}");
+
+    let duplicate_gap = constitution_with_coverage_parts(
+        r#"{ "number": "第三十九条", "status": "needs_ontology", "gap": "kinship" }"#,
+        r#"{"kinship": "甲", "kinship": "乙"}"#,
+        "",
+        None,
+    );
+    let error = parse_error(&duplicate_gap);
+    assert!(error.contains("coverage.gaps 键 `kinship` 重复"), "{error}");
 }
 
 #[test]
@@ -1210,17 +1228,9 @@ fn the_repository_constitution_corpus_parses() {
     assert_eq!(
         coverage.numbers(CoverageStatus::Formalized),
         [
-            "第三十三条",
-            "第三十四条",
             "第三十五条",
-            "第三十七条",
             "第三十八条",
             "第三十九条",
-            "第四十一条",
-            "第四十二条",
-            "第四十三条",
-            "第四十五条",
-            "第四十六条",
             "第五十二条",
             "第五十三条",
             "第五十六条"
@@ -1229,9 +1239,17 @@ fn the_repository_constitution_corpus_parses() {
     assert_eq!(
         coverage.numbers(CoverageStatus::Partial),
         [
+            "第三十三条",
+            "第三十四条",
             "第三十六条",
+            "第三十七条",
             "第四十条",
+            "第四十一条",
+            "第四十二条",
+            "第四十三条",
             "第四十四条",
+            "第四十五条",
+            "第四十六条",
             "第四十七条",
             "第四十八条",
             "第五十四条",
@@ -1275,15 +1293,20 @@ fn the_repository_constitution_corpus_parses() {
             ("protection_remedy", 1),
         ]
     );
-    assert_eq!(coverage.open_concepts.len(), 49);
-    assert!(coverage
-        .open_concepts
-        .iter()
-        .any(|concept| concept == "科学研究"));
-    assert!(coverage
-        .open_concepts
-        .iter()
-        .any(|concept| concept == "纳税"));
+    assert_eq!(coverage.open_concepts.len(), 52);
+    for concept in [
+        "科学研究",
+        "纳税",
+        "劳动者",
+        "退休人员",
+        "丧失劳动能力",
+        "依法免服兵役",
+    ] {
+        assert!(
+            coverage.open_concepts.iter().any(|item| item == concept),
+            "missing open concept {concept:?}"
+        );
+    }
 
     let formalized_rules: usize = coverage
         .articles
@@ -1297,7 +1320,7 @@ fn the_repository_constitution_corpus_parses() {
         .filter(|entry| entry.status == CoverageStatus::Partial)
         .map(|entry| entry.rules.len())
         .sum();
-    assert_eq!((formalized_rules, partial_rules), (41, 15));
+    assert_eq!((formalized_rules, partial_rules), (19, 37));
     let all_rules: BTreeSet<&str> = coverage
         .articles
         .iter()
@@ -1328,17 +1351,14 @@ fn the_repository_constitution_corpus_parses() {
     let notes = coverage.notes.as_deref().unwrap_or_default();
     for needle in [
         "143 条台账",
-        "formalized",
-        "partial",
-        "indexed",
-        "needs_ontology",
-        "第三十六条",
-        "第四十条",
-        "第四十四条",
-        "第四十七条",
-        "第四十八条",
-        "第五十四条",
-        "第五十五条",
+        "formalized 6",
+        "partial 15",
+        "indexed 17",
+        "needs_ontology 105",
+        "第三十五、三十八、三十九",
+        "第三十三、三十四、三十六",
+        "义务类规则",
+        "第五十一条",
         "第五条",
         "第三章国家机构",
         "不是整部宪法的完整形式化",

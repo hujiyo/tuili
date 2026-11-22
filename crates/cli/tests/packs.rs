@@ -75,6 +75,15 @@ const CORPUS_V2: &str = r#"{
   ]
 }"#;
 
+const CORPUS_NO_COVERAGE: &str = r#"{
+  "format": 2,
+  "law": "cn.test",
+  "title": "测试法",
+  "version": "2018",
+  "jurisdiction": "CN",
+  "articles": [{ "number": "第一条", "text": "a" }]
+}"#;
+
 fn run(command: &str) -> Output {
     run_in(None, command)
 }
@@ -123,7 +132,7 @@ fn packs_lists_a_valid_pack() {
 
     let out = stdout(&output);
     let pack_line = format!(
-        "cn.constitution 0.1.0  CN/CN  1982-12-04 起  community  {}",
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  community  {}",
         escaped_path(&temp.path().join("cn.constitution"))
     );
     let lines: Vec<&str> = out.lines().collect();
@@ -161,7 +170,7 @@ fn packs_lists_good_packs_and_reports_bad_manifests() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 5, "{out:?}");
     let good_line = format!(
-        "cn.constitution 0.1.0  CN/CN  1982-12-04 起  community  {}",
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  community  {}",
         escaped_path(&temp.path().join("good"))
     );
     assert_eq!(lines[0], good_line);
@@ -278,7 +287,7 @@ description = "x\r\ty\u0007\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fak
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3, "{out:?}");
     let pack_line = format!(
-        "cn.constitution 0.1.0  CN/CN  1982-12-04 起  community  {}",
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  community  {}",
         escaped_path(&temp.path().join("cn.constitution"))
     );
     assert_eq!(lines[0], pack_line);
@@ -606,7 +615,7 @@ fn packs_displays_the_trust_level() {
     let output = run(&format!(":packs {}", temp.path().display()));
     assert_exit(&output, PROVED);
     let expected = format!(
-        "cn.constitution 0.1.0  CN/CN  1982-12-04 起  official  {}",
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  official  {}",
         escaped_path(&temp.path().join("cn.constitution"))
     );
     assert!(
@@ -641,14 +650,37 @@ corpus = "cn.test/2018"
         "{out}"
     );
     assert!(
-        out.contains("  覆盖：形式化 1 / 部分 1 / 仅索引 1 / 待本体 2；开放概念 5"),
+        out.contains("  覆盖 cn.test@2018：形式化 1 / 部分 1 / 仅索引 1 / 待本体 2；开放概念 5"),
         "{out}"
     );
     assert!(
-        out.contains("  本体缺口：kinship 1、state_organs 1"),
+        out.contains("  本体缺口：「kinship」 1、「state_organs」 1"),
         "{out}"
     );
     assert!(out.contains(UNLOCKED), "{out}");
+}
+
+#[test]
+fn packs_prints_undeclared_coverage_for_a_linked_corpus() {
+    let temp = TempDir::new("corpus-no-coverage");
+    let manifest = r#"
+[pack]
+name = "cn.test"
+version = "0.1.0"
+jurisdiction = "CN"
+territory = "CN"
+corpus = "cn.test/2018"
+"#;
+    temp.write_pack_at(&temp.path().join("lawpacks"), "cn.test", manifest);
+    temp.corpus("cn.test", "2018", CORPUS_NO_COVERAGE);
+
+    let output = run(&format!(
+        ":packs {}",
+        temp.path().join("lawpacks").display()
+    ));
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(out.contains("覆盖 cn.test@2018：未声明"), "{out}");
 }
 
 #[test]
@@ -676,7 +708,132 @@ corpus = "cn.test/2018"
         "{out}"
     );
     assert!(
-        stderr(&output).contains("1 个语料读取错误"),
+        stderr(&output).contains("1 个语料错误"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn packs_reports_lock_and_corpus_errors_together() {
+    let temp = TempDir::new("corpus-and-lock");
+    let manifest = r#"
+[pack]
+name = "cn.test"
+version = "0.1.0"
+jurisdiction = "CN"
+territory = "CN"
+corpus = "cn.test/2018"
+"#;
+    temp.write_pack_at(&temp.path().join("lawpacks"), "cn.test", manifest);
+    fs::write(temp.path().join("lawpacks/std.lock"), "lock_version = 1\n").unwrap();
+
+    let output = run(&format!(
+        ":packs {}",
+        temp.path().join("lawpacks").display()
+    ));
+    assert_exit(&output, ERROR);
+    assert!(
+        stderr(&output).contains("1 个锁定校验错误、1 个语料错误"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn packs_rejects_a_linked_corpus_with_a_different_law_or_version() {
+    for (name, replacement, expected) in [
+        (
+            "corpus-law-mismatch",
+            ("\"law\": \"cn.test\"", "\"law\": \"cn.other\""),
+            "cn.other@2018",
+        ),
+        (
+            "corpus-version-mismatch",
+            ("\"version\": \"2018\"", "\"version\": \"1999\""),
+            "cn.test@1999",
+        ),
+    ] {
+        let temp = TempDir::new(name);
+        let manifest = r#"
+[pack]
+name = "cn.test"
+version = "0.1.0"
+jurisdiction = "CN"
+territory = "CN"
+corpus = "cn.test/2018"
+"#;
+        temp.write_pack_at(&temp.path().join("lawpacks"), "cn.test", manifest);
+        let corpus = CORPUS_V2.replace(replacement.0, replacement.1);
+        temp.corpus("cn.test", "2018", &corpus);
+
+        let output = run(&format!(
+            ":packs {}",
+            temp.path().join("lawpacks").display()
+        ));
+        assert_exit(&output, ERROR);
+        let out = stdout(&output);
+        assert!(out.contains(expected), "{out}");
+        assert!(out.contains("与清单链接"), "{out}");
+        assert!(
+            stderr(&output).contains("1 个语料错误"),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn packs_dot_resolves_the_corpus_next_to_the_registry() {
+    let temp = TempDir::new("corpus-dot");
+    let manifest = r#"
+[pack]
+name = "cn.test"
+version = "0.1.0"
+jurisdiction = "CN"
+territory = "CN"
+corpus = "cn.test/2018"
+"#;
+    temp.write_pack_at(&temp.path().join("lawpacks"), "cn.test", manifest);
+    temp.corpus("cn.test", "2018", CORPUS_V2);
+
+    let output = run_in(Some(&temp.path().join("lawpacks")), ":packs .");
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(out.contains("覆盖 cn.test@2018：形式化 1"), "{out}");
+}
+
+#[test]
+fn packs_rejects_a_symlinked_corpus() {
+    let temp = TempDir::new("corpus-symlink");
+    let manifest = r#"
+[pack]
+name = "cn.test"
+version = "0.1.0"
+jurisdiction = "CN"
+territory = "CN"
+corpus = "cn.test/2018"
+"#;
+    temp.write_pack_at(&temp.path().join("lawpacks"), "cn.test", manifest);
+    let corpus_dir = temp.path().join("law/corpus/cn.test");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    let target = temp.path().join("outside.json");
+    fs::write(&target, CORPUS_V2).unwrap();
+    let link = corpus_dir.join("2018.json");
+    if !create_file_symlink(&target, &link) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let output = run(&format!(
+        ":packs {}",
+        temp.path().join("lawpacks").display()
+    ));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("必须是普通文件"), "{out}");
+    assert!(
+        stderr(&output).contains("1 个语料错误"),
         "{}",
         stderr(&output)
     );
@@ -698,7 +855,9 @@ corpus = "cn.test"
     let output = run(&format!(":packs {}", temp.path().display()));
     assert_exit(&output, ERROR);
     let out = stdout(&output);
-    assert!(out.contains("corpus"), "{out}");
+    assert!(out.contains("pack.corpus"), "{out}");
+    assert!(out.contains("格式无效"), "{out}");
+    assert!(!out.contains("cn.test 0.1.0"), "{out}");
     assert!(out.contains(LOCK_NOT_RUN), "{out}");
 }
 

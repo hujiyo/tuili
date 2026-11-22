@@ -204,7 +204,7 @@ fn the_audit_prints_coverage_for_every_loaded_corpus_in_order() {
 }
 
 #[test]
-fn coverage_indexed_count_uses_the_article_total() {
+fn coverage_counts_use_the_v2_ledger_statuses() {
     let temp = TempDir::new("coverage-indexed");
     let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
     let articles = format!(

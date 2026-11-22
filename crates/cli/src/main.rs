@@ -183,6 +183,7 @@ mod environment;
 mod packs;
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -1051,10 +1052,12 @@ impl Session {
 
     /// List the legal-pack manifests under a directory.
     ///
-    /// This only reads and validates manifest format. It does not load rules,
-    /// does not check that listed files exist, and does not require `:load`.
-    /// Text that comes from a manifest or a path is escaped before printing,
-    /// so a newline or escape sequence cannot forge another output line.
+    /// This reads and validates manifest format and, when a manifest declares
+    /// `corpus`, reads that linked corpus to print its coverage. It does not
+    /// load rules, does not check that the manifest's theory files exist, and
+    /// does not require `:load`. Text that comes from a manifest, a path or a
+    /// linked corpus is escaped before printing, so a newline or escape
+    /// sequence cannot forge another output line.
     ///
     /// When `root/std.lock` exists, the registry is verified after the
     /// listing. A verification error is printed per pack and fails the
@@ -1087,9 +1090,7 @@ impl Session {
                 writeln!(out, "  文件 {} 个", pack.manifest.files.len()).ok();
             }
             if let Some(link) = &info.corpus {
-                match pack_corpus_path(&root, link)
-                    .and_then(|path| Corpus::read(&path).map_err(|error| error.to_string()))
-                {
+                match read_pack_corpus(&root, link) {
                     Ok(corpus) => write_pack_coverage(out, &corpus),
                     Err(message) => {
                         writeln!(out, "{}", escape_control(&message)).ok();
@@ -1110,7 +1111,11 @@ impl Session {
         // count it as a lock error, so verification waits for a clean listing.
         if !found.errors.is_empty() {
             writeln!(out, "锁定校验：未运行（清单错误）").ok();
-            return Err(format!("{} 个法律包清单错误", found.errors.len()));
+            return Err(listing_error(
+                found.errors.len(),
+                "法律包清单错误",
+                corpus_errors,
+            ));
         }
 
         let lock_path = root.join(LOCK_FILE);
@@ -1143,10 +1148,10 @@ impl Session {
         };
 
         if let Some(count) = lock_errors {
-            return Err(format!("{count} 个锁定校验错误"));
+            return Err(listing_error(count, "锁定校验错误", corpus_errors));
         }
         if corpus_errors > 0 {
-            return Err(format!("{corpus_errors} 个语料读取错误"));
+            return Err(format!("{corpus_errors} 个语料错误"));
         }
         Ok(Outcome::Proved)
     }
@@ -1376,13 +1381,29 @@ fn quoted_list<S: AsRef<str>>(items: &[S]) -> String {
         .join("、")
 }
 
-/// Format ontology-gap counts as `code count` joined by `、`.
+/// Combine a listing error count with independently found corpus errors.
+///
+/// A manifest or lock error used to be returned alone even when a linked corpus
+/// had already failed to load; the stderr then under-reported the failures that
+/// stdout had shown. Both counts are reported instead.
+fn listing_error(primary: usize, label: &str, corpus_errors: usize) -> String {
+    if corpus_errors == 0 {
+        format!("{primary} 个{label}")
+    } else {
+        format!("{primary} 个{label}、{corpus_errors} 个语料错误")
+    }
+}
+
+/// Format ontology-gap counts as `「code」 count` joined by `、`.
+///
+/// The code is quoted so a code containing `、` or whitespace cannot be read as
+/// several separate gaps.
 fn format_gap_counts(gaps: &[(&str, usize)]) -> String {
     if gaps.is_empty() {
         return "（无）".to_owned();
     }
     gaps.iter()
-        .map(|(gap, count)| format!("{} {count}", escape_control(gap)))
+        .map(|(gap, count)| format!("「{}」 {count}", escape_control(gap)))
         .collect::<Vec<_>>()
         .join("、")
 }
@@ -1392,11 +1413,12 @@ fn format_gap_counts(gaps: &[(&str, usize)]) -> String {
 /// The counts are a declaration from the corpus, not a comparison with the
 /// pack's rules. A corpus without coverage prints `覆盖：未声明`.
 fn write_pack_coverage(out: &mut impl Write, corpus: &Corpus) {
+    let id = escape_control(&format!("{}@{}", corpus.law, corpus.version));
     match &corpus.coverage {
         Some(coverage) => {
             writeln!(
                 out,
-                "  覆盖：形式化 {} / 部分 {} / 仅索引 {} / 待本体 {}；开放概念 {}",
+                "  覆盖 {id}：形式化 {} / 部分 {} / 仅索引 {} / 待本体 {}；开放概念 {}",
                 coverage.count(CoverageStatus::Formalized),
                 coverage.count(CoverageStatus::Partial),
                 coverage.count(CoverageStatus::Indexed),
@@ -1412,33 +1434,61 @@ fn write_pack_coverage(out: &mut impl Write, corpus: &Corpus) {
             .ok();
         }
         None => {
-            writeln!(out, "  覆盖：未声明").ok();
+            writeln!(out, "  覆盖 {id}：未声明").ok();
         }
     }
 }
 
-/// Resolve a manifest's `corpus = "<law-id>/<version>"` link.
+/// Read a manifest's `corpus = "<law-id>/<version>"` link.
 ///
 /// The corpus lives next to the registry, not inside it: `law/corpus` is a
-/// sibling of `lawpacks`. The manifest validator has already checked the link's
-/// shape, but the function does not unwrap that check.
-fn pack_corpus_path(root: &Path, link: &str) -> Result<PathBuf, String> {
+/// sibling of `lawpacks`. The registry root is made absolute first, so `:packs .`
+/// and `:packs lawpacks` resolve the same corpus. The linked file must be a
+/// regular file, not a symbolic link, and its own `law`/`version` must match
+/// both segments of the link; otherwise a wrong corpus would be displayed under
+/// this pack as if it were the pack's coverage.
+fn read_pack_corpus(root: &Path, link: &str) -> Result<Corpus, String> {
     let Some((law, version)) = link.split_once('/') else {
         return Err(format!(
             "语料链接 `{link}` 格式无效：必须是 `<law-id>/<version>`"
         ));
     };
+    if law.is_empty() || version.is_empty() || version.contains('/') {
+        return Err(format!(
+            "语料链接 `{link}` 格式无效：必须是 `<law-id>/<version>`"
+        ));
+    }
+    let root = std::path::absolute(root)
+        .map_err(|error| format!("无法解析注册表路径 `{}`：{error}", root.display()))?;
     let Some(parent) = root.parent() else {
         return Err(format!(
             "无法从注册表路径 `{}` 推导语料目录",
             root.display()
         ));
     };
-    Ok(parent
+    let path = parent
         .join("law")
         .join("corpus")
         .join(law)
-        .join(format!("{version}.json")))
+        .join(format!("{version}.json"));
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("无法读取语料文件 `{}`：{error}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "语料文件 `{}` 必须是普通文件，不能是符号链接或其他类型",
+            path.display()
+        ));
+    }
+    let corpus = Corpus::read(&path).map_err(|error| error.to_string())?;
+    if corpus.law != law || corpus.version != version {
+        return Err(format!(
+            "语料 `{}` 的标识是 `{}@{}`，与清单链接 `{link}` 不符",
+            path.display(),
+            corpus.law,
+            corpus.version
+        ));
+    }
+    Ok(corpus)
 }
 
 /// Print each loaded corpus's declared coverage.
@@ -1582,9 +1632,9 @@ fn unknown_option_message(option: &str, expected: &str) -> String {
 fn effective_range(info: &PackInfo) -> String {
     match (&info.effective_from, &info.effective_to) {
         (None, None) => "未注明".to_owned(),
-        (Some(from), Some(to)) => format!("{from} 至 {to}"),
-        (Some(from), None) => format!("{from} 起"),
-        (None, Some(to)) => format!("{to} 止"),
+        (Some(from), Some(to)) => format!("{from}..{to}"),
+        (Some(from), None) => format!("{from}..未注明"),
+        (None, Some(to)) => format!("未注明..{to}"),
     }
 }
 

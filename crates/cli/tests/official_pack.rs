@@ -105,11 +105,11 @@ fn the_official_pack_is_listed_and_its_lock_verifies() {
         run_in_repo(&[":packs lawpacks".to_string()]),
         PROVED,
         &[
-            "cn.constitution 0.4.0  CN/CN  1982-12-04 起  official  ",
+            "cn.constitution 0.4.0  CN/CN  1982-12-04..未注明  official  ",
             "中华人民共和国宪法官方包 v0.4.0（第三十三至五十六条中的选定权利与义务；非完整形式化）",
             "文件 1 个",
-            "覆盖：形式化 14 / 部分 7 / 仅索引 17 / 待本体 105；开放概念 49",
-            "本体缺口：state_organs 82、property_economy 11、legal_norms 3、procedure 3、territory 2、deontic_harm 1、kinship 1、military 1、protection_remedy 1",
+            "覆盖 cn.constitution@2018：形式化 6 / 部分 15 / 仅索引 17 / 待本体 105；开放概念 52",
+            "本体缺口：「state_organs」 82、「property_economy」 11、「legal_norms」 3、「procedure」 3、「territory」 2、「deontic_harm」 1、「kinship」 1、「military」 1、「protection_remedy」 1",
             "锁定校验：通过（1 个包）",
         ],
     );
@@ -132,9 +132,9 @@ fn inspect_marks_pack_declarations_with_the_pack_version() {
         ],
     );
     let out = stdout(&output);
-    // The pack contributes 2 sorts + 70 predicates + 56 rules = 128 declarations,
+    // The pack contributes 2 sorts + 71 predicates + 56 rules = 129 declarations,
     // all marked with the locked version; the case objects are not.
-    assert_eq!(out.matches("[cn.constitution@0.4.0]").count(), 128, "{out}");
+    assert_eq!(out.matches("[cn.constitution@0.4.0]").count(), 129, "{out}");
 }
 
 /// A user file may not declare into the official pack's namespace. The ledger
@@ -170,8 +170,8 @@ fn a_file_cannot_declare_into_a_loaded_pack_namespace() {
     );
     assert_eq!(
         out.matches("[cn.constitution@0.4.0]").count(),
-        128,
-        "the pack's 128 declarations still carry the pack suffix:\n{out}"
+        129,
+        "the pack's 129 declarations still carry the pack suffix:\n{out}"
     );
 }
 
@@ -204,10 +204,10 @@ fn audit_matches_the_quotations_inside_the_official_pack() {
             "✓ 「宪法第五十六条」← cn.constitution@2018",
             "核对 56 条带引文来源：命中 56，不一致 0，未核对 0；另有 2 条来源无引文（不参与核对）。",
             "条文哈希：56 条已固定并核验，0 条未固定，0 条未核验或格式非法。",
-            "覆盖 cn.constitution@2018：形式化 14 条 / 部分 7 条 / 仅索引 17 条 / 待本体 105 条 / 开放概念 49 个",
-            "  形式化：「第三十三条」、「第三十四条」、「第三十五条」、「第三十七条」、「第三十八条」、「第三十九条」、「第四十一条」、「第四十二条」、「第四十三条」、「第四十五条」、「第四十六条」、「第五十二条」、「第五十三条」、「第五十六条」",
-            "  部分：「第三十六条」、「第四十条」、「第四十四条」、「第四十七条」、「第四十八条」、「第五十四条」、「第五十五条」",
-            "  待本体：state_organs 82、property_economy 11、legal_norms 3、procedure 3、territory 2、deontic_harm 1、kinship 1、military 1、protection_remedy 1",
+            "覆盖 cn.constitution@2018：形式化 6 条 / 部分 15 条 / 仅索引 17 条 / 待本体 105 条 / 开放概念 52 个",
+            "  形式化：「第三十五条」、「第三十八条」、「第三十九条」、「第五十二条」、「第五十三条」、「第五十六条」",
+            "  部分：「第三十三条」、「第三十四条」、「第三十六条」、「第三十七条」、「第四十条」、「第四十一条」、「第四十二条」、「第四十三条」、「第四十四条」、「第四十五条」、「第四十六条」、「第四十七条」、「第四十八条」、「第五十四条」、「第五十五条」",
+            "  待本体：「state_organs」 82、「property_economy」 11、「legal_norms」 3、「procedure」 3、「territory」 2、「deontic_harm」 1、「kinship」 1、「military」 1、「protection_remedy」 1",
             "  备注：coverage.articles 是整个宪法的 143 条台账",
         ],
     );
@@ -400,18 +400,18 @@ axiom 张三是妇女 : cn.constitution.妇女 张三
                 ":why cn.constitution.科学研究自由 张三".to_string(),
                 ":why cn.constitution.文学艺术创作自由 张三".to_string(),
                 ":why cn.constitution.其他文化活动自由 张三".to_string(),
-                ":why cn.constitution.妇女平等权利 张三".to_string(),
+                ":why cn.constitution.与男子平等权利 张三".to_string(),
                 ":why cn.constitution.维护国家统一和民族团结义务 张三".to_string(),
-                ":why cn.constitution.遵守宪法法律义务 张三".to_string(),
+                ":why cn.constitution.遵守宪法和法律义务 张三".to_string(),
                 ":why cn.constitution.保守国家秘密义务 张三".to_string(),
                 ":why cn.constitution.爱护公共财产义务 张三".to_string(),
                 ":why cn.constitution.遵守劳动纪律义务 张三".to_string(),
                 ":why cn.constitution.遵守公共秩序义务 张三".to_string(),
                 ":why cn.constitution.尊重社会公德义务 张三".to_string(),
                 ":why cn.constitution.维护祖国安全荣誉利益义务 张三".to_string(),
-                ":why cn.constitution.保卫祖国抵抗侵略职责 张三".to_string(),
+                ":why cn.constitution.保卫祖国抵抗侵略的神圣职责 张三".to_string(),
                 ":why cn.constitution.依法服兵役参加民兵组织义务 张三".to_string(),
-                ":why cn.constitution.纳税义务 张三".to_string(),
+                ":why cn.constitution.依法纳税义务 张三".to_string(),
             ],
         ),
         PROVED,
@@ -419,18 +419,18 @@ axiom 张三是妇女 : cn.constitution.妇女 张三
             "▸ cn.constitution.科学研究自由 张三  ⟨cn.constitution.公民有科学研究自由⟩",
             "▸ cn.constitution.文学艺术创作自由 张三  ⟨cn.constitution.公民有文学艺术创作自由⟩",
             "▸ cn.constitution.其他文化活动自由 张三  ⟨cn.constitution.公民有其他文化活动自由⟩",
-            "▸ cn.constitution.妇女平等权利 张三  ⟨cn.constitution.妇女享有平等权利⟩",
+            "▸ cn.constitution.与男子平等权利 张三  ⟨cn.constitution.妇女享有与男子平等权利⟩",
             "▸ cn.constitution.维护国家统一和民族团结义务 张三  ⟨cn.constitution.公民有维护国家统一和民族团结义务⟩",
-            "▸ cn.constitution.遵守宪法法律义务 张三  ⟨cn.constitution.公民有遵守宪法法律义务⟩",
+            "▸ cn.constitution.遵守宪法和法律义务 张三  ⟨cn.constitution.公民有遵守宪法和法律义务⟩",
             "▸ cn.constitution.保守国家秘密义务 张三  ⟨cn.constitution.公民有保守国家秘密义务⟩",
             "▸ cn.constitution.爱护公共财产义务 张三  ⟨cn.constitution.公民有爱护公共财产义务⟩",
             "▸ cn.constitution.遵守劳动纪律义务 张三  ⟨cn.constitution.公民有遵守劳动纪律义务⟩",
             "▸ cn.constitution.遵守公共秩序义务 张三  ⟨cn.constitution.公民有遵守公共秩序义务⟩",
             "▸ cn.constitution.尊重社会公德义务 张三  ⟨cn.constitution.公民有尊重社会公德义务⟩",
             "▸ cn.constitution.维护祖国安全荣誉利益义务 张三  ⟨cn.constitution.公民有维护祖国安全荣誉利益义务⟩",
-            "▸ cn.constitution.保卫祖国抵抗侵略职责 张三  ⟨cn.constitution.公民有保卫祖国抵抗侵略职责⟩",
+            "▸ cn.constitution.保卫祖国抵抗侵略的神圣职责 张三  ⟨cn.constitution.公民有保卫祖国抵抗侵略的神圣职责⟩",
             "▸ cn.constitution.依法服兵役参加民兵组织义务 张三  ⟨cn.constitution.公民有依法服兵役参加民兵组织义务⟩",
-            "▸ cn.constitution.纳税义务 张三  ⟨cn.constitution.公民有纳税义务⟩",
+            "▸ cn.constitution.依法纳税义务 张三  ⟨cn.constitution.公民有依法纳税义务⟩",
         ],
     );
     let out = stdout(&output);
@@ -438,6 +438,50 @@ axiom 张三是妇女 : cn.constitution.妇女 张三
         out.matches("推导已通过独立校验。").count(),
         15,
         "all fifteen queries must pass both certificate checks:\n{out}"
+    );
+}
+
+/// Article 55's military-service duty is blocked when a legal exemption is
+/// proved; the blocked query stays a gap, never a negation.
+#[test]
+fn article_55_military_duty_is_blocked_by_a_legal_exemption() {
+    let temp = TempDir::new("chapter-two-military-exemption");
+    let case = temp.path().join("case.std");
+    fs::write(
+        &case,
+        r#"import cn.constitution
+
+obj 李四 : cn.constitution.人
+
+axiom 李四有中国国籍 : cn.constitution.中国国籍 李四
+  source text "测试案情" locator "国籍"
+
+axiom 李四依法免服兵役 : cn.constitution.依法免服兵役 李四
+  source text "测试案情" locator "免服兵役"
+"#,
+    )
+    .expect("write the case file");
+
+    let output = check(
+        run_in(
+            &repo_root(),
+            &[
+                case.display().to_string(),
+                ":why cn.constitution.依法服兵役参加民兵组织义务 李四".to_string(),
+            ],
+        ),
+        LOAD_FAILED,
+        &[
+            "? cn.constitution.依法服兵役参加民兵组织义务 李四  【未闭合】",
+            "候选 ⟨cn.constitution.公民有依法服兵役参加民兵组织义务⟩ ← 「宪法第五十五条」（2018）",
+            "被阻断：「cn.constitution.依法免服兵役 李四」已成立",
+            "证书有效，但根为缺口，结论未被证明。",
+        ],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("推导已通过独立校验。"),
+        "an exempted citizen's duty must not be reported as proved:\n{out}"
     );
 }
 

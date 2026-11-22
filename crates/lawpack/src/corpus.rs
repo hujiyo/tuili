@@ -12,9 +12,9 @@
 //! unique article numbers and, when present, a coverage ledger. The ledger has
 //! exactly one entry per article in corpus order; each entry is `formalized`,
 //! `partial`, `indexed` or `needs_ontology`, with rules only for the first two,
-//! a note for `partial`, and a named gap for `needs_ontology`. Gap keys must be
-//! used by at least one article, and a rule name may appear under only one
-//! article. A broken corpus is an error, never a skipped file.
+//! a note required for `partial` (and allowed on any status) and a named gap
+//! for `needs_ontology`. Gap keys must be used by at least one article, and a
+//! rule name may appear under only one article. A broken corpus is an error, never a skipped file.
 //!
 //! The audit reads exactly the fields of a rule's `source` that bear on the
 //! quotation: the instrument name, the article number, the version, the quoted
@@ -25,7 +25,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::de::{Error as _, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 use crate::{date, hex};
@@ -95,6 +96,7 @@ pub struct Coverage {
     pub notes: Option<String>,
     /// Named ontology gaps. Every key must be used by a `needs_ontology`
     /// article, and every `needs_ontology` article must name an existing key.
+    #[serde(deserialize_with = "deserialize_gaps")]
     pub gaps: BTreeMap<String, String>,
     /// One ledger entry per corpus article, in the same order.
     pub articles: Vec<ArticleCoverage>,
@@ -327,6 +329,9 @@ impl Coverage {
         let mut formalized = 0;
         for (index, entry) in self.articles.iter().enumerate() {
             let field = format!("coverage.articles[{index}]");
+            if let Some(note) = &entry.note {
+                require_text(&format!("{field}.note"), note)?;
+            }
             match entry.status {
                 CoverageStatus::Formalized => {
                     formalized += 1;
@@ -473,11 +478,65 @@ fn parse_at(path: &Path, text: &str) -> Result<Corpus, CorpusError> {
 }
 
 fn require_text(field: &str, value: &str) -> Result<(), String> {
-    if value.trim().is_empty() {
+    if value.trim().is_empty()
+        || !value
+            .chars()
+            .any(|character| !character.is_whitespace() && !is_invisible_format(character))
+    {
         Err(format!("{field} 不能为空"))
     } else {
         Ok(())
     }
+}
+
+/// Deserialize the `gaps` object while rejecting duplicate keys.
+///
+/// A plain `BTreeMap` would keep the last value and silently hide the duplicate;
+/// a strict corpus format must report it instead.
+fn deserialize_gaps<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct GapsVisitor;
+
+    impl<'de> Visitor<'de> for GapsVisitor {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("以字符串为键和值的对象")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut gaps = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, String>()? {
+                if gaps.insert(key.clone(), value).is_some() {
+                    return Err(M::Error::custom(format!("coverage.gaps 键 `{key}` 重复")));
+                }
+            }
+            Ok(gaps)
+        }
+    }
+
+    deserializer.deserialize_map(GapsVisitor)
+}
+
+/// Characters that occupy no visible space but are not `char::is_whitespace`.
+///
+/// A note made only of these characters is empty for a human reader even though
+/// `trim()` leaves it non-empty.
+fn is_invisible_format(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200B}'..='\u{200F}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
 }
 
 /// Reject leading or trailing whitespace instead of silently trimming it.

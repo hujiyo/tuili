@@ -93,6 +93,7 @@ fn corpus_links_are_optional_and_format_checked() {
         ("/2018", "law-id"),
         ("CN.constitution/2018", "law-id"),
         ("cn.constitution/..", "`..`"),
+        ("cn.constitution/ 2018", "首尾空白"),
     ] {
         let error = parse_error(&manifest_with(&format!("corpus = \"{link}\"")));
         assert!(error.contains(expected), "`{link}`: {error}");

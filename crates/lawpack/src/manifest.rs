@@ -218,6 +218,9 @@ fn validate_corpus(field: &str, value: &str) -> Result<(), String> {
     if version.is_empty() {
         return Err(format!("{field} 的 version 不能为空"));
     }
+    if version.trim() != version {
+        return Err(format!("{field} 的 version `{version}` 不能有首尾空白"));
+    }
     if version.contains('/') || version.contains('\\') || version.contains(':') {
         return Err(format!(
             "{field} 的 version `{version}` 不能包含路径分隔符或冒号"
