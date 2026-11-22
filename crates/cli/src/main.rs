@@ -64,7 +64,10 @@
 //! duplicate `(law, version)`, exits `2`. All text from a source, a corpus or a
 //! path is escaped before printing, so a newline in a quotation cannot forge
 //! another output line. A corpus's `text_sha256` is provenance metadata only
-//! and is neither recomputed nor verified.
+//! and is neither recomputed nor verified. After the summary, each loaded
+//! corpus prints its declared `coverage`: formalized article count, indexed
+//! article count and open concepts. The declaration is printed only and is not
+//! compared with the loaded theory's rules.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -120,7 +123,7 @@ use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::{elab, Library};
-use std_deduce_lawpack::corpus::{self, Audit, Citation};
+use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus};
 use std_deduce_lawpack::{PackInfo, LOCK_FILE};
 use std_deduce_reason::{
     certificate as reason_certificate, Conflict, Provenance, Reasoner, Resolution, Side,
@@ -805,7 +808,10 @@ impl Session {
     /// newlines; the summary distinguishes hashes that were fixed and verified,
     /// absent hashes and hashes that could not be verified or are malformed.
     /// `text_sha256` in a corpus is provenance metadata only and is neither
-    /// recomputed nor verified.
+    /// recomputed nor verified. After the summary, each loaded corpus prints its
+    /// declared coverage: formalized article count, indexed article count and
+    /// open concepts. The declaration is printed only; it is not compared with
+    /// the rules in the loaded theory.
     fn audit_sources(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !self.loaded {
             writeln!(out, "语料核对：未运行（尚未加载理论）").ok();
@@ -910,6 +916,7 @@ impl Session {
         )
         .ok();
         if quoted == 0 {
+            write_coverage(out, &corpora);
             writeln!(out, "没有可核对的引文：至少要有一条 quote 非空的来源。").ok();
             return Ok(Outcome::Gap);
         }
@@ -918,10 +925,52 @@ impl Session {
             "条文哈希：{fixed_hash} 条已固定并核验，{unfixed_hash} 条未固定，{unchecked_hash} 条未核验或格式非法。"
         )
         .ok();
+        write_coverage(out, &corpora);
         if hit == quoted {
             Ok(Outcome::Proved)
         } else {
             Ok(Outcome::Gap)
+        }
+    }
+}
+
+/// Print each loaded corpus's declared coverage.
+///
+/// This is a declaration from the corpus file: the audit displays it but does
+/// not compare it with the rules in the loaded theory. Fields are escaped so a
+/// newline or a format character cannot forge another output line.
+fn write_coverage(out: &mut impl Write, corpora: &[Corpus]) {
+    for corpus in corpora {
+        let id = escape_control(&format!("{}@{}", corpus.law, corpus.version));
+        match &corpus.coverage {
+            Some(coverage) => {
+                let formalized = coverage.formalized.len();
+                let indexed = corpus.articles.len() - formalized;
+                writeln!(
+                    out,
+                    "覆盖 {id}：形式化 {formalized} 条 / 索引 {indexed} 条 / 开放概念 {} 个",
+                    coverage.open_concepts.len()
+                )
+                .ok();
+                writeln!(
+                    out,
+                    "  形式化：{}",
+                    escape_control(&coverage.formalized.join("、"))
+                )
+                .ok();
+                writeln!(
+                    out,
+                    "  开放概念：{}",
+                    escape_control(&coverage.open_concepts.join("、"))
+                )
+                .ok();
+                if let Some(notes) = &coverage.notes {
+                    writeln!(out, "  备注：{}", escape_control(notes)).ok();
+                }
+            }
+            None => {
+                writeln!(out, "覆盖 {id}：未声明").ok();
+            }
         }
     }
 }

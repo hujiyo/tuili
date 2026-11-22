@@ -8,8 +8,10 @@
 //!
 //! Corpus files are static repository data; this crate never downloads one.
 //! Parsing is strict: `deny_unknown_fields`, a supported format version, real
-//! calendar dates, a well-formed `sha256:` value, a non-empty article list and
-//! unique article numbers. A broken corpus is an error, never a skipped file.
+//! calendar dates, a well-formed `sha256:` value, a non-empty article list,
+//! unique article numbers and, when present, a coverage declaration whose
+//! `formalized` numbers exist and whose lists contain no blanks or duplicates.
+//! A broken corpus is an error, never a skipped file.
 //!
 //! The audit reads exactly the fields of a rule's `source` that bear on the
 //! quotation: the instrument name, the article number, the version, the quoted
@@ -66,8 +68,30 @@ pub struct Corpus {
     /// corpus. Never used for matching.
     #[serde(default)]
     pub notes: Option<String>,
+    /// Declared coverage of this corpus. It is a statement, not a check: the
+    /// audit prints it but does not compare it with the rules in an environment.
+    #[serde(default)]
+    pub coverage: Option<Coverage>,
     /// The articles, in the order the corpus lists them.
     pub articles: Vec<Article>,
+}
+
+/// A corpus's declared coverage.
+///
+/// `formalized` lists article numbers that a rule in this repository already
+/// formalises; every other article is held in the corpus as an index only.
+/// `open_concepts` lists concepts that need a human reading. The declaration is
+/// not verified against an environment.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Coverage {
+    /// Article numbers formalised by at least one rule in this repository.
+    pub formalized: Vec<String>,
+    /// Concepts that need a human reading; may be empty.
+    pub open_concepts: Vec<String>,
+    /// Free-form explanation of the coverage counts.
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 /// One article of a corpus.
@@ -220,6 +244,42 @@ impl Corpus {
             let normalized = normalize_space(&article.number);
             if !numbers.insert(normalized) {
                 return Err(format!("条号 `{}` 重复", article.number));
+            }
+        }
+        if let Some(coverage) = &self.coverage {
+            coverage.validate(&numbers)?;
+        }
+        Ok(())
+    }
+}
+
+impl Coverage {
+    /// Validate the declaration against the corpus's normalized article
+    /// numbers. An unknown or repeated formalized number is an error, never a
+    /// number the audit silently ignores.
+    fn validate(&self, article_numbers: &BTreeSet<String>) -> Result<(), String> {
+        if self.formalized.is_empty() {
+            return Err("coverage.formalized 不能为空：至少声明一条已形式化的条文".to_owned());
+        }
+        let mut seen = BTreeSet::new();
+        for (index, number) in self.formalized.iter().enumerate() {
+            require_text(&format!("coverage.formalized[{index}]"), number)?;
+            let normalized = normalize_space(number);
+            if !seen.insert(normalized.clone()) {
+                return Err(format!("coverage.formalized 条号 `{number}` 重复"));
+            }
+            if !article_numbers.contains(&normalized) {
+                return Err(format!(
+                    "coverage.formalized 条号 `{number}` 不在 articles 中"
+                ));
+            }
+        }
+        let mut concepts = BTreeSet::new();
+        for (index, concept) in self.open_concepts.iter().enumerate() {
+            require_text(&format!("coverage.open_concepts[{index}]"), concept)?;
+            let normalized = normalize_space(concept);
+            if !concepts.insert(normalized) {
+                return Err(format!("coverage.open_concepts 概念 `{concept}` 重复"));
             }
         }
         Ok(())

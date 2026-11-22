@@ -36,6 +36,13 @@ fn corpus_json(version: &str, article_text_json: &str) -> String {
     )
 }
 
+fn corpus_json_with_coverage(version: &str, article_text_json: &str, coverage: &str) -> String {
+    corpus_json(version, article_text_json).replace(
+        "  \"articles\": [",
+        &format!("  \"coverage\": {coverage},\n  \"articles\": ["),
+    )
+}
+
 fn theory(extra: &str) -> String {
     format!("sort 公民\nsource {extra}\n")
 }
@@ -83,6 +90,63 @@ fn line_starting_with(out: &str, prefix: char) -> &str {
     out.lines()
         .find(|line| line.starts_with(prefix))
         .unwrap_or_else(|| panic!("no line starts with `{prefix}`:\n{out}"))
+}
+
+#[test]
+fn the_audit_prints_declared_coverage() {
+    let temp = TempDir::new("coverage");
+    let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
+    let coverage = r#"{ "formalized": ["第三十九条"], "open_concepts": ["非法", "住宅"], "notes": "形式化声明" }"#;
+    temp.corpus(
+        "corpus/cn.constitution/2018.json",
+        &corpus_json_with_coverage("2018", ARTICLE_39_JSON, coverage),
+    );
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("覆盖 cn.constitution@2018：形式化 1 条 / 索引 0 条 / 开放概念 2 个"),
+        "{out}"
+    );
+    assert!(out.contains("  形式化：第三十九条"), "{out}");
+    assert!(out.contains("  开放概念：非法、住宅"), "{out}");
+    assert!(out.contains("  备注：形式化声明"), "{out}");
+}
+
+#[test]
+fn the_audit_reports_undeclared_coverage() {
+    let temp = TempDir::new("coverage-absent");
+    let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
+    temp.corpus(
+        "corpus/cn.constitution/2018.json",
+        &corpus_json("2018", ARTICLE_39_JSON),
+    );
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(out.contains("覆盖 cn.constitution@2018：未声明"), "{out}");
+    assert!(!out.contains("形式化："), "{out}");
+}
+
+#[test]
+fn the_audit_escapes_coverage_fields() {
+    let temp = TempDir::new("coverage-escaped");
+    let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
+    let coverage = "{\n  \"formalized\": [\"第三十九条\"],\n  \"open_concepts\": [\"非法\u{2028}住宅\"],\n  \"notes\": \"备注\\u001b[31m\"\n}";
+    temp.corpus(
+        "corpus/cn.constitution/2018.json",
+        &corpus_json_with_coverage("2018", ARTICLE_39_JSON, coverage),
+    );
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(out.contains("开放概念：非法\\u{2028}住宅"), "{out:?}");
+    assert!(out.contains("备注：备注\\u{001B}[31m"), "{out:?}");
+    assert!(!out.contains('\u{2028}'), "{out:?}");
+    assert!(!out.contains('\u{001B}'), "{out:?}");
 }
 
 #[test]

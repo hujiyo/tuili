@@ -18,7 +18,7 @@ const ABC_SHA256: &str = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9
 const FIXTURE_SHA256: &str =
     "sha256:ee6e873b9595a23b87d25fde0dfa9324dd9c338e71bfdd952dd08e06ae798749";
 
-/// Exact official text of the five articles shipped in the repository corpus.
+/// Exact official text of the six articles asserted against the repository corpus.
 const OFFICIAL_33: &str = "凡具有中华人民共和国国籍的人都是中华人民共和国公民。\n\
 中华人民共和国公民在法律面前一律平等。\n\
 国家尊重和保障人权。\n\
@@ -30,6 +30,7 @@ const OFFICIAL_37: &str = "中华人民共和国公民的人身自由不受侵�
 const OFFICIAL_39: &str = "中华人民共和国公民的住宅不受侵犯。禁止非法搜查或者非法侵入公民的住宅。";
 const OFFICIAL_46: &str = "中华人民共和国公民有受教育的权利和义务。\n\
 国家培养青年、少年、儿童在品德、智力、体质等方面全面发展。";
+const OFFICIAL_143: &str = "中华人民共和国首都是北京。";
 
 fn corpus_json(law: &str, title: &str, aliases: &str, version: &str, articles: &str) -> String {
     format!(
@@ -61,6 +62,87 @@ fn constitution_json() -> String {
         "2018",
         &article("第三十九条", TEXT_39_JSON),
     )
+}
+
+/// Insert a coverage declaration into the fixture corpus.
+fn constitution_with_coverage(formalized: &str, open_concepts: &str) -> String {
+    let coverage = format!(
+        "  \"coverage\": {{\n    \"formalized\": [{formalized}],\n    \"open_concepts\": [{open_concepts}],\n    \"notes\": \"声明\"\n  }},\n"
+    );
+    constitution_json().replace("  \"articles\": [", &format!("{coverage}  \"articles\": ["))
+}
+
+/// Read a Chinese article number (`第...条`) as an integer.
+fn article_number_value(number: &str) -> u32 {
+    let body = number
+        .strip_prefix('第')
+        .and_then(|rest| rest.strip_suffix('条'))
+        .unwrap_or_else(|| panic!("not an article number: {number}"));
+    let mut total = 0;
+    let mut current = 0;
+    let mut seen = false;
+    for character in body.chars() {
+        match character {
+            '零' | '〇' => {
+                current = 0;
+                seen = true;
+            }
+            '一' => {
+                current = 1;
+                seen = true;
+            }
+            '二' => {
+                current = 2;
+                seen = true;
+            }
+            '三' => {
+                current = 3;
+                seen = true;
+            }
+            '四' => {
+                current = 4;
+                seen = true;
+            }
+            '五' => {
+                current = 5;
+                seen = true;
+            }
+            '六' => {
+                current = 6;
+                seen = true;
+            }
+            '七' => {
+                current = 7;
+                seen = true;
+            }
+            '八' => {
+                current = 8;
+                seen = true;
+            }
+            '九' => {
+                current = 9;
+                seen = true;
+            }
+            '十' => {
+                if !seen {
+                    current = 1;
+                }
+                total += current * 10;
+                current = 0;
+                seen = false;
+            }
+            '百' => {
+                if !seen {
+                    current = 1;
+                }
+                total += current * 100;
+                current = 0;
+                seen = false;
+            }
+            other => panic!("unexpected numeral {other} in {number}"),
+        }
+    }
+    total + current
 }
 
 fn constitution() -> Corpus {
@@ -248,6 +330,61 @@ fn optional_fields_may_be_absent() {
     assert_eq!(corpus.retrieved_at, None);
     assert_eq!(corpus.text_sha256, None);
     assert_eq!(corpus.notes, None);
+    assert_eq!(corpus.coverage, None);
+}
+
+#[test]
+fn coverage_parses_and_may_have_no_open_concepts() {
+    let text = constitution_with_coverage(r#""第三十九条""#, r#""住宅", "非法""#);
+    let corpus = Corpus::parse(&text).expect("the coverage declaration is valid");
+    let coverage = corpus.coverage.as_ref().expect("coverage was parsed");
+    assert_eq!(coverage.formalized, ["第三十九条"]);
+    assert_eq!(coverage.open_concepts, ["住宅", "非法"]);
+    assert_eq!(coverage.notes.as_deref(), Some("声明"));
+
+    let text = constitution_with_coverage(r#""第三十九条""#, "");
+    let corpus = Corpus::parse(&text).expect("open_concepts may be empty");
+    assert!(corpus.coverage.unwrap().open_concepts.is_empty());
+}
+
+#[test]
+fn coverage_rejects_unknown_duplicate_or_blank_formalized_numbers() {
+    for (formalized, expected) in [
+        (r#""第四十条""#, "不在 articles"),
+        (r#""第三十九条", " 第三十九条 ""#, "重复"),
+        (r#""""#, "coverage.formalized[0]"),
+        ("", "不能为空"),
+    ] {
+        let text = constitution_with_coverage(formalized, "");
+        let error = parse_error(&text);
+        assert!(
+            error.contains(expected),
+            "`{formalized}` expected `{expected}`: {error}"
+        );
+    }
+}
+
+#[test]
+fn coverage_rejects_duplicate_or_blank_open_concepts() {
+    for (concepts, expected) in [
+        (r#""住宅", "住宅""#, "重复"),
+        (r#""住宅", " ""#, "coverage.open_concepts[1]"),
+    ] {
+        let text = constitution_with_coverage(r#""第三十九条""#, concepts);
+        let error = parse_error(&text);
+        assert!(
+            error.contains(expected),
+            "`{concepts}` expected `{expected}`: {error}"
+        );
+    }
+}
+
+#[test]
+fn coverage_rejects_unknown_fields() {
+    let text = constitution_with_coverage(r#""第三十九条""#, r#""住宅""#)
+        .replace("\"notes\": \"声明\"", "\"notes\": \"声明\", \"bogus\": 1");
+    let error = parse_error(&text);
+    assert!(error.contains("bogus"), "{error}");
 }
 
 #[test]
@@ -736,33 +873,70 @@ fn the_repository_constitution_corpus_parses() {
     assert_eq!(corpus.effective_from.as_deref(), Some("1982-12-04"));
     assert_eq!(corpus.retrieved_at.as_deref(), Some("2026-11-22"));
     assert_eq!(corpus.text_sha256.as_deref(), Some(FIXTURE_SHA256));
-    let numbers: Vec<&str> = corpus
+    assert!(
+        corpus
+            .notes
+            .as_deref()
+            .is_some_and(|notes| notes.contains("序言未入库")),
+        "{:?}",
+        corpus.notes
+    );
+
+    assert_eq!(corpus.articles.len(), 143);
+    let values: Vec<u32> = corpus
         .articles
         .iter()
-        .map(|article| article.number.as_str())
+        .map(|article| article_number_value(&article.number))
         .collect();
-    assert_eq!(
-        numbers,
-        [
-            "第三十三条",
-            "第三十五条",
-            "第三十七条",
-            "第三十九条",
-            "第四十六条"
-        ]
-    );
+    assert_eq!(values, (1u32..=143).collect::<Vec<_>>());
+    assert_eq!(corpus.articles[0].number, "第一条");
+    assert_eq!(corpus.articles[142].number, "第一百四十三条");
+    for article in &corpus.articles {
+        assert!(
+            !article.text.starts_with(&article.number),
+            "{} still starts with its article number",
+            article.number
+        );
+    }
+
     for (number, expected) in [
         ("第三十三条", OFFICIAL_33),
         ("第三十五条", OFFICIAL_35),
         ("第三十七条", OFFICIAL_37),
         ("第三十九条", OFFICIAL_39),
         ("第四十六条", OFFICIAL_46),
+        ("第一百四十三条", OFFICIAL_143),
     ] {
         let article = corpus
             .article(number)
             .unwrap_or_else(|| panic!("missing {number}"));
         assert_eq!(article.text, expected, "{number}");
     }
+
+    let coverage = corpus
+        .coverage
+        .as_ref()
+        .expect("the repository corpus declares coverage");
+    assert_eq!(
+        coverage.formalized,
+        ["第五条", "第三十七条", "第三十九条", "第四十六条"]
+    );
+    assert_eq!(coverage.open_concepts, ["非法", "住宅", "侵犯", "人身自由"]);
+    assert!(
+        !coverage
+            .formalized
+            .iter()
+            .any(|number| number == "第三十三条" || number == "第三十五条"),
+        "articles 33 and 35 are indexed, not formalized"
+    );
+    assert!(
+        coverage
+            .notes
+            .as_deref()
+            .is_some_and(|notes| notes.contains("M2-16")),
+        "{:?}",
+        coverage.notes
+    );
 }
 
 struct TempDir {

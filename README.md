@@ -137,6 +137,12 @@ cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':why 不
   "source_url": "http://www.npc.gov.cn/...",
   "retrieved_at": "2026-11-22",
   "text_sha256": "sha256:...",
+  "notes": "序言未入库；官方只维护宪法包。",
+  "coverage": {
+    "formalized": ["第五条", "第三十七条", "第三十九条", "第四十六条"],
+    "open_concepts": ["非法", "住宅", "侵犯", "人身自由"],
+    "notes": "形式化指仓库内已有示例规则引用该条；官方包规则迁入见 M2-16。"
+  },
   "articles": [
     { "number": "第三十九条", "text": "条文正文，不含“第X条”前缀；多段用 \n 连接" }
   ]
@@ -146,14 +152,18 @@ cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':why 不
 `format` 必须为 1；`law` 只允许小写 ASCII 字母、数字、`.`、`-`；`title`、`version`、
 `jurisdiction` 非空；`effective_from` / `retrieved_at` 若存在必须是真实的 `YYYY-MM-DD`；
 `text_sha256` 若存在必须是 `sha256:` 加 64 位小写十六进制；`articles` 非空，条号在文件内唯一
-（空白归一化后比较），条文正文非空。未知字段、坏 JSON、重复 `(law, version)` 都报错，不跳过。
+（空白归一化后比较），条文正文非空。`coverage` 可选；存在时 `formalized` 必须非空、无空白项、
+无重复，且每个条号都能在 `articles` 中找到，`open_concepts` 可以为空数组但每个概念必须非空且不重复，
+`notes` 可选。未知字段（包括 `coverage` 内的未知字段）、坏 JSON、重复 `(law, version)` 都报错，不跳过。
 语料目录按 `<law>/<version>.json` 严格布局：根下只能有 `<law>` 目录，目录名必须等于语料的 `law`，
 文件名主干必须等于 `version`；子目录、非 `.json` 文件、根下文件和布局外的 JSON 都报错，不静默跳过。
 `text_sha256` 是整本官方文本的抓取哈希（取自 staging 的 provenance），**仅为出处元数据，
 `:audit` 不重算、不校验它**；`source_url`、`retrieved_at`、`text_sha256` 与可选的 `notes` 都是出处元数据，
 匹配只用 `title`/`aliases`、`version`、`jurisdiction` 与 `articles`。
-仓库目前只有 `law/corpus/cn.constitution/2018.json`，收录第三十三、三十五、三十七、三十九、四十六条，
-按 `text.txt` 的段落结构保留换行。
+仓库目前只有 `law/corpus/cn.constitution/2018.json`，收录第一至第一百四十三条完整条级语料，
+按 staging `text.txt` 的段落结构保留换行；序言、目录、章/节标题不入库。它的 `coverage` 声明
+形式化 4 条（第五、三十七、三十九、四十六条）、索引 139 条、开放概念 4 个；第三十三、三十五条仅索引，
+不声称已形式化。
 
 `:load` 之后，`:audit [目录]` 只核对账本里 `quote` 非空的来源；`quote` 为空的来源打印
 `· 「…」：没有引文原文，不参与核对`，单独计数且不影响退出码。对带引文的来源：
@@ -175,6 +185,12 @@ cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':why 不
 坏布局、坏 JSON 或重复 `(law, version)` 退出 `2`。来源文本、条号、版本、语料标识和路径在打印前都会转义
 控制字符与不可见格式字符（含 U+2028/U+202E、ESC）以及字面反斜杠，引文里的换行或制表符不会破坏行结构。
 遇到带 `text_sha256` 的语料时，`:audit` 会额外注明它仅是出处元数据、未重算、未校验。
+汇总之后，每个加载的语料再打印一行覆盖声明和两行列表：
+`覆盖 cn.constitution@2018：形式化 4 条 / 索引 139 条 / 开放概念 4 个`、
+`  形式化：第五条、第三十七条、第三十九条、第四十六条`、`  开放概念：非法、住宅、侵犯、人身自由`，
+有 `coverage.notes` 时再打印 `  备注：…`；索引数等于 `articles` 条数减去 `formalized` 条数，
+没有 `coverage` 的语料打印 `覆盖 …：未声明`。覆盖计数是语料里的**声明**，`:audit` 只显示它，
+不与已加载理论中的规则自动比对；自动核对留到 M2-16。
 
 核对边界：`:audit` 只证明"引文与仓库语料中的条文一致"，不证明规则忠实于条文、不判断条文是否适用于
 具体案件、也不判断法律结论正确。语料是仓库内的静态文件，没有爬取、版本历史或包导入；条文哈希也
@@ -321,14 +337,16 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
   `name@version` 与 SHA-256；哈希覆盖包内全部普通文件，路径用 `/`、内容做 CRLF→LF 归一化，并用长度前缀
   消除拼接歧义。`corpus` 模块按 `<law-id>/<version>.json` 严格布局加载条级语料：目录名必须等于 `law`、
   文件名主干必须等于 `version`，子目录、非 `.json` 文件与根下文件都报错；同时校验 JSON 格式、真实日期、
-  哈希形状、条号唯一与 `(law, version)` 唯一，并提供 `audit` 做引文核对（标题/别名、版本、条号、
+  哈希形状、条号唯一与 `(law, version)` 唯一，以及可选的 `coverage`（`formalized` 非空、无重复且指向
+  现有条号，`open_concepts` 非空去重），并提供 `audit` 做引文核对（标题/别名、版本、条号、
   空白归一化后的逐字引文、条文原文含换行的 SHA-256、管辖）。`text_sha256` 只校验形状，是出处元数据，
   不重算也不校验。该 crate 依赖 `serde` / `serde_json` / `toml` / `sha2`。
 - **`crates/cli`**：会话与命令；`:why` 生成证书、从证书渲染推导树，并对同一份证书依次运行
   `cert::check` 与 `cert::kernel_proof`；冲突分支展示的推导同样从证书渲染并用 `cert::check` 复核。
   `:cert` 导出证书，`:check` 依次运行 `cert::check` 与 `cert::kernel_proof`，把逻辑、内核、侧条件和需人判断分成四行报告；
   可选的目标绑定要求证书根命题与目标内核等价。`:packs` 扫描清单、在有锁时重新哈希校验，`:lock` 生成锁；
-  `:audit` 只核对带 `quote` 的来源；无 `quote` 的来源不参与核对、不影响退出码。三者都转义外部文本
+  `:audit` 只核对带 `quote` 的来源；无 `quote` 的来源不参与核对、不影响退出码；汇总后按语料打印
+  `coverage` 声明的形式化/索引/开放概念计数与列表。三者都转义外部文本
   （含不可见格式字符与字面反斜杠），不导入规则。
 
 ### 证书链的当前边界
@@ -417,9 +435,9 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
   推理时已跳过声明型 axiom（`axiom 假 : Prop` 这类只声明常量、不断言命题），
   但账本本身仍接受形状不对的声明。
 - **法律包有清单、`:packs`、`:lock`、`:audit` 与条级语料，但还不能导入。** `lawpacks/cn.constitution/lawpack.toml`
-  是清单示例；`law/corpus/cn.constitution/2018.json` 只收了宪法五条，`:audit` 用它们核对规则 `source.quote`。
-  条文尚未按包导入，`:load` 不读取法律包或语料，`Theory.requires` 没有解析器语法，多个文件加载后仍合并成
-  一个扁平环境；条文哈希也没有写进证书。全库语料、包导入与证书写入见后续 M2 项。
+  是清单示例；`law/corpus/cn.constitution/2018.json` 已收宪法 143 条并声明覆盖率，`:audit` 用它们核对规则
+  `source.quote`。条文尚未按包导入，`:load` 不读取法律包或语料，`Theory.requires` 没有解析器语法，
+  多个文件加载后仍合并成一个扁平环境；条文哈希也没有写进证书。包导入与证书写入见后续 M2 项。
 - **同一结论多路径只留一条。** `build_nodes` 用 `or_insert`，另一条推导及其出处丢失。
 
 ### 修复顺序
@@ -444,7 +462,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 368 个：kernel 19、lang 27、reason 41、cert 101、cli 85、lawpack 95（含 1 个 doc test）。
+`cargo test --workspace` 共 375 个：kernel 19、lang 27、reason 41、cert 101、cli 88、lawpack 99（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -512,22 +530,25 @@ cargo test --workspace
   另含目标绑定与单点变异：删前提、换绑定、换结论、复用错误节点、追加已成立 blocker、
   改根后带目标失败/不带目标仍合法、合法目标通过、缺口根不能绑定目标、定义等价目标通过；
   以及含空格路径（不加引号只当路径、加引号可带目标）、缺根、目标无法解析。
-- `crates/cli/tests/audit.rs`（24）：`:audit` 端到端——带引文来源命中与正确哈希退出 `0`；规则带正确 `quote`
+- `crates/cli/tests/audit.rs`（27）：`:audit` 端到端——带引文来源命中与正确哈希退出 `0`；规则带正确 `quote`
   加事实 `axiom` 无 `quote` 时仍退出 `0`（1 命中、1 无引文）；只有无引文来源时退出 `1` 并报“没有可核对的引文”；
   改一个字、哈希不符或格式非法、版本不符、无条号、多版本歧义、无对应语料、管辖不符退出 `1`；语料目录缺失
   或为空逐条报未核对并退出 `1`；坏 JSON、未知字段、布局错误（文件主干不符/嵌套目录）退出 `2`；未 `:load`
   拒绝运行；来源字段含换行，或含 U+2028/U+202E/ESC/字面反斜杠时报告仍是正确的单行转义；多条来源分别计数；
-  带 `text_sha256` 的语料会注明它只是未校验的出处元数据；非法 hash 不计入“已固定”。
+  带 `text_sha256` 的语料会注明它只是未校验的出处元数据；非法 hash 不计入“已固定”；`coverage` 存在时打印
+  形式化/索引/开放概念计数与列表，没有时打印“未声明”，覆盖率文本同样转义。
 - `crates/cli/tests/packs.rs`（24）：`:packs` / `:lock` 端到端——合法清单逐行输出、含空格目录、
   好包+坏清单、根不存在/空目录、默认 `lawpacks`、悬空清单符号链接、description/错误/路径中的换行、
   不可见格式字符、ESC、字面反斜杠与控制字符转义；`:lock` 写锁、锁缺失/版本不符/哈希不符/多包/
   锁符号链接、坏包不覆盖旧锁、示例锁一致。
-- `crates/lawpack/tests/corpus.rs`（43）：语料 JSON 必填/可选字段、未知字段、格式版本、`law` 字符集、
-  坏日期、坏哈希、空 `articles`、空白归一化后的重复条号；扫描的稳定顺序、坏 JSON、缺失根目录，
-  以及严格布局拒绝根下文件、非 `.json` 文件、嵌套目录、空法律目录、目录名与 `law` 不符、
+- `crates/lawpack/tests/corpus.rs`（47）：语料 JSON 必填/可选字段、未知字段、格式版本、`law` 字符集、
+  坏日期、坏哈希、空 `articles`、空白归一化后的重复条号；`coverage` 的解析、空 `open_concepts`、
+  未知条号、重复/空白 `formalized`、重复/空白开放概念与 `coverage` 内未知字段；扫描的稳定顺序、坏 JSON、
+  缺失根目录，以及严格布局拒绝根下文件、非 `.json` 文件、嵌套目录、空法律目录、目录名与 `law` 不符、
   文件名主干与 `version` 不符；引文核对的精确命中、空白/换行差异、改字/标点/大小写/数字失败、
   无 quote/无语料/无条号/版本不符/多版本歧义、哈希命中/不符/格式非法与“未到达时不标记为已核验”、
-  管辖不符、标题与别名匹配；仓库内宪法语料的字段、五条条号，以及五条条文的精确正文。
+  管辖不符、标题与别名匹配；仓库内宪法语料的字段、143 条连续条号、六条条文精确正文、覆盖率声明，
+  以及条文正文不含条号前缀。
 - `crates/lawpack/tests/lawpack.rs`（24）：清单必填/可选字段、字符集与长度、真实日历日期（含闰年）、
   未知字段、空日期、目录扫描、坏清单、悬空清单 symlink、symlink 越界、junction 越界与 `load` 的全有或全无语义。
 - `crates/lawpack/tests/lock.rs`（27）：锁文件往返、哈希确定性、改一字节即变、CRLF/LF 同哈希、
