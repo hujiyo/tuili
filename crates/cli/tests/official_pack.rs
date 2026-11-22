@@ -105,8 +105,8 @@ fn the_official_pack_is_listed_and_its_lock_verifies() {
         run_in_repo(&[":packs lawpacks".to_string()]),
         PROVED,
         &[
-            "cn.constitution 0.1.0",
-            "中华人民共和国宪法最小官方包（第三十九条示例；完整规则见 M2-16）",
+            "cn.constitution 0.2.0",
+            "中华人民共和国宪法官方包 v1（第三十三、三十五、三十七、三十九、四十六条；非完整形式化）",
             "文件 1 个",
             "锁定校验：通过（1 个包）",
         ],
@@ -123,15 +123,16 @@ fn inspect_marks_pack_declarations_with_the_pack_version() {
         ]),
         PROVED,
         &[
-            "rule  cn.constitution.非法搜查即侵犯",
-            "[cn.constitution@0.1.0]",
+            "rule  cn.constitution.非法搜查侵犯住宅",
+            "pred  cn.constitution.公民 : cn.constitution.人 → Prop",
+            "[cn.constitution@0.2.0]",
             "引文：中华人民共和国公民的住宅不受侵犯。禁止非法搜查或者非法侵入公民的住宅。",
         ],
     );
     let out = stdout(&output);
-    // Both sorts, both predicates and the rule all come from the pack and are
+    // v1 contributes 2 sorts + 20 predicates + 17 rules = 39 declarations, all
     // marked with the locked version; the case objects are not.
-    assert_eq!(out.matches("[cn.constitution@0.1.0]").count(), 5, "{out}");
+    assert_eq!(out.matches("[cn.constitution@0.2.0]").count(), 39, "{out}");
 }
 
 /// A user file may not declare into the official pack's namespace. The ledger
@@ -166,24 +167,88 @@ fn a_file_cannot_declare_into_a_loaded_pack_namespace() {
         "a rejected declaration must not enter the ledger:\n{out}"
     );
     assert_eq!(
-        out.matches("[cn.constitution@0.1.0]").count(),
-        5,
-        "the pack's five declarations still carry the pack suffix:\n{out}"
+        out.matches("[cn.constitution@0.2.0]").count(),
+        39,
+        "the pack's 39 declarations still carry the pack suffix:\n{out}"
     );
 }
 
 #[test]
-fn audit_matches_the_quotation_inside_the_official_pack() {
+fn audit_matches_the_quotations_inside_the_official_pack() {
     let output = check(
         run_in_repo(&[import_example().display().to_string(), ":audit".to_string()]),
         PROVED,
         &[
+            "✓ 「宪法第三十三条」← cn.constitution@2018",
+            "✓ 「宪法第三十五条」← cn.constitution@2018",
+            "✓ 「宪法第三十七条」← cn.constitution@2018",
             "✓ 「宪法第三十九条」← cn.constitution@2018",
-            "核对 1 条带引文来源：命中 1，不一致 0，未核对 0；另有 1 条来源无引文（不参与核对）。",
-            "条文哈希：1 条已固定并核验",
+            "✓ 「宪法第四十六条」← cn.constitution@2018",
+            "核对 17 条带引文来源：命中 17，不一致 0，未核对 0；另有 2 条来源无引文（不参与核对）。",
+            "条文哈希：17 条已固定并核验，0 条未固定，0 条未核验或格式非法。",
+            "覆盖 cn.constitution@2018：形式化 5 条 / 索引 138 条 / 开放概念 12 个",
+            "  形式化：「第三十三条」、「第三十五条」、「第三十七条」、「第三十九条」、「第四十六条」",
         ],
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+/// A case file only states nationality and the two unlawful acts; the pack's
+/// selected sentences must carry the reasoning for all five articles.
+#[test]
+fn a_facts_only_case_proves_the_selected_sentences_of_five_articles() {
+    let temp = TempDir::new("five-articles");
+    let case = temp.path().join("case.std");
+    fs::write(
+        &case,
+        r#"import cn.constitution
+
+obj 张三 : cn.constitution.人
+obj 甲宅 : cn.constitution.住宅
+
+axiom 张三有中国国籍 : cn.constitution.中国国籍 张三
+  source text "测试案情" locator "国籍"
+
+axiom 张三被非法拘禁 : cn.constitution.非法拘禁 张三
+  source text "测试案情" locator "拘禁"
+
+axiom 张三住宅遭非法搜查 : cn.constitution.非法搜查 张三 甲宅
+  source text "测试案情" locator "搜查"
+"#,
+    )
+    .expect("write the case file");
+
+    let output = check(
+        run_in(
+            &repo_root(),
+            &[
+                case.display().to_string(),
+                ":why cn.constitution.公民 张三".to_string(),
+                ":why cn.constitution.法律面前平等 张三".to_string(),
+                ":why cn.constitution.言论自由 张三".to_string(),
+                ":why cn.constitution.人身自由受侵犯 张三".to_string(),
+                ":why cn.constitution.住宅受侵犯 张三 甲宅".to_string(),
+                ":why cn.constitution.受教育权 张三".to_string(),
+                ":why cn.constitution.受教育义务 张三".to_string(),
+            ],
+        ),
+        PROVED,
+        &[
+            "▸ cn.constitution.公民 张三  ⟨cn.constitution.中国国籍即公民⟩",
+            "▸ cn.constitution.法律面前平等 张三  ⟨cn.constitution.公民法律面前平等⟩",
+            "▸ cn.constitution.言论自由 张三  ⟨cn.constitution.公民有言论自由⟩",
+            "▸ cn.constitution.人身自由受侵犯 张三  ⟨cn.constitution.非法拘禁侵犯人身自由⟩",
+            "▸ cn.constitution.住宅受侵犯 张三 甲宅  ⟨cn.constitution.非法搜查侵犯住宅⟩",
+            "▸ cn.constitution.受教育权 张三  ⟨cn.constitution.公民有受教育权⟩",
+            "▸ cn.constitution.受教育义务 张三  ⟨cn.constitution.公民有受教育义务⟩",
+        ],
+    );
+    let out = stdout(&output);
+    assert_eq!(
+        out.matches("推导已通过独立校验。").count(),
+        7,
+        "all seven queries must pass both certificate checks:\n{out}"
+    );
 }
 
 /// A changed pack file must be caught by both the registry lock check and the
@@ -215,7 +280,7 @@ fn a_corrupted_pack_file_fails_packs_and_load() {
             temp.path(),
             &[
                 import_example().display().to_string(),
-                ":why cn.constitution.不受侵犯 张三 甲宅".to_string(),
+                ":why cn.constitution.住宅受侵犯 张三 甲宅".to_string(),
             ],
         ),
         LOAD_FAILED,

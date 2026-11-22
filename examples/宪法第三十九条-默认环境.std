@@ -1,5 +1,8 @@
-obj 张三 : cn.constitution.公民
+obj 张三 : cn.constitution.人
 obj 甲宅 : cn.constitution.住宅
+
+axiom 张三有中国国籍 : cn.constitution.中国国籍 张三
+  source text "示例案情" locator "当事人身份" note "教学示例事实，非真实证据"
 
 axiom 张三住宅遭非法搜查 : cn.constitution.非法搜查 张三 甲宅
   source text "示例案情" locator "某次搜查" note "教学示例事实，非真实证据"

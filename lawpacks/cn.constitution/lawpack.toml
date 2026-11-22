@@ -1,13 +1,13 @@
-# 中华人民共和国宪法最小官方包（第三十九条示例；完整规则见 M2-16）。
+# 中华人民共和国宪法官方包 v1（第三十三、三十五、三十七、三十九、四十六条的选定句子；非完整形式化）。
 [pack]
 name = "cn.constitution"
-version = "0.1.0"
+version = "0.2.0"
 jurisdiction = "CN"
 territory = "CN"
 namespace = "cn.constitution"
 trust = "official"
 effective_from = "1982-12-04"
-description = "中华人民共和国宪法最小官方包（第三十九条示例；完整规则见 M2-16）"
+description = "中华人民共和国宪法官方包 v1（第三十三、三十五、三十七、三十九、四十六条；非完整形式化）"
 
 [[files]]
 path = "constitution.std"

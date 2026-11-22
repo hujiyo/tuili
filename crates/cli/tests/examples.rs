@@ -148,7 +148,7 @@ fn constitution_39_import_example_proves_through_the_official_pack() {
         .current_dir(repo_root())
         .args([
             example("宪法第三十九条-导入包.std"),
-            ":why cn.constitution.不受侵犯 张三 甲宅".to_string(),
+            ":why cn.constitution.住宅受侵犯 张三 甲宅".to_string(),
         ])
         .output()
         .unwrap_or_else(|e| panic!("failed to run the CLI: {e}"));
@@ -157,7 +157,7 @@ fn constitution_39_import_example_proves_through_the_official_pack() {
         PROVED,
         &[
             "已加载",
-            "▸ cn.constitution.不受侵犯 张三 甲宅",
+            "▸ cn.constitution.住宅受侵犯 张三 甲宅",
             "推导已通过独立校验",
         ],
     );

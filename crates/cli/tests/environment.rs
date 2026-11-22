@@ -167,7 +167,7 @@ fn env_reports_the_default_profile_and_its_official_pack() {
             "环境 profile：cn.default",
             "中国法默认环境：只含官方宪法包",
             "  信任要求：official",
-            "  cn.constitution 0.1 → 0.1.0（official，锁 sha256:",
+            "  cn.constitution 0.2 → 0.2.0（official，锁 sha256:",
             "注册表：",
             "lawpacks",
             "锁定校验：通过（1 个包）",
@@ -196,7 +196,7 @@ fn env_accepts_the_cn_alias() {
     let output = check(
         run_in(&repo_root(), &args(&["--profile", "cn", "env"])),
         PROVED,
-        &["环境 profile：cn.default", "  cn.constitution 0.1 → 0.1.0"],
+        &["环境 profile：cn.default", "  cn.constitution 0.2 → 0.2.0"],
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
@@ -221,13 +221,13 @@ fn the_facts_only_example_proves_under_the_default_environment() {
             &repo_root(),
             &args(&[
                 example("宪法第三十九条-默认环境.std").as_str(),
-                ":why cn.constitution.不受侵犯 张三 甲宅",
+                ":why cn.constitution.住宅受侵犯 张三 甲宅",
             ]),
         ),
         PROVED,
         &[
             "默认环境 cn.default：已加载 1 个包",
-            "  cn.constitution@0.1.0（official）",
+            "  cn.constitution@0.2.0（official）",
             "推导已通过独立校验。",
         ],
     );
@@ -250,12 +250,13 @@ fn no_default_packs_fails_the_facts_only_example_with_a_pack_hint() {
             &args(&[
                 "--no-default-packs",
                 example("宪法第三十九条-默认环境.std").as_str(),
-                ":why cn.constitution.不受侵犯 张三 甲宅",
+                ":why cn.constitution.住宅受侵犯 张三 甲宅",
             ]),
         ),
         LOAD_FAILED,
         &[
             "未知名称",
+            "cn.constitution.人",
             "提示：",
             "cn.constitution",
             "--no-default-packs",
@@ -292,6 +293,7 @@ fn a_repl_load_with_no_default_packs_gets_the_same_pack_hint() {
     );
     assert!(
         out.contains("提示：")
+            && out.contains("cn.constitution.人")
             && out.contains("cn.constitution")
             && out.contains("import cn.constitution"),
         "the closed-environment hint is appended on stdout:\n{out}"
@@ -499,7 +501,7 @@ fn an_explicit_import_still_works_with_no_default_packs() {
             &args(&[
                 "--no-default-packs",
                 example("宪法第三十九条-导入包.std").as_str(),
-                ":why cn.constitution.不受侵犯 张三 甲宅",
+                ":why cn.constitution.住宅受侵犯 张三 甲宅",
             ]),
         ),
         PROVED,
@@ -567,7 +569,7 @@ fn the_environment_is_not_preloaded_by_startup_or_listing_commands() {
     let output = check(
         run_in(&repo_root(), &args(&[":packs lawpacks"])),
         PROVED,
-        &["cn.constitution 0.1.0"],
+        &["cn.constitution 0.2.0"],
     );
     assert!(
         !stdout(&output).contains("默认环境"),

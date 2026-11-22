@@ -193,7 +193,7 @@ namespace 我的案件
    声明、包信息或 `loaded` 状态。
 8. 加载成功后 `Session` 记录包的 `name`、`version`、`hash`、`namespace` 与该包实际声明的名字。
    `:inspect` 只给真正由该包声明的 namespaced 声明显示 `[name@version]`（如
-   `[cn.constitution@0.1.0]`）；直接按文件加载的 namespaced 模块仍显示 `[ns]`；案件文件声明
+   `[cn.constitution@0.2.0]`）；直接按文件加载的 namespaced 模块仍显示 `[ns]`；案件文件声明
    没有后缀。顶层文件的 namespace 若等于某个已加载包的 namespace，加载被拒绝并提示使用独立
    namespace，防止用户文件向官方 namespace 注入声明；包加载器内部的 theory 文件不走这条检查
    （它们的 namespace 必须等于清单 namespace）。
@@ -203,17 +203,22 @@ namespace 我的案件
 里，该行追加环境外标记：`  导入 example（环境外：community）`；环境内的包保持原样。
 没有活动 profile 时输出不变。
 
-仓库里的官方包 `cn.constitution` 已经可以导入，案件文件只需写事实：
+仓库里的官方包 `cn.constitution` v1 已经可以导入，案件文件只需写事实：
 
 ```powershell
-cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-导入包.std ':why cn.constitution.不受侵犯 张三 甲宅'
+cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-导入包.std ':why cn.constitution.住宅受侵犯 张三 甲宅'
 ```
 
-输出 `▸ cn.constitution.不受侵犯 张三 甲宅 ⟨cn.constitution.非法搜查即侵犯⟩ ← 「宪法第三十九条」（2018）`，
-最后打印 `推导已通过独立校验。`。官方包目前只有第三十九条一条最小规则，不是完整形式化；
-`0.1.0` 是**包版本**，不是法律文本年份——文本年份看 `source` 的 `version "2018"` 与语料版本
-`2018`。`lawpacks/std.lock` 固定 `cn.constitution@0.1.0` 与包内容哈希，`:inspect` 对包内声明
-显示 `[cn.constitution@0.1.0]`；完整规则与覆盖率见 M2-16。
+案件只声明 `cn.constitution.中国国籍 张三` 与 `cn.constitution.非法搜查 张三 甲宅`；包内
+`中国国籍即公民` 先推出 `公民 张三`，`非法搜查侵犯住宅` 再推出
+`▸ cn.constitution.住宅受侵犯 张三 甲宅 ⟨cn.constitution.非法搜查侵犯住宅⟩ ← 「宪法第三十九条」（2018）`，
+最后打印 `推导已通过独立校验。`。官方包 v1 有 2 个 sort（`人`、`住宅`）、20 个 pred 与
+17 条 rule，共 39 个声明，形式化第三十三、三十五、三十七、三十九、四十六条的**选定句子**
+（第三十三条的人权宣示、第三十五条的自由边界、第三十七条的合法性判断、第三十九条的住宅范围、
+第四十六条的国家培养条款是开放概念/说明，不是公理），不是整部宪法或整条条文的完整形式化。
+`0.2.0` 是**包版本**，不是法律文本年份——文本年份看 `source` 的 `version "2018"` 与语料版本
+`2018`。`lawpacks/std.lock` 固定 `cn.constitution@0.2.0` 与包内容哈希，`:inspect` 对包内声明
+显示 `[cn.constitution@0.2.0]`。
 
 ### 默认法律环境与 profile
 
@@ -228,7 +233,7 @@ trust = "official"
 
 [[packs]]
 name = "cn.constitution"
-version = "0.1"
+version = "0.2"
 ```
 
 - `name` 与 `aliases` 的字符集、长度和首尾限制与包名相同；alias 不能被两个 profile 共用，
@@ -264,7 +269,7 @@ profile 时不启用默认环境，也不打开注册表校验锁；纯逻辑文
 
 ```
 默认环境 cn.default：已加载 1 个包
-  cn.constitution@0.1.0（official）
+  cn.constitution@0.2.0（official）
 ```
 
 依赖写成 `  dep.pack@0.1.0（community，依赖）`；用了 `--allow-community-packs` 且 profile
@@ -273,7 +278,7 @@ profile 时不启用默认环境，也不打开注册表校验锁；纯逻辑文
 `examples/宪法第三十九条-默认环境.std` 只写对象与事实，不写 `import`、`sort`、`pred` 或 `rule`：
 
 ```powershell
-cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-默认环境.std ':why cn.constitution.不受侵犯 张三 甲宅'
+cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-默认环境.std ':why cn.constitution.住宅受侵犯 张三 甲宅'
 ```
 
 `--no-default-packs` 下文件本身加载失败、且错误是 `未知名称 \`...\`` 时，错误后追加一行提示：
@@ -317,9 +322,13 @@ cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
   "text_sha256": "sha256:...",
   "notes": "序言未入库；官方只维护宪法包。",
   "coverage": {
-    "formalized": ["第五条", "第三十七条", "第三十九条", "第四十六条"],
-    "open_concepts": ["非法", "住宅", "侵犯", "人身自由"],
-    "notes": "官方包已迁入第三十九条最小规则；完整规则与覆盖率见 M2-16。"
+    "formalized": ["第三十三条", "第三十五条", "第三十七条", "第三十九条", "第四十六条"],
+    "open_concepts": [
+      "非法", "住宅", "侵犯", "人身自由",
+      "言论自由", "出版自由", "集会自由", "结社自由", "游行自由", "示威自由",
+      "受教育权", "中国国籍"
+    ],
+    "notes": "官方包 v1 形式化第三十三、三十五、三十七、三十九、四十六条的选定句子；第五条与三个宪法案例的本地规则见 M2-16 第二段。"
   },
   "articles": [
     { "number": "第三十九条", "text": "条文正文，不含“第X条”前缀；多段用 \n 连接" }
@@ -341,8 +350,9 @@ cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
 匹配只用 `title`/`aliases`、`version`、`jurisdiction` 与 `articles`。
 仓库目前只有 `law/corpus/cn.constitution/2018.json`，收录第一至第一百四十三条完整条级语料，
 按 staging `text.txt` 的段落结构保留换行；序言、目录、章/节标题不入库。它的 `coverage` 声明
-形式化 4 条（第五、三十七、三十九、四十六条）、索引 139 条、开放概念 4 个；第三十三、三十五条仅索引，
-不声称已形式化。`effective_from` 是宪法原施行日 1982-12-04，条文为 2018 修正文本，不是 1982 年文本。
+形式化 5 条（第三十三、三十五、三十七、三十九、四十六条）、索引 138 条、开放概念 12 个；
+第五条与三个宪法案例仍由各自的示例文件本地形式化，不进入官方包。
+`effective_from` 是宪法原施行日 1982-12-04，条文为 2018 修正文本，不是 1982 年文本。
 
 `:load` 之后，`:audit [目录]` 只核对账本里 `quote` 非空的来源；`quote` 为空的来源打印
 `· 「…」：没有引文原文，不参与核对`，单独计数且不影响退出码。对带引文的来源：
@@ -365,9 +375,9 @@ cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
 控制字符与不可见格式字符（含 U+2028/U+202E、ESC）以及字面反斜杠，引文里的换行或制表符不会破坏行结构。
 遇到带 `text_sha256` 的语料时，`:audit` 会额外注明它仅是出处元数据、未重算、未校验。
 汇总之后，每个加载的语料再打印一行覆盖声明和两行列表：
-`覆盖 cn.constitution@2018：形式化 4 条 / 索引 139 条 / 开放概念 4 个`、
-`  形式化：「第五条」、「第三十七条」、「第三十九条」、「第四十六条」`、
-`  开放概念：「非法」、「住宅」、「侵犯」、「人身自由」`。列表项逐项用 `「」` 括起，
+`覆盖 cn.constitution@2018：形式化 5 条 / 索引 138 条 / 开放概念 12 个`、
+`  形式化：「第三十三条」、「第三十五条」、「第三十七条」、「第三十九条」、「第四十六条」`、
+`  开放概念：「非法」、「住宅」、「侵犯」、「人身自由」、「言论自由」、「出版自由」、「集会自由」、「结社自由」、「游行自由」、「示威自由」、「受教育权」、「中国国籍」`。列表项逐项用 `「」` 括起，
 概念本身含 `、` 时不会与分隔符混淆；空概念列表打印 `开放概念：（无）`。有 `coverage.notes`
 时再打印 `  备注：…`；索引数等于 `articles` 条数减去 `formalized` 条数，
 没有 `coverage` 的语料打印 `覆盖 …：未声明`。覆盖计数是语料里的**声明**，`:audit` 只显示它，
@@ -482,7 +492,7 @@ import cn.constitution
 
 namespace cn.criminal
 sort cn.criminal.罪名
-pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
+pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 ```
 
 `namespace` 只能出现一次，且必须在所有 `import` 之后；之后所有声明名（`sort` / `obj` / `pred` /
@@ -577,11 +587,9 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
 
 官方只维护宪法包：`lawpacks/cn.constitution`、`lawpacks/profiles/cn.default.toml` 与
 `law/corpus/cn.constitution/2018.json`（143 条完整语料；
-只有第五条、第三十七条、第三十九条、第四十六条有示例规则形式化，第三十三、三十五条仅索引）。其他法律不进入
+官方包 v1 形式化第三十三、三十五、三十七、三十九、四十六条的选定句子，共 39 个声明；
+第五条与三个宪法案例由各自的示例文件本地形式化）。其他法律不进入
 官方注册表或默认环境；社区包可以放在本地 `lawpacks/` 并由显式 `import` 加载，但不能当成官方文本。
-官方宪法包
-目前只形式化第三十九条一条最小规则（`sort` / `pred` / `rule` 与带引文 `source`），不是完整形式化；
-完整规则与覆盖率见 M2-16。
 
 ### 证书链的当前边界
 
@@ -668,15 +676,18 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
   没有调用点，M2-8 实现解释语义后再放开加载。
 - **规则参数必须被前提约束。** 出现在结论却没有出现在任何前提里的参数，
   加载时即被拒绝——否则实例化后结论会是 `?x`，那是一个不闭合的洞。
-  代价是「凡公民皆有 X」这类无条件规则暂时写不了；它需要量词公理的实例化支持。
+  代价是完全没有前提的规则暂时写不了；「凡公民皆有 X」现在可以写成
+  `premise 公民 x → conclude X x`，不需要量词公理的实例化支持。
 - **非命题声明不被拒。** `pred` / `axiom` / `def` 的共域不校验必须是 `Prop`。
   推理时已跳过声明型 axiom（`axiom 假 : Prop` 这类只声明常量、不断言命题），
   但账本本身仍接受形状不对的声明。
-- **法律包导入已接通；官方宪法包只有一条最小规则。** `:load` 遇到 `import` 时先看已加载的
+- **法律包导入已接通；官方宪法包 v1 形式化五条选定句子。** `:load` 遇到 `import` 时先看已加载的
   namespace，未加载的才扫描 `lawpacks`、校验 `std.lock`，并递归加载 `kind = "theory"` 的包文件，
   `:inspect` 显示 `[包名@版本]`；默认环境还会在第一次加载时按 profile 预加载官方包。
-  `lawpacks/cn.constitution/constitution.std` 目前只形式化第三十九条一条规则
-  （`非法搜查` 推出 `不受侵犯`），不是完整形式化，完整规则与覆盖率见 M2-16。
+  `lawpacks/cn.constitution/constitution.std` 有 2 个 sort、20 个 pred、17 条 rule（共 39 个声明），
+  形式化第三十三、三十五、三十七、三十九、四十六条的选定句子：第三十三条的人权宣示、
+  第三十五条的自由边界、第三十七条的合法性判断、第三十九条的住宅范围、第四十六条的国家培养条款
+  仍是开放概念/说明，不是整条条文的完整翻译；第五条与三个案例由各自的示例文件本地形式化。
   `law/corpus/cn.constitution/2018.json` 已收宪法 143 条并声明覆盖率，仍只供 `:audit`
   核对规则 `source.quote`；`:load` 不读取语料。证书还不记录包身份/哈希、profile 或默认环境
   （v3），多个文件加载后仍合并成一个扁平环境。
@@ -704,7 +715,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 546 个：kernel 19、lang 76、reason 41、cert 101、cli 182、lawpack 127（含 1 个 doc test）。
+`cargo test --workspace` 共 547 个：kernel 19、lang 76、reason 41、cert 101、cli 183、lawpack 127（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -795,11 +806,13 @@ cargo test --workspace
   不打印预加载行、REPL 重试只打印一次；缺包提示只出现在文件加载失败、已 import 的包不提示、
   profile 依赖包能被命名、`:why` 等查询错误不追加提示；namespace 与 name 不同或缺少 namespace
   的包不被建议 import，更长的不可导入 namespace 不会遮蔽同前缀可导入包。
-- `crates/cli/tests/official_pack.rs`（5）：官方宪法包端到端——`:packs lawpacks` 列出
-  `cn.constitution 0.1.0`、文件数与通过锁校验；导入示例的 `:why` 证明第三十九条；
-  `:inspect` 对包内 5 个声明显示 `[cn.constitution@0.1.0]`；加载官方示例后，用户文件若声明
-  `namespace cn.constitution` 会被拒绝，`:inspect` 不出现注入的声明；`:audit` 命中带引文来源并核验
-  条文哈希；在临时副本里改坏 `constitution.std` 后，`:packs` 因哈希不符退出 `2`、批处理 `:load` 退出 `1`。
+- `crates/cli/tests/official_pack.rs`（6）：官方宪法包端到端——`:packs lawpacks` 列出
+  `cn.constitution 0.2.0`、v1 描述、文件数与通过锁校验；导入示例的 `:why` 证明第三十九条；
+  `:inspect` 对包内 39 个声明显示 `[cn.constitution@0.2.0]`；加载官方示例后，用户文件若声明
+  `namespace cn.constitution` 会被拒绝，`:inspect` 不出现注入的声明；`:audit` 命中 17 条带引文来源、
+  核验条文哈希并打印 5/138/12 覆盖率；临时案件只写国籍、非法拘禁、非法搜查事实时，包内规则推出
+  第三十三/三十五/三十七/三十九/四十六条的七条结论；在临时副本里改坏 `constitution.std` 后，
+  `:packs` 因哈希不符退出 `2`、批处理 `:load` 退出 `1`。
 - `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
   `[ns]` 后缀；限定名 `:why` 通过证书复核；`a` 的事实不满足 `b` 的目标；交换两个模块的加载顺序后
   `:why` / `:cert` 结果一致；模块内未限定引用加载失败。

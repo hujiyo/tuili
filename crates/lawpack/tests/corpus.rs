@@ -983,15 +983,34 @@ fn the_repository_constitution_corpus_parses() {
         .expect("the repository corpus declares coverage");
     assert_eq!(
         coverage.formalized,
-        ["第五条", "第三十七条", "第三十九条", "第四十六条"]
+        [
+            "第三十三条",
+            "第三十五条",
+            "第三十七条",
+            "第三十九条",
+            "第四十六条"
+        ]
     );
-    assert_eq!(coverage.open_concepts, ["非法", "住宅", "侵犯", "人身自由"]);
+    assert_eq!(
+        coverage.open_concepts,
+        [
+            "非法",
+            "住宅",
+            "侵犯",
+            "人身自由",
+            "言论自由",
+            "出版自由",
+            "集会自由",
+            "结社自由",
+            "游行自由",
+            "示威自由",
+            "受教育权",
+            "中国国籍",
+        ]
+    );
     assert!(
-        !coverage
-            .formalized
-            .iter()
-            .any(|number| number == "第三十三条" || number == "第三十五条"),
-        "articles 33 and 35 are indexed, not formalized"
+        !coverage.formalized.iter().any(|number| number == "第五条"),
+        "article 5 is indexed, not formalized in the official pack"
     );
     assert!(
         coverage
