@@ -293,7 +293,7 @@ axiom 张三被非法检查通信 : cn.constitution.非法检查通信 张三
 axiom 张三因国家机关侵权受损失 : cn.constitution.因国家机关侵权受损失 张三
   source text "测试案情" locator "损失"
 
-axiom 张三因国家机关违法失职受侵害 : cn.constitution.因国家机关违法失职受侵害 张三
+axiom 存在违法失职 : cn.constitution.国家机关或国家工作人员违法失职
   source text "测试案情" locator "违法失职"
 
 axiom 张三是劳动者 : cn.constitution.劳动者 张三
@@ -415,8 +415,9 @@ axiom 李四依法被剥夺政治权利 : cn.constitution.依法被剥夺政治�
     );
 }
 
-/// Article 41 conditions the remedy rights on a public office's unlawful or
-/// derelict act. Nationality alone must not prove them.
+/// Article 41 conditions the remedy rights on the existence of an unlawful or
+/// derelict act by a public office or public official. Nationality alone must
+/// not prove them.
 #[test]
 fn article_41_remedy_rights_need_a_public_office_violation() {
     let temp = TempDir::new("chapter-two-remedy-condition");
@@ -451,7 +452,7 @@ axiom 王五有中国国籍 : cn.constitution.中国国籍 王五
             "候选 ⟨cn.constitution.公民有控告权⟩ ← 「宪法第四十一条」（2018）",
             "? cn.constitution.检举权 王五  【未闭合】",
             "候选 ⟨cn.constitution.公民有检举权⟩ ← 「宪法第四十一条」（2018）",
-            "缺：cn.constitution.因国家机关违法失职受侵害 王五",
+            "缺：cn.constitution.国家机关或国家工作人员违法失职",
         ],
     );
     let out = stdout(&output);
@@ -463,6 +464,48 @@ axiom 王五有中国国籍 : cn.constitution.中国国籍 王五
         out.matches("【未闭合】").count(),
         3,
         "all three remedy rights must stay gaps:\n{out}"
+    );
+}
+
+/// The existence of the unlawful or derelict act is enough for the reporting
+/// right; the reporting citizen need not have suffered any personal harm.
+#[test]
+fn article_41_reporting_right_does_not_require_personal_harm() {
+    let temp = TempDir::new("chapter-two-reporting-no-harm");
+    let case = temp.path().join("case.std");
+    fs::write(
+        &case,
+        r#"import cn.constitution
+
+obj 赵六 : cn.constitution.人
+
+axiom 赵六有中国国籍 : cn.constitution.中国国籍 赵六
+  source text "测试案情" locator "国籍"
+
+axiom 存在违法失职 : cn.constitution.国家机关或国家工作人员违法失职
+  source text "测试案情" locator "违法失职"
+"#,
+    )
+    .expect("write the case file");
+
+    let output = check(
+        run_in(
+            &repo_root(),
+            &[
+                case.display().to_string(),
+                ":why cn.constitution.检举权 赵六".to_string(),
+            ],
+        ),
+        PROVED,
+        &[
+            "▸ cn.constitution.检举权 赵六  ⟨cn.constitution.公民有检举权⟩ ← 「宪法第四十一条」（2018）",
+            "推导已通过独立校验。",
+        ],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("因国家机关侵权受损失"),
+        "the reporting right must not require a personal loss fact:\n{out}"
     );
 }
 

@@ -1063,6 +1063,11 @@ fn the_repository_constitution_corpus_parses() {
         "coverage.notes must explain the article 42 reading: {notes:?}"
     );
     assert!(
+        notes.contains("不要求提出者本人受侵害")
+            && notes.contains("具体是哪个机关或人员是开放概念"),
+        "coverage.notes must explain the article 41 condition: {notes:?}"
+    );
+    assert!(
         notes.contains("第二章第一批") && notes.contains("第四十七至五十六条"),
         "{notes:?}"
     );

@@ -3,4 +3,4 @@ lock_version = 1
 [[pack]]
 name = "cn.constitution"
 version = "0.3.0"
-hash = "sha256:a3778ddfdd6256fe46b292c1cb3380f730148b266643babe224f9b5fe284825b"
+hash = "sha256:af8cba2bd36331e61eba582f06e617bfebe75dfc5de84fabaea31b7fe4a01c11"

@@ -223,6 +223,8 @@ cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-导入包.std '
 第三十六、四十、四十四条是部分形式化（partial），分别未建模“正常宗教活动/宗教团体和宗教事务
 不受外国势力支配”“合法检查程序”“退休制度”。第四十二条的劳动义务来自第一句“公民有劳动的权利和
 义务”，是无条件的法律义务；第三句“有劳动能力的公民”评价的是“光荣职责”，不窄化第一句。
+第四十一条的申诉、控告、检举以“国家机关或国家工作人员违法失职行为存在”为前提，不要求提出者
+本人受侵害；具体是哪个机关或人员由案件事实作开放判断。
 `0.3.0` 是**包版本**，不是法律文本年份——文本年份看 `source` 的 `version "2018"` 与语料版本
 `2018`。`lawpacks/std.lock` 固定 `cn.constitution@0.3.0` 与包内容哈希，`:inspect` 对包内声明
 显示 `[cn.constitution@0.3.0]`。
@@ -733,7 +735,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 551 个：kernel 19、lang 76、reason 41、cert 101、cli 187、lawpack 127（含 1 个 doc test）。
+`cargo test --workspace` 共 552 个：kernel 19、lang 76、reason 41、cert 101、cli 188、lawpack 127（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -824,15 +826,16 @@ cargo test --workspace
   不打印预加载行、REPL 重试只打印一次；缺包提示只出现在文件加载失败、已 import 的包不提示、
   profile 依赖包能被命名、`:why` 等查询错误不追加提示；namespace 与 name 不同或缺少 namespace
   的包不被建议 import，更长的不可导入 namespace 不会遮蔽同前缀可导入包。
-- `crates/cli/tests/official_pack.rs`（10）：官方宪法包端到端——`:packs lawpacks` 列出
+- `crates/cli/tests/official_pack.rs`（11）：官方宪法包端到端——`:packs lawpacks` 列出
   `cn.constitution 0.3.0`、v0.3.0 描述、文件数与通过锁校验；导入示例的 `:why` 证明第三十九条；
   `:inspect` 对包内 97 个声明显示 `[cn.constitution@0.3.0]`；加载官方示例后，用户文件若声明
   `namespace cn.constitution` 会被拒绝，`:inspect` 不出现注入的声明；`:audit` 命中 41 条带引文来源、
   核验条文哈希并打印 14/129/29 覆盖率与 `formalized` 口径备注；临时案件只写国籍、非法拘禁、
   非法搜查事实时，包内规则推出第三十三/三十五/三十七/三十九/四十六条的七条结论；另一份临时案件
-  用年龄、宗教强制、侮辱、非法检查通信、国家机关侵权损失、违法失职侵害、劳动者、退休人员与年老
-  事实，证明第二章第一批的十六条结论；只有国籍、没有违法失职侵害事实时，申诉/控告/检举三项均
-  保持缺口；八条未被该案件触发的规则各用只含单一触发事实的最小案件直接证明；第三十四条在
+  用年龄、宗教强制、侮辱、非法检查通信、国家机关侵权损失、违法失职行为存在、劳动者、退休人员与
+  年老事实，证明第二章第一批的十六条结论；只有国籍、没有违法失职行为事实时，申诉/控告/检举三项
+  均保持缺口；只断言违法失职行为存在、没有任何个人受侵害或损失事实时，检举权仍能证明；八条未被
+  该案件触发的规则各用只含单一触发事实的最小案件直接证明；第三十四条在
   `依法被剥夺政治权利` 成立时以 `unless` 阻断选举权和被选举权并保持缺口；在临时副本里改坏
   `constitution.std` 后，`:packs` 因哈希不符退出 `2`、批处理 `:load` 退出 `1`。
 - `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
