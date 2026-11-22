@@ -1,6 +1,8 @@
 //! Lexer. The surface syntax uses Lean-style keywords and Unicode, but the
 //! operator set is deliberately tiny so that a reader can hold it in their
-//! head.
+//! head. Identifiers may contain `.` and `-` inside them, so a qualified name
+//! such as `cn.constitution.公民` is one token; `->` and `--` keep their
+//! operator/comment precedence.
 
 use std::fmt;
 
@@ -301,6 +303,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                         || d == '\u{0027}'
                         || d == '·'
                         || d == '′'
+                        || d == '.'
+                        // A `-` belongs to an identifier only when it is not
+                        // the start of a comment (`--`) or an arrow (`->`);
+                        // those two keep precedence.
+                        || (d == '-' && !matches!(bytes.get(i + 1), Some(&'-') | Some(&'>')))
                     {
                         i += 1;
                         col += 1;

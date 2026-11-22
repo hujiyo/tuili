@@ -35,6 +35,10 @@ impl fmt::Display for Term {
 /// A top-level declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
+    /// `namespace cn.constitution` — the first item of a module file. Every
+    /// declaration name and every reference to a declaration in that file is
+    /// then required to carry the namespace prefix.
+    Namespace(String),
     /// `sort 公民`
     Sort {
         name: String,

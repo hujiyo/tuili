@@ -191,6 +191,23 @@ impl Session {
                     Ok(Outcome::Proved)
                 }
                 "inspect" => {
+                    // The ledger is flat, so recover each declaration's source
+                    // namespace from the theory that recorded it. Case files
+                    // have no namespace and therefore print exactly as before.
+                    let namespaces: std::collections::HashMap<String, String> = self
+                        .lib
+                        .theories
+                        .iter()
+                        .filter_map(|theory| {
+                            theory.namespace.as_ref().map(|ns| (theory, ns.clone()))
+                        })
+                        .flat_map(|(theory, ns)| {
+                            theory
+                                .decls
+                                .iter()
+                                .map(move |decl| (decl.clone(), ns.clone()))
+                        })
+                        .collect();
                     for decl in self.lib.env.iter() {
                         let kind = match &decl.kind {
                             DeclKind::Sort => "sort ",
@@ -203,7 +220,17 @@ impl Session {
                             DeclKind::Contrary { .. } => "contr ",
                             DeclKind::Unique { .. } => "uniq  ",
                         };
-                        writeln!(out, "  {kind} {} : {}", decl.name, print_expr(&decl.ty)).ok();
+                        let namespace = namespaces
+                            .get(decl.name.as_ref())
+                            .map(|ns| format!(" [{ns}]"))
+                            .unwrap_or_default();
+                        writeln!(
+                            out,
+                            "  {kind} {} : {}{namespace}",
+                            decl.name,
+                            print_expr(&decl.ty)
+                        )
+                        .ok();
                         for s in &decl.sources {
                             writeln!(out, "       ← {}", s.one_line()).ok();
                             for line in s.full().lines() {

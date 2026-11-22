@@ -3,7 +3,8 @@
 //! Grammar (summary):
 //!
 //! ```text
-//! program  := item*
+//! program  := namespace? item*
+//! namespace := 'namespace' NAMESPACE      (first item only)
 //! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | command
 //! sort     := 'sort' IDENT source?
 //! pred     := 'pred' IDENT ':' term source?
@@ -72,6 +73,34 @@ fn is_source_key(name: &str) -> bool {
     SOURCE_KEYS.contains(&name)
 }
 
+/// Why a namespace is malformed, or `None` when it is well formed.
+///
+/// A namespace is lowercase ASCII letters, digits, `.` and `-`; every
+/// dot-separated segment is non-empty and may not start or end with `-`.
+fn namespace_format_error(ns: &str) -> Option<String> {
+    if ns.is_empty() {
+        return Some("命名空间不能为空".into());
+    }
+    for ch in ns.chars() {
+        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '-') {
+            return Some(format!(
+                "命名空间 `{ns}` 含非法字符 `{ch}`：只能使用小写 ASCII 字母、数字、`.` 和 `-`"
+            ));
+        }
+    }
+    for segment in ns.split('.') {
+        if segment.is_empty() {
+            return Some(format!("命名空间 `{ns}` 含空段：`.` 之间必须有内容"));
+        }
+        if segment.starts_with('-') || segment.ends_with('-') {
+            return Some(format!(
+                "命名空间 `{ns}` 的段 `{segment}` 不能以 `-` 开头或结尾"
+            ));
+        }
+    }
+    None
+}
+
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Self {
         Parser { toks, pos: 0 }
@@ -133,10 +162,20 @@ impl Parser {
 
     pub fn program(&mut self) -> PResult<Vec<Item>> {
         let mut items = Vec::new();
+        let mut namespace_seen = false;
         loop {
             self.skip_newlines();
             if matches!(self.peek(), Tok::Eof) {
                 break;
+            }
+            if self.keyword("namespace") {
+                if namespace_seen {
+                    return self.err("namespace 只能出现一次");
+                }
+                if !items.is_empty() {
+                    return self.err("namespace 必须是文件的第一条声明，不能出现在其他声明之后");
+                }
+                namespace_seen = true;
             }
             items.push(self.item()?);
         }
@@ -182,6 +221,24 @@ impl Parser {
     /// so the `#`-command path above stays short.
     fn dispatch_plain(&mut self, kw: &str) -> PResult<Item> {
         match kw {
+            "namespace" => {
+                self.bump();
+                let (line, col) = {
+                    let token = self.here();
+                    (token.line, token.col)
+                };
+                let ns = self.ident()?;
+                if let Some(msg) = namespace_format_error(&ns) {
+                    return Err(ParseError { msg, line, col });
+                }
+                if !matches!(self.peek(), Tok::Newline | Tok::Eof) {
+                    return self.err(format!(
+                        "`namespace {ns}` 之后必须是换行，实际是 `{:?}`",
+                        self.peek()
+                    ));
+                }
+                Ok(Item::Namespace(ns))
+            }
             "sort" => {
                 self.bump();
                 let name = self.ident()?;
@@ -264,7 +321,10 @@ impl Parser {
                 self.bump();
                 let name = self.ident()?;
                 self.expect(&Tok::Colon, "`:`")?;
-                let from = self.term()?;
+                // `term` consumes a top-level `→` itself, so the source side
+                // is parsed at application level; a source-side function
+                // type needs parentheses. The target side may be any term.
+                let from = self.application()?;
                 self.expect(&Tok::Arrow, "`→`")?;
                 let to = self.term()?;
                 let mut sources = Vec::new();
@@ -373,9 +433,9 @@ impl Parser {
                     sources.push(self.source_spec()?);
                 }
                 // Another item starts here.
-                "rule" | "sort" | "pred" | "axiom" | "def" | "interpret" | "interpretation"
-                | "contrary" | "unique" | "obj" | "object" | "individual" | "#check" | "#why"
-                | "#gap" | "#assert" | "#show" => break,
+                "namespace" | "rule" | "sort" | "pred" | "axiom" | "def" | "interpret"
+                | "interpretation" | "contrary" | "unique" | "obj" | "object" | "individual"
+                | "#check" | "#why" | "#gap" | "#assert" | "#show" => break,
                 other => return self.err(format!("规则 `{name}` 里未知的子句 `{other}`")),
             }
         }

@@ -8,13 +8,16 @@
 use std_deduce_kernel::env::{Decl, Env, SourceRef};
 use std_deduce_kernel::{Error, Expr};
 
-use crate::ast::Item;
+use crate::ast::{Defeater, Item, Term};
 use crate::elab;
 use crate::parser;
 
 #[derive(Debug, Clone, Default)]
 pub struct Theory {
     pub name: String,
+    /// The explicit namespace declared by the theory's file, if any. A
+    /// namespaced theory's `name` is the namespace, not the load path.
+    pub namespace: Option<String>,
     /// Declarations made by this theory, in ledger order.
     pub decls: Vec<String>,
     /// Rules among those declarations.
@@ -43,15 +46,30 @@ impl Library {
     /// and only commit at the end).
     pub fn load(&mut self, name: &str, src: &str) -> Result<LoadReport, LoadError> {
         let items = parser::parse(src).map_err(|e| LoadError { msg: e.to_string() })?;
+        // The parser guarantees that a `namespace` item, when present, is the
+        // first item and appears once. A namespaced file is a module: every
+        // declaration name and every reference to a declaration must be
+        // qualified. This is checked over the whole file before anything is
+        // inserted, so a bad module cannot leave a partial theory behind.
+        let namespace = match items.first() {
+            Some(Item::Namespace(ns)) => Some(ns.clone()),
+            _ => None,
+        };
+        if let Some(ns) = namespace.as_deref() {
+            check_module_names(ns, &items).map_err(|msg| LoadError { msg })?;
+        }
+        let theory_name = namespace.clone().unwrap_or_else(|| name.to_string());
         let mut next = self.clone();
         let mut theory = Theory {
-            name: name.to_string(),
+            name: theory_name.clone(),
+            namespace: namespace.clone(),
             ..Default::default()
         };
         let mut report = LoadReport::default();
 
         for item in items {
             match item {
+                Item::Namespace(_) => {}
                 Item::Sort { name: n, source } => {
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
@@ -555,7 +573,7 @@ impl Library {
         }
 
         // Commit only if everything above succeeded.
-        if let Some(existing) = next.theories.iter_mut().find(|t| t.name == name) {
+        if let Some(existing) = next.theories.iter_mut().find(|t| t.name == theory_name) {
             existing.decls.extend(theory.decls);
             existing.rules.extend(theory.rules);
         } else {
@@ -587,6 +605,194 @@ impl From<Error> for LoadError {
     fn from(e: Error) -> Self {
         LoadError { msg: e.to_string() }
     }
+}
+
+/// A qualified name has at least one dot and no empty dot-separated segment.
+/// Whether the namespace exists is left to the elaborator's existing
+/// unknown-name check.
+fn is_qualified(name: &str) -> bool {
+    name.contains('.') && name.split('.').all(|part| !part.is_empty())
+}
+
+/// Whether `name` is declared under exactly `ns.`.
+fn has_namespace_prefix(ns: &str, name: &str) -> bool {
+    name.strip_prefix(ns)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(|rest| !rest.is_empty())
+}
+
+fn require_decl_name(ns: &str, kind: &str, name: &str) -> Result<(), String> {
+    if has_namespace_prefix(ns, name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{kind} {name}`：模块 `{ns}` 的声明名必须以 `{ns}.` 开头"
+        ))
+    }
+}
+
+fn require_qualified_ref(ns: &str, what: &str, name: &str) -> Result<(), String> {
+    if is_qualified(name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{what}：名称 `{name}` 未限定；模块 `{ns}` 内的引用必须写全限定名（如 `{ns}.{name}`）"
+        ))
+    }
+}
+
+/// Check a surface term's constant references. Local binders are `Var` at
+/// elaboration time, so they are in `locals` and do not need a prefix; every
+/// other `Ident` is a reference to a declaration and must be qualified.
+fn check_term(ns: &str, what: &str, locals: &[String], term: &Term) -> Result<(), String> {
+    match term {
+        Term::Prop | Term::Type(_) => Ok(()),
+        Term::Ident(s) => {
+            if s == "_" || locals.iter().any(|local| local == s) {
+                Ok(())
+            } else {
+                require_qualified_ref(ns, what, s)
+            }
+        }
+        Term::Pi {
+            name,
+            domain,
+            codomain,
+        } => {
+            check_term(ns, what, locals, domain)?;
+            let mut inner = locals.to_vec();
+            if let Some(n) = name {
+                inner.push(n.clone());
+            }
+            check_term(ns, what, &inner, codomain)
+        }
+        Term::Lam { name, domain, body } => {
+            check_term(ns, what, locals, domain)?;
+            let mut inner = locals.to_vec();
+            inner.push(name.clone());
+            check_term(ns, what, &inner, body)
+        }
+        Term::App(func, arg) => {
+            check_term(ns, what, locals, func)?;
+            check_term(ns, what, locals, arg)
+        }
+    }
+}
+
+fn check_rule(
+    ns: &str,
+    name: &str,
+    params: &[(String, Term)],
+    premises: &[crate::ast::Premise],
+    conclusion: &Term,
+    defeaters: &[Defeater],
+) -> Result<(), String> {
+    let mut locals = Vec::new();
+    for (param, ty) in params {
+        let what = format!("`rule {name}` 的参数 `{param}`");
+        check_term(ns, &what, &locals, ty)?;
+        locals.push(param.clone());
+    }
+    for (i, premise) in premises.iter().enumerate() {
+        let what = match &premise.name {
+            Some(binder) => format!("`rule {name}` 的前提 `{binder}`"),
+            None => format!("`rule {name}` 的前提 {}", i + 1),
+        };
+        check_term(ns, &what, &locals, &premise.ty)?;
+        // A named premise binds its name; an unnamed one is opened by the
+        // elaborator as the generated local `_p{i}`.
+        match &premise.name {
+            Some(binder) => locals.push(binder.clone()),
+            None => locals.push(format!("_p{i}")),
+        }
+    }
+    let what = format!("`rule {name}` 的结论");
+    check_term(ns, &what, &locals, conclusion)?;
+    for defeater in defeaters {
+        match defeater {
+            Defeater::Unless(t) => {
+                let what = format!("`rule {name}` 的 unless");
+                check_term(ns, &what, &locals, t)?;
+            }
+            Defeater::By(rule) => {
+                let what = format!("`rule {name}` 的 defeated_by");
+                require_qualified_ref(ns, &what, rule)?;
+            }
+            Defeater::Prefer(rule) => {
+                let what = format!("`rule {name}` 的 prefer");
+                require_qualified_ref(ns, &what, rule)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enforce the module contract for one file: declarations live under the
+/// file's namespace and every declaration reference is fully qualified. This
+/// runs before loading so an unqualified name cannot silently resolve to a
+/// same-named case-level declaration.
+fn check_module_names(ns: &str, items: &[Item]) -> Result<(), String> {
+    for item in items {
+        match item {
+            Item::Namespace(_) => {}
+            Item::Sort { name, .. } => require_decl_name(ns, "sort", name)?,
+            Item::Obj { name, ty, .. } => {
+                require_decl_name(ns, "obj", name)?;
+                let what = format!("`obj {name}` 的类型");
+                check_term(ns, &what, &[], ty)?;
+            }
+            Item::Pred { name, ty, .. } => {
+                require_decl_name(ns, "pred", name)?;
+                let what = format!("`pred {name}` 的类型");
+                check_term(ns, &what, &[], ty)?;
+            }
+            Item::Axiom { name, ty, .. } => {
+                require_decl_name(ns, "axiom", name)?;
+                let what = format!("`axiom {name}` 的类型");
+                check_term(ns, &what, &[], ty)?;
+            }
+            Item::Def { name, ty, body, .. } => {
+                require_decl_name(ns, "def", name)?;
+                let what = format!("`def {name}` 的类型");
+                check_term(ns, &what, &[], ty)?;
+                let what = format!("`def {name}` 的定义");
+                check_term(ns, &what, &[], body)?;
+            }
+            Item::Rule {
+                name,
+                params,
+                premises,
+                conclusion,
+                defeaters,
+                ..
+            } => {
+                require_decl_name(ns, "rule", name)?;
+                check_rule(ns, name, params, premises, conclusion, defeaters)?;
+            }
+            Item::Interpretation { name, from, to, .. } => {
+                require_decl_name(ns, "interpret", name)?;
+                let what = format!("`interpret {name}` 的 from");
+                check_term(ns, &what, &[], from)?;
+                let what = format!("`interpret {name}` 的 to");
+                check_term(ns, &what, &[], to)?;
+            }
+            Item::Contrary { left, right, .. } => {
+                let what = format!("`contrary {left} {right}`");
+                require_qualified_ref(ns, &what, left)?;
+                require_qualified_ref(ns, &what, right)?;
+            }
+            Item::Unique { pred, index, .. } => {
+                let what = format!("`unique {pred} {index}`");
+                require_qualified_ref(ns, &what, pred)?;
+            }
+            Item::Check(t) => check_term(ns, "`#check` 的项", &[], t)?,
+            Item::Why(t) => check_term(ns, "`#why` 的项", &[], t)?,
+            Item::Gap(t) => check_term(ns, "`#gap` 的项", &[], t)?,
+            Item::Assert(t) => check_term(ns, "`#assert` 的项", &[], t)?,
+            Item::Show(name) => require_qualified_ref(ns, "`#show`", name)?,
+        }
+    }
+    Ok(())
 }
 
 /// Number of arguments a predicate takes, read off its declared type.
