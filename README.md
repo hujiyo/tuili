@@ -75,10 +75,12 @@ cargo run -p std-deduce-cli
 cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 ```
 
-二进制名是 `std-deduce`，包名仍是 `std-deduce-cli`。批处理加载失败时 stderr 为
-`路径: 错误：...` 并以 `1` 退出；`std-deduce check <文件.std>` 与直接给文件等价；
-`std-deduce repl` 显式进入 REPL；`--help` / `-h` 打印用法，`--version` / `-V` 打印
-`std-deduce <版本>`。
+二进制名是 `std-deduce`，包名仍是 `std-deduce-cli`。加载失败时的诊断采用 Lean 风格：
+解析错误带源码行列，输出 `路径:行:列: error: ...`；精化与内核错误没有 AST span，
+不伪造位置，输出 `路径: error: ...`。批处理入口把这条诊断原样写到 stderr 并以 `1`
+退出，不再重复路径或另加前缀；`:load` 命令仍以 `错误：` 前缀报告同一条诊断。
+`std-deduce check <文件.std>` 与直接给文件等价；`std-deduce repl` 显式进入 REPL；
+`--help` / `-h` 打印用法，`--version` / `-V` 打印 `std-deduce <版本>`。
 
 交互命令：
 
@@ -385,7 +387,8 @@ rule cn.constitution.非法搜查即侵犯 :
   空白归一化后的逐字引文、条文原文含换行的 SHA-256、管辖）。`text_sha256` 只校验形状，是出处元数据，
   不重算也不校验。该 crate 依赖 `serde` / `serde_json` / `toml` / `sha2`。
 - **`crates/cli`**：`std-deduce` 二进制的批处理入口把第一个文件参数交给与 `:load` 相同的加载路径，
-  成功后执行剩余命令；加载失败打印 `路径: 错误：...` 并退出 `1`。会话命令里，`:why` 生成证书、从证书渲染
+  成功后执行剩余命令；加载失败打印 `路径:行:列: error: ...`（无位置时 `路径: error: ...`）
+  并退出 `1`。会话命令里，`:why` 生成证书、从证书渲染
   推导树，并对同一份证书依次运行 `cert::check` 与 `cert::kernel_proof`；冲突分支展示的推导同样从证书渲染
   并用 `cert::check` 复核。`:cert` 导出证书，`:verify-cert` 依次运行 `cert::check` 与 `cert::kernel_proof`，
   把逻辑、内核、侧条件和需人判断分成四行报告；
@@ -510,7 +513,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 415 个：kernel 19、lang 48、reason 41、cert 101、cli 105、lawpack 101（含 1 个 doc test）。
+`cargo test --workspace` 共 427 个：kernel 19、lang 57、reason 41、cert 101、cli 108、lawpack 101（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -519,15 +522,18 @@ cargo test --workspace
   少给一个前提时剩下的是函数类型而不是结论，证明本身也不能当命题用。
   另有一条固定的加载期拒绝：参数与前提 binder 重名；以及来源渲染的几条：
   `one_line` 保持旧格式并转义控制字符、字面反斜杠与不可见格式字符，`full` 逐行列出全部非空字段并转义。
-- `crates/lang/tests/lang.rs`（13）：最小规则和 `contrary` 声明能加载；参数/前提 binder 重名、
+- `crates/lang/tests/lang.rs`（19）：最小规则和 `contrary` 声明能加载；参数/前提 binder 重名、
   未命名前提生成的 `_p{i}` 重名、参数只出现在 `unless` 里、以及完全未使用的参数都拒绝加载；
   规则与断言事实缺 `source` 或来源只有空白时加载失败且错误指出声明名，补上后加载成功；
   缺来源先于类型错误报告，失败的加载不改变库内容；
-  `sort`/`pred`/`obj`/`def`/`contrary`/`unique` 无来源仍可加载。
+  `sort`/`pred`/`obj`/`def`/`contrary`/`unique` 无来源仍可加载；解析错误把行列保留在
+  `LoadError` 里，消息不再内嵌“第 X 行第 Y 列”，`render` 输出 Lean 风格诊断。
+- `crates/lang/src/module.rs`（2 个单元测试）：`LoadError` 的 Lean 风格渲染——有位置时
+  `x.std:2:3: error: ...`，无位置时 `x.std: error: ...`；`Display` 始终只输出消息本身。
 - `crates/lang/tests/source.rs`（14）：字符串字面量的转义、CJK/URL 字符、未闭合/未知转义/裸换行与
   裸控制字符的行列号；source 全字段按任意顺序跨行解析；重复键的报错列指向键；CRLF 输入、注释中的引号；
   缺/空 `text`/`locator` 与旧位置式写法都拒绝。
-- `crates/lang/tests/namespace.rs`（21）：限定名词法/解析、`namespace` 第一条/唯一/格式与缺参位置；
+- `crates/lang/tests/namespace.rs`（22）：限定名词法/解析、`namespace` 第一条/唯一/格式与缺参位置；
   模块声明前缀与空段、未限定类型/结论/unless/`defeated_by`/`prefer`/`contrary`/`unique`/解释/`def`
   体/`obj`/`axiom`/`#check`/`#show` 的拒绝、局部 binder 豁免；两模块同名后缀与加载顺序无关；
   案件文件不能声明带点名字但仍可引用限定名；同名 theory 的 namespace 冲突；`defeated_by`/`prefer`
@@ -587,8 +593,10 @@ cargo test --workspace
   改根后带目标失败/不带目标仍合法、合法目标通过、缺口根不能绑定目标、定义等价目标通过；
   以及含空格路径（不加引号只当路径、加引号可带目标）、缺根、目标无法解析；
   旧 `:check` 不再作为别名，报改名错误并退出 `2`。
-- `crates/cli/tests/entry.rs`（10）：二进制入口端到端——批处理加载成功退出 `0` 并打印加载报告；
-  坏文件退出 `1`，stderr 带路径与错误且不执行后续命令；含空格路径按单个参数加载；
+- `crates/cli/tests/entry.rs`（13）：二进制入口端到端——批处理加载成功退出 `0` 并打印加载报告；
+  坏文件退出 `1`，stderr 带路径与错误且不执行后续命令；坏语法批处理输出 `路径:行:列: error:`
+  且路径只出现一次、不出现 `错误：` 前缀；`:load` 坏语法保留 `错误：` 前缀并带同样位置；
+  精化错误没有 AST span 时输出 `路径: error: ...`，不伪造行列号；含空格路径按单个参数加载；
   `check` 子命令与直接给文件输出一致；加载后继续执行 `:why`；`--help` / `-h` 列出批处理与
   `:verify-cert`；`--version` / `-V` 输出 `std-deduce <版本>`；无参数与 `repl` 都进入 REPL；
   `check` 缺文件与 `repl` 带多余参数报用法错误（`2`）。

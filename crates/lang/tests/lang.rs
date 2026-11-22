@@ -23,6 +23,25 @@ rule 规则 :
     }
 }
 
+/// A parse error carries its 1-based line and column structurally. The message
+/// itself stays free of the location, which the CLI renders in Lean style.
+#[test]
+fn a_parse_error_keeps_its_line_and_column_out_of_the_message() {
+    let err = Library::new()
+        .load("bad.std", "sort 公民\nbogus\n")
+        .expect_err("an unknown declaration keyword must fail to parse");
+    assert_eq!(err.position(), Some((2, 1)), "got: {err}");
+    assert_eq!(
+        err.render("bad.std"),
+        "bad.std:2:1: error: 未知声明关键字 `bogus`"
+    );
+    assert_eq!(err.to_string(), "未知声明关键字 `bogus`");
+    assert!(
+        !err.to_string().contains("第 2 行"),
+        "the message must not embed the position: {err}"
+    );
+}
+
 #[test]
 fn contrary_declaration_loads() {
     let src = r#"

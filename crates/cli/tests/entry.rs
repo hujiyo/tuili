@@ -101,6 +101,13 @@ const GOOD_THEORY: &str = "sort 公民\npred 好人 : 公民 → Prop\nobj 张�
 const BAD_THEORY: &str =
     "sort 公民\npred 好人 : 公民 → Prop\nobj 张三 : 公民\naxiom 张三是好人 : 好人 张三\n";
 
+/// A file that fails in the parser: `bogus` is not a declaration keyword.
+const BAD_SYNTAX_THEORY: &str = "sort 公民\nbogus\n";
+
+/// A file that parses but fails in elaboration: the predicate's domain is an
+/// unknown name, and elaboration has no AST span to report.
+const BAD_REFINEMENT_THEORY: &str = "sort 公民\npred 好人 : 未知类型 → Prop\n";
+
 #[test]
 fn a_batch_file_loads_and_exits_zero() {
     let output = run(&[example("constitution-39.std")]);
@@ -125,13 +132,84 @@ fn a_failed_batch_load_exits_one_and_skips_the_remaining_commands() {
         "stderr must name the file:\n{err}"
     );
     assert!(
-        err.contains("错误："),
-        "stderr must carry the error:\n{err}"
+        err.contains(&format!(
+            "{}: error: axiom `张三是好人` 缺少 source",
+            file.display()
+        )),
+        "a positionless load error must render as `path: error: ...`:\n{err}"
+    );
+    assert!(
+        !err.contains("错误："),
+        "the batch entry must not add a second prefix:\n{err}"
+    );
+    assert_eq!(
+        err.matches(&file.display().to_string()).count(),
+        1,
+        "the path must appear once:\n{err}"
     );
     let out = stdout(&output);
     assert!(
         !out.contains("推导"),
         "a failed load must not run the remaining commands:\n{out}"
+    );
+}
+
+#[test]
+fn a_batch_syntax_error_prints_path_line_and_column() {
+    let dir = TempDir::new("syntax");
+    let file = dir.write("坏语法.std", BAD_SYNTAX_THEORY);
+    let path = file.display().to_string();
+    let output = run(std::slice::from_ref(&path));
+    assert_exit(&output, LOAD_ERROR);
+    let err = stderr(&output);
+    assert!(
+        err.contains(&format!("{path}:2:1: error: 未知声明关键字 `bogus`")),
+        "stderr must be `path:line:col: error: ...`:\n{err}"
+    );
+    assert_eq!(
+        err.matches(&path).count(),
+        1,
+        "the batch entry must not repeat the path:\n{err}"
+    );
+    assert!(
+        !err.contains("错误："),
+        "the batch entry must not add the `:load` prefix:\n{err}"
+    );
+    assert!(stdout(&output).is_empty(), "no report on a failed load");
+}
+
+#[test]
+fn a_load_command_syntax_error_keeps_its_prefix_and_position() {
+    let dir = TempDir::new("load-syntax");
+    let file = dir.write("坏语法.std", BAD_SYNTAX_THEORY);
+    let path = file.display().to_string();
+    let output = run_with_stdin(&[], &format!(":load {path}\n:quit\n"));
+    assert_exit(&output, USAGE_ERROR);
+    let out = stdout(&output);
+    assert!(
+        out.contains(&format!("错误：{path}:2:1: error: 未知声明关键字 `bogus`")),
+        "`:load` keeps its `错误：` prefix and the rendered position:\n{out}"
+    );
+    assert!(stderr(&output).is_empty(), "the REPL reports on stdout");
+}
+
+#[test]
+fn a_refinement_error_has_no_fabricated_position() {
+    let dir = TempDir::new("refinement");
+    let file = dir.write("坏精化.std", BAD_REFINEMENT_THEORY);
+    let path = file.display().to_string();
+    let output = run(std::slice::from_ref(&path));
+    assert_exit(&output, LOAD_ERROR);
+    let err = stderr(&output);
+    assert!(
+        err.starts_with(&format!("{path}: error: ")),
+        "a refinement error has no AST span and must not invent one:\n{err}"
+    );
+    assert!(err.contains("未知名称 `未知类型`"), "{err}");
+    assert_eq!(
+        err.matches(&path).count(),
+        1,
+        "the path must appear once:\n{err}"
     );
 }
 

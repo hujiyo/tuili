@@ -45,7 +45,7 @@ impl Library {
     /// on the first error the library is left unchanged (we work on a clone
     /// and only commit at the end).
     pub fn load(&mut self, name: &str, src: &str) -> Result<LoadReport, LoadError> {
-        let items = parser::parse(src).map_err(|e| LoadError { msg: e.to_string() })?;
+        let items = parser::parse(src).map_err(|e| LoadError::at(e.msg, e.line, e.col))?;
         // The parser guarantees that a `namespace` item, when present, is the
         // first item and appears once. A namespaced file is a module: every
         // declaration name and every reference to a declaration must be
@@ -56,24 +56,22 @@ impl Library {
             _ => None,
         };
         if let Some(ns) = namespace.as_deref() {
-            check_module_names(ns, &items).map_err(|msg| LoadError { msg })?;
+            check_module_names(ns, &items).map_err(LoadError::new)?;
         } else {
             // A file without a namespace is a case/example file: it may
             // *reference* qualified names from modules, but it must not
             // declare one, or it could squat on a module's name.
-            check_case_decl_names(&items).map_err(|msg| LoadError { msg })?;
+            check_case_decl_names(&items).map_err(LoadError::new)?;
         }
         let theory_name = namespace.clone().unwrap_or_else(|| name.to_string());
         if let Some(existing) = self.theories.iter().find(|t| t.name == theory_name) {
             if existing.namespace != namespace {
-                return Err(LoadError {
-                    msg: format!(
-                        "理论 `{theory_name}` 已存在，但 namespace 不一致（已有 {}，本次 {}）；\
+                return Err(LoadError::new(format!(
+                    "理论 `{theory_name}` 已存在，但 namespace 不一致（已有 {}，本次 {}）；\
                          同名理论只有 namespace 相同才能合并",
-                        namespace_label(&existing.namespace),
-                        namespace_label(&namespace)
-                    ),
-                });
+                    namespace_label(&existing.namespace),
+                    namespace_label(&namespace)
+                )));
             }
         }
         let mut next = self.clone();
@@ -97,9 +95,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError {
-                            msg: format!("`sort {n}`：{e}"),
-                        })?;
+                        .map_err(|e| LoadError::new(format!("`sort {n}`：{e}")))?;
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
@@ -111,16 +107,15 @@ impl Library {
                     // An individual is an axiom-like constant, but its type
                     // must be a *type* (a sort or a term of a sort), never a
                     // proposition. This catches `obj 张三 : 非法搜查 张三 甲宅`.
-                    let ety = elab::elab_top(&next.env, &ty).map_err(|e| LoadError {
-                        msg: format!("`obj {n}`：{}", e.msg),
-                    })?;
+                    let ety = elab::elab_top(&next.env, &ty)
+                        .map_err(|e| LoadError::new(format!("`obj {n}`：{}", e.msg)))?;
                     std_deduce_kernel::check::check_is_type(
                         &next.env,
                         &std_deduce_kernel::Ctx::new(),
                         &ety,
                     )
-                    .map_err(|e| LoadError {
-                        msg: format!("`obj {n}` 的类型必须是类型而不是命题：{e}"),
+                    .map_err(|e| {
+                        LoadError::new(format!("`obj {n}` 的类型必须是类型而不是命题：{e}"))
                     })?;
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
@@ -131,9 +126,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError {
-                            msg: format!("`obj {n}`：{e}"),
-                        })?;
+                        .map_err(|e| LoadError::new(format!("`obj {n}`：{e}")))?;
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
@@ -142,9 +135,8 @@ impl Library {
                     ty,
                     source,
                 } => {
-                    let ety = elab::elab_top(&next.env, &ty).map_err(|e| LoadError {
-                        msg: format!("`pred {n}`：{}", e.msg),
-                    })?;
+                    let ety = elab::elab_top(&next.env, &ty)
+                        .map_err(|e| LoadError::new(format!("`pred {n}`：{}", e.msg)))?;
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
                         kind: std_deduce_kernel::DeclKind::Pred,
@@ -154,9 +146,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError {
-                            msg: format!("`pred {n}`：{e}"),
-                        })?;
+                        .map_err(|e| LoadError::new(format!("`pred {n}`：{e}")))?;
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
@@ -172,15 +162,12 @@ impl Library {
                     // a missing source is not masked by an unrelated type
                     // error.
                     if !source.as_ref().is_some_and(usable_source) {
-                        return Err(LoadError {
-                            msg: format!(
+                        return Err(LoadError::new(format!(
                                 "axiom `{n}` 缺少 source 或来源为空白；断言事实必须有出处（法律名称 + 条号，或案件材料）"
-                            ),
-                        });
+                            )));
                     }
-                    let ety = elab::elab_top(&next.env, &ty).map_err(|e| LoadError {
-                        msg: format!("`axiom {n}`：{}", e.msg),
-                    })?;
+                    let ety = elab::elab_top(&next.env, &ty)
+                        .map_err(|e| LoadError::new(format!("`axiom {n}`：{}", e.msg)))?;
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
                         kind: std_deduce_kernel::DeclKind::Axiom,
@@ -190,9 +177,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError {
-                            msg: format!("`axiom {n}`：{e}"),
-                        })?;
+                        .map_err(|e| LoadError::new(format!("`axiom {n}`：{e}")))?;
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
@@ -202,12 +187,10 @@ impl Library {
                     body,
                     source,
                 } => {
-                    let ety = elab::elab_top(&next.env, &ty).map_err(|e| LoadError {
-                        msg: format!("`def {n}`：{}", e.msg),
-                    })?;
-                    let ebody = elab::elab_top(&next.env, &body).map_err(|e| LoadError {
-                        msg: format!("`def {n}`：{}", e.msg),
-                    })?;
+                    let ety = elab::elab_top(&next.env, &ty)
+                        .map_err(|e| LoadError::new(format!("`def {n}`：{}", e.msg)))?;
+                    let ebody = elab::elab_top(&next.env, &body)
+                        .map_err(|e| LoadError::new(format!("`def {n}`：{}", e.msg)))?;
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
                         kind: std_deduce_kernel::DeclKind::Def { body: ebody },
@@ -217,9 +200,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError {
-                            msg: format!("`def {n}`：{e}"),
-                        })?;
+                        .map_err(|e| LoadError::new(format!("`def {n}`：{e}")))?;
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
@@ -234,33 +215,29 @@ impl Library {
                         match next.env.get(p) {
                             Some(d) if matches!(d.kind, std_deduce_kernel::DeclKind::Pred) => {}
                             Some(_) => {
-                                return Err(LoadError {
-                                    msg: format!(
-                                        "`contrary {left} {right}`：`{p}` 不是谓词（pred）"
-                                    ),
-                                })
+                                return Err(LoadError::new(format!(
+                                    "`contrary {left} {right}`：`{p}` 不是谓词（pred）"
+                                )))
                             }
                             None => {
-                                return Err(LoadError {
-                                    msg: format!("`contrary {left} {right}`：未知谓词 `{p}`"),
-                                })
+                                return Err(LoadError::new(format!(
+                                    "`contrary {left} {right}`：未知谓词 `{p}`"
+                                )))
                             }
                         }
                     }
                     let al = pred_arity(&next.env, &l).unwrap_or(0);
                     let ar = pred_arity(&next.env, &r).unwrap_or(0);
                     if al != ar {
-                        return Err(LoadError {
-                            msg: format!(
-                                "`contrary {left} {right}`：两个谓词的参数个数不同（{al} vs {ar}）"
-                            ),
-                        });
+                        return Err(LoadError::new(format!(
+                            "`contrary {left} {right}`：两个谓词的参数个数不同（{al} vs {ar}）"
+                        )));
                     }
                     for (a, b) in next.env.contrary_pairs() {
                         if (a == l && b == r) || (a == r && b == l) {
-                            return Err(LoadError {
-                                msg: format!("`contrary {left} {right}`：这一对已经声明过了"),
-                            });
+                            return Err(LoadError::new(format!(
+                                "`contrary {left} {right}`：这一对已经声明过了"
+                            )));
                         }
                     }
                     let decl = Decl {
@@ -272,9 +249,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError {
-                            msg: format!("`contrary {left} {right}`：{e}"),
-                        })?;
+                        .map_err(|e| LoadError::new(format!("`contrary {left} {right}`：{e}")))?;
                     theory.decls.push(format!("contrary:{left}:{right}"));
                     report.declared.push(format!("contrary {left} {right}"));
                 }
@@ -287,30 +262,28 @@ impl Library {
                     match next.env.get(&p) {
                         Some(d) if matches!(d.kind, std_deduce_kernel::DeclKind::Pred) => {}
                         Some(_) => {
-                            return Err(LoadError {
-                                msg: format!("`unique {pred} {index}`：`{p}` 不是谓词（pred）"),
-                            })
+                            return Err(LoadError::new(format!(
+                                "`unique {pred} {index}`：`{p}` 不是谓词（pred）"
+                            )))
                         }
                         None => {
-                            return Err(LoadError {
-                                msg: format!("`unique {pred} {index}`：未知谓词 `{p}`"),
-                            })
+                            return Err(LoadError::new(format!(
+                                "`unique {pred} {index}`：未知谓词 `{p}`"
+                            )))
                         }
                     }
                     let arity = pred_arity(&next.env, &p).unwrap_or(0);
                     if index == 0 || index > arity {
-                        return Err(LoadError {
-                            msg: format!(
-                                "`unique {pred} {index}`：参数位置超出范围（该谓词有 {arity} 个参数）"
-                            ),
-                        });
+                        return Err(LoadError::new(format!(
+                            "`unique {pred} {index}`：参数位置超出范围（该谓词有 {arity} 个参数）"
+                        )));
                     }
                     let pos = index - 1;
                     for (q, i) in next.env.unique_positions() {
                         if q == p && i == pos {
-                            return Err(LoadError {
-                                msg: format!("`unique {pred} {index}`：这一条已经声明过了"),
-                            });
+                            return Err(LoadError::new(format!(
+                                "`unique {pred} {index}`：这一条已经声明过了"
+                            )));
                         }
                     }
                     let decl = Decl {
@@ -325,9 +298,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError {
-                            msg: format!("`unique {pred} {index}`：{e}"),
-                        })?;
+                        .map_err(|e| LoadError::new(format!("`unique {pred} {index}`：{e}")))?;
                     theory.decls.push(format!("unique:{pred}:{index}"));
                     report.declared.push(format!("unique {pred} {index}"));
                 }
@@ -346,11 +317,9 @@ impl Library {
                     // elaboration step so a missing source is reported as
                     // such, not as a type error.
                     if !sources.iter().any(usable_source) {
-                        return Err(LoadError {
-                            msg: format!(
+                        return Err(LoadError::new(format!(
                                 "规则 `{n}` 缺少 source 或来源为空白；规则必须有出处（法律名称 + 条号，或案件材料）"
-                            ),
-                        });
+                            )));
                     }
                     // Every telescope binder is opened by the kernel as the
                     // constant `?<binder>`. Two binders with the same name
@@ -367,11 +336,8 @@ impl Library {
                         Some(pn) => std_deduce_kernel::name(pn),
                         None => std_deduce_kernel::name(format!("_p{i}")),
                     }));
-                    std_deduce_kernel::env::check_unique_binders(&binder_names).map_err(|e| {
-                        LoadError {
-                            msg: format!("`rule {n}`：{e}"),
-                        }
-                    })?;
+                    std_deduce_kernel::env::check_unique_binders(&binder_names)
+                        .map_err(|e| LoadError::new(format!("`rule {n}`：{e}")))?;
 
                     // One telescope elaboration: params and premises are
                     // elaborated in the same growing context, and the
@@ -381,16 +347,16 @@ impl Library {
                     let mut binds: Vec<(String, Expr)> = Vec::new();
                     let mut rule_params: Vec<(std_deduce_kernel::Name, Expr)> = Vec::new();
                     for (pn, pt) in &params {
-                        let ty = elab::elab(&next.env, &binds, pt).map_err(|e| LoadError {
-                            msg: format!("`rule {n}` 的参数 `{pn}`：{}", e.msg),
+                        let ty = elab::elab(&next.env, &binds, pt).map_err(|e| {
+                            LoadError::new(format!("`rule {n}` 的参数 `{pn}`：{}", e.msg))
                         })?;
                         std_deduce_kernel::check::check_is_type(
                             &next.env,
                             &elab::ctx_of(&binds),
                             &ty,
                         )
-                        .map_err(|e| LoadError {
-                            msg: format!("`rule {n}` 的参数 `{pn}` 类型不合法：{e}"),
+                        .map_err(|e| {
+                            LoadError::new(format!("`rule {n}` 的参数 `{pn}` 类型不合法：{e}"))
                         })?;
                         binds.push((pn.clone(), ty.clone()));
                         rule_params.push((std_deduce_kernel::name(pn), ty));
@@ -399,8 +365,8 @@ impl Library {
                     let mut rule_premises: Vec<(Option<std_deduce_kernel::Name>, Expr)> =
                         Vec::new();
                     for (i, p) in premises.iter().enumerate() {
-                        let ty = elab::elab(&next.env, &binds, &p.ty).map_err(|e| LoadError {
-                            msg: format!("`rule {n}` 的前提 {}：{}", i + 1, e.msg),
+                        let ty = elab::elab(&next.env, &binds, &p.ty).map_err(|e| {
+                            LoadError::new(format!("`rule {n}` 的前提 {}：{}", i + 1, e.msg))
                         })?;
                         std_deduce_kernel::check::check(
                             &next.env,
@@ -408,27 +374,23 @@ impl Library {
                             &ty,
                             &Expr::Sort(0),
                         )
-                        .map_err(|e| LoadError {
-                            msg: format!("`rule {n}` 的前提 {} 不是命题：{e}", i + 1),
+                        .map_err(|e| {
+                            LoadError::new(format!("`rule {n}` 的前提 {} 不是命题：{e}", i + 1))
                         })?;
                         let bind = p.name.clone().unwrap_or_else(|| format!("_p{i}"));
                         binds.push((bind.clone(), ty.clone()));
                         rule_premises.push((p.name.as_ref().map(std_deduce_kernel::name), ty));
                     }
 
-                    let concl =
-                        elab::elab(&next.env, &binds, &conclusion).map_err(|e| LoadError {
-                            msg: format!("`rule {n}` 的结论：{}", e.msg),
-                        })?;
+                    let concl = elab::elab(&next.env, &binds, &conclusion)
+                        .map_err(|e| LoadError::new(format!("`rule {n}` 的结论：{}", e.msg)))?;
                     std_deduce_kernel::check::check(
                         &next.env,
                         &elab::ctx_of(&binds),
                         &concl,
                         &Expr::Sort(0),
                     )
-                    .map_err(|e| LoadError {
-                        msg: format!("`rule {n}` 的结论不是命题：{e}"),
-                    })?;
+                    .map_err(|e| LoadError::new(format!("`rule {n}` 的结论不是命题：{e}")))?;
 
                     let mut unlesses = Vec::new();
                     let mut exceptions = Vec::new();
@@ -436,18 +398,17 @@ impl Library {
                     for d in &defeaters {
                         match d {
                             crate::ast::Defeater::Unless(t) => {
-                                let e =
-                                    elab::elab(&next.env, &binds, t).map_err(|e| LoadError {
-                                        msg: format!("`rule {n}` 的 unless：{}", e.msg),
-                                    })?;
+                                let e = elab::elab(&next.env, &binds, t).map_err(|e| {
+                                    LoadError::new(format!("`rule {n}` 的 unless：{}", e.msg))
+                                })?;
                                 std_deduce_kernel::check::check(
                                     &next.env,
                                     &elab::ctx_of(&binds),
                                     &e,
                                     &Expr::Sort(0),
                                 )
-                                .map_err(|e| LoadError {
-                                    msg: format!("`rule {n}` 的 unless 不是命题：{e}"),
+                                .map_err(|e| {
+                                    LoadError::new(format!("`rule {n}` 的 unless 不是命题：{e}"))
                                 })?;
                                 unlesses.push(e);
                             }
@@ -479,9 +440,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError {
-                            msg: format!("`rule {n}`：{e}"),
-                        })?;
+                        .map_err(|e| LoadError::new(format!("`rule {n}`：{e}")))?;
                     theory.decls.push(n.clone());
                     theory.rules.push(n.clone());
                     report.declared.push(n);
@@ -492,18 +451,18 @@ impl Library {
                     // it. Letting it into the ledger would make `:why` show a
                     // gap while `:inspect` claims an interpretation exists;
                     // refuse it explicitly until M2-8 implements the semantics.
-                    return Err(LoadError {
-                        msg: format!("`interpret {n}`：解释语义尚未实现（M2-8），推理器不消费解释"),
-                    });
+                    return Err(LoadError::new(format!(
+                        "`interpret {n}`：解释语义尚未实现（M2-8），推理器不消费解释"
+                    )));
                 }
                 Item::Check(t) => {
-                    let e = elab::elab_top(&next.env, &t).map_err(|e| LoadError { msg: e.msg })?;
+                    let e = elab::elab_top(&next.env, &t).map_err(|e| LoadError::new(e.msg))?;
                     let ty = std_deduce_kernel::check::infer(
                         &next.env,
                         &std_deduce_kernel::Ctx::new(),
                         &e,
                     )
-                    .map_err(|e| LoadError { msg: e.to_string() })?;
+                    .map_err(|e| LoadError::new(e.to_string()))?;
                     report.checked.push(format!(
                         "{} : {}",
                         std_deduce_kernel::pretty::print_expr(&e),
@@ -511,16 +470,14 @@ impl Library {
                     ));
                 }
                 Item::Proposition(t) => {
-                    let e = elab::elab_top(&next.env, &t).map_err(|e| LoadError { msg: e.msg })?;
+                    let e = elab::elab_top(&next.env, &t).map_err(|e| LoadError::new(e.msg))?;
                     std_deduce_kernel::check::check(
                         &next.env,
                         &std_deduce_kernel::Ctx::new(),
                         &e,
                         &std_deduce_kernel::Expr::Sort(0),
                     )
-                    .map_err(|e| LoadError {
-                        msg: format!("`#proposition` 的项不是命题：{e}"),
-                    })?;
+                    .map_err(|e| LoadError::new(format!("`#proposition` 的项不是命题：{e}")))?;
                     report.checked.push(format!(
                         "命题：{}",
                         std_deduce_kernel::pretty::print_expr(&e)
@@ -534,15 +491,13 @@ impl Library {
                             std_deduce_kernel::pretty::print_expr(&d.ty)
                         ));
                     } else {
-                        return Err(LoadError {
-                            msg: format!("`#show {n}`：未知名称"),
-                        });
+                        return Err(LoadError::new(format!("`#show {n}`：未知名称")));
                     }
                 }
                 Item::Why(_) | Item::Gap(_) => {
-                    return Err(LoadError {
-                        msg: "#why / #gap 需要推理引擎，请用独立的推理命令".into(),
-                    })
+                    return Err(LoadError::new(
+                        "#why / #gap 需要推理引擎，请用独立的推理命令",
+                    ))
                 }
             }
         }
@@ -551,7 +506,7 @@ impl Library {
         // typo would silently disable the intended priority. Validate the
         // targets after the whole file is in the environment, which allows a
         // rule to name a rule declared later in the same file.
-        check_rule_targets(&next.env, &theory.rules).map_err(|msg| LoadError { msg })?;
+        check_rule_targets(&next.env, &theory.rules).map_err(LoadError::new)?;
 
         // Commit only if everything above succeeded.
         if let Some(existing) = next.theories.iter_mut().find(|t| t.name == theory_name) {
@@ -572,10 +527,53 @@ pub struct LoadReport {
     pub shown: Vec<String>,
 }
 
+/// A failed load. The message is independent of where the error was found:
+/// `msg` is the text shown to the user, and the optional line/column is a
+/// source position when the loader has one.
 #[derive(Debug, Clone)]
 pub struct LoadError {
     pub msg: String,
+    line: Option<usize>,
+    col: Option<usize>,
 }
+
+impl LoadError {
+    /// An error with no known source position (refinement, kernel, I/O or a
+    /// whole-file check).
+    pub fn new(msg: impl Into<String>) -> Self {
+        LoadError {
+            msg: msg.into(),
+            line: None,
+            col: None,
+        }
+    }
+
+    /// An error at a 1-based source position.
+    pub fn at(msg: impl Into<String>, line: usize, col: usize) -> Self {
+        LoadError {
+            msg: msg.into(),
+            line: Some(line),
+            col: Some(col),
+        }
+    }
+
+    /// The 1-based `(line, column)`, when the loader knows it.
+    pub fn position(&self) -> Option<(usize, usize)> {
+        Some((self.line?, self.col?))
+    }
+
+    /// Render the error in Lean style. A positioned error is
+    /// `path:line:col: error: msg`; one without a position is
+    /// `path: error: msg`. The line/column is never invented for errors that
+    /// do not carry one.
+    pub fn render(&self, path: &str) -> String {
+        match self.position() {
+            Some((line, col)) => format!("{path}:{line}:{col}: error: {}", self.msg),
+            None => format!("{path}: error: {}", self.msg),
+        }
+    }
+}
+
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.msg)
@@ -584,7 +582,7 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 impl From<Error> for LoadError {
     fn from(e: Error) -> Self {
-        LoadError { msg: e.to_string() }
+        LoadError::new(e.to_string())
     }
 }
 
@@ -899,5 +897,27 @@ fn to_source(s: crate::ast::SourceSpec) -> SourceRef {
         jurisdiction: s.jurisdiction,
         retrieved_at: s.retrieved_at,
         hash: s.hash,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LoadError;
+
+    #[test]
+    fn a_positioned_error_renders_lean_style() {
+        let err = LoadError::at("期望项", 2, 3);
+        assert_eq!(err.position(), Some((2, 3)));
+        assert_eq!(err.render("x.std"), "x.std:2:3: error: 期望项");
+        // Display stays the bare message, so existing text assertions hold.
+        assert_eq!(err.to_string(), "期望项");
+    }
+
+    #[test]
+    fn an_unpositioned_error_renders_without_a_location() {
+        let err = LoadError::new("未知名称");
+        assert_eq!(err.position(), None);
+        assert_eq!(err.render("x.std"), "x.std: error: 未知名称");
+        assert_eq!(err.to_string(), "未知名称");
     }
 }

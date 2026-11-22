@@ -13,9 +13,11 @@
 //! ```
 //!
 //! A batch load uses the same path as `:load`, so it prints the same report. A
-//! file that does not pass its checks prints `path: 错误：...` on stderr and
-//! exits `1`, and the remaining commands are not run; a malformed invocation is
-//! still a usage error (`2`). Commands are line-oriented:
+//! file that does not pass its checks prints `path:line:col: error: ...` on
+//! stderr when the loader knows a source position, or `path: error: ...`
+//! otherwise (refinement and kernel errors carry no position yet), and exits
+//! `1`; the remaining commands are not run. A malformed invocation is still a
+//! usage error (`2`). Commands are line-oriented:
 //!
 //! ```text
 //! :load <file>            load a theory file
@@ -186,11 +188,15 @@ impl Session {
     /// Load a theory file into the session and print the load report.
     ///
     /// Both `:load` and the batch entry point go through this one function, so
-    /// they cannot report or fail differently. The library load is
-    /// all-or-nothing; `loaded` and `lib` change only after a full success.
+    /// they cannot report or fail differently. The returned error is already
+    /// rendered as `path:line:col: error: ...` (or `path: error: ...` when the
+    /// loader has no source position); callers add their own command prefix, if
+    /// any. The library load is all-or-nothing; `loaded` and `lib` change only
+    /// after a full success.
     fn load_theory(&mut self, path: &str, out: &mut impl Write) -> Result<Outcome, String> {
-        let src = std::fs::read_to_string(path).map_err(|e| format!("读取 `{path}` 失败：{e}"))?;
-        let report = self.lib.load(path, &src).map_err(|e| e.to_string())?;
+        let src =
+            std::fs::read_to_string(path).map_err(|e| format!("{path}: error: 读取失败：{e}"))?;
+        let report = self.lib.load(path, &src).map_err(|e| e.render(path))?;
         self.loaded = true;
         writeln!(out, "已加载 `{path}`。").ok();
         for d in &report.declared {
@@ -1422,12 +1428,14 @@ fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write
 
 /// Load one theory file and then run the remaining commands.
 ///
-/// A failed load prints `path: 错误：...` on stderr and exits `1`: the file did
-/// not pass its checks, while the invocation itself was well-formed. Remaining
+/// A failed load prints the already-rendered `path:line:col: error: ...` (or
+/// `path: error: ...`) on stderr and exits `1`: the file did not pass its
+/// checks, while the invocation itself was well-formed. The load error already
+/// names the file, so the batch entry adds no path prefix of its own. Remaining
 /// commands are not run.
 fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut impl Write) -> i32 {
     if let Err(error) = session.load_theory(file, out) {
-        eprintln!("{file}: 错误：{error}");
+        eprintln!("{error}");
         return 1;
     }
     run_commands(session, commands, out)
