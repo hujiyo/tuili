@@ -5,6 +5,7 @@ version = "0.1.0"
 jurisdiction = "CN"
 territory = "CN"
 namespace = "cn.constitution"
+trust = "official"
 effective_from = "1982-12-04"
 description = "中华人民共和国宪法最小官方包（第三十九条示例；完整规则见 M2-16）"
 

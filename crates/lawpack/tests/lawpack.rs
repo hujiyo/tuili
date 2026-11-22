@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std_deduce_lawpack::{load, scan, Manifest};
+use std_deduce_lawpack::{load, scan, Manifest, Trust};
 
 const VALID: &str = r#"
 [pack]
@@ -55,6 +55,7 @@ fn valid_manifest_parses_all_fields() {
     assert_eq!(pack.effective_from.as_deref(), Some("1982-12-04"));
     assert_eq!(pack.effective_to.as_deref(), Some("2018-03-11"));
     assert_eq!(pack.description.as_deref(), Some("示例"));
+    assert_eq!(pack.trust, Trust::Community);
     assert_eq!(manifest.files.len(), 2);
     assert_eq!(manifest.files[0].path.as_deref(), Some("constitution.std"));
     assert_eq!(manifest.files[0].kind.as_deref(), Some("theory"));
@@ -224,6 +225,32 @@ fn effective_to_before_effective_from_is_accepted() {
     let manifest = Manifest::parse(&text).expect("format validation does not order dates");
     assert_eq!(manifest.pack.effective_from.as_deref(), Some("2000-01-01"));
     assert_eq!(manifest.pack.effective_to.as_deref(), Some("1990-01-01"));
+}
+
+#[test]
+fn trust_defaults_to_community() {
+    let manifest = Manifest::parse(&manifest_with("")).expect("trust is optional");
+    assert_eq!(manifest.pack.trust, Trust::Community);
+    assert_eq!(Trust::default(), Trust::Community);
+}
+
+#[test]
+fn trust_parses_official_and_ranks_from_experimental_up() {
+    let manifest = Manifest::parse(&manifest_with("trust = \"official\"")).expect("trust is valid");
+    assert_eq!(manifest.pack.trust, Trust::Official);
+    assert!(Trust::Official > Trust::Community);
+    assert!(Trust::Community > Trust::Local);
+    assert!(Trust::Local > Trust::Experimental);
+    assert_eq!(Trust::Official.to_string(), "official");
+    assert_eq!(Trust::Community.to_string(), "community");
+}
+
+#[test]
+fn an_unknown_trust_level_is_rejected() {
+    for value in ["official ", "Official", "root", "trusted"] {
+        let error = parse_error(&manifest_with(&format!("trust = \"{value}\"")));
+        assert!(error.contains("unknown variant"), "{value}: {error}");
+    }
 }
 
 #[test]

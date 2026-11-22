@@ -26,7 +26,7 @@ use std_deduce_lang::ast::Item;
 use std_deduce_lang::module::escape_path;
 use std_deduce_lang::{Library, LoadError};
 use std_deduce_lawpack::{
-    scan, verify_lock, LoadedPack, Lockfile, Manifest, PackError, LOCK_FILE, MANIFEST_FILE,
+    scan, verify_lock, LoadedPack, Lockfile, Manifest, PackError, Trust, LOCK_FILE, MANIFEST_FILE,
 };
 
 /// A pack successfully loaded into the current session.
@@ -35,11 +35,13 @@ use std_deduce_lawpack::{
 /// itself contributed; the namespace alone is not enough, because the ledger is
 /// flat and a declaration from another file could share the namespace. The hash
 /// is kept so a later import can tell whether the registry still describes the
-/// same content the session loaded.
+/// same content the session loaded. The trust level comes from the manifest and
+/// is used to mark imports that are outside the active environment profile.
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedPackInfo {
     pub(crate) name: String,
     pub(crate) version: String,
+    pub(crate) trust: Trust,
     pub(crate) hash: String,
     pub(crate) namespace: String,
     /// Ledger names added by this pack's theory files, across all of them.
@@ -75,7 +77,7 @@ impl Registry {
         Registry::open_at(cwd.join("lawpacks"))
     }
 
-    fn open_at(root: PathBuf) -> Result<Registry, Vec<String>> {
+    pub(crate) fn open_at(root: PathBuf) -> Result<Registry, Vec<String>> {
         let found = scan(&root).map_err(|error| vec![render_pack_error(&error)])?;
         let mut errors: Vec<String> = found.errors.iter().map(render_pack_error).collect();
 
@@ -148,6 +150,32 @@ impl Registry {
 
     fn find(&self, name: &str) -> Option<&RegistryPack> {
         self.packs.get(name)
+    }
+
+    /// The registry root whose packs this instance describes.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// How many packs the registry and its lock agree on.
+    pub(crate) fn pack_count(&self) -> usize {
+        self.packs.len()
+    }
+
+    /// The manifest version of `name`.
+    pub(crate) fn version(&self, name: &str) -> Option<&str> {
+        self.find(name)
+            .map(|pack| pack.manifest.pack.version.as_str())
+    }
+
+    /// The manifest trust level of `name`.
+    pub(crate) fn trust(&self, name: &str) -> Option<Trust> {
+        self.find(name).map(|pack| pack.manifest.pack.trust)
+    }
+
+    /// The locked content hash of `name`.
+    pub(crate) fn hash(&self, name: &str) -> Option<&str> {
+        self.find(name).map(|pack| pack.hash.as_str())
     }
 }
 
@@ -281,6 +309,7 @@ impl<'a> PackageLoader<'a> {
         self.infos.push(LoadedPackInfo {
             name: name.to_owned(),
             version: manifest.pack.version.clone(),
+            trust: manifest.pack.trust,
             hash,
             namespace,
             decls,
@@ -549,7 +578,7 @@ fn validate_theory_path(raw: &str) -> Result<String, String> {
 }
 
 /// Render a `lawpack` error as a P0c-style diagnostic.
-fn render_pack_error(error: &PackError) -> String {
+pub(crate) fn render_pack_error(error: &PackError) -> String {
     diag(error.path(), error.message())
 }
 

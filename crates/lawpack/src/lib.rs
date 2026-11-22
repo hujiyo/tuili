@@ -14,6 +14,11 @@
 //! compares a directory against its lock; it does not import or certify
 //! anything either.
 //!
+//! [`profile`] describes the default legal environment: which packs it contains,
+//! the version constraints they must satisfy and the minimum trust level the
+//! environment requires. Profiles are scanned from `<registry>/profiles/*.toml`;
+//! they never enter a pack hash or the lock.
+//!
 //! [`corpus`] holds the article-level texts used to check a rule's quotation.
 //! [`corpus::audit`] proves that a quotation matches a stored article; it does
 //! not prove that a rule is a faithful or applicable reading of the law.
@@ -39,9 +44,11 @@ mod hex;
 mod load;
 mod lock;
 mod manifest;
+pub mod profile;
 
 pub use load::{load, scan, LoadedPack, PackError, Scan, MANIFEST_FILE};
 pub use lock::{
     build_lock, hash_pack, verify_lock, LockReport, LockedPack, Lockfile, LOCK_FILE, LOCK_VERSION,
 };
+pub use manifest::Trust;
 pub use manifest::{Manifest, ManifestError, PackFile, PackInfo};

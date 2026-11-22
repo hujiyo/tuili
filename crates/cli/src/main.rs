@@ -4,13 +4,31 @@
 //!
 //! ```text
 //! std-deduce                       start the REPL
-//! std-deduce <file> [commands...]  load a theory file, then run the commands
-//! std-deduce check <file> [...]    the same batch entry as a plain file
-//! std-deduce repl                  start the REPL
+//! std-deduce [options] <file> [commands...]
+//!                                  load a theory file, then run the commands
+//! std-deduce [options] check <file> [...]
+//!                                  the same batch entry as a plain file
+//! std-deduce [options] env         report and load the default environment
+//! std-deduce [options] repl        start the REPL
 //! std-deduce --help | -h           print usage
 //! std-deduce --version | -V        print `std-deduce <version>`
-//! std-deduce <command> [...]       run every argument as a colon command
+//! std-deduce [options] <command> [...]
+//!                                  run every argument as a colon command
 //! ```
+//!
+//! Options must come before the file, subcommand or colon command:
+//! `--profile <name>` selects a profile from `lawpacks/profiles`,
+//! `--no-default-packs` disables the default environment and
+//! `--allow-community-packs` lowers the trust gate of the selected profile.
+//!
+//! When the current directory contains `lawpacks/profiles` with a
+//! `default = true` profile, the first theory load prepares that environment
+//! lazily: the profile is validated, its packs are checked against the lock,
+//! version constraints and trust level, and they are loaded before the file.
+//! A failed preparation fails the load. `--no-default-packs` turns this off
+//! without affecting explicit imports; `--profile` selects a profile by name or
+//! alias. Profiles and the environment are session objects only: certificates
+//! remain v2 and do not record them.
 //!
 //! A batch load uses the same path as `:load`, so it prints the same report. A
 //! file that does not pass its checks prints `path:line:col: error: ...` on
@@ -153,6 +171,7 @@
 //! `:check` is not an alias: it reports that it was renamed to `:verify-cert`
 //! and exits `2`.
 
+mod environment;
 mod packs;
 
 use std::collections::BTreeSet;
@@ -194,6 +213,144 @@ impl Outcome {
     }
 }
 
+/// What the command line asked for after the leading environment options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Invocation {
+    Batch { file: String, commands: Vec<String> },
+    Commands(Vec<String>),
+    Repl,
+    Env,
+    Help,
+    Version,
+}
+
+/// Parse the leading environment options, then the entry point.
+///
+/// Options are only recognised in one contiguous prefix. After a file,
+/// `check`, `repl`, `env` or a colon command has started, an argument that
+/// looks like an option is a usage error and is never silently ignored.
+/// `--help` and `--version` only work as the sole argument.
+fn parse_invocation(args: &[String]) -> Result<(environment::Options, Invocation), String> {
+    if args.len() == 1 {
+        match args[0].as_str() {
+            "--help" | "-h" => return Ok((environment::Options::default(), Invocation::Help)),
+            "--version" | "-V" => {
+                return Ok((environment::Options::default(), Invocation::Version));
+            }
+            _ => {}
+        }
+    }
+
+    let mut options = environment::Options::default();
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        match argument.as_str() {
+            "--profile" => {
+                if options.profile.is_some() {
+                    return Err("用法错误：--profile 只能使用一次".to_owned());
+                }
+                let Some(name) = args.get(index + 1) else {
+                    return Err("用法错误：--profile 缺少值（用法：--profile <名字>）".to_owned());
+                };
+                if name.starts_with('-') {
+                    return Err(format!(
+                        "用法错误：--profile 缺少值，`{}` 看起来是选项",
+                        escape_path(name)
+                    ));
+                }
+                options.profile = Some(name.clone());
+                index += 2;
+            }
+            "--no-default-packs" => {
+                options.no_default_packs = true;
+                index += 1;
+            }
+            "--allow-community-packs" => {
+                options.allow_community_packs = true;
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    if options.profile.is_some() && options.no_default_packs {
+        return Err("用法错误：--profile 与 --no-default-packs 不能同时使用".to_owned());
+    }
+
+    let rest = &args[index..];
+    let Some(first) = rest.first() else {
+        return Ok((options, Invocation::Repl));
+    };
+    match first.as_str() {
+        "check" => {
+            let Some(file) = rest.get(1) else {
+                return Err("用法：std-deduce check <文件.std> [命令...]".to_owned());
+            };
+            if file.starts_with('-') {
+                return Err(unknown_option_message(
+                    file,
+                    "std-deduce check 的第一个参数必须是文件",
+                ));
+            }
+            Ok((
+                options,
+                Invocation::Batch {
+                    file: file.clone(),
+                    commands: rest[2..].to_vec(),
+                },
+            ))
+        }
+        "repl" => {
+            if rest.len() == 1 {
+                Ok((options, Invocation::Repl))
+            } else {
+                Err(extra_argument_error(
+                    &rest[1],
+                    "用法：std-deduce repl（不接受额外参数）",
+                ))
+            }
+        }
+        "env" => {
+            if rest.len() == 1 {
+                Ok((options, Invocation::Env))
+            } else {
+                Err(format!(
+                    "用法：std-deduce env（不接受额外参数）；选项要写在 env 之前，例如 std-deduce --no-default-packs env{}",
+                    if rest[1].starts_with('-') {
+                        format!("；`{}` 不是 env 的参数", escape_path(&rest[1]))
+                    } else {
+                        String::new()
+                    }
+                ))
+            }
+        }
+        "--help" | "-h" | "--version" | "-V" => Err(format!(
+            "用法错误：{}只能作为唯一参数使用",
+            escape_path(first)
+        )),
+        first if first.starts_with(':') => Ok((options, Invocation::Commands(rest.to_vec()))),
+        first if first.starts_with('-') => Err(unknown_option_message(
+            first,
+            "std-deduce 的第一个参数必须是文件或命令",
+        )),
+        _ => Ok((
+            options,
+            Invocation::Batch {
+                file: first.clone(),
+                commands: rest[1..].to_vec(),
+            },
+        )),
+    }
+}
+
+/// The usage error for an unexpected extra argument of `repl`.
+fn extra_argument_error(argument: &str, usage: &str) -> String {
+    if argument.starts_with('-') {
+        unknown_option_message(argument, usage)
+    } else {
+        usage.to_owned()
+    }
+}
+
 struct Session {
     lib: Library,
     /// Whether a theory has been loaded. `:verify-cert` needs an environment,
@@ -202,14 +359,17 @@ struct Session {
     /// Packs loaded through the registry, in load order. A package loaded from
     /// a file path directly has no entry; its declarations still show `[ns]`.
     packs: Vec<packs::LoadedPackInfo>,
+    /// The lazily prepared default legal environment.
+    environment: environment::Environment,
 }
 
 impl Session {
-    fn new() -> Self {
+    fn new(options: environment::Options) -> Self {
         Session {
             lib: Library::new(),
             loaded: false,
             packs: Vec::new(),
+            environment: environment::Environment::new(options),
         }
     }
 
@@ -221,15 +381,14 @@ impl Session {
     /// loader has no source position); callers add their own command prefix, if
     /// any.
     ///
-    /// A file without an `import` never touches the registry, so existing
-    /// examples and case files keep working without `lawpacks` or `std.lock`.
-    /// Imports resolve against the session's loaded namespaces first: one that
-    /// a file already introduced needs no registry, while one that came from a
-    /// pack is still re-checked for version/hash drift. Only the remaining
-    /// imports scan the registry once, verify the lock once, and load every
-    /// package (dependencies first) on a cloned library. Only a fully
-    /// successful load commits the library, the package list and `loaded`; any
-    /// failure restores the state from before the call.
+    /// The first load first prepares the default legal environment when the
+    /// current directory declares one. The whole load runs on cloned session
+    /// state: a failed environment preparation, import, package or file load
+    /// leaves no declarations or package records behind. Imports resolve against
+    /// the session's loaded namespaces first: one that a file already introduced
+    /// needs no registry, while one that came from a pack is still re-checked
+    /// for version/hash drift. Only the remaining imports scan the registry
+    /// once, verify the lock once, and load every package (dependencies first).
     fn load_theory(&mut self, path: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let src = std::fs::read_to_string(path)
             .map_err(|e| format!("{}: error: 读取失败：{e}", escape_path(path)))?;
@@ -240,18 +399,27 @@ impl Session {
             std_deduce_lang::LoadError::at(error.msg, error.line, error.col).render(path)
         })?;
         let imports = packs::imports_of(&items);
+        let namespace = namespace_of(&items);
+
+        // The whole load, including preparing the default environment, runs on
+        // clones; no partial state can survive a failure.
+        let mut lib = self.lib.clone();
+        let mut loaded_packs = self.packs.clone();
+        let mut environment = self.environment.clone();
+        environment.ensure_loaded(&mut lib, &mut loaded_packs, out)?;
+
         // A top-level file may not declare inside a namespace a loaded pack
         // owns: the flat ledger would merge them and `:inspect` could not tell
         // the file's declarations from the pack's.
-        reject_pack_namespace(path, namespace_of(&items), &self.packs)?;
+        reject_pack_namespace(path, namespace, &loaded_packs)?;
 
         // Imports first look at what this session already loaded. A namespace
         // that arrived through a pack is kept on the registry path so a changed
         // version or hash is still reported; one loaded directly from a file
         // needs no registry at all.
-        let pack_names: BTreeSet<&str> = self.packs.iter().map(|pack| pack.name.as_str()).collect();
-        let loaded_namespaces: BTreeSet<&str> = self
-            .lib
+        let pack_names: BTreeSet<&str> =
+            loaded_packs.iter().map(|pack| pack.name.as_str()).collect();
+        let loaded_namespaces: BTreeSet<&str> = lib
             .theories
             .iter()
             .filter_map(|theory| theory.namespace.as_deref())
@@ -264,31 +432,21 @@ impl Session {
             .cloned()
             .collect();
 
-        // No imports, or every import is already satisfied by a file-loaded
-        // namespace: load the top-level file directly without opening the
-        // registry.
-        if registry_imports.is_empty() {
-            let report = self.lib.load(path, &src).map_err(|e| e.render(path))?;
-            self.loaded = true;
-            self.print_load_report(path, &report, out);
-            return Ok(Outcome::Proved);
-        }
-
-        let registry = packs::Registry::open().map_err(|errors| errors.join("\n"))?;
-        let mut lib = self.lib.clone();
-        let mut loaded_packs = self.packs.clone();
-        {
+        if !registry_imports.is_empty() {
+            let registry = packs::Registry::open().map_err(|errors| errors.join("\n"))?;
             let mut loader = packs::PackageLoader::new(&registry, &mut lib, &mut loaded_packs);
             loader.load_imports(&registry_imports, Path::new(path))?;
+            // A pack imported by this very file may own the file's namespace,
+            // so check the packages loaded above as well.
+            reject_pack_namespace(path, namespace, &loaded_packs)?;
         }
-        // A pack imported by this very file may own the file's namespace, so
-        // check the packages loaded above as well.
-        reject_pack_namespace(path, namespace_of(&items), &loaded_packs)?;
+
         // The case/module file itself is loaded last, after its dependencies.
         // If it fails, the cloned library and package list are dropped.
         let report = lib.load(path, &src).map_err(|e| e.render(path))?;
         self.lib = lib;
         self.packs = loaded_packs;
+        self.environment = environment;
         self.loaded = true;
         self.print_load_report(path, &report, out);
         Ok(Outcome::Proved)
@@ -302,7 +460,11 @@ impl Session {
     fn print_load_report(&self, path: &str, report: &LoadReport, out: &mut impl Write) {
         writeln!(out, "已加载 `{path}`。").ok();
         for name in &report.imported {
-            writeln!(out, "  导入 {name}").ok();
+            let marker = self
+                .environment
+                .import_marker(name, &self.packs)
+                .unwrap_or_default();
+            writeln!(out, "  导入 {name}{marker}").ok();
         }
         for d in &report.declared {
             writeln!(out, "  + {d}").ok();
@@ -1564,6 +1726,11 @@ fn print_help(out: &mut impl Write) {
         "  std-deduce check <文件.std> [...]  等价于直接给文件（check 是批处理入口）"
     )
     .ok();
+    writeln!(
+        out,
+        "  std-deduce env                     检查并加载默认法律环境"
+    )
+    .ok();
     writeln!(out, "  std-deduce repl                    进入 REPL").ok();
     writeln!(
         out,
@@ -1574,6 +1741,23 @@ fn print_help(out: &mut impl Write) {
     writeln!(
         out,
         "  std-deduce --version | -V          显示版本（std-deduce <version>）"
+    )
+    .ok();
+    writeln!(out).ok();
+    writeln!(out, "环境选项（写在文件、子命令或命令之前）：").ok();
+    writeln!(
+        out,
+        "  --profile <名字>             选择 lawpacks/profiles 里的环境 profile"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  --no-default-packs           不加载默认环境（与 --profile 互斥；显式 import 仍可用）"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  --allow-community-packs      允许 profile 包含非官方信任级别的包"
     )
     .ok();
     writeln!(out).ok();
@@ -1599,7 +1783,7 @@ fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write
         match session.handle(command, out) {
             Ok(outcome) => worst = worst.max(outcome.exit_code()),
             Err(error) => {
-                eprintln!("错误：{error}");
+                eprintln!("错误：{}", session.environment.annotate_error(error));
                 return 2;
             }
         }
@@ -1616,7 +1800,7 @@ fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write
 /// commands are not run.
 fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut impl Write) -> i32 {
     if let Err(error) = session.load_theory(file, out) {
-        eprintln!("{error}");
+        eprintln!("{}", session.environment.annotate_error(error));
         return 1;
     }
     run_commands(session, commands, out)
@@ -1650,64 +1834,56 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
         match session.handle(&line, out) {
             Ok(outcome) => worst = worst.max(outcome.exit_code()),
             Err(error) => {
-                writeln!(out, "错误：{error}").ok();
+                writeln!(out, "错误：{}", session.environment.annotate_error(error)).ok();
                 worst = 2;
             }
         }
     }
-    // Interactive mode used to ignore every result; stdin input now settles
-    // the exit code on the worst command, the same way argv mode does.
+    // Interactive mode settles the exit code on the worst command, the same way
+    // argv mode does.
     worst
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut session = Session::new();
     let mut out = io::stdout();
 
-    let code = match args.first().map(String::as_str) {
-        None => run_repl(&mut session, &mut out),
-        Some("--help" | "-h") => {
+    let (options, invocation) = match parse_invocation(&args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("错误：{error}");
+            std::process::exit(2);
+        }
+    };
+
+    let code = match invocation {
+        Invocation::Help => {
             print_help(&mut out);
             0
         }
-        Some("--version" | "-V") => {
+        Invocation::Version => {
             print_version(&mut out);
             0
         }
-        Some("repl") if args.len() == 1 => run_repl(&mut session, &mut out),
-        Some("repl") => {
-            eprintln!("错误：用法：std-deduce repl（不接受额外参数）");
-            2
-        }
-        Some("check") if args.len() >= 2 => {
-            if args[1].starts_with('-') {
-                // `check --help` must not be read as a file: the invocation is
-                // malformed, not a failed load.
-                eprintln!(
-                    "错误：{}",
-                    unknown_option_message(&args[1], "std-deduce check 的第一个参数必须是文件")
-                );
+        Invocation::Env => match environment::run_env(&options, &mut out) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("错误：{error}");
                 2
-            } else {
-                run_batch(&mut session, &args[1], &args[2..], &mut out)
             }
+        },
+        Invocation::Repl => {
+            let mut session = Session::new(options);
+            run_repl(&mut session, &mut out)
         }
-        Some("check") => {
-            eprintln!("错误：用法：std-deduce check <文件.std> [命令...]");
-            2
+        Invocation::Commands(commands) => {
+            let mut session = Session::new(options);
+            run_commands(&mut session, &commands, &mut out)
         }
-        Some(first) if first.starts_with(':') => run_commands(&mut session, &args, &mut out),
-        Some(first) if first.starts_with('-') => {
-            // Without this arm the last branch would read `--foo` as a file and
-            // report a read failure (exit `1`) instead of a usage error.
-            eprintln!(
-                "错误：{}",
-                unknown_option_message(first, "std-deduce 的第一个参数必须是文件或命令")
-            );
-            2
+        Invocation::Batch { file, commands } => {
+            let mut session = Session::new(options);
+            run_batch(&mut session, &file, &commands, &mut out)
         }
-        Some(_) => run_batch(&mut session, &args[0], &args[1..], &mut out),
     };
     if code != 0 {
         std::process::exit(code);

@@ -82,16 +82,20 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 批处理入口把这条诊断原样写到 stderr 并以 `1`
 退出，不再重复路径或另加前缀；`:load` 命令仍以 `错误：` 前缀报告同一条诊断。
 `std-deduce check <文件.std>` 与直接给文件等价；`std-deduce repl` 显式进入 REPL；
-`--help` / `-h` 打印用法，`--version` / `-V` 打印 `std-deduce <版本>`。
-除单独使用的这四个选项外，首参或文件后的剩余参数只要以 `-` 开头就按未知选项报用法错误
-（`2`），不会被当成文件读取，也不会被静默忽略；`std-deduce check --help` 同样是用法错误。
-文件名本身以 `-` 开头时写 `./-名字`。
+`std-deduce env` 检查并加载默认法律环境。环境选项写在文件、子命令或冒号命令之前：
+`--profile <名字>` 选择 `lawpacks/profiles` 里的 profile，`--no-default-packs` 关闭默认环境
+（显式 `import` 仍可用），`--allow-community-packs` 允许 profile 包含非官方信任级别的包。
+`--help` / `-h` 打印用法，`--version` / `-V` 打印 `std-deduce <版本>`；两者只能作为唯一参数。
+选项只解析开头连续的一段；文件、`check`/`repl`/`env` 或冒号命令之后再出现 `-` 开头的参数仍按
+未知选项报用法错误（`2`），不会被当成文件读取，也不会被静默忽略。`--profile` 缺值、重复使用或与
+`--no-default-packs` 同时出现都是用法错误；`env` 后的多余参数也是用法错误，并提示选项要写在
+`env` 之前。文件名本身以 `-` 开头时写 `./-名字`；文件名正好是 `env` 时写 `./env`。
 
 交互命令：
 
 | 命令 | 作用 |
 |---|---|
-| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有任何 import（或 import 全部已由文件加载）时不读取注册表 |
+| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表 |
 | `:inspect` | 打印声明台账（含出处与全部来源字段） |
 | `:given <命题>` | 手工登记一条已知事实 |
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导 |
@@ -122,8 +126,9 @@ cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':verify-
 | `:packs` | 扫描成功；空目录也是成功 | 当前没有 `1` 的结局 | 目录不存在/不可读、坏清单/坏目录项，或 `std.lock` 校验失败（好包仍会列出） |
 | `:lock` | 所有包成功扫描并写入锁 | 当前没有 `1` 的结局 | 目录/清单/包内文件错误、重复包名或写锁失败；不写部分锁 |
 | `:audit` | 至少一条带引文来源，且全部命中 | 没有带引文来源（没有可核对的引文），或有引文来源未命中/未核对 | 尚未 `:load`，或语料本身坏了（坏布局、坏 JSON、重复 `(law, version)`） |
-| `:load` | 文件（以及 import 的包）加载成功 | 当前没有 `1` 的结局 | 文件、注册表、锁、包路径、包 namespace 或 import 失败 |
-| `std-deduce <文件.std>` | 文件加载成功，且后续命令全部成功 | 文件加载失败（含 import/注册表/锁失败），或后续查询是缺口/未决冲突 | 后续命令错误、未知选项或用法错误 |
+| `:load` | 文件（以及默认环境与 import 的包）加载成功 | 当前没有 `1` 的结局 | 文件、profile、注册表、锁、包路径、包 namespace 或 import 失败 |
+| `std-deduce <文件.std>` | 文件加载成功，且后续命令全部成功 | 文件加载失败（含 profile/默认环境/import/注册表/锁失败），或后续查询是缺口/未决冲突 | 后续命令错误、未知选项或用法错误 |
+| `std-deduce env` | 环境已加载，或自动模式下没有默认 profile 可加载 | 当前没有 `1` 的结局 | 没有 `lawpacks/`、坏 profile、坏锁、缺包、版本不符或信任不足等环境错误 |
 
 也可以一次性执行：
 
@@ -155,8 +160,9 @@ namespace 我的案件
 
 `:load` / 批处理先解析文件里的 `import`，再按当前会话的状态决定要不要读注册表：
 
-- 没有任何 `import` 的文件完全不读取注册表，所以现有 `examples/` 不要求 `lawpacks/` 或
-  `std.lock` 存在。
+- 没有 `import` 的文件本身不需要注册表；但默认环境开启时，第一次 `:load` 会先读
+  `lawpacks/profiles` 校验并加载默认包。`--no-default-packs` 恢复纯文件行为：
+  没有 `import` 就不读 `lawpacks/`，也不要求 `std.lock` 存在。
 - 已经由本会话加载的 namespace 直接使用，不再查注册表：它可能来自模块文件（`:load module.std`），
   也可能来自包。
 - 未加载的 namespace 才进入注册表；由包加载的 namespace 即使已加载也仍走注册表，以复核版本与
@@ -193,7 +199,9 @@ namespace 我的案件
    （它们的 namespace 必须等于清单 namespace）。
 
 加载报告在 `已加载` 行后打印顶层文件自己的 `import`：`  导入 cn.constitution`；包内部的依赖
-不会重复打印。
+不会重复打印。有活动 profile 时，显式 import 的包若不在默认环境（profile 的直接包与依赖闭包）
+里，该行追加环境外标记：`  导入 example（环境外：community）`；环境内的包保持原样。
+没有活动 profile 时输出不变。
 
 仓库里的官方包 `cn.constitution` 已经可以导入，案件文件只需写事实：
 
@@ -207,6 +215,70 @@ cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-导入包.std '
 `2018`。`lawpacks/std.lock` 固定 `cn.constitution@0.1.0` 与包内容哈希，`:inspect` 对包内声明
 显示 `[cn.constitution@0.1.0]`；完整规则与覆盖率见 M2-16。
 
+### 默认法律环境与 profile
+
+`lawpacks/profiles/*.toml` 声明默认法律环境。仓库里的 `lawpacks/profiles/cn.default.toml`：
+
+```toml
+name = "cn.default"
+aliases = ["cn"]
+default = true
+description = "中国法默认环境：只含官方宪法包"
+trust = "official"
+
+[[packs]]
+name = "cn.constitution"
+version = "0.1"
+```
+
+- `name` 与 `aliases` 的字符集、长度和首尾限制与包名相同；alias 不能被两个 profile 共用，
+  也不能与任何 profile 的 `name` 相同。`default = true` 最多一个。
+- `profiles/` 里只允许普通 `.toml` 文件；子目录、符号链接、非 `.toml` 文件和坏 TOML 都让整次
+  扫描失败，并列出全部错误，不静默跳过。
+- `trust` 是环境要求的最低信任级别，profile 缺省 `official`；取值 `official` / `community` /
+  `local` / `experimental`，排序 `official` > `community` > `local` > `experimental`。
+  profile 里的包（包括依赖闭包）必须达到该级别。
+- `[[packs]]` 的 `version` 是按点分段的前缀约束：`0.1` 接受 `0.1`、`0.1.0`、`0.1.9`，
+  不接受 `0.10.0`、`0.2.0`；段按文本比较，不做数值归一化。
+- profile 文件不进入包内容哈希，`std.lock` 不记录它。
+
+清单的 `[pack]` 有可选 `trust` 字段（`official` / `community` / `local` / `experimental`），
+缺省 `community`，所以没写 trust 的包不会被当成官方包。官方 `cn.constitution` 声明
+`trust = "official"`。这个最小字段只用于默认环境的门禁；`:packs` 暂不显示它。
+
+第一次加载理论文件时（`:load` 或批处理文件入口），如果当前目录有 `lawpacks/` 且其中有
+`default = true` 的 profile，会话会先加载该环境；`--profile <名字>` 可按名称或别名显式选择，
+`--no-default-packs` 关闭默认环境，显式 `import` 仍然工作。`--allow-community-packs` 只在
+profile 默认环境生效，允许非官方包进入环境。没有 `lawpacks/`、没有 `profiles/` 或没有默认
+profile 时不启用默认环境，也不打开注册表校验锁；纯逻辑文件照常工作。
+
+`std-deduce env` 单独检查并加载环境，打印 profile、信任要求、包版本映射、注册表、锁校验与
+环境加载结果，退出码只有 `0`（成功，或自动模式下没有默认 profile）与 `2`（环境错误）。
+它总是校验注册表与 `std.lock`；启用 profile 时还会真正加载包，所以坏 theory 文件也以 `2` 失败。
+依赖闭包中不在 profile 直接列表里的包标成 `（依赖）`。
+
+默认环境只在第一次加载时懒加载，`:packs` / `:lock` / `:inspect` 和纯 REPL 启动不触发。
+加载在克隆的 `Library` 与包记录上进行，失败不会留下半加载的声明或包记录。预加载报告在文件
+加载报告之前打印：
+
+```
+默认环境 cn.default：已加载 1 个包
+  cn.constitution@0.1.0（official）
+```
+
+依赖写成 `  dep.pack@0.1.0（community，依赖）`；用了 `--allow-community-packs` 且 profile
+含非官方包时，首行追加 `（已允许非官方包）`。关闭或未启用默认环境时不打印预加载行。
+
+`examples/宪法第三十九条-默认环境.std` 只写对象与事实，不写 `import`、`sort`、`pred` 或 `rule`：
+
+```powershell
+cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-默认环境.std ':why cn.constitution.不受侵犯 张三 甲宅'
+```
+
+`--no-default-packs` 下文件使用未加载的 `cn.constitution.*` 名字而失败时，错误后追加一行提示，
+指出来自哪个默认环境包，并建议写 `import cn.constitution` 或去掉该选项。提示只做诊断，不改变
+退出码：批处理仍 `1`，`:load` 仍 `2`。显式 import 一个环境外的包仍是用户的决定，系统不禁止。
+
 临时注册表示例：
 
 ```powershell
@@ -217,9 +289,10 @@ cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
 ```
 
 失败时批处理入口退出 `1`，显式 `:load` 退出 `2`；诊断仍以 `path: error: ...`（或带行列号的
-`path:line:col: error: ...`）开头，包解析错误含包名与相关路径。`:packs` / `:lock` 不参与这条
-加载路径；`--packs`、远程 registry、`std build/update` 仍未实现。证书也还不记录包身份/哈希
-（证书 v3）。
+`path:line:col: error: ...`）开头，包解析错误含包名与相关路径。默认环境的 profile、锁、版本、
+信任或包错误同样让本次加载失败；`std-deduce env` 的环境错误单独以 `2` 退出。`:packs` / `:lock`
+不参与这条加载路径；`--packs`、远程 registry、`std build/update` 仍未实现。证书也还不记录
+包身份/哈希或默认环境（证书 v3）。
 
 ## 条级语料与 `:audit`
 
@@ -460,12 +533,16 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
   `convertible`；alpha/eta 和“绑定变量与同名常量”都不会因打印形式相同而混淆。
   它只依赖 `crates/kernel`，**不依赖 `crates/reason`**；已记录的冲突与裁决会被读取，但
   `defeated_by` / `prefer` 的优先级来源不在这里核验（`priority_sources_checked = false`）。
-- **`crates/lawpack`**：法律包清单、目录扫描、`std.lock`、内容哈希与条级语料。清单记录 `name`、`version`、
-  `jurisdiction`、`territory`、`namespace`、生效范围、描述和文件列表；只校验**格式**（必填、字符集、长度、
-  真实日历日期），不导入规则、不打开清单里的文件、不判断法律内容。扫描只把含普通 `lawpack.toml` 的直接
+- **`crates/lawpack`**：法律包清单、目录扫描、`std.lock`、内容哈希、默认环境 profile 与条级语料。清单记录
+  `name`、`version`、`jurisdiction`、`territory`、`namespace`、信任级别、生效范围、描述和文件列表；只校验
+  **格式**（必填、字符集、长度、真实日历日期），不导入规则、不打开清单里的文件、不判断法律内容。
+  `[pack].trust` 是可选信任级别（`official` / `community` / `local` / `experimental`，缺省 `community`），
+  未知值在清单解析期报错。扫描只把含普通 `lawpack.toml` 的直接
   子目录当作包；符号链接、越界 junction 与坏清单都进入错误，不静默跳过。锁文件记录每个包的
   `name@version` 与 SHA-256；哈希覆盖包内全部普通文件，路径用 `/`、内容做 CRLF→LF 归一化，并用长度前缀
-  消除拼接歧义。`corpus` 模块按 `<law-id>/<version>.json` 严格布局加载条级语料：目录名必须等于 `law`、
+  消除拼接歧义。`profile` 模块扫描 `<registry>/profiles/*.toml`：校验名称、别名、唯一默认 profile、
+  版本前缀约束与最低信任级别，提供默认/按名选择；profile 不进入包哈希或锁。
+  `corpus` 模块按 `<law-id>/<version>.json` 严格布局加载条级语料：目录名必须等于 `law`、
   文件名主干必须等于 `version`，子目录、非 `.json` 文件与根下文件都报错；同时校验 JSON 格式、真实日期、
   哈希形状、条号唯一与 `(law, version)` 唯一，以及可选的 `coverage`（`formalized` 非空、无重复且指向
   现有条号，`open_concepts` 的每个概念非空且不重复、列表可为空），并提供 `audit` 做引文核对
@@ -483,16 +560,20 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
   可选的目标绑定要求证书根命题与目标内核等价。`:load` 遇到 `import` 时先看当前会话已加载的
   namespace；未加载的（以及已由包加载、需要复核漂移的）才扫描当前目录的 `lawpacks`、校验
   `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件，并把包信息与包实际声明的名字记入
-  `Session` 供 `:inspect` 显示 `[name@version]`；没有 `import` 或 import 全部已由文件加载时
-  不读取注册表。
+  `Session` 供 `:inspect` 显示 `[name@version]`；没有 `import` 且默认环境未启用/已关闭、或 import
+  全部已由文件加载时不读取注册表。环境选项只在开头连续解析；第一次 `:load` 时 `environment` 模块
+  按 profile 在克隆的库与包记录上加载默认环境（失败整体回滚），`std-deduce env` 独立检查并加载
+  环境且只用 `0`/`2` 退出码；`--no-default-packs` 关闭预加载并给缺包错误追加诊断提示。
   `:packs` 扫描清单、在有锁时重新哈希校验，`:lock` 生成锁；
   `:audit` 只核对带 `quote` 的来源；无 `quote` 的来源不参与核对、不影响退出码；汇总后按语料打印
   `coverage` 声明的形式化/索引/开放概念计数与列表。除 `:load` 的包文件外，三者都只读不导入规则，
   并转义外部文本（含不可见格式字符与字面反斜杠）。
 
-官方只维护宪法包：`lawpacks/cn.constitution` 与 `law/corpus/cn.constitution/2018.json`（143 条完整语料；
+官方只维护宪法包：`lawpacks/cn.constitution`、`lawpacks/profiles/cn.default.toml` 与
+`law/corpus/cn.constitution/2018.json`（143 条完整语料；
 只有第五条、第三十七条、第三十九条、第四十六条有示例规则形式化，第三十三、三十五条仅索引）。其他法律不进入
-官方注册表或默认环境；社区包可以放在本地 `lawpacks/` 并由 `import` 加载，但不能当成官方文本。官方宪法包
+官方注册表或默认环境；社区包可以放在本地 `lawpacks/` 并由显式 `import` 加载，但不能当成官方文本。
+官方宪法包
 目前只形式化第三十九条一条最小规则（`sort` / `pred` / `rule` 与带引文 `source`），不是完整形式化；
 完整规则与覆盖率见 M2-16。
 
@@ -532,6 +613,8 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
   （`root_is_assumption = true`、`assumption_count = N`），是**在 N 条假设下的条件证明**，
   不是无条件结论。
 - "证书通过"只表示它和当前加载的理论、规则声明及检查规则一致，**不表示法律结论正确**。
+- 证书仍是 v2：不记录 profile、默认环境的包集合或信任级别。环境身份、语料哈希与 `as_of` /
+  管辖一起留给证书 v3。
 
 ## 已知的、故意留白的地方
 
@@ -585,11 +668,12 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
   但账本本身仍接受形状不对的声明。
 - **法律包导入已接通；官方宪法包只有一条最小规则。** `:load` 遇到 `import` 时先看已加载的
   namespace，未加载的才扫描 `lawpacks`、校验 `std.lock`，并递归加载 `kind = "theory"` 的包文件，
-  `:inspect` 显示 `[包名@版本]`。`lawpacks/cn.constitution/constitution.std` 目前只形式化第三十九条一条规则
+  `:inspect` 显示 `[包名@版本]`；默认环境还会在第一次加载时按 profile 预加载官方包。
+  `lawpacks/cn.constitution/constitution.std` 目前只形式化第三十九条一条规则
   （`非法搜查` 推出 `不受侵犯`），不是完整形式化，完整规则与覆盖率见 M2-16。
   `law/corpus/cn.constitution/2018.json` 已收宪法 143 条并声明覆盖率，仍只供 `:audit`
-  核对规则 `source.quote`；`:load` 不读取语料。证书还不记录包身份/哈希（v3），
-  多个文件加载后仍合并成一个扁平环境。
+  核对规则 `source.quote`；`:load` 不读取语料。证书还不记录包身份/哈希、profile 或默认环境
+  （v3），多个文件加载后仍合并成一个扁平环境。
 - **同一结论多路径只留一条。** `build_nodes` 用 `or_insert`，另一条推导及其出处丢失。
 
 ### 修复顺序
@@ -614,7 +698,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 490 个：kernel 19、lang 76、reason 41、cert 101、cli 152、lawpack 101（含 1 个 doc test）。
+`cargo test --workspace` 共 538 个：kernel 19、lang 76、reason 41、cert 101、cli 174、lawpack 127（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -686,12 +770,22 @@ cargo test --workspace
   `unique_declaration_makes_same_predicate_instances_conflict`（同一谓词不同参数互斥）、
   `unique_does_not_conflict_when_the_other_arguments_differ`（其余参数不同则相容），
   以及五条加载期拒绝（未知谓词、参数个数不同、重复 contrary、越界 unique、重复 unique）。
-- `crates/cli/tests/examples.rs`（19）：`examples/` 下每个 `.std` 一条端到端用例——
+- `crates/cli/tests/examples.rs`（19）：`examples/` 下除默认环境示例外的每个 `.std` 一条端到端用例
+  （默认环境示例由 `environment.rs` 覆盖）——
   加载文件、执行查询，断言退出码（证成 0，缺口 / 冲突 1）和关键输出；
   其中 `宪法第三十九条-导入包.std` 以仓库根为工作目录，经官方包与锁导入后证明查询；另有两条例外路径：
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
   另有一条 `:inspect` 用例：结构化来源字段逐行输出，引文中的换行被转义、不会破坏行结构；
   两条 `:given` 用例（argv 与 stdin 交互）：登记事实的来源显示为「用户输入交互会话」，不出现空 `「」`。
+- `crates/cli/tests/environment.rs`（22）：默认环境与 `std env` 端到端——仓库根下 `env` 打印
+  `cn.default`、description、`official`、版本映射与锁哈希、锁校验与环境加载通过；`--profile cn`
+  解析别名；`--no-default-packs` 下 env 报告未启用但仍校验锁，事实-only 示例加载失败并追加
+  包名与 `import` 提示，显式导入示例仍通过；事实-only 示例在默认环境下 `:why` 证明并先打印预加载行；
+  `:packs`/纯 REPL 启动不预加载；未知 profile、缺值/重复/互斥选项、选项写在文件/`env` 之后都是用法错误；
+  临时注册表验证 profile 只加载环境内 official 包（`:inspect` 不含社区声明）、显式导入社区包标
+  `（环境外：community）`、依赖闭包计入环境与预加载计数、社区包进 profile 需
+  `--allow-community-packs`、版本不符/缺包/坏 profile/坏 theory/坏锁的错误与回滚；没有默认 profile 时
+  批处理不打开注册表；没有 `lawpacks/` 时纯逻辑文件照常工作。
 - `crates/cli/tests/official_pack.rs`（5）：官方宪法包端到端——`:packs lawpacks` 列出
   `cn.constitution 0.1.0`、文件数与通过锁校验；导入示例的 `:why` 证明第三十九条；
   `:inspect` 对包内 5 个声明显示 `[cn.constitution@0.1.0]`；加载官方示例后，用户文件若声明
@@ -748,8 +842,13 @@ cargo test --workspace
   数字失败、无 quote/无语料/无条号/版本不符/多版本歧义、哈希命中/不符/格式非法与“未到达时不标记为已核验”、
   管辖不符、标题与别名匹配；仓库内宪法语料的字段、143 条连续且规范的条号、六条条文精确正文、覆盖率声明，
   以及条文正文不含条号前缀。
-- `crates/lawpack/tests/lawpack.rs`（24）：清单必填/可选字段、字符集与长度、真实日历日期（含闰年）、
-  未知字段、空日期、目录扫描、坏清单、悬空清单 symlink、symlink 越界、junction 越界与 `load` 的全有或全无语义。
+- `crates/lawpack/tests/lawpack.rs`（27）：清单必填/可选字段、字符集与长度、真实日历日期（含闰年）、
+  未知字段、空日期、目录扫描、坏清单、悬空清单 symlink、symlink 越界、junction 越界与 `load` 的全有或全无语义；
+  信任级别缺省 `community`、`official` 解析、未知值拒绝与排序。
+- `crates/lawpack/tests/profile.rs`（23）：profile 解析与扫描——必填/可选字段、profile 缺省 `official`、
+  无效名称/别名、重复包条目、空 packs、坏版本约束、未知字段、多个 default、重复 profile 名/alias、
+  alias 与 profile 名冲突、缺失 `profiles/`、非 `.toml` 文件、子目录、文件与目录符号链接、坏 TOML、
+  一次列出全部错误；版本前缀匹配正反例；默认/按名/按别名选择与未知 profile 的可用列表。
 - `crates/lawpack/tests/lock.rs`（27）：锁文件往返、哈希确定性、改一字节即变、CRLF/LF 同哈希、
   NUL 拼接歧义回归、包内 `std.lock` 参与哈希、包内 symlink/非普通文件拒绝、缺锁/缺包/多包/
   版本与哈希不符、锁符号链接、坏锁版本与坏 TOML、示例锁校验。

@@ -1,0 +1,10 @@
+# 中国法默认环境：只含官方宪法包。
+name = "cn.default"
+aliases = ["cn"]
+default = true
+description = "中国法默认环境：只含官方宪法包"
+trust = "official"
+
+[[packs]]
+name = "cn.constitution"
+version = "0.1"

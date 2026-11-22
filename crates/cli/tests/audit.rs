@@ -80,6 +80,9 @@ fn theory_with_quote(quote: &str) -> String {
 
 fn run(commands: &[String]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_std-deduce"))
+        // Corpora checks do not take part in the default environment; keep the
+        // audit tests independent of the working directory's `lawpacks/`.
+        .arg("--no-default-packs")
         .args(commands)
         .output()
         .unwrap_or_else(|error| panic!("failed to run the CLI: {error}"))

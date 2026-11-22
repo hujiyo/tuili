@@ -6,10 +6,37 @@ use serde::{Deserialize, Deserializer};
 
 use crate::date;
 
-/// Longest accepted pack name, in bytes.
-const MAX_NAME_LEN: usize = 128;
+/// Longest accepted pack or profile name, in bytes.
+pub(crate) const MAX_NAME_LEN: usize = 128;
 /// Longest accepted version string, in bytes.
-const MAX_VERSION_LEN: usize = 64;
+pub(crate) const MAX_VERSION_LEN: usize = 64;
+
+/// How much a legal pack is trusted.
+///
+/// The levels are ordered: `official` is the highest, `experimental` the
+/// lowest. A manifest without `trust` is `community`, so a pack is never
+/// treated as official by omission.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trust {
+    Experimental,
+    Local,
+    #[default]
+    Community,
+    Official,
+}
+
+impl fmt::Display for Trust {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Trust::Experimental => "experimental",
+            Trust::Local => "local",
+            Trust::Community => "community",
+            Trust::Official => "official",
+        };
+        f.write_str(label)
+    }
+}
 
 /// A parsed `lawpack.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -39,6 +66,9 @@ pub struct PackInfo {
     /// Namespace owned by the pack, if declared.
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Trust level; absence means `community`.
+    #[serde(default)]
+    pub trust: Trust,
     /// First effective date, `YYYY-MM-DD`; an empty string means "not set".
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub effective_from: Option<String>,
@@ -104,8 +134,8 @@ impl Manifest {
     }
 
     fn validate(&self) -> Result<(), ManifestError> {
-        validate_name(&self.pack.name)?;
-        validate_version(&self.pack.version)?;
+        validate_name("pack.name", &self.pack.name).map_err(ManifestError::new)?;
+        validate_version("pack.version", &self.pack.version).map_err(ManifestError::new)?;
         validate_code("pack.jurisdiction", &self.pack.jurisdiction)?;
         validate_code("pack.territory", &self.pack.territory)?;
         if let Some(date) = &self.pack.effective_from {
@@ -118,42 +148,38 @@ impl Manifest {
     }
 }
 
-fn validate_name(name: &str) -> Result<(), ManifestError> {
+/// Validate an identity name (`pack.name` or a profile name/alias).
+pub(crate) fn validate_name(field: &str, name: &str) -> Result<(), String> {
     if name.is_empty() {
-        return Err(ManifestError::new("pack.name 不能为空"));
+        return Err(format!("{field} 不能为空"));
     }
     if name.len() > MAX_NAME_LEN {
-        return Err(ManifestError::new(format!(
-            "pack.name 长度不能超过 {MAX_NAME_LEN}"
-        )));
+        return Err(format!("{field} 长度不能超过 {MAX_NAME_LEN}"));
     }
     let allowed = name
         .bytes()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
     if !allowed {
-        return Err(ManifestError::new(format!(
-            "pack.name `{name}` 含非法字符：只允许小写字母、数字、点和短横"
-        )));
+        return Err(format!(
+            "{field} `{name}` 含非法字符：只允许小写字母、数字、点和短横"
+        ));
     }
     let bytes = name.as_bytes();
     let first = bytes[0];
     let last = bytes[bytes.len() - 1];
     if first == b'.' || first == b'-' || last == b'.' || last == b'-' {
-        return Err(ManifestError::new(format!(
-            "pack.name `{name}` 的首尾字符不能是点或短横"
-        )));
+        return Err(format!("{field} `{name}` 的首尾字符不能是点或短横"));
     }
     Ok(())
 }
 
-fn validate_version(version: &str) -> Result<(), ManifestError> {
+/// Validate a pack version or a profile version constraint.
+pub(crate) fn validate_version(field: &str, version: &str) -> Result<(), String> {
     if version.is_empty() {
-        return Err(ManifestError::new("pack.version 不能为空"));
+        return Err(format!("{field} 不能为空"));
     }
     if version.len() > MAX_VERSION_LEN {
-        return Err(ManifestError::new(format!(
-            "pack.version 长度不能超过 {MAX_VERSION_LEN}"
-        )));
+        return Err(format!("{field} 长度不能超过 {MAX_VERSION_LEN}"));
     }
     let parts: Vec<&str> = version.split('.').collect();
     let valid = parts.len() >= 2
@@ -161,9 +187,9 @@ fn validate_version(version: &str) -> Result<(), ManifestError> {
             .iter()
             .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
     if !valid {
-        return Err(ManifestError::new(format!(
-            "pack.version `{version}` 格式无效：必须是至少两段的数字和点，如 1.0"
-        )));
+        return Err(format!(
+            "{field} `{version}` 格式无效：必须是至少两段的数字和点，如 1.0"
+        ));
     }
     Ok(())
 }

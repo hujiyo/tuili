@@ -590,6 +590,7 @@ obj 张三 : 公民
 const COVERED_EXAMPLES: &[&str] = &[
     "constitution-39.std",
     "宪法第三十九条-导入包.std",
+    "宪法第三十九条-默认环境.std",
     "冲突-互补谓词.std",
     "宪法案例-齐玉苓.std",
     "宪法案例-孙志刚.std",
