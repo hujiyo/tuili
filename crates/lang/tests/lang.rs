@@ -7,6 +7,7 @@ sort 公民
 pred 非法搜查 : 公民 → 公民 → Prop
 obj 张三 : 公民
 axiom 事实 : 非法搜查 张三 张三
+  source text "测试" locator "夹具"
 
 rule 规则 :
   params p : 公民, h : 公民
@@ -50,6 +51,7 @@ rule 重名 :
   premise r : R p
   premise p : P
   conclude Q p
+  source text "测试" locator "夹具"
 "#;
     let mut lib = Library::new();
     let err = lib
@@ -74,6 +76,7 @@ rule 重名 :
   params _p0 : Prop
   premise P
   conclude P
+  source text "测试" locator "夹具"
 "#;
     let mut lib = Library::new();
     let err = lib
@@ -98,13 +101,16 @@ pred 违法 : 公民 → Prop
 pred 无辜 : 公民 → Prop
 obj 张三 : 公民
 axiom 侵占事实 : 侵占 张三
+  source text "测试" locator "夹具"
 axiom 无辜事实 : 无辜 张三
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民, q : 公民 → Prop
   premise 侵占 p
   conclude 违法 p
   unless q 张三
+  source text "测试" locator "夹具"
 "#;
     let mut lib = Library::new();
     let err = lib
@@ -115,6 +121,74 @@ rule r :
         msg.contains("参数 `q`") && msg.contains("没有出现在任何前提里") && msg.contains("unless"),
         "error should name the unconstrained parameter `q` and its unless clause, got: {msg}"
     );
+}
+
+/// A rule is an assertion bridge and must name its source; the load error
+/// names the declaration so the missing provenance can be fixed.
+#[test]
+fn a_rule_without_a_source_is_rejected_and_the_error_names_it() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+obj 张三 : 公民
+
+rule 无来源规则 :
+  params p : 公民
+  premise 侵占 p
+  conclude 侵占 p
+"#;
+    let err = Library::new()
+        .load("t", src)
+        .expect_err("a rule without a source must be refused")
+        .to_string();
+    assert!(err.contains("无来源规则"), "got: {err}");
+    assert!(err.contains("缺少 source"), "got: {err}");
+
+    let with_source = format!("{src}  source text \"测试\" locator \"夹具\"\n");
+    Library::new()
+        .load("t", &with_source)
+        .expect("the same rule loads once it has a source");
+}
+
+#[test]
+fn an_axiom_without_a_source_is_rejected_and_the_error_names_it() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+obj 张三 : 公民
+
+axiom 无来源事实 : 侵占 张三
+"#;
+    let err = Library::new()
+        .load("t", src)
+        .expect_err("an axiom without a source must be refused")
+        .to_string();
+    assert!(err.contains("无来源事实"), "got: {err}");
+    assert!(err.contains("缺少 source"), "got: {err}");
+
+    let with_source = format!("{src}  source text \"测试\" locator \"夹具\"\n");
+    Library::new()
+        .load("t", &with_source)
+        .expect("the same axiom loads once it has a source");
+}
+
+/// Type, vocabulary and definition declarations are not assertions: they are
+/// exempt from the source requirement, and so are the conflict declarations
+/// whose provenance is checked by a later layer.
+#[test]
+fn type_vocabulary_definition_conflict_and_unique_declarations_need_no_source() {
+    let src = r#"
+sort 公民
+obj 张三 : 公民
+pred 侵占 : 公民 → Prop
+pred 合法 : 公民 → Prop
+def 侵权 : 公民 → Prop := λ (x : 公民) := 侵占 x
+contrary 侵占 合法
+unique 侵占 1
+"#;
+    Library::new()
+        .load("t", src)
+        .expect("exempt declarations must load without a source");
 }
 
 /// A parameter used nowhere is never bound by the reasoner, while the
@@ -131,6 +205,7 @@ rule r :
   params p : 公民, q : 公民
   premise 侵占 p
   conclude 违法 p
+  source text "测试" locator "夹具"
 "#;
     let mut lib = Library::new();
     let err = lib

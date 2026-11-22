@@ -44,6 +44,7 @@ pred 不受侵犯 : 公民 → 住宅 → Prop
 obj 张三 : 公民
 obj 甲宅 : 住宅
 axiom f : 非法搜查 张三 甲宅
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民, h : 住宅
@@ -113,7 +114,9 @@ rule 依法搜查不侵犯 :
 
     // Now supply 依法搜查 and 非法搜查 both. The premise holds, and the
     // `unless` condition also holds, so the rule must be blocked.
-    let src2 = format!("{base}\naxiom a : 依法搜查 张三 甲宅\naxiom b : 非法搜查 张三 甲宅\n");
+    let src2 = format!(
+        "{base}\naxiom a : 依法搜查 张三 甲宅\n  source text \"测试\" locator \"夹具\"\naxiom b : 非法搜查 张三 甲宅\n  source text \"测试\" locator \"夹具\"\n"
+    );
     // Note: the same rule name cannot be redeclared, so load the facts into
     // a fresh library.
     let mut lib2 = Library::new();
@@ -370,10 +373,12 @@ pred 结论 : 人 → 人 → Prop
 obj 甲 : 人
 obj 乙 : 人
 axiom f : 前提 甲
+  source text "测试" locator "夹具"
 rule r :
   params x : 人, y : 人
   premise 前提 x
   conclude 结论 x y
+  source text "测试" locator "夹具"
 "#;
     let mut lib = Library::new();
     let e = lib.load("t", src).unwrap_err();
@@ -395,6 +400,7 @@ rule r :
   premise 前提 x
   premise 另一前提 y
   conclude 结论 x y
+  source text "测试" locator "夹具"
 "#;
     load(src);
 }
@@ -431,6 +437,7 @@ obj 张三 : 公民
 obj 身份证 : 证件
 
 axiom f : 持有 张三 身份证
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民, z : 证件
@@ -459,6 +466,7 @@ obj 张三 : 公民
 obj 身份证 : 证件
 
 axiom f : 持有 张三 身份证
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民, z : 证件
@@ -560,7 +568,9 @@ pred 该批准 : 申请 → Prop
 pred 不该批准 : 申请 → Prop
 obj 甲申请 : 申请
 axiom f1 : 该批准 甲申请
+  source text "测试" locator "夹具"
 axiom f2 : 不该批准 甲申请
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
@@ -583,7 +593,9 @@ pred 不该批准 : 申请 → Prop
 contrary 该批准 不该批准
 obj 甲申请 : 申请
 axiom f1 : 该批准 甲申请
+  source text "测试" locator "夹具"
 axiom f2 : 不该批准 甲申请
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
@@ -615,19 +627,23 @@ pred 可复议 : 申请 → Prop
 contrary 批准 不批准
 obj 甲 : 申请
 axiom 条件 : 符合条件 甲
+  source text "测试" locator "夹具"
 rule 一般 :
   params x : 申请
   premise 符合条件 x
   conclude 批准 x
+  source text "测试" locator "夹具"
 rule 例外 :
   params x : 申请
   premise 符合条件 x
   conclude 不批准 x
   defeated_by 一般
+  source text "测试" locator "夹具"
 rule 下游 :
   params x : 申请
   premise 不批准 x
   conclude 可复议 x
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
@@ -665,15 +681,18 @@ pred 不批准 : 申请 → Prop
 contrary 批准 不批准
 obj 甲 : 申请
 axiom 条件 : 符合条件 甲
+  source text "测试" locator "夹具"
 rule 一般 :
   params x : 申请
   premise 符合条件 x
   conclude 批准 x
   prefer 例外
+  source text "测试" locator "夹具"
 rule 例外 :
   params x : 申请
   premise 符合条件 x
   conclude 不批准 x
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
@@ -733,7 +752,9 @@ obj 甲 : 案件
 obj 法A : 规范
 obj 法B : 规范
 axiom a : 应适用 法A 甲
+  source text "测试" locator "夹具"
 axiom b : 应适用 法B 甲
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
@@ -757,7 +778,9 @@ obj 乙 : 案件
 obj 法A : 规范
 obj 法B : 规范
 axiom a : 应适用 法A 甲
+  source text "测试" locator "夹具"
 axiom b : 应适用 法B 乙
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
@@ -804,7 +827,9 @@ sort 公民
 pred 侵占 : 公民 → Prop
 obj 张三 : 公民
 axiom 假 : Prop
+  source text "测试" locator "夹具"
 axiom f : 侵占 张三
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
@@ -826,6 +851,7 @@ sort 公民
 pred 侵占 : 公民 → Prop
 obj 张三 : 公民
 axiom f : 侵占 张三
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
@@ -845,6 +871,7 @@ pred 侵占 : 公民 → Prop
 pred 违法 : 公民 → Prop
 obj 张三 : 公民
 axiom f : 侵占 张三
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
@@ -878,6 +905,7 @@ sort 公民
 pred 受教育权 : 公民 → Prop
 obj 张三 : 公民
 axiom 凡公民皆有受教育权 : ∀ (x : 公民), 受教育权 x
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let mut r = Reasoner::new(&lib.env);
@@ -904,19 +932,23 @@ pred 不负刑事责任 : 行为 → Prop
 obj 甲行为 : 行为
 
 axiom 是正当防卫 : 正当防卫 甲行为
+  source text "测试" locator "夹具"
 axiom 超过限度之事实 : 超过限度 甲行为
+  source text "测试" locator "夹具"
 
 rule 过当 :
   params a : 行为
   premise 正当防卫 a
   premise 超过限度 a
   conclude 防卫过当 a
+  source text "测试" locator "夹具"
 
 rule 免责 :
   params a : 行为
   premise 正当防卫 a
   conclude 不负刑事责任 a
   unless 防卫过当 a
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let overdue = Expr::app(p("防卫过当"), p("甲行为"));
@@ -962,11 +994,13 @@ pred 侵占 : 公民 → Prop
 pred 违法 : 公民 → Prop
 obj 张三 : 公民
 axiom 侵占事实 : 侵占 张三
+  source text "测试" locator "夹具"
 
 rule 声明 :
   params q : 公民
   premise 侵占 q
   conclude 可信 (∀ (z : 公民), 侵占 z)
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
@@ -1007,11 +1041,13 @@ pred 侵占 : 公民 → Prop
 pred 违法 : 公民 → Prop
 obj 张三 : 公民
 axiom 侵占事实 : 侵占 张三
+  source text "测试" locator "夹具"
 
 rule 声明 :
   params q : 公民
   premise 侵占 q
   conclude 可信 侵占
+  source text "测试" locator "夹具"
 
 rule r :
   params p : 公民
@@ -1049,18 +1085,21 @@ pred 不负刑事责任 : 行为 → Prop
 obj 甲行为 : 行为
 
 axiom 是正当防卫 : 正当防卫 甲行为
+  source text "测试" locator "夹具"
 
 rule 过当 :
   params a : 行为
   premise 正当防卫 a
   premise 超过限度 a
   conclude 防卫过当 a
+  source text "测试" locator "夹具"
 
 rule 免责 :
   params a : 行为
   premise 正当防卫 a
   conclude 不负刑事责任 a
   unless 防卫过当 a
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let exempt = Expr::app(p("不负刑事责任"), p("甲行为"));
@@ -1088,12 +1127,14 @@ pred 阻断 : 行为 → Prop
 pred 结论 : 行为 → Prop
 obj 甲行为 : 行为
 axiom 有前提 : 前提 甲行为
+  source text "测试" locator "夹具"
 
 rule 规则 :
   params a : 行为
   premise 前提 a
   conclude 结论 a
   unless 阻断 a
+  source text "测试" locator "夹具"
 "#;
     let lib = load(src);
     let concl = Expr::app(p("结论"), p("甲行为"));
@@ -1108,4 +1149,30 @@ rule 规则 :
         r.knows(&concl),
         "阻断 is unproven, not false; the rule must still fire"
     );
+}
+
+/// An assumption is a fact the reasoner will treat as proved. Without a
+/// source it cannot be audited, so `assume` refuses it instead of inventing
+/// provenance.
+#[test]
+fn an_assumption_without_a_source_is_rejected() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+obj 张三 : 公民
+"#;
+    let lib = load(src);
+    let prop = Expr::app(p("侵占"), p("张三"));
+
+    let mut r = Reasoner::new(&lib.env);
+    let err = r
+        .assume(&prop, vec![], None)
+        .expect_err("an assumption without a source must be refused");
+    assert!(err.contains("假设必须有来源"), "got: {err}");
+    assert!(!r.knows(&prop), "a refused assumption enters no fact base");
+
+    r.assume(&prop, vec![SourceRef::new("测试", "夹具")], None)
+        .expect("an assumption with a source is accepted");
+    r.saturate().unwrap();
+    assert!(r.knows(&prop), "the sourced assumption is usable");
 }

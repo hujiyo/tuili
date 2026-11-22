@@ -130,6 +130,17 @@ impl Library {
                     ty,
                     source,
                 } => {
+                    // An asserted fact without provenance is not auditable: it
+                    // would enter the fact base as if it had been proved. This
+                    // is checked before elaboration so a missing source is not
+                    // masked by an unrelated type error.
+                    if source.is_none() {
+                        return Err(LoadError {
+                            msg: format!(
+                                "axiom `{n}` 缺少 source；断言事实必须有出处（法律名称 + 条号，或案件材料）"
+                            ),
+                        });
+                    }
                     let ety = elab::elab_top(&next.env, &ty).map_err(|e| LoadError {
                         msg: format!("`axiom {n}`：{}", e.msg),
                     })?;
@@ -291,6 +302,17 @@ impl Library {
                     defeaters,
                     sources,
                 } => {
+                    // A rule is the bridge from a legal provision to a
+                    // conclusion; without a source the bridge cannot be
+                    // audited. This runs before every elaboration step so a
+                    // missing source is reported as such, not as a type error.
+                    if sources.is_empty() {
+                        return Err(LoadError {
+                            msg: format!(
+                                "规则 `{n}` 缺少 source；规则必须有出处（法律名称 + 条号，或案件材料）"
+                            ),
+                        });
+                    }
                     // Every telescope binder is opened by the kernel as the
                     // constant `?<binder>`. Two binders with the same name
                     // would become one constant, so the reasoner could take a

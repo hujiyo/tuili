@@ -35,7 +35,7 @@ axiom 本案存在不一致 : 不一致 种子法 河南省农作物种子管理
   source text "争议焦点" locator "赔偿计算方式" version "2003" note "种子法第三十二条与河南省条例第三十七条"
 
 axiom 本案已受理 : 是本案 汝阳种子公司案
-  source text "洛阳市中级人民法院" locator "立案" version "2003"
+  source text "示例案情" locator "本案受理" version "2003" note "教学示例事实，非真实证据"
 
 -- 「法律的效力高于行政法规、地方性法规、规章」
 -- ——立法法第七十九条（2000 年版；2023 年版为第九十九条）。
