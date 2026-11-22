@@ -177,8 +177,18 @@ namespace 我的案件
    包的 namespaced 声明显示 `[name@version]`（如 `[cn.constitution@0.1.0]`）；直接按文件加载的
    namespaced 模块仍显示 `[ns]`；案件文件声明没有后缀。
 
-临时注册表示例（仓库里的官方包在 M2-13b2 之前只有清单，没有 theory 文件，因此还不能
-`import cn.constitution`）：
+仓库里的官方包 `cn.constitution` 已经可以导入，案件文件只需写事实：
+
+```powershell
+cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-导入包.std ':why cn.constitution.不受侵犯 张三 甲宅'
+```
+
+输出 `▸ cn.constitution.不受侵犯 张三 甲宅 ⟨cn.constitution.非法搜查即侵犯⟩ ← 「宪法第三十九条」（2018）`，
+最后打印 `推导已通过独立校验。`。官方包目前只有第三十九条一条最小规则，不是完整形式化；
+`lawpacks/std.lock` 固定 `cn.constitution@0.1.0` 与包内容哈希，`:inspect` 对包内声明显示
+`[cn.constitution@0.1.0]`；完整规则与覆盖率见 M2-16。
+
+临时注册表示例：
 
 ```powershell
 # lawpacks/example/lawpack.toml 声明 name = "example"、namespace = "example"、
@@ -268,8 +278,9 @@ cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
 
 核对边界：`:audit` 只证明"引文与仓库语料中的条文一致"，不证明规则忠实于条文、不判断条文是否适用于
 具体案件、也不判断法律结论正确。语料是仓库内的静态文件，没有爬取或版本历史；`:audit` 不读取
-`lawpacks/` 或锁。条文哈希也没有写进证书。仓库现有 `examples/` 里的 `source` 尚未填 `quote`，
-对它们运行 `:audit` 会逐条显示无引文，并因“没有可核对的引文”退出 `1`。
+`lawpacks/` 或锁。条文哈希也没有写进证书。仓库里多数 `examples/` 的 `source` 仍没有 `quote`，
+对它们运行 `:audit` 会逐条显示无引文，并因“没有可核对的引文”退出 `1`；
+`examples/宪法第三十九条-导入包.std` 通过官方包引入带引文的规则，可以直接审计。
 
 ## 三个宪法案例
 
@@ -461,7 +472,8 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
 官方只维护宪法包：`lawpacks/cn.constitution` 与 `law/corpus/cn.constitution/2018.json`（143 条完整语料；
 只有第五条、第三十七条、第三十九条、第四十六条有示例规则形式化，第三十三、三十五条仅索引）。其他法律不进入
 官方注册表或默认环境；社区包可以放在本地 `lawpacks/` 并由 `import` 加载，但不能当成官方文本。官方宪法包
-目前只有清单、没有 theory 文件，导入它会报“没有可导入的 theory 文件”；条文迁入见 M2-13b2。
+目前只形式化第三十九条一条最小规则（`sort` / `pred` / `rule` 与带引文 `source`），不是完整形式化；
+完整规则与覆盖率见 M2-16。
 
 ### 证书链的当前边界
 
@@ -547,12 +559,13 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
 - **非命题声明不被拒。** `pred` / `axiom` / `def` 的共域不校验必须是 `Prop`。
   推理时已跳过声明型 axiom（`axiom 假 : Prop` 这类只声明常量、不断言命题），
   但账本本身仍接受形状不对的声明。
-- **法律包导入已接通，但官方宪法包还没有 theory 文件。** `:load` 遇到 `import` 时会扫描
+- **法律包导入已接通；官方宪法包只有一条最小规则。** `:load` 遇到 `import` 时会扫描
   `lawpacks`、校验 `std.lock`，并递归加载 `kind = "theory"` 的包文件，`:inspect` 显示
-  `[包名@版本]`；`lawpacks/cn.constitution/lawpack.toml` 仍只有清单，所以
-  `import cn.constitution` 会报“没有可导入的 theory 文件”。`law/corpus/cn.constitution/2018.json`
-  已收宪法 143 条并声明覆盖率，仍只供 `:audit` 核对规则 `source.quote`；`:load` 不读取语料。
-  条文迁入官方包见 M2-13b2；证书还不记录包身份/哈希（v3），多个文件加载后仍合并成一个扁平环境。
+  `[包名@版本]`。`lawpacks/cn.constitution/constitution.std` 目前只形式化第三十九条一条规则
+  （`非法搜查` 推出 `不受侵犯`），不是完整形式化，完整规则与覆盖率见 M2-16。
+  `law/corpus/cn.constitution/2018.json` 已收宪法 143 条并声明覆盖率，仍只供 `:audit`
+  核对规则 `source.quote`；`:load` 不读取语料。证书还不记录包身份/哈希（v3），
+  多个文件加载后仍合并成一个扁平环境。
 - **同一结论多路径只留一条。** `build_nodes` 用 `or_insert`，另一条推导及其出处丢失。
 
 ### 修复顺序
@@ -577,7 +590,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 479 个：kernel 19、lang 76、reason 41、cert 101、cli 141、lawpack 101（含 1 个 doc test）。
+`cargo test --workspace` 共 484 个：kernel 19、lang 76、reason 41、cert 101、cli 146、lawpack 101（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -649,11 +662,16 @@ cargo test --workspace
   `unique_declaration_makes_same_predicate_instances_conflict`（同一谓词不同参数互斥）、
   `unique_does_not_conflict_when_the_other_arguments_differ`（其余参数不同则相容），
   以及五条加载期拒绝（未知谓词、参数个数不同、重复 contrary、越界 unique、重复 unique）。
-- `crates/cli/tests/examples.rs`（18）：`examples/` 下每个 `.std` 一条端到端用例——
-  加载文件、执行查询，断言退出码（证成 0，缺口 / 冲突 1）和关键输出；另有两条例外路径：
+- `crates/cli/tests/examples.rs`（19）：`examples/` 下每个 `.std` 一条端到端用例——
+  加载文件、执行查询，断言退出码（证成 0，缺口 / 冲突 1）和关键输出；
+  其中 `宪法第三十九条-导入包.std` 以仓库根为工作目录，经官方包与锁导入后证明查询；另有两条例外路径：
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
   另有一条 `:inspect` 用例：结构化来源字段逐行输出，引文中的换行被转义、不会破坏行结构；
   两条 `:given` 用例（argv 与 stdin 交互）：登记事实的来源显示为「用户输入交互会话」，不出现空 `「」`。
+- `crates/cli/tests/official_pack.rs`（4）：官方宪法包端到端——`:packs lawpacks` 列出
+  `cn.constitution 0.1.0`、文件数与通过锁校验；导入示例的 `:why` 证明第三十九条；
+  `:inspect` 对包内 5 个声明显示 `[cn.constitution@0.1.0]`；`:audit` 命中带引文来源并核验条文哈希；
+  在临时副本里改坏 `constitution.std` 后，`:packs` 因哈希不符退出 `2`、批处理 `:load` 退出 `1`。
 - `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
   `[ns]` 后缀；限定名 `:why` 通过证书复核；`a` 的事实不满足 `b` 的目标；交换两个模块的加载顺序后
   `:why` / `:cert` 结果一致；模块内未限定引用加载失败。

@@ -14,8 +14,12 @@ const PROVED: i32 = 0;
 const GAP_OR_CONFLICT: i32 = 1;
 const LOAD_ERROR: i32 = 2;
 
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 fn examples_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples")
+    repo_root().join("examples")
 }
 
 fn example(name: &str) -> String {
@@ -132,6 +136,30 @@ fn constitution_39_loads_and_proves() {
         session("constitution-39.std", &[":why 不受侵犯 张三 甲宅"]),
         PROVED,
         &["▸ 不受侵犯 张三 甲宅", "推导已通过独立校验"],
+    );
+}
+
+/// The import example is facts-only: sorts, predicates and the rule come from
+/// `import cn.constitution`. The CLI must run from the repository root so the
+/// fixed `lawpacks/` registry is the one being exercised.
+#[test]
+fn constitution_39_import_example_proves_through_the_official_pack() {
+    let output = Command::new(env!("CARGO_BIN_EXE_std-deduce"))
+        .current_dir(repo_root())
+        .args([
+            example("宪法第三十九条-导入包.std"),
+            ":why cn.constitution.不受侵犯 张三 甲宅".to_string(),
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run the CLI: {e}"));
+    check(
+        output,
+        PROVED,
+        &[
+            "已加载",
+            "▸ cn.constitution.不受侵犯 张三 甲宅",
+            "推导已通过独立校验",
+        ],
     );
 }
 
@@ -561,6 +589,7 @@ obj 张三 : 公民
 /// this table in step with the contents of `examples/`.
 const COVERED_EXAMPLES: &[&str] = &[
     "constitution-39.std",
+    "宪法第三十九条-导入包.std",
     "冲突-互补谓词.std",
     "宪法案例-齐玉苓.std",
     "宪法案例-孙志刚.std",

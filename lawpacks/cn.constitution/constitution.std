@@ -1,0 +1,17 @@
+namespace cn.constitution
+
+sort cn.constitution.公民
+sort cn.constitution.住宅
+
+pred cn.constitution.不受侵犯 : cn.constitution.公民 → cn.constitution.住宅 → Prop
+pred cn.constitution.非法搜查 : cn.constitution.公民 → cn.constitution.住宅 → Prop
+
+rule cn.constitution.非法搜查即侵犯 :
+  params p : cn.constitution.公民, h : cn.constitution.住宅
+  premise cn.constitution.非法搜查 p h
+  conclude cn.constitution.不受侵犯 p h
+  source text "宪法" locator "第三十九条" version "2018"
+         quote "中华人民共和国公民的住宅不受侵犯。禁止非法搜查或者非法侵入公民的住宅。"
+         url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
+         jurisdiction "CN" retrieved_at "2026-11-22"
+         hash "sha256:9aae70936e97a9f380fd0c74e8318c404b0612aaa33b358df83b5ee404a7cf7e"

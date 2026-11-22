@@ -1,4 +1,4 @@
-# 清单示例：只演示格式，条文尚未导入。
+# 中华人民共和国宪法最小官方包（第三十九条示例；完整规则见 M2-16）。
 [pack]
 name = "cn.constitution"
 version = "0.1.0"
@@ -6,4 +6,8 @@ jurisdiction = "CN"
 territory = "CN"
 namespace = "cn.constitution"
 effective_from = "1982-12-04"
-description = "中华人民共和国宪法清单示例；仅清单示例，条文尚未导入。"
+description = "中华人民共和国宪法最小官方包（第三十九条示例；完整规则见 M2-16）"
+
+[[files]]
+path = "constitution.std"
+kind = "theory"
