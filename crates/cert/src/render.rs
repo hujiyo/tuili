@@ -23,6 +23,7 @@
 
 use std::collections::BTreeSet;
 
+use std_deduce_kernel::env::escape_control;
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::Expr;
 
@@ -184,7 +185,7 @@ fn render_node(
                 print_expr(&Expr::from(&entry.proposition))
             ));
             if let Some(label) = &entry.label {
-                out.push_str(&format!("  [{label}]"));
+                out.push_str(&format!("  [{}]", escape_control(label)));
             }
             if let Some(source) = entry.sources.first() {
                 out.push_str(&format!("  ← {}", source.one_line()));
@@ -199,8 +200,9 @@ fn render_node(
             sources,
         } => {
             out.push_str(&format!(
-                "{pad}▸ {}  ⟨{rule}⟩",
-                print_expr(&Expr::from(conclusion))
+                "{pad}▸ {}  ⟨{}⟩",
+                print_expr(&Expr::from(conclusion)),
+                escape_control(rule)
             ));
             if let Some(source) = sources.first() {
                 out.push_str(&format!(" ← {}", source.one_line()));
@@ -208,7 +210,7 @@ fn render_node(
             out.push('\n');
             if let Some(source) = sources.first() {
                 if !source.note.is_empty() {
-                    out.push_str(&format!("{pad}  注：{}\n", source.note));
+                    out.push_str(&format!("{pad}  注：{}\n", escape_control(&source.note)));
                 }
             }
             if !bindings.is_empty() {
@@ -217,7 +219,7 @@ fn render_node(
                     .map(|binding| {
                         format!(
                             "{} ↦ {}",
-                            binding.parameter,
+                            escape_control(&binding.parameter),
                             print_expr(&Expr::from(&binding.value))
                         )
                     })
@@ -239,10 +241,13 @@ fn render_node(
                 print_expr(&Expr::from(proposition))
             ));
             if let Some(note) = note {
-                out.push_str(&format!("{pad}  {note}\n"));
+                out.push_str(&format!("{pad}  {}\n", escape_control(note)));
             }
             for candidate in candidates {
-                out.push_str(&format!("{pad}  候选 ⟨{}⟩", candidate.rule));
+                out.push_str(&format!(
+                    "{pad}  候选 ⟨{}⟩",
+                    escape_control(&candidate.rule)
+                ));
                 if let Some(source) = candidate.sources.first() {
                     out.push_str(&format!(" ← {}", source.one_line()));
                 }

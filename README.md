@@ -368,26 +368,29 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 278 个：kernel 17、lang 17、reason 39、cert 94、cli 59、lawpack 52（含 1 个 doc test）。
+`cargo test --workspace` 共 290 个：kernel 19、lang 20、reason 39、cert 101、cli 59、lawpack 52（含 1 个 doc test）。
 
-- `crates/kernel/tests/kernel.rs`（17）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
+- `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
   `types_stay_predicative`（Type 层不许自包含），以及规则常量的两条：
   类型是 `∀ 参数, 前提 → 结论`，应用到全部参数与前提后正好得到结论；
   少给一个前提时剩下的是函数类型而不是结论，证明本身也不能当命题用。
-  另有一条固定的加载期拒绝：参数与前提 binder 重名；以及来源渲染的两条：
-  `one_line` 保持旧格式并转义控制字符，`full` 逐行列出全部非空字段并转义控制字符。
+  另有一条固定的加载期拒绝：参数与前提 binder 重名；以及来源渲染的几条：
+  `one_line` 保持旧格式并转义控制字符、字面反斜杠与不可见格式字符，`full` 逐行列出全部非空字段并转义。
 - `crates/lang/tests/lang.rs`（6）：最小规则和 `contrary` 声明能加载；参数/前提 binder 重名、
   未命名前提生成的 `_p{i}` 重名、参数只出现在 `unless` 里、以及完全未使用的参数都拒绝加载。
-- `crates/lang/tests/source.rs`（11）：字符串字面量的转义、CJK/URL 字符、未闭合/未知转义/裸换行的
-  行列号；source 全字段按任意顺序跨行解析；重复键、未知键、缺/空 `text`/`locator` 与旧位置式写法都拒绝。
-- `crates/cert/tests/json.rs`（15）：证书 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
-  快照比对、字段名与节点标签固定、未知版本或未知字段被拒、v1 证书因版本不符被拒并报告版本，
-  全部来源字段（含引文、链接、管辖、抓取时间、哈希）的 JSON 往返，以及内核表达式与 `CertExpr`
-  的双向转换。
-- `crates/cert/tests/render.rs`（9）：从证书渲染推导树——假设与规则树（label、source、note、bindings、
+- `crates/lang/tests/source.rs`（14）：字符串字面量的转义、CJK/URL 字符、未闭合/未知转义/裸换行与
+  裸控制字符的行列号；source 全字段按任意顺序跨行解析；重复键的报错列指向键；CRLF 输入、注释中的引号；
+  缺/空 `text`/`locator` 与旧位置式写法都拒绝。
+- `crates/cert/tests/json.rs`（16）：证书 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
+  快照比对、字段名与节点标签固定、未知版本或未知字段被拒、真正的 v1 证书因版本不符被拒并报告版本，
+  缺少 v2 新字段的 v2 证书按默认值解析；全部来源字段（含引文、链接、管辖、抓取时间、哈希）的 JSON
+  往返，以及内核表达式与 `CertExpr` 的双向转换。
+- `crates/cert/tests/render.rs`（15）：从证书渲染推导树——假设与规则树（label、source、note、bindings、
   多前提）、缺口与候选（缺失前提、阻断条件）、无根时的多根与空行、`Source::one_line` 与内核格式一致，
-  以及越界根/越界假设/越界前提和可达、不可达的节点环都返回带节点编号的错误。
+  以及越界根/越界假设/越界前提和可达、不可达的节点环都返回带节点编号的错误；来源备注、假设标签、
+  规则名、绑定参数、缺口备注、候选规则名与表达式常量/binder 名中的换行及控制/格式字符会被转义，
+  不能伪造 `▸` 推导行。
 - `crates/cert/tests/check.rs`（60）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
   缺失/重复/未闭合绑定、结论或前提漂移、已成立的 `unless`、缺口当前提、越界索引和
   非命题假设等伪造都会被拒绝；根是缺口时 `root_proved = false`。

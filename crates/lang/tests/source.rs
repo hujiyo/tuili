@@ -76,6 +76,62 @@ fn a_bare_newline_inside_a_string_is_rejected() {
 }
 
 #[test]
+fn raw_control_characters_inside_a_string_are_rejected() {
+    for control in ['\t', '\u{001B}', '\0', '\u{007F}'] {
+        let source = format!("\"a{control}b\"");
+        let error = lex(&source).expect_err("a raw control character inside a string is an error");
+        assert_eq!(
+            (error.line, error.col),
+            (1, 3),
+            "raw U+{:04X}",
+            control as u32
+        );
+        assert!(error.msg.contains("控制字符"), "{error}");
+    }
+}
+
+#[test]
+fn crlf_input_still_lexes_and_parses() {
+    let toks = lex("\"a\"\r\n\"b\"").expect("CRLF between strings is whitespace");
+    let strings: Vec<&str> = toks
+        .iter()
+        .filter_map(|token| match &token.tok {
+            Tok::Str(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(strings, vec!["a", "b"]);
+
+    let items = parse("sort 公民\r\nsource text \"宪法\" locator \"第三十九条\"\r\n")
+        .expect("a CRLF theory parses");
+    let Some(Item::Sort {
+        source: Some(source),
+        ..
+    }) = items.into_iter().next()
+    else {
+        panic!("expected a sort with one source clause");
+    };
+    assert_eq!(source.text, "宪法");
+    assert_eq!(source.locator, "第三十九条");
+}
+
+#[test]
+fn quotes_inside_dash_and_single_quote_comments_are_not_strings() {
+    for comment in ["—", "'"] {
+        let source = format!("{comment} \"ignored\n\"kept\"");
+        let toks = lex(&source).expect("a quote inside the comment is not a string delimiter");
+        let strings: Vec<&str> = toks
+            .iter()
+            .filter_map(|token| match &token.tok {
+                Tok::Str(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strings, vec!["kept"]);
+    }
+}
+
+#[test]
 fn every_field_parses_in_any_order_and_across_lines() {
     let spec = parse_source(concat!(
         "source\n",
@@ -133,6 +189,8 @@ fn a_repeated_key_is_rejected() {
         error.msg.contains("重复") && error.msg.contains("text"),
         "{error}"
     );
+    // The position points at the second `text`, not at its value.
+    assert_eq!((error.line, error.col), (2, 17), "{error}");
 }
 
 #[test]
