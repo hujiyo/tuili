@@ -103,7 +103,9 @@ fn a_matching_quote_passes() {
         "✓ 「宪法第三十九条」← cn.constitution@2018"
     );
     assert!(
-        out.contains("核对 1 条来源，命中 1，不一致 0，未核对 0。"),
+        out.contains(
+            "核对 1 条带引文来源：命中 1，不一致 0，未核对 0；另有 0 条来源无引文（不参与核对）。"
+        ),
         "{out}"
     );
     assert!(
@@ -177,7 +179,9 @@ fn one_changed_character_fails() {
         "✗ 「宪法第三十九条」← cn.constitution@2018：引文与条文不一致"
     );
     assert!(
-        out.contains("核对 1 条来源，命中 0，不一致 1，未核对 0。"),
+        out.contains(
+            "核对 1 条带引文来源：命中 0，不一致 1，未核对 0；另有 0 条来源无引文（不参与核对）。"
+        ),
         "{out}"
     );
 }
@@ -198,7 +202,9 @@ fn a_missing_corpus_is_unverified() {
         "{out}"
     );
     assert!(
-        out.contains("核对 1 条来源，命中 0，不一致 0，未核对 1。"),
+        out.contains(
+            "核对 1 条带引文来源：命中 0，不一致 0，未核对 1；另有 0 条来源无引文（不参与核对）。"
+        ),
         "{out}"
     );
 }
@@ -215,6 +221,34 @@ fn a_missing_corpus_directory_is_unverified() {
     assert!(out.contains("无法读取语料目录"), "{out}");
     assert!(
         out.contains("? 「宪法第三十九条」：未找到语料（未核对）"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_different_law_corpus_is_unverified() {
+    let temp = TempDir::new("other-law");
+    let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
+    let body = corpus_json("2018", ARTICLE_39_JSON)
+        .replace("cn.constitution", "cn.other-law")
+        .replace(
+            "\"title\": \"中华人民共和国宪法\"",
+            "\"title\": \"中华人民共和国其他法\"",
+        )
+        .replace("\"aliases\": [\"宪法\"]", "\"aliases\": []");
+    temp.corpus("corpus/cn.other-law/2018.json", &body);
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, UNVERIFIED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("? 「宪法第三十九条」：未找到语料（未核对）"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "核对 1 条带引文来源：命中 0，不一致 0，未核对 1；另有 0 条来源无引文（不参与核对）。"
+        ),
         "{out}"
     );
 }
@@ -347,7 +381,7 @@ fn an_ambiguous_instrument_without_a_version_fails() {
 }
 
 #[test]
-fn a_missing_quote_is_unverified() {
+fn a_missing_quote_does_not_participate_and_alone_fails() {
     let temp = TempDir::new("no-quote");
     let theory = temp.theory(
         "theory.std",
@@ -362,13 +396,17 @@ fn a_missing_quote_is_unverified() {
     assert_exit(&output, UNVERIFIED);
     let out = stdout(&output);
     assert!(
-        out.contains("? 「宪法第三十九条」：没有引文原文（未核对）"),
+        out.contains("· 「宪法第三十九条」：没有引文原文，不参与核对"),
         "{out}"
     );
     assert!(
-        out.contains("核对 1 条来源，命中 0，不一致 0，未核对 1。"),
+        out.contains(
+            "核对 0 条带引文来源：命中 0，不一致 0，未核对 0；另有 1 条来源无引文（不参与核对）。"
+        ),
         "{out}"
     );
+    assert!(out.contains("没有可核对的引文"), "{out}");
+    assert!(!out.contains("条文哈希："), "{out}");
 }
 
 #[test]
@@ -418,13 +456,22 @@ fn the_report_escapes_a_control_character_in_a_failure_detail() {
 }
 
 #[test]
-fn every_source_is_counted_and_one_unverified_source_fails_the_run() {
-    let temp = TempDir::new("counts");
+fn a_quoted_rule_and_an_unquoted_fact_audit_cleanly() {
+    let temp = TempDir::new("quoted-and-unquoted");
     let theory = temp.theory(
         "theory.std",
         &format!(
-            "sort 公民\nsource text \"宪法\" locator \"第三十九条\" version \"2018\" quote \"{QUOTE_39}\"\n\
-             sort 住宅\nsource text \"宪法\" locator \"第三十九条\" version \"2018\"\n"
+            "sort 公民\n\
+             obj 张三 : 公民\n\
+             pred 违法 : 公民 → Prop\n\
+             pred 应罚 : 公民 → Prop\n\
+             axiom 事实 : 违法 张三\n\
+             source text \"案情\" locator \"某事实\"\n\
+             rule 处罚 :\n\
+             params p : 公民\n\
+             premise 违法 p\n\
+             conclude 应罚 p\n\
+             source text \"宪法\" locator \"第三十九条\" version \"2018\" quote \"{QUOTE_39}\"\n"
         ),
     );
     temp.corpus(
@@ -433,12 +480,19 @@ fn every_source_is_counted_and_one_unverified_source_fails_the_run() {
     );
 
     let output = session(&theory, &temp.path().join("corpus"));
-    assert_exit(&output, UNVERIFIED);
+    assert_exit(&output, PROVED);
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
     let out = stdout(&output);
     assert_eq!(out.lines().filter(|line| line.starts_with('✓')).count(), 1);
-    assert_eq!(out.lines().filter(|line| line.starts_with('?')).count(), 1);
+    assert_eq!(out.lines().filter(|line| line.starts_with('·')).count(), 1);
     assert!(
-        out.contains("核对 2 条来源，命中 1，不一致 0，未核对 1。"),
+        out.contains("· 「案情某事实」：没有引文原文，不参与核对"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "核对 1 条带引文来源：命中 1，不一致 0，未核对 0；另有 1 条来源无引文（不参与核对）。"
+        ),
         "{out}"
     );
 }
@@ -462,7 +516,9 @@ fn a_jurisdiction_mismatch_fails() {
     assert!(line.contains("管辖不符"), "{line}");
     assert!(line.contains("US") && line.contains("CN"), "{line}");
     assert!(
-        out.contains("核对 1 条来源，命中 0，不一致 1，未核对 0。"),
+        out.contains(
+            "核对 1 条带引文来源：命中 0，不一致 1，未核对 0；另有 0 条来源无引文（不参与核对）。"
+        ),
         "{out}"
     );
 }

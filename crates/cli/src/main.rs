@@ -47,21 +47,24 @@
 //! `\r\n` normalized to `\n`, so the same files hash the same on Windows and
 //! Linux. `:lock` does not import rules and does not require a loaded theory.
 //!
-//! `:audit` checks every `source` on every declaration in the loaded theory
-//! against the article corpus under `law/corpus`, or against the directory
-//! given as its argument. A source is printed as `✓` when its quotation
-//! matches the stored article after removing all Unicode whitespace, as `?`
-//! when it has no quotation or no corpus matches (unverified), and as `✗` for
-//! every other failure: a missing article, a version mismatch, an ambiguous
-//! instrument name, changed wording, a wrong article-text hash, an invalid
-//! source or a jurisdiction mismatch. Only a run with at least one source and
-//! every source `✓` exits `0`; an unverified source is never a pass. A missing
-//! or empty corpus directory leaves every source unverified (exit `1`), while
-//! a corpus with a broken layout or JSON, or a duplicate `(law, version)`,
-//! exits `2`. All text from a source, a corpus or a path is escaped before
-//! printing, so a newline in a quotation cannot forge another output line. A
-//! corpus's `text_sha256` is provenance metadata only and is neither
-//! recomputed nor verified.
+//! `:audit` checks every quoted `source` on every declaration in the loaded
+//! theory against the article corpus under `law/corpus`, or against the
+//! directory given as its argument. A quoted source is printed as `✓` when its
+//! quotation matches the stored article after removing all Unicode whitespace,
+//! as `?` when no corpus matches (unverified), and as `✗` for every other
+//! failure: a missing article, a version mismatch, an ambiguous instrument
+//! name, changed wording, a wrong article-text hash, an invalid source or a
+//! jurisdiction mismatch. A source without a quotation is printed with `·` and
+//! does not take part in the audit or affect the exit code, because case facts
+//! carry provenance but no article text to check. Only a run with at least one
+//! quoted source and every quoted source `✓` exits `0`; zero quoted sources
+//! prints "没有可核对的引文" and exits `1`, and an unverified source is never a
+//! pass. A missing or empty corpus directory leaves every quoted source
+//! unverified (exit `1`), while a corpus with a broken layout or JSON, or a
+//! duplicate `(law, version)`, exits `2`. All text from a source, a corpus or a
+//! path is escaped before printing, so a newline in a quotation cannot forge
+//! another output line. A corpus's `text_sha256` is provenance metadata only
+//! and is neither recomputed nor verified.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -117,7 +120,7 @@ use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::{elab, Library};
-use std_deduce_lawpack::corpus::{self, Citation};
+use std_deduce_lawpack::corpus::{self, Audit, Citation};
 use std_deduce_lawpack::{PackInfo, LOCK_FILE};
 use std_deduce_reason::{
     certificate as reason_certificate, Conflict, Provenance, Reasoner, Resolution, Side,
@@ -789,16 +792,20 @@ impl Session {
     /// directory; an argument is the whole directory, so a path containing
     /// spaces needs no further quoting. A theory must be loaded first.
     ///
-    /// Every source is printed on one line and counted as a hit, a mismatch or
-    /// unverified. Only a run with at least one source and no mismatch or
-    /// unverified source exits `0`. A missing or empty corpus directory leaves
-    /// every source unverified (exit `1`); it is never a pass. A corpus with a
-    /// broken layout or JSON, or a duplicate `(law, version)`, is a corpus
-    /// error (exit `2`). A recorded `hash` is the SHA-256 of the article text
-    /// exactly as stored, including newlines; the summary distinguishes hashes
-    /// that were fixed and verified, absent hashes and hashes that could not be
-    /// verified or are malformed. `text_sha256` in a corpus is provenance
-    /// metadata only and is neither recomputed nor verified.
+    /// Only sources with a non-empty `quote` take part in the audit. A source
+    /// without a quotation is printed with `·` and does not affect the exit
+    /// code, because case facts carry provenance but no article text to check.
+    /// At least one quoted source is required; zero quoted sources prints
+    /// "没有可核对的引文" and exits `1`, never a pass. A quoted source that is
+    /// not a hit fails the run, including a missing corpus (`NoCorpus`, reported
+    /// as unverified). A missing or empty corpus directory therefore leaves
+    /// every quoted source unverified. A corpus with a broken layout or JSON,
+    /// or a duplicate `(law, version)`, is a corpus error (exit `2`). A recorded
+    /// `hash` is the SHA-256 of the article text exactly as stored, including
+    /// newlines; the summary distinguishes hashes that were fixed and verified,
+    /// absent hashes and hashes that could not be verified or are malformed.
+    /// `text_sha256` in a corpus is provenance metadata only and is neither
+    /// recomputed nor verified.
     fn audit_sources(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !self.loaded {
             writeln!(out, "语料核对：未运行（尚未加载理论）").ok();
@@ -814,12 +821,7 @@ impl Session {
                     return Err(format!("{} 个语料错误，未进行核对", scan.errors.len()));
                 }
                 if scan.corpora.is_empty() {
-                    writeln!(
-                        out,
-                        "语料目录中没有语料：{}（所有来源都未核对）",
-                        escape_path(&root)
-                    )
-                    .ok();
+                    writeln!(out, "语料目录中没有语料：{}", escape_path(&root)).ok();
                 }
                 scan.corpora
                     .into_iter()
@@ -827,12 +829,7 @@ impl Session {
                     .collect()
             }
             Err(error) => {
-                writeln!(
-                    out,
-                    "{}（所有来源都未核对）",
-                    escape_control(&error.to_string())
-                )
-                .ok();
+                writeln!(out, "{}", escape_control(&error.to_string())).ok();
                 Vec::new()
             }
         };
@@ -845,7 +842,8 @@ impl Session {
             .ok();
         }
 
-        let mut total = 0;
+        let mut quoted = 0;
+        let mut unquoted = 0;
         let mut hit = 0;
         let mut mismatch = 0;
         let mut unverified = 0;
@@ -854,7 +852,11 @@ impl Session {
         let mut unchecked_hash = 0;
         for decl in self.lib.env.iter() {
             for source in &decl.sources {
-                total += 1;
+                let label = format!(
+                    "「{}{}」",
+                    escape_control(&source.text),
+                    escape_control(&source.locator)
+                );
                 let citation = Citation {
                     text: &source.text,
                     locator: &source.locator,
@@ -864,6 +866,12 @@ impl Session {
                     jurisdiction: &source.jurisdiction,
                 };
                 let checked = corpus::audit(&corpora, &citation);
+                if checked.audit == Audit::NoQuote {
+                    unquoted += 1;
+                    writeln!(out, "· {label}：没有引文原文，不参与核对").ok();
+                    continue;
+                }
+                quoted += 1;
                 if checked.hash_checked {
                     fixed_hash += 1;
                 } else if source.hash.is_empty() {
@@ -871,11 +879,6 @@ impl Session {
                 } else {
                     unchecked_hash += 1;
                 }
-                let label = format!(
-                    "「{}{}」",
-                    escape_control(&source.text),
-                    escape_control(&source.locator)
-                );
                 let line = if checked.audit.is_hit() {
                     hit += 1;
                     let id = checked
@@ -903,19 +906,19 @@ impl Session {
 
         writeln!(
             out,
-            "核对 {total} 条来源，命中 {hit}，不一致 {mismatch}，未核对 {unverified}。"
+            "核对 {quoted} 条带引文来源：命中 {hit}，不一致 {mismatch}，未核对 {unverified}；另有 {unquoted} 条来源无引文（不参与核对）。"
         )
         .ok();
+        if quoted == 0 {
+            writeln!(out, "没有可核对的引文：至少要有一条 quote 非空的来源。").ok();
+            return Ok(Outcome::Gap);
+        }
         writeln!(
             out,
             "条文哈希：{fixed_hash} 条已固定并核验，{unfixed_hash} 条未固定，{unchecked_hash} 条未核验或格式非法。"
         )
         .ok();
-        if total == 0 {
-            writeln!(out, "没有可核对的来源：没有任何引文得到核对。").ok();
-            return Ok(Outcome::Gap);
-        }
-        if hit == total {
+        if hit == quoted {
             Ok(Outcome::Proved)
         } else {
             Ok(Outcome::Gap)
@@ -1278,7 +1281,7 @@ fn main() {
             println!(
                 ":load <文件>  :inspect  :given <命题>  :why <命题>  :gap <命题>  \
                  :cert <命题>  :check <证书文件> [目标命题]  :packs [目录]  :lock [目录]  \
-                 :audit [目录]  :quit"
+                 :audit [目录]（只核对带 quote 的来源）  :quit"
             );
             continue;
         }
