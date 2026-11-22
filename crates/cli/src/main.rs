@@ -24,7 +24,7 @@
 //! line-oriented:
 //!
 //! ```text
-//! :load <file>            load a theory file
+//! :load <file>            load a theory file (its imports load registry packs)
 //! :inspect                dump the ledger
 //! :why <term>             derive, print the certificate's tree, and check it
 //! :gap <term>             explain what is missing for a goal
@@ -37,6 +37,17 @@
 //! :given <term>           add an assumption by hand
 //! :quit
 //! ```
+//!
+//! A `:load` file may begin with `import <pack>` items. Only a file with at
+//! least one import reads the registry: `lawpacks` below the current working
+//! directory is scanned and its `std.lock` verified once, then each package's
+//! `kind = "theory"` files are loaded depth-first, dependencies first. A file
+//! without imports keeps the old behavior and never requires `lawpacks` or a
+//! lock. The whole load runs on cloned session state, so a registry, lock,
+//! package-path, dependency-cycle or package-load error leaves no
+//! half-loaded declarations or package information behind. `:inspect` shows
+//! `[name@version]` for declarations from a loaded pack, and still `[ns]` for
+//! a namespaced module loaded directly from a file.
 //!
 //! `:packs` reads manifests but imports nothing and does not require a loaded
 //! theory. With no argument it scans `lawpacks` in the current working
@@ -139,6 +150,8 @@
 //! `:check` is not an alias: it reports that it was renamed to `:verify-cert`
 //! and exits `2`.
 
+mod packs;
+
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -148,7 +161,7 @@ use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::module::escape_path;
-use std_deduce_lang::{elab, Library};
+use std_deduce_lang::{elab, Library, LoadReport};
 use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus};
 use std_deduce_lawpack::{PackInfo, LOCK_FILE};
 use std_deduce_reason::{
@@ -180,6 +193,9 @@ struct Session {
     /// Whether a theory has been loaded. `:verify-cert` needs an environment,
     /// so it refuses to run before any `:load`.
     loaded: bool,
+    /// Packs loaded through the registry, in load order. A package loaded from
+    /// a file path directly has no entry; its declarations still show `[ns]`.
+    packs: Vec<packs::LoadedPackInfo>,
 }
 
 impl Session {
@@ -187,6 +203,7 @@ impl Session {
         Session {
             lib: Library::new(),
             loaded: false,
+            packs: Vec::new(),
         }
     }
 
@@ -196,13 +213,50 @@ impl Session {
     /// they cannot report or fail differently. The returned error is already
     /// rendered as `path:line:col: error: ...` (or `path: error: ...` when the
     /// loader has no source position); callers add their own command prefix, if
-    /// any. The library load is all-or-nothing; `loaded` and `lib` change only
-    /// after a full success.
+    /// any.
+    ///
+    /// A file without an `import` never touches the registry, so existing
+    /// examples and case files keep working without `lawpacks` or `std.lock`.
+    /// A file with imports scans the registry once, verifies the lock once, and
+    /// loads every package (dependencies first) on a cloned library. Only a
+    /// fully successful load commits the library, the package list and
+    /// `loaded`; any failure restores the state from before the call.
     fn load_theory(&mut self, path: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let src = std::fs::read_to_string(path)
             .map_err(|e| format!("{}: error: 读取失败：{e}", escape_path(path)))?;
-        let report = self.lib.load(path, &src).map_err(|e| e.render(path))?;
+        // The parser is also run by `Library::load`; doing it here first is
+        // what lets a file without imports take the old path untouched and
+        // returns parser diagnostics in exactly the same rendering as before.
+        let items = std_deduce_lang::parser::parse(&src).map_err(|error| {
+            std_deduce_lang::LoadError::at(error.msg, error.line, error.col).render(path)
+        })?;
+        let imports = packs::imports_of(&items);
+        if imports.is_empty() {
+            let report = self.lib.load(path, &src).map_err(|e| e.render(path))?;
+            self.loaded = true;
+            self.print_load_report(path, &report, out);
+            return Ok(Outcome::Proved);
+        }
+
+        let registry = packs::Registry::open().map_err(|errors| errors.join("\n"))?;
+        let mut lib = self.lib.clone();
+        let mut loaded_packs = self.packs.clone();
+        {
+            let mut loader = packs::PackageLoader::new(&registry, &mut lib, &mut loaded_packs);
+            loader.load_imports(&imports, Path::new(path))?;
+        }
+        // The case/module file itself is loaded last, after its dependencies.
+        // If it fails, the cloned library and package list are dropped.
+        let report = lib.load(path, &src).map_err(|e| e.render(path))?;
+        self.lib = lib;
+        self.packs = loaded_packs;
         self.loaded = true;
+        self.print_load_report(path, &report, out);
+        Ok(Outcome::Proved)
+    }
+
+    /// Print the declarations a successful load reported, in ledger order.
+    fn print_load_report(&self, path: &str, report: &LoadReport, out: &mut impl Write) {
         writeln!(out, "已加载 `{path}`。").ok();
         for d in &report.declared {
             writeln!(out, "  + {d}").ok();
@@ -213,7 +267,6 @@ impl Session {
         for s in &report.shown {
             writeln!(out, "  · {s}").ok();
         }
-        Ok(Outcome::Proved)
     }
 
     fn handle(&mut self, line: &str, out: &mut impl Write) -> Result<Outcome, String> {
@@ -253,6 +306,13 @@ impl Session {
                                 .map(move |decl| (decl.clone(), ns.clone()))
                         })
                         .collect();
+                    // A package supplies the richer `[name@version]` suffix;
+                    // a namespace loaded directly from a file keeps `[ns]`.
+                    let pack_by_namespace: std::collections::HashMap<&str, &packs::LoadedPackInfo> =
+                        self.packs
+                            .iter()
+                            .map(|pack| (pack.namespace.as_str(), pack))
+                            .collect();
                     for decl in self.lib.env.iter() {
                         let kind = match &decl.kind {
                             DeclKind::Sort => "sort ",
@@ -267,7 +327,12 @@ impl Session {
                         };
                         let namespace = namespaces
                             .get(decl.name.as_ref())
-                            .map(|ns| format!(" [{ns}]"))
+                            .map(|ns| match pack_by_namespace.get(ns.as_str()) {
+                                Some(pack) => {
+                                    format!(" [{}@{}]", pack.name, pack.version)
+                                }
+                                None => format!(" [{ns}]"),
+                            })
                             .unwrap_or_default();
                         writeln!(
                             out,

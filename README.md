@@ -91,7 +91,7 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 
 | 命令 | 作用 |
 |---|---|
-| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚） |
+| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。文件里有 `import <包名>` 时，先从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；没有 import 时不读取注册表 |
 | `:inspect` | 打印声明台账（含出处与全部来源字段） |
 | `:given <命题>` | 手工登记一条已知事实 |
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导 |
@@ -122,7 +122,8 @@ cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':verify-
 | `:packs` | 扫描成功；空目录也是成功 | 当前没有 `1` 的结局 | 目录不存在/不可读、坏清单/坏目录项，或 `std.lock` 校验失败（好包仍会列出） |
 | `:lock` | 所有包成功扫描并写入锁 | 当前没有 `1` 的结局 | 目录/清单/包内文件错误、重复包名或写锁失败；不写部分锁 |
 | `:audit` | 至少一条带引文来源，且全部命中 | 没有带引文来源（没有可核对的引文），或有引文来源未命中/未核对 | 尚未 `:load`，或语料本身坏了（坏布局、坏 JSON、重复 `(law, version)`） |
-| `std-deduce <文件.std>` | 文件加载成功，且后续命令全部成功 | 文件加载失败，或后续查询是缺口/未决冲突 | 后续命令错误、未知选项或用法错误 |
+| `:load` | 文件（以及 import 的包）加载成功 | 当前没有 `1` 的结局 | 文件、注册表、锁、包路径、包 namespace 或 import 失败 |
+| `std-deduce <文件.std>` | 文件加载成功，且后续命令全部成功 | 文件加载失败（含 import/注册表/锁失败），或后续查询是缺口/未决冲突 | 后续命令错误、未知选项或用法错误 |
 
 也可以一次性执行：
 
@@ -141,6 +142,55 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std ':why 不受侵�
 
 推导已通过独立校验。
 ```
+
+## 法律包与 `import`
+
+案件或模块文件可以在开头写 `import <包名>`：
+
+```text
+import cn.constitution
+namespace 我的案件
+...
+```
+
+`:load` / 批处理先解析文件里的 `import`。没有任何 `import` 的文件完全不读取注册表，所以现有
+`examples/` 不要求 `lawpacks/` 或 `std.lock` 存在。有 `import` 时：
+
+1. 注册表根是**当前工作目录**下的 `lawpacks/`，不从二进制位置或仓库根推断；根不存在/不可读
+   是错误，错误信息给出期望路径。
+2. `lawpack::scan` 扫描注册表；坏清单、坏目录项、重复包名、重复 namespace 都让整次加载失败，
+   所有扫描错误一起列出，不跳过坏包。
+3. 必须存在 `lawpacks/std.lock` 并校验通过。缺锁、锁版本不符、包版本/哈希不符、缺包/多包、
+   符号链接都在一次校验里报告，错误全部列出；一次 `:load` 只校验一次锁，不按 import 重复校验。
+4. 按包名找到清单。可导入包的清单必须声明 `namespace`，且 `namespace` 必须等于包名：`import`
+   写的是包名，而 `Library` 又要求导入名等于已加载 namespace。包内每个 `kind = "theory"` 文件的
+   namespace 必须等于清单的 `namespace`，否则加载失败并指出文件名和两个 namespace。
+5. 只打开 `kind = "theory"` 的条目；`path` 必须是相对路径，不能是绝对路径、不能含 `..`，
+   同一个包内不能重复，必须是普通文件、非符号链接、有效 UTF-8。一个 theory 文件都没有的包
+   不能 import，报“包 `x` 没有可导入的 theory 文件”。
+6. 包内 theory 文件按 manifest 顺序加载；每个文件先解析它的 `import`，递归加载依赖包，再交给
+   `Library::load`。依赖先于 importer；多个包共用同一个依赖时只加载一次；`a → b → a` 报错
+   并给出环路径。
+7. 整个 `:load` 在 `Library` 克隆和包记录克隆上完成；任何一步失败都丢弃克隆，不留半加载的
+   声明、包信息或 `loaded` 状态。
+8. 加载成功后 `Session` 记录包的 `name`、`version`、`hash` 与 `namespace`。`:inspect` 对来自
+   包的 namespaced 声明显示 `[name@version]`（如 `[cn.constitution@0.1.0]`）；直接按文件加载的
+   namespaced 模块仍显示 `[ns]`；案件文件声明没有后缀。
+
+临时注册表示例（仓库里的官方包在 M2-13b2 之前只有清单，没有 theory 文件，因此还不能
+`import cn.constitution`）：
+
+```powershell
+# lawpacks/example/lawpack.toml 声明 name = "example"、namespace = "example"、
+# version = "0.1.0"，[[files]] 指向 kind = "theory" 的 example.std
+cargo run -q -p std-deduce-cli -- ':lock lawpacks'
+cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
+```
+
+失败时批处理入口退出 `1`，显式 `:load` 退出 `2`；诊断仍以 `path: error: ...`（或带行列号的
+`path:line:col: error: ...`）开头，包解析错误含包名与相关路径。`:packs` / `:lock` 不参与这条
+加载路径；`--packs`、远程 registry、`std build/update` 仍未实现。证书也还不记录包身份/哈希
+（证书 v3）。
 
 ## 条级语料与 `:audit`
 
@@ -217,9 +267,9 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std ':why 不受侵�
 不与已加载理论中的规则自动比对；自动核对留到 M2-16。
 
 核对边界：`:audit` 只证明"引文与仓库语料中的条文一致"，不证明规则忠实于条文、不判断条文是否适用于
-具体案件、也不判断法律结论正确。语料是仓库内的静态文件，没有爬取、版本历史或包导入；条文哈希也
-没有写进证书。仓库现有 `examples/` 里的 `source` 尚未填 `quote`，对它们运行 `:audit` 会逐条显示
-无引文，并因“没有可核对的引文”退出 `1`。
+具体案件、也不判断法律结论正确。语料是仓库内的静态文件，没有爬取或版本历史；`:audit` 不读取
+`lawpacks/` 或锁。条文哈希也没有写进证书。仓库现有 `examples/` 里的 `source` 尚未填 `quote`，
+对它们运行 `:audit` 会逐条显示无引文，并因“没有可核对的引文”退出 `1`。
 
 ## 三个宪法案例
 
@@ -400,14 +450,18 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
   推导树，并对同一份证书依次运行 `cert::check` 与 `cert::kernel_proof`；冲突分支展示的推导同样从证书渲染
   并用 `cert::check` 复核。`:cert` 导出证书，`:verify-cert` 依次运行 `cert::check` 与 `cert::kernel_proof`，
   把逻辑、内核、侧条件和需人判断分成四行报告；
-  可选的目标绑定要求证书根命题与目标内核等价。`:packs` 扫描清单、在有锁时重新哈希校验，`:lock` 生成锁；
+  可选的目标绑定要求证书根命题与目标内核等价。`:load` 遇到 `import` 时扫描当前目录的
+  `lawpacks`、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件，并把包信息记入
+  `Session` 供 `:inspect` 显示 `[name@version]`；没有 `import` 的文件不读取注册表。
+  `:packs` 扫描清单、在有锁时重新哈希校验，`:lock` 生成锁；
   `:audit` 只核对带 `quote` 的来源；无 `quote` 的来源不参与核对、不影响退出码；汇总后按语料打印
-  `coverage` 声明的形式化/索引/开放概念计数与列表。三者都转义外部文本
-  （含不可见格式字符与字面反斜杠），不导入规则。
+  `coverage` 声明的形式化/索引/开放概念计数与列表。除 `:load` 的包文件外，三者都只读不导入规则，
+  并转义外部文本（含不可见格式字符与字面反斜杠）。
 
 官方只维护宪法包：`lawpacks/cn.constitution` 与 `law/corpus/cn.constitution/2018.json`（143 条完整语料；
 只有第五条、第三十七条、第三十九条、第四十六条有示例规则形式化，第三十三、三十五条仅索引）。其他法律不进入
-官方注册表或默认环境；社区包与包导入尚未实现，本地文件不能当成官方文本。
+官方注册表或默认环境；社区包可以放在本地 `lawpacks/` 并由 `import` 加载，但不能当成官方文本。官方宪法包
+目前只有清单、没有 theory 文件，导入它会报“没有可导入的 theory 文件”；条文迁入见 M2-13b2。
 
 ### 证书链的当前边界
 
@@ -493,10 +547,12 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
 - **非命题声明不被拒。** `pred` / `axiom` / `def` 的共域不校验必须是 `Prop`。
   推理时已跳过声明型 axiom（`axiom 假 : Prop` 这类只声明常量、不断言命题），
   但账本本身仍接受形状不对的声明。
-- **法律包有清单、`:packs`、`:lock`、`:audit` 与条级语料，但还不能导入。** `lawpacks/cn.constitution/lawpack.toml`
-  是清单示例；`law/corpus/cn.constitution/2018.json` 已收宪法 143 条并声明覆盖率，`:audit` 用它们核对规则
-  `source.quote`。条文尚未按包导入，`:load` 不读取法律包或语料，`Theory.requires` 没有解析器语法，
-  多个文件加载后仍合并成一个扁平环境；条文哈希也没有写进证书。包导入与证书写入见后续 M2 项。
+- **法律包导入已接通，但官方宪法包还没有 theory 文件。** `:load` 遇到 `import` 时会扫描
+  `lawpacks`、校验 `std.lock`，并递归加载 `kind = "theory"` 的包文件，`:inspect` 显示
+  `[包名@版本]`；`lawpacks/cn.constitution/lawpack.toml` 仍只有清单，所以
+  `import cn.constitution` 会报“没有可导入的 theory 文件”。`law/corpus/cn.constitution/2018.json`
+  已收宪法 143 条并声明覆盖率，仍只供 `:audit` 核对规则 `source.quote`；`:load` 不读取语料。
+  条文迁入官方包见 M2-13b2；证书还不记录包身份/哈希（v3），多个文件加载后仍合并成一个扁平环境。
 - **同一结论多路径只留一条。** `build_nodes` 用 `or_insert`，另一条推导及其出处丢失。
 
 ### 修复顺序
@@ -521,7 +577,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 453 个：kernel 19、lang 76、reason 41、cert 101、cli 115、lawpack 101（含 1 个 doc test）。
+`cargo test --workspace` 共 479 个：kernel 19、lang 76、reason 41、cert 101、cli 141、lawpack 101（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -601,6 +657,14 @@ cargo test --workspace
 - `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
   `[ns]` 后缀；限定名 `:why` 通过证书复核；`a` 的事实不满足 `b` 的目标；交换两个模块的加载顺序后
   `:why` / `:cert` 结果一致；模块内未限定引用加载失败。
+- `crates/cli/tests/imports.rs`（26）：注册表导入端到端——临时 `lawpacks` + `std.lock` 后案件
+  `import` 一个包并 `:why`；无 import 时没有注册表也能加载；缺锁、哈希不符（两个包的错误都列出）、
+  锁缺包/多包、版本不符；坏清单、重复包名、重复 namespace、缺包；两个包同名后缀的限定名各自解析；
+  包依赖 A→B 先加载 B，A/B 共用 C 时 C 只加载一次；后续 `:load` 复用已加载包；A→B→A 报环并给出
+  路径；`../`、绝对路径、缺失文件、非 UTF-8、符号链接、重复 path、缺 path 的 theory 条目；
+  manifest 缺 namespace、theory namespace 不符、没有 theory 文件；非 theory 条目被忽略；失败加载
+  回滚声明与包信息；`:inspect` 显示 `[a@0.1.0]`，直接按文件加载的 namespaced 模块仍是 `[a]`；
+  批处理失败退出 `1`、显式 `:load` 退出 `2`。
 - `crates/cli/tests/cert.rs`（21）：`:cert` / `:verify-cert` 端到端——导出的 JSON 往返并通过检查器；
   `:verify-cert` 分行报告逻辑与内核两段；缺口证书退出 `1` 且产生 `MissingPremise`；
   未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在逻辑层失败；
