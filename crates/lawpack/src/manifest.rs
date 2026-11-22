@@ -4,6 +4,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer};
 
+use crate::date;
+
 /// Longest accepted pack name, in bytes.
 const MAX_NAME_LEN: usize = 128;
 /// Longest accepted version string, in bytes.
@@ -107,10 +109,10 @@ impl Manifest {
         validate_code("pack.jurisdiction", &self.pack.jurisdiction)?;
         validate_code("pack.territory", &self.pack.territory)?;
         if let Some(date) = &self.pack.effective_from {
-            validate_date("pack.effective_from", date)?;
+            date::validate("pack.effective_from", date).map_err(ManifestError::new)?;
         }
         if let Some(date) = &self.pack.effective_to {
-            validate_date("pack.effective_to", date)?;
+            date::validate("pack.effective_to", date).map_err(ManifestError::new)?;
         }
         Ok(())
     }
@@ -179,55 +181,6 @@ fn validate_code(field: &str, value: &str) -> Result<(), ManifestError> {
         )));
     }
     Ok(())
-}
-
-fn validate_date(field: &str, value: &str) -> Result<(), ManifestError> {
-    let bytes = value.as_bytes();
-    let shaped = bytes.len() == 10
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && digits(&bytes[0..4])
-        && digits(&bytes[5..7])
-        && digits(&bytes[8..10]);
-    if !shaped {
-        return Err(ManifestError::new(format!(
-            "{field} `{value}` 不是 YYYY-MM-DD 日期"
-        )));
-    }
-    let year = decimal(&bytes[0..4]);
-    let month = decimal(&bytes[5..7]);
-    let max_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap_year(year) => 29,
-        2 => 28,
-        _ => {
-            return Err(ManifestError::new(format!(
-                "{field} `{value}` 的月份 {month} 超出 1..12"
-            )));
-        }
-    };
-    let day = decimal(&bytes[8..10]);
-    if !(1..=max_day).contains(&day) {
-        return Err(ManifestError::new(format!(
-            "{field} `{value}` 的日期 {day} 超出 1..{max_day}"
-        )));
-    }
-    Ok(())
-}
-
-fn leap_year(year: u32) -> bool {
-    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
-}
-
-fn digits(bytes: &[u8]) -> bool {
-    bytes.iter().all(|b| b.is_ascii_digit())
-}
-
-fn decimal(bytes: &[u8]) -> u32 {
-    bytes
-        .iter()
-        .fold(0, |value, b| value * 10 + u32::from(b - b'0'))
 }
 
 fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>

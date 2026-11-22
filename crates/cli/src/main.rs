@@ -11,6 +11,7 @@
 //! :check <file> [goal]    check a certificate, optionally bound to a goal
 //! :packs [dir]            list the legal-pack manifests under a directory
 //! :lock [dir]             hash the packs and write the std.lock registry lock
+//! :audit [dir]            check rule-source quotations against article corpora
 //! :given <term>           add an assumption by hand
 //! :quit
 //! ```
@@ -45,6 +46,20 @@
 //! regular file in the pack directory, with `/`-separated relative paths and
 //! `\r\n` normalized to `\n`, so the same files hash the same on Windows and
 //! Linux. `:lock` does not import rules and does not require a loaded theory.
+//!
+//! `:audit` checks every `source` on every declaration in the loaded theory
+//! against the article corpus under `law/corpus`, or against the directory
+//! given as its argument. A source is printed as `✓` when its quotation
+//! matches the stored article after removing all Unicode whitespace, as `?`
+//! when it has no quotation or no corpus matches (unverified), and as `✗` for
+//! every other failure: a missing article, a version mismatch, an ambiguous
+//! instrument name, changed wording, a wrong hash, an invalid source or a
+//! jurisdiction mismatch. Only a run with at least one source and every source
+//! `✓` exits `0`; an unverified source is never a pass. A missing or empty
+//! corpus directory leaves every source unverified (exit `1`), while a
+//! malformed corpus or a duplicate `(law, version)` exits `2`. All text from a
+//! source, a corpus or a path is escaped before printing, so a newline in a
+//! quotation cannot forge another output line.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -100,6 +115,7 @@ use std_deduce_kernel::env::{Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::{elab, Library};
+use std_deduce_lawpack::corpus::{self, Citation};
 use std_deduce_lawpack::{PackInfo, LOCK_FILE};
 use std_deduce_reason::{
     certificate as reason_certificate, Conflict, Provenance, Reasoner, Resolution, Side,
@@ -221,6 +237,7 @@ impl Session {
                 "check" => self.check_certificate(arg, out),
                 "packs" => self.list_packs(arg, out),
                 "lock" => self.lock_packs(arg, out),
+                "audit" => self.audit_sources(arg, out),
                 "quit" | "exit" => Ok(Outcome::Proved),
                 other => Err(format!("未知命令 `:{other}`")),
             }
@@ -763,6 +780,130 @@ impl Session {
         .ok();
         Ok(Outcome::Proved)
     }
+
+    /// Check every declared source's quotation against the article corpus.
+    ///
+    /// The corpus directory defaults to `law/corpus` below the current
+    /// directory; an argument is the whole directory, so a path containing
+    /// spaces needs no further quoting. A theory must be loaded first.
+    ///
+    /// Every source is printed on one line and counted as a hit, a mismatch or
+    /// unverified. Only a run with at least one source and no mismatch or
+    /// unverified source exits `0`. A missing or empty corpus directory leaves
+    /// every source unverified (exit `1`); it is never a pass. A corpus that
+    /// cannot be read or parsed, or a duplicate `(law, version)`, is a corpus
+    /// error (exit `2`).
+    fn audit_sources(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if !self.loaded {
+            writeln!(out, "语料核对：未运行（尚未加载理论）").ok();
+            return Err("尚未加载理论：:audit 需要环境才能核对引文，请先 :load <文件>".into());
+        }
+        let root = corpus_root(arg)?;
+        let corpora = match corpus::scan(&root) {
+            Ok(scan) => {
+                if !scan.errors.is_empty() {
+                    for error in &scan.errors {
+                        writeln!(out, "{}", escape_field(&error.to_string())).ok();
+                    }
+                    return Err(format!("{} 个语料错误，未进行核对", scan.errors.len()));
+                }
+                if scan.corpora.is_empty() {
+                    writeln!(
+                        out,
+                        "语料目录中没有语料：{}（所有来源都未核对）",
+                        escape_path(&root)
+                    )
+                    .ok();
+                }
+                scan.corpora
+                    .into_iter()
+                    .map(|loaded| loaded.corpus)
+                    .collect()
+            }
+            Err(error) => {
+                writeln!(
+                    out,
+                    "{}（所有来源都未核对）",
+                    escape_field(&error.to_string())
+                )
+                .ok();
+                Vec::new()
+            }
+        };
+
+        let mut total = 0;
+        let mut hit = 0;
+        let mut mismatch = 0;
+        let mut unverified = 0;
+        let mut with_hash = 0;
+        let mut without_hash = 0;
+        for decl in self.lib.env.iter() {
+            for source in &decl.sources {
+                total += 1;
+                if source.hash.is_empty() {
+                    without_hash += 1;
+                } else {
+                    with_hash += 1;
+                }
+                let citation = Citation {
+                    text: &source.text,
+                    locator: &source.locator,
+                    version: &source.version,
+                    quote: &source.quote,
+                    hash: &source.hash,
+                    jurisdiction: &source.jurisdiction,
+                };
+                let checked = corpus::audit(&corpora, &citation);
+                let label = format!(
+                    "「{}{}」",
+                    escape_field(&source.text),
+                    escape_field(&source.locator)
+                );
+                let line = if checked.audit.is_hit() {
+                    hit += 1;
+                    let id = checked
+                        .corpus
+                        .as_ref()
+                        .ok_or_else(|| "内部错误：引文命中但没有对应的语料".to_owned())?;
+                    format!("✓ {label}← {}", escape_field(&id.to_string()))
+                } else if checked.audit.is_unverified() {
+                    unverified += 1;
+                    format!("? {label}：{}（未核对）", escape_field(&checked.detail))
+                } else {
+                    mismatch += 1;
+                    match &checked.corpus {
+                        Some(id) => format!(
+                            "✗ {label}← {}：{}",
+                            escape_field(&id.to_string()),
+                            escape_field(&checked.detail)
+                        ),
+                        None => format!("✗ {label}：{}", escape_field(&checked.detail)),
+                    }
+                };
+                writeln!(out, "{line}").ok();
+            }
+        }
+
+        writeln!(
+            out,
+            "核对 {total} 条来源，命中 {hit}，不一致 {mismatch}，未核对 {unverified}。"
+        )
+        .ok();
+        writeln!(
+            out,
+            "引文哈希：{with_hash} 条已固定，{without_hash} 条未固定哈希。"
+        )
+        .ok();
+        if total == 0 {
+            writeln!(out, "没有可核对的来源：没有任何引文得到核对。").ok();
+            return Ok(Outcome::Gap);
+        }
+        if hit == total {
+            Ok(Outcome::Proved)
+        } else {
+            Ok(Outcome::Gap)
+        }
+    }
 }
 
 /// Resolve the legal-pack directory a `:packs` or `:lock` command operates on.
@@ -771,10 +912,22 @@ impl Session {
 /// directory; with an argument the whole string is the directory, so a path
 /// containing spaces needs no further quoting.
 fn packs_root(arg: &str) -> Result<PathBuf, String> {
+    directory_arg(arg, "lawpacks")
+}
+
+/// Resolve the corpus directory `:audit` operates on.
+///
+/// With no argument the directory is `law/corpus` below the current working
+/// directory; with an argument the whole string is the directory.
+fn corpus_root(arg: &str) -> Result<PathBuf, String> {
+    directory_arg(arg, "law/corpus")
+}
+
+fn directory_arg(arg: &str, default: &str) -> Result<PathBuf, String> {
     if arg.is_empty() {
         Ok(std::env::current_dir()
             .map_err(|error| format!("无法取得当前目录：{}", escape_field(&error.to_string())))?
-            .join("lawpacks"))
+            .join(default))
     } else {
         Ok(PathBuf::from(arg))
     }
@@ -1127,7 +1280,8 @@ fn main() {
         if line.trim() == ":help" {
             println!(
                 ":load <文件>  :inspect  :given <命题>  :why <命题>  :gap <命题>  \
-                 :cert <命题>  :check <证书文件> [目标命题]  :packs [目录]  :lock [目录]  :quit"
+                 :cert <命题>  :check <证书文件> [目标命题]  :packs [目录]  :lock [目录]  \
+                 :audit [目录]  :quit"
             );
             continue;
         }

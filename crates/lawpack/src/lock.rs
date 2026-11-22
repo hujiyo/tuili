@@ -25,7 +25,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{scan, LoadedPack, PackError};
+use crate::{hex, scan, LoadedPack, PackError};
 
 /// The lock file name, written at the registry root.
 pub const LOCK_FILE: &str = "std.lock";
@@ -169,7 +169,7 @@ pub fn hash_pack(dir: &Path) -> Result<String, PackError> {
         hasher.update((content.len() as u64).to_le_bytes());
         hasher.update(&content);
     }
-    Ok(format!("sha256:{}", hex(&hasher.finalize())))
+    Ok(format!("sha256:{}", hex::encode(&hasher.finalize())))
 }
 
 fn collect_files(
@@ -257,14 +257,6 @@ fn normalized(bytes: &[u8]) -> Vec<u8> {
         }
     }
     out
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push_str(&format!("{byte:02x}"));
-    }
-    text
 }
 
 /// Hash every pack under `root` and build the lock that describes them.

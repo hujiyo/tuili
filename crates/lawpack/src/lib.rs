@@ -1,4 +1,4 @@
-//! The official legal-pack manifest and registry lock.
+//! The official legal-pack manifest, registry lock, and article corpus.
 //!
 //! A legal pack is a directory containing a `lawpack.toml` manifest. The
 //! manifest records the pack's identity, its jurisdiction and territory, its
@@ -13,6 +13,10 @@
 //! which records the version and content hash of every pack. Verification
 //! compares a directory against its lock; it does not import or certify
 //! anything either.
+//!
+//! [`corpus`] holds the article-level texts used to check a rule's quotation.
+//! [`corpus::audit`] proves that a quotation matches a stored article; it does
+//! not prove that a rule is a faithful or applicable reading of the law.
 //!
 //! ```
 //! use std_deduce_lawpack::Manifest;
@@ -29,6 +33,9 @@
 //! assert_eq!(manifest.pack.name, "cn.constitution");
 //! ```
 
+pub mod corpus;
+mod date;
+mod hex;
 mod load;
 mod lock;
 mod manifest;
