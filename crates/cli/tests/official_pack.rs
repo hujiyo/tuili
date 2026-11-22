@@ -5,8 +5,9 @@
 //! registry into its own temporary directory; it never edits the repository.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const PROVED: i32 = 0;
@@ -32,6 +33,25 @@ fn run_in(current_dir: &Path, args: &[String]) -> Output {
 
 fn run_in_repo(args: &[String]) -> Output {
     run_in(&repo_root(), args)
+}
+
+fn run_repl_in(current_dir: &Path, input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_std-deduce"))
+        .current_dir(current_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to run the CLI: {error}"));
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(input.as_bytes())
+        .expect("write REPL input");
+    child
+        .wait_with_output()
+        .unwrap_or_else(|error| panic!("failed to wait for the CLI: {error}"))
 }
 
 fn stdout(output: &Output) -> String {
@@ -112,6 +132,44 @@ fn inspect_marks_pack_declarations_with_the_pack_version() {
     // Both sorts, both predicates and the rule all come from the pack and are
     // marked with the locked version; the case objects are not.
     assert_eq!(out.matches("[cn.constitution@0.1.0]").count(), 5, "{out}");
+}
+
+/// A user file may not declare into the official pack's namespace. The ledger
+/// is flat, so such declarations would merge with the pack's and could be
+/// displayed as if the pack had contributed them.
+#[test]
+fn a_file_cannot_declare_into_a_loaded_pack_namespace() {
+    let temp = TempDir::new("pack-namespace-injection");
+    let fake = temp.path().join("fake.std");
+    fs::write(
+        &fake,
+        "namespace cn.constitution\nsort cn.constitution.伪造\n",
+    )
+    .expect("write the fake file");
+
+    let input = format!(
+        ":load {}\n:load {}\n:inspect\n:quit\n",
+        import_example().display(),
+        fake.display()
+    );
+    let output = run_repl_in(&repo_root(), &input);
+    let code = output.status.code();
+    let out = stdout(&output);
+    let err = stderr(&output);
+    assert_eq!(code, Some(ERROR), "stdout:\n{out}\nstderr:\n{err}");
+    assert!(
+        out.contains("不能向已加载包 `cn.constitution` 添加声明；请使用独立 namespace"),
+        "the rejected file must name the pack namespace:\n{out}"
+    );
+    assert!(
+        !out.contains("伪造"),
+        "a rejected declaration must not enter the ledger:\n{out}"
+    );
+    assert_eq!(
+        out.matches("[cn.constitution@0.1.0]").count(),
+        5,
+        "the pack's five declarations still carry the pack suffix:\n{out}"
+    );
 }
 
 #[test]

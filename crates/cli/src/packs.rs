@@ -6,10 +6,12 @@
 //! the directory still matches `std.lock`.
 //!
 //! A `:load` first parses the file to find its `import` items. A file without
-//! any import never touches the registry. A file with imports scans
-//! `lawpacks` in the current directory and verifies the lock once for the whole
-//! load; packages are then loaded depth-first, dependencies before the package
-//! that imports them.
+//! any import never touches the registry, and an import already satisfied by a
+//! namespace loaded directly from a file does not either. The remaining
+//! imports scan `lawpacks` in the current directory and verify the lock once
+//! for the whole load; packages are then loaded depth-first, dependencies
+//! before the package that imports them. An import whose namespace came from a
+//! pack is always resolved here, so a changed version or hash is reported.
 //!
 //! The whole load runs on a cloned [`Library`] and a cloned package list. An
 //! error at any step therefore leaves the session exactly as it was: no
@@ -29,15 +31,19 @@ use std_deduce_lawpack::{
 
 /// A pack successfully loaded into the current session.
 ///
-/// `:inspect` uses the namespace to find the pack and prints
-/// `[name@version]`; the hash is kept so a later import can tell whether the
-/// registry still describes the same content the session loaded.
+/// `:inspect` prints `[name@version]` only for the declaration names this pack
+/// itself contributed; the namespace alone is not enough, because the ledger is
+/// flat and a declaration from another file could share the namespace. The hash
+/// is kept so a later import can tell whether the registry still describes the
+/// same content the session loaded.
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedPackInfo {
     pub(crate) name: String,
     pub(crate) version: String,
     pub(crate) hash: String,
     pub(crate) namespace: String,
+    /// Ledger names added by this pack's theory files, across all of them.
+    pub(crate) decls: BTreeSet<String>,
 }
 
 /// One pack as the registry sees it after the lock has been verified.
@@ -270,13 +276,14 @@ impl<'a> PackageLoader<'a> {
         self.stack.push(name.to_owned());
         let loaded = self.load_theory_files(name, &namespace, &theory_files);
         self.stack.pop();
-        loaded?;
+        let decls = loaded?;
 
         self.infos.push(LoadedPackInfo {
             name: name.to_owned(),
             version: manifest.pack.version.clone(),
             hash,
             namespace,
+            decls,
         });
         self.done.insert(name.to_owned());
         Ok(())
@@ -370,12 +377,19 @@ impl<'a> PackageLoader<'a> {
     /// Each file's imports are resolved recursively before the file itself is
     /// given to [`Library::load`], so a dependency is always loaded first. A
     /// package theory file must declare exactly the manifest's namespace.
+    ///
+    /// Returns the ledger names the pack added, across all its theory files.
+    /// They are collected from the environment diff around each load rather
+    /// than from a theory's declaration list: the ledger is flat, so a file
+    /// loaded earlier can share the namespace, and only the names this pack
+    /// really inserted may be attributed to it by `:inspect`.
     fn load_theory_files(
         &mut self,
         name: &str,
         namespace: &str,
         files: &[TheoryFile],
-    ) -> Result<(), String> {
+    ) -> Result<BTreeSet<String>, String> {
+        let mut decls = BTreeSet::new();
         for file in files {
             let path = file.path.to_string_lossy().into_owned();
             let items = std_deduce_lang::parser::parse(&file.src)
@@ -399,11 +413,23 @@ impl<'a> PackageLoader<'a> {
             }
             let imports = imports_of(&items);
             self.load_imports(&imports, &file.path)?;
+            let before: BTreeSet<String> = self
+                .lib
+                .env
+                .iter()
+                .map(|decl| decl.name.to_string())
+                .collect();
             self.lib
                 .load(&path, &file.src)
                 .map_err(|error| error.render(&path))?;
+            for decl in self.lib.env.iter() {
+                let name = decl.name.to_string();
+                if !before.contains(&name) {
+                    decls.insert(name);
+                }
+            }
         }
-        Ok(())
+        Ok(decls)
     }
 
     /// Re-check a package loaded earlier in this session against the registry.
@@ -500,6 +526,13 @@ fn validate_theory_path(raw: &str) -> Result<String, String> {
                 let part = part
                     .to_str()
                     .ok_or_else(|| "path 不是有效的 UTF-8".to_owned())?;
+                // On Windows `theory.std:hidden` names an alternate data stream
+                // of `theory.std`: directory scans and the lock hash never see
+                // it, but `fs::read` would open it. Reject the colon on every
+                // platform instead of relying on the platform path parser.
+                if part.contains(':') {
+                    return Err("path 不能包含 `:`（Windows 备用数据流）".to_owned());
+                }
                 parts.push(part);
             }
             Component::CurDir => {}

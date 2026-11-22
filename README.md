@@ -91,14 +91,14 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 
 | 命令 | 作用 |
 |---|---|
-| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。文件里有 `import <包名>` 时，先从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；没有 import 时不读取注册表 |
+| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有任何 import（或 import 全部已由文件加载）时不读取注册表 |
 | `:inspect` | 打印声明台账（含出处与全部来源字段） |
 | `:given <命题>` | 手工登记一条已知事实 |
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导 |
 | `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告 |
 | `:cert <命题>` | 跑推理并把该目标的证书 JSON（缩进）写到 stdout；推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations` |
 | `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 JSON：先跑 `cert::check`，再跑 `kernel_proof`，两段分开报告；必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标 |
-| `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、描述与文件数；若目录里有 `std.lock`，再重新哈希并校验；不导入规则，不要求 `:load` |
+| `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、描述与文件数；若目录里有 `std.lock`，再重新哈希并校验；不导入规则，不要求 `:load`。只校验清单与锁，不检查 namespace 唯一性，也不保证包可导入——这些由 `:load` 检查 |
 | `:lock [目录]` | 对目录（默认 `lawpacks`）里的所有包计算内容哈希，写入 `<目录>/std.lock`；坏包/坏文件/重复包名时打印错误并退出 `2`，不写部分锁 |
 | `:audit [目录]` | 只核对已加载理论里 `quote` 非空的 `source`：法名匹配语料标题/别名，版本、条号、引文（删除全部空白后逐字比较）、条文哈希（条文原文含换行的 SHA-256）与管辖逐项检查；`quote` 为空的来源不参与核对，单独计数且不影响退出码。默认语料目录 `law/corpus`，按 `<law>/<version>.json` 严格布局。至少一条带引文来源且全部命中才退出 `0`；一条带引文来源都没有时报“没有可核对的引文”并退出 `1`；坏语料退出 `2` |
 
@@ -153,8 +153,16 @@ namespace 我的案件
 ...
 ```
 
-`:load` / 批处理先解析文件里的 `import`。没有任何 `import` 的文件完全不读取注册表，所以现有
-`examples/` 不要求 `lawpacks/` 或 `std.lock` 存在。有 `import` 时：
+`:load` / 批处理先解析文件里的 `import`，再按当前会话的状态决定要不要读注册表：
+
+- 没有任何 `import` 的文件完全不读取注册表，所以现有 `examples/` 不要求 `lawpacks/` 或
+  `std.lock` 存在。
+- 已经由本会话加载的 namespace 直接使用，不再查注册表：它可能来自模块文件（`:load module.std`），
+  也可能来自包。
+- 未加载的 namespace 才进入注册表；由包加载的 namespace 即使已加载也仍走注册表，以复核版本与
+  哈希漂移。只有确实需要解析的 import 才扫描注册表；全部可跳过时，一次也不打开注册表。
+
+需要注册表时：
 
 1. 注册表根是**当前工作目录**下的 `lawpacks/`，不从二进制位置或仓库根推断；根不存在/不可读
    是错误，错误信息给出期望路径。
@@ -162,20 +170,30 @@ namespace 我的案件
    所有扫描错误一起列出，不跳过坏包。
 3. 必须存在 `lawpacks/std.lock` 并校验通过。缺锁、锁版本不符、包版本/哈希不符、缺包/多包、
    符号链接都在一次校验里报告，错误全部列出；一次 `:load` 只校验一次锁，不按 import 重复校验。
+   锁校验是**校验时点**的语义：`verify_lock` 返回后文件再变化，本次加载不会重新发现；需要更强
+   保证时重新 `:lock` 并重启会话。
 4. 按包名找到清单。可导入包的清单必须声明 `namespace`，且 `namespace` 必须等于包名：`import`
    写的是包名，而 `Library` 又要求导入名等于已加载 namespace。包内每个 `kind = "theory"` 文件的
    namespace 必须等于清单的 `namespace`，否则加载失败并指出文件名和两个 namespace。
 5. 只打开 `kind = "theory"` 的条目；`path` 必须是相对路径，不能是绝对路径、不能含 `..`，
-   同一个包内不能重复，必须是普通文件、非符号链接、有效 UTF-8。一个 theory 文件都没有的包
-   不能 import，报“包 `x` 没有可导入的 theory 文件”。
+   同一个包内不能重复，必须是普通文件、非符号链接、有效 UTF-8。路径分量不能含 `:`（Windows
+   备用数据流：`theory.std:hidden` 会读写 `theory.std` 的隐藏流，目录扫描和锁哈希都看不到它，
+   所以跨平台一律拒绝）；`:lock` 只哈希包目录里的普通文件，这种包仍能写出锁，但不能导入。
+   一个 theory 文件都没有的包不能 import，报“包 `x` 没有可导入的 theory 文件”。
 6. 包内 theory 文件按 manifest 顺序加载；每个文件先解析它的 `import`，递归加载依赖包，再交给
    `Library::load`。依赖先于 importer；多个包共用同一个依赖时只加载一次；`a → b → a` 报错
    并给出环路径。
 7. 整个 `:load` 在 `Library` 克隆和包记录克隆上完成；任何一步失败都丢弃克隆，不留半加载的
    声明、包信息或 `loaded` 状态。
-8. 加载成功后 `Session` 记录包的 `name`、`version`、`hash` 与 `namespace`。`:inspect` 对来自
-   包的 namespaced 声明显示 `[name@version]`（如 `[cn.constitution@0.1.0]`）；直接按文件加载的
-   namespaced 模块仍显示 `[ns]`；案件文件声明没有后缀。
+8. 加载成功后 `Session` 记录包的 `name`、`version`、`hash`、`namespace` 与该包实际声明的名字。
+   `:inspect` 只给真正由该包声明的 namespaced 声明显示 `[name@version]`（如
+   `[cn.constitution@0.1.0]`）；直接按文件加载的 namespaced 模块仍显示 `[ns]`；案件文件声明
+   没有后缀。顶层文件的 namespace 若等于某个已加载包的 namespace，加载被拒绝并提示使用独立
+   namespace，防止用户文件向官方 namespace 注入声明；包加载器内部的 theory 文件不走这条检查
+   （它们的 namespace 必须等于清单 namespace）。
+
+加载报告在 `已加载` 行后打印顶层文件自己的 `import`：`  导入 cn.constitution`；包内部的依赖
+不会重复打印。
 
 仓库里的官方包 `cn.constitution` 已经可以导入，案件文件只需写事实：
 
@@ -185,8 +203,9 @@ cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-导入包.std '
 
 输出 `▸ cn.constitution.不受侵犯 张三 甲宅 ⟨cn.constitution.非法搜查即侵犯⟩ ← 「宪法第三十九条」（2018）`，
 最后打印 `推导已通过独立校验。`。官方包目前只有第三十九条一条最小规则，不是完整形式化；
-`lawpacks/std.lock` 固定 `cn.constitution@0.1.0` 与包内容哈希，`:inspect` 对包内声明显示
-`[cn.constitution@0.1.0]`；完整规则与覆盖率见 M2-16。
+`0.1.0` 是**包版本**，不是法律文本年份——文本年份看 `source` 的 `version "2018"` 与语料版本
+`2018`。`lawpacks/std.lock` 固定 `cn.constitution@0.1.0` 与包内容哈希，`:inspect` 对包内声明
+显示 `[cn.constitution@0.1.0]`；完整规则与覆盖率见 M2-16。
 
 临时注册表示例：
 
@@ -222,7 +241,7 @@ cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
   "coverage": {
     "formalized": ["第五条", "第三十七条", "第三十九条", "第四十六条"],
     "open_concepts": ["非法", "住宅", "侵犯", "人身自由"],
-    "notes": "形式化指仓库内已有示例规则引用该条；官方包规则迁入见 M2-16。"
+    "notes": "官方包已迁入第三十九条最小规则；完整规则与覆盖率见 M2-16。"
   },
   "articles": [
     { "number": "第三十九条", "text": "条文正文，不含“第X条”前缀；多段用 \n 连接" }
@@ -394,10 +413,10 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
 `b.违法` 可以同时存在），加载顺序不影响结果。没有 `namespace` 的文件是案件/示例文件：它可以引用
 `a.违法` 这样的限定名，但不能自己声明带 `.` 的名字。
 
-`import` 每行写一个带点包名，只能出现在 `namespace` 和所有声明之前；被 import 的 namespace
-必须已经在当前会话中加载，否则加载失败并报告“包 `x` 尚未加载”。`import` 只写包名，不写版本；
-重复 import 同一个包合法，加载报告与 `Theory.requires` 只记录一次。`import` 不是声明，也不会
-进入 `:inspect` 账本。
+`import` 每行写一个带点包名，只能出现在 `namespace` 和所有声明之前；CLI 加载时先看当前会话
+已加载的 namespace，未加载的才去 `lawpacks` 解析。`Library` 本身只接受已加载的 namespace，
+否则加载失败并报告“包 `x` 尚未加载”。`import` 只写包名，不写版本；重复 import 同一个包合法，
+加载报告与 `Theory.requires` 只记录一次。`import` 不是声明，也不会进入 `:inspect` 账本。
 
 出处要求的当前范围：
 
@@ -461,9 +480,11 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
   推导树，并对同一份证书依次运行 `cert::check` 与 `cert::kernel_proof`；冲突分支展示的推导同样从证书渲染
   并用 `cert::check` 复核。`:cert` 导出证书，`:verify-cert` 依次运行 `cert::check` 与 `cert::kernel_proof`，
   把逻辑、内核、侧条件和需人判断分成四行报告；
-  可选的目标绑定要求证书根命题与目标内核等价。`:load` 遇到 `import` 时扫描当前目录的
-  `lawpacks`、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件，并把包信息记入
-  `Session` 供 `:inspect` 显示 `[name@version]`；没有 `import` 的文件不读取注册表。
+  可选的目标绑定要求证书根命题与目标内核等价。`:load` 遇到 `import` 时先看当前会话已加载的
+  namespace；未加载的（以及已由包加载、需要复核漂移的）才扫描当前目录的 `lawpacks`、校验
+  `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件，并把包信息与包实际声明的名字记入
+  `Session` 供 `:inspect` 显示 `[name@version]`；没有 `import` 或 import 全部已由文件加载时
+  不读取注册表。
   `:packs` 扫描清单、在有锁时重新哈希校验，`:lock` 生成锁；
   `:audit` 只核对带 `quote` 的来源；无 `quote` 的来源不参与核对、不影响退出码；汇总后按语料打印
   `coverage` 声明的形式化/索引/开放概念计数与列表。除 `:load` 的包文件外，三者都只读不导入规则，
@@ -493,6 +514,9 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
   目录里有 `std.lock` 时会重新扫描并哈希：缺包、多包、版本不符、哈希不符或锁本身是符号链接都退出 `2`；
   没有锁时只提示“未锁定”，仍按清单结果返回；清单本身有错时锁校验标记为“未运行（清单错误）”，先修清单。
   `:lock` 遇到坏包不写任何锁；写锁前拒绝符号链接目标。
+  `:packs` 不检查 namespace 唯一性，也不保证包可导入：两个包声明同一 namespace、清单 `path`
+  含 `:` 等问题只在 `:load` / 包加载器里报错。锁校验是**校验时点**的语义，不是已解决的 TOCTOU：
+  校验返回后文件再变化，不会被本次加载重新发现；需要更强保证时重新 `:lock` 并重启会话。
 - `cert::check` 只检查根命题是否处于未决冲突或败方；非根冲突不在这里裁决，
   `defeated_by` / `prefer` 的优先级来源也未核验（`priority_sources_checked = false`）。
   `:cert` 把缺口写成 `MissingPremise`、把未决冲突写成 `UnresolvedConflict` 的
@@ -559,9 +583,9 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
 - **非命题声明不被拒。** `pred` / `axiom` / `def` 的共域不校验必须是 `Prop`。
   推理时已跳过声明型 axiom（`axiom 假 : Prop` 这类只声明常量、不断言命题），
   但账本本身仍接受形状不对的声明。
-- **法律包导入已接通；官方宪法包只有一条最小规则。** `:load` 遇到 `import` 时会扫描
-  `lawpacks`、校验 `std.lock`，并递归加载 `kind = "theory"` 的包文件，`:inspect` 显示
-  `[包名@版本]`。`lawpacks/cn.constitution/constitution.std` 目前只形式化第三十九条一条规则
+- **法律包导入已接通；官方宪法包只有一条最小规则。** `:load` 遇到 `import` 时先看已加载的
+  namespace，未加载的才扫描 `lawpacks`、校验 `std.lock`，并递归加载 `kind = "theory"` 的包文件，
+  `:inspect` 显示 `[包名@版本]`。`lawpacks/cn.constitution/constitution.std` 目前只形式化第三十九条一条规则
   （`非法搜查` 推出 `不受侵犯`），不是完整形式化，完整规则与覆盖率见 M2-16。
   `law/corpus/cn.constitution/2018.json` 已收宪法 143 条并声明覆盖率，仍只供 `:audit`
   核对规则 `source.quote`；`:load` 不读取语料。证书还不记录包身份/哈希（v3），
@@ -590,7 +614,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 484 个：kernel 19、lang 76、reason 41、cert 101、cli 146、lawpack 101（含 1 个 doc test）。
+`cargo test --workspace` 共 490 个：kernel 19、lang 76、reason 41、cert 101、cli 152、lawpack 101（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -622,7 +646,7 @@ cargo test --workspace
   所有声明之前，空 import 报在 import 行、行尾多 token 被拒、`import x@2018` 被词法拒绝、重复 import
   由解析层保留；案件与模块文件都可 import 已加载 namespace，报告按首次出现去重，未加载时报“尚未加载”
   且不改变库，同名但非 namespace 的 theory 不满足 import，模块可 import 已加载模块（含带点包名），
-  失败加载不回滚记录 import，重载同一 theory 时 `requires` 合并去重，import 不豁免声明名检查。
+  失败加载不记录 import，重载同一 theory 时 `requires` 合并去重，import 不豁免声明名检查。
 - `crates/cert/tests/json.rs`（16）：证书 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
   快照比对、字段名与节点标签固定、未知版本或未知字段被拒、真正的 v1 证书因版本不符被拒并报告版本，
   缺少 v2 新字段的 v2 证书按默认值解析；全部来源字段（含引文、链接、管辖、抓取时间、哈希）的 JSON
@@ -668,21 +692,24 @@ cargo test --workspace
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
   另有一条 `:inspect` 用例：结构化来源字段逐行输出，引文中的换行被转义、不会破坏行结构；
   两条 `:given` 用例（argv 与 stdin 交互）：登记事实的来源显示为「用户输入交互会话」，不出现空 `「」`。
-- `crates/cli/tests/official_pack.rs`（4）：官方宪法包端到端——`:packs lawpacks` 列出
+- `crates/cli/tests/official_pack.rs`（5）：官方宪法包端到端——`:packs lawpacks` 列出
   `cn.constitution 0.1.0`、文件数与通过锁校验；导入示例的 `:why` 证明第三十九条；
-  `:inspect` 对包内 5 个声明显示 `[cn.constitution@0.1.0]`；`:audit` 命中带引文来源并核验条文哈希；
-  在临时副本里改坏 `constitution.std` 后，`:packs` 因哈希不符退出 `2`、批处理 `:load` 退出 `1`。
+  `:inspect` 对包内 5 个声明显示 `[cn.constitution@0.1.0]`；加载官方示例后，用户文件若声明
+  `namespace cn.constitution` 会被拒绝，`:inspect` 不出现注入的声明；`:audit` 命中带引文来源并核验
+  条文哈希；在临时副本里改坏 `constitution.std` 后，`:packs` 因哈希不符退出 `2`、批处理 `:load` 退出 `1`。
 - `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
   `[ns]` 后缀；限定名 `:why` 通过证书复核；`a` 的事实不满足 `b` 的目标；交换两个模块的加载顺序后
   `:why` / `:cert` 结果一致；模块内未限定引用加载失败。
-- `crates/cli/tests/imports.rs`（26）：注册表导入端到端——临时 `lawpacks` + `std.lock` 后案件
+- `crates/cli/tests/imports.rs`（31）：注册表导入端到端——临时 `lawpacks` + `std.lock` 后案件
   `import` 一个包并 `:why`；无 import 时没有注册表也能加载；缺锁、哈希不符（两个包的错误都列出）、
   锁缺包/多包、版本不符；坏清单、重复包名、重复 namespace、缺包；两个包同名后缀的限定名各自解析；
-  包依赖 A→B 先加载 B，A/B 共用 C 时 C 只加载一次；后续 `:load` 复用已加载包；A→B→A 报环并给出
-  路径；`../`、绝对路径、缺失文件、非 UTF-8、符号链接、重复 path、缺 path 的 theory 条目；
+  包依赖 A→B 先加载 B，A/B 共用 C 时 C 只加载一次；后续 `:load` 复用已加载包，注册表随后变化时
+  仍复核版本/哈希漂移；A→B→A 报环并给出路径；`../`、绝对路径、含 `:` 的 ADS 路径（`:lock` 仍可
+  写锁，但包不可导入）、缺失文件、非 UTF-8、符号链接、重复 path、缺 path 的 theory 条目；
   manifest 缺 namespace、theory namespace 不符、没有 theory 文件；非 theory 条目被忽略；失败加载
-  回滚声明与包信息；`:inspect` 显示 `[a@0.1.0]`，直接按文件加载的 namespaced 模块仍是 `[a]`；
-  批处理失败退出 `1`、显式 `:load` 退出 `2`。
+  回滚声明与包信息；向自己 import 的包 namespace 声明同样被拒绝；`:inspect` 显示 `[a@0.1.0]`，
+  直接按文件加载的 namespaced 模块仍是 `[a]`；已由文件加载的 namespace 被 import 时跳过注册表，
+  混合 import 只解析包；批处理失败退出 `1`、显式 `:load` 退出 `2`。
 - `crates/cli/tests/cert.rs`（21）：`:cert` / `:verify-cert` 端到端——导出的 JSON 往返并通过检查器；
   `:verify-cert` 分行报告逻辑与内核两段；缺口证书退出 `1` 且产生 `MissingPremise`；
   未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在逻辑层失败；

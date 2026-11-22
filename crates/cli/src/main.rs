@@ -24,7 +24,7 @@
 //! line-oriented:
 //!
 //! ```text
-//! :load <file>            load a theory file (its imports load registry packs)
+//! :load <file>            load a theory file (imports resolve loaded namespaces first)
 //! :inspect                dump the ledger
 //! :why <term>             derive, print the certificate's tree, and check it
 //! :gap <term>             explain what is missing for a goal
@@ -38,16 +38,19 @@
 //! :quit
 //! ```
 //!
-//! A `:load` file may begin with `import <pack>` items. Only a file with at
-//! least one import reads the registry: `lawpacks` below the current working
-//! directory is scanned and its `std.lock` verified once, then each package's
+//! A `:load` file may begin with `import <pack>` items. Imports resolve
+//! against namespaces already loaded in the session first; only the remaining
+//! ones read the registry: `lawpacks` below the current working directory is
+//! scanned and its `std.lock` verified once, then each package's
 //! `kind = "theory"` files are loaded depth-first, dependencies first. A file
-//! without imports keeps the old behavior and never requires `lawpacks` or a
-//! lock. The whole load runs on cloned session state, so a registry, lock,
-//! package-path, dependency-cycle or package-load error leaves no
-//! half-loaded declarations or package information behind. `:inspect` shows
-//! `[name@version]` for declarations from a loaded pack, and still `[ns]` for
-//! a namespaced module loaded directly from a file.
+//! without imports, or whose imports are all already loaded from files, never
+//! requires `lawpacks` or a lock. The whole load runs on cloned session state,
+//! so a registry, lock, package-path, dependency-cycle or package-load error
+//! leaves no half-loaded declarations or package information behind. A
+//! top-level file may not declare inside a namespace an already loaded pack
+//! owns. `:inspect` shows `[name@version]` only for declarations a loaded pack
+//! itself contributed, and still `[ns]` for a namespaced module loaded
+//! directly from a file.
 //!
 //! `:packs` reads manifests but imports nothing and does not require a loaded
 //! theory. With no argument it scans `lawpacks` in the current working
@@ -152,8 +155,11 @@
 
 mod packs;
 
+use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+
+use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{render, Certificate, CheckReport, Node as CertNode, ObligationKind};
 use std_deduce_kernel::conv::convertible;
@@ -217,10 +223,13 @@ impl Session {
     ///
     /// A file without an `import` never touches the registry, so existing
     /// examples and case files keep working without `lawpacks` or `std.lock`.
-    /// A file with imports scans the registry once, verifies the lock once, and
-    /// loads every package (dependencies first) on a cloned library. Only a
-    /// fully successful load commits the library, the package list and
-    /// `loaded`; any failure restores the state from before the call.
+    /// Imports resolve against the session's loaded namespaces first: one that
+    /// a file already introduced needs no registry, while one that came from a
+    /// pack is still re-checked for version/hash drift. Only the remaining
+    /// imports scan the registry once, verify the lock once, and load every
+    /// package (dependencies first) on a cloned library. Only a fully
+    /// successful load commits the library, the package list and `loaded`; any
+    /// failure restores the state from before the call.
     fn load_theory(&mut self, path: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let src = std::fs::read_to_string(path)
             .map_err(|e| format!("{}: error: 读取失败：{e}", escape_path(path)))?;
@@ -231,7 +240,34 @@ impl Session {
             std_deduce_lang::LoadError::at(error.msg, error.line, error.col).render(path)
         })?;
         let imports = packs::imports_of(&items);
-        if imports.is_empty() {
+        // A top-level file may not declare inside a namespace a loaded pack
+        // owns: the flat ledger would merge them and `:inspect` could not tell
+        // the file's declarations from the pack's.
+        reject_pack_namespace(path, namespace_of(&items), &self.packs)?;
+
+        // Imports first look at what this session already loaded. A namespace
+        // that arrived through a pack is kept on the registry path so a changed
+        // version or hash is still reported; one loaded directly from a file
+        // needs no registry at all.
+        let pack_names: BTreeSet<&str> = self.packs.iter().map(|pack| pack.name.as_str()).collect();
+        let loaded_namespaces: BTreeSet<&str> = self
+            .lib
+            .theories
+            .iter()
+            .filter_map(|theory| theory.namespace.as_deref())
+            .collect();
+        let registry_imports: Vec<String> = imports
+            .iter()
+            .filter(|name| {
+                !loaded_namespaces.contains(name.as_str()) || pack_names.contains(name.as_str())
+            })
+            .cloned()
+            .collect();
+
+        // No imports, or every import is already satisfied by a file-loaded
+        // namespace: load the top-level file directly without opening the
+        // registry.
+        if registry_imports.is_empty() {
             let report = self.lib.load(path, &src).map_err(|e| e.render(path))?;
             self.loaded = true;
             self.print_load_report(path, &report, out);
@@ -243,8 +279,11 @@ impl Session {
         let mut loaded_packs = self.packs.clone();
         {
             let mut loader = packs::PackageLoader::new(&registry, &mut lib, &mut loaded_packs);
-            loader.load_imports(&imports, Path::new(path))?;
+            loader.load_imports(&registry_imports, Path::new(path))?;
         }
+        // A pack imported by this very file may own the file's namespace, so
+        // check the packages loaded above as well.
+        reject_pack_namespace(path, namespace_of(&items), &loaded_packs)?;
         // The case/module file itself is loaded last, after its dependencies.
         // If it fails, the cloned library and package list are dropped.
         let report = lib.load(path, &src).map_err(|e| e.render(path))?;
@@ -256,8 +295,15 @@ impl Session {
     }
 
     /// Print the declarations a successful load reported, in ledger order.
+    ///
+    /// `report.imported` belongs to the top-level file only; the package
+    /// loader never prints its own files' reports, so internal dependencies are
+    /// not repeated here.
     fn print_load_report(&self, path: &str, report: &LoadReport, out: &mut impl Write) {
         writeln!(out, "已加载 `{path}`。").ok();
+        for name in &report.imported {
+            writeln!(out, "  导入 {name}").ok();
+        }
         for d in &report.declared {
             writeln!(out, "  + {d}").ok();
         }
@@ -306,12 +352,15 @@ impl Session {
                                 .map(move |decl| (decl.clone(), ns.clone()))
                         })
                         .collect();
-                    // A package supplies the richer `[name@version]` suffix;
-                    // a namespace loaded directly from a file keeps `[ns]`.
-                    let pack_by_namespace: std::collections::HashMap<&str, &packs::LoadedPackInfo> =
+                    // A package supplies the richer `[name@version]` suffix,
+                    // but only for a name it really declared; a namespace
+                    // loaded directly from a file keeps `[ns]`.
+                    let pack_by_decl: std::collections::HashMap<&str, &packs::LoadedPackInfo> =
                         self.packs
                             .iter()
-                            .map(|pack| (pack.namespace.as_str(), pack))
+                            .flat_map(|pack| {
+                                pack.decls.iter().map(move |decl| (decl.as_str(), pack))
+                            })
                             .collect();
                     for decl in self.lib.env.iter() {
                         let kind = match &decl.kind {
@@ -325,15 +374,13 @@ impl Session {
                             DeclKind::Contrary { .. } => "contr ",
                             DeclKind::Unique { .. } => "uniq  ",
                         };
-                        let namespace = namespaces
-                            .get(decl.name.as_ref())
-                            .map(|ns| match pack_by_namespace.get(ns.as_str()) {
-                                Some(pack) => {
-                                    format!(" [{}@{}]", pack.name, pack.version)
-                                }
-                                None => format!(" [{ns}]"),
-                            })
-                            .unwrap_or_default();
+                        let namespace = match pack_by_decl.get(decl.name.as_ref()) {
+                            Some(pack) => format!(" [{}@{}]", pack.name, pack.version),
+                            None => namespaces
+                                .get(decl.name.as_ref())
+                                .map(|ns| format!(" [{ns}]"))
+                                .unwrap_or_default(),
+                        };
                         writeln!(
                             out,
                             "  {kind} {} : {}{namespace}",
@@ -1078,6 +1125,40 @@ impl Session {
             Ok(Outcome::Gap)
         }
     }
+}
+
+/// The top-level `namespace` of a parsed file, when it has one.
+///
+/// The parser guarantees that a namespace item is the first non-import item.
+/// A case/example file has none.
+fn namespace_of(items: &[Item]) -> Option<&str> {
+    match items.iter().find(|item| !matches!(item, Item::Import(_))) {
+        Some(Item::Namespace(namespace)) => Some(namespace.as_str()),
+        _ => None,
+    }
+}
+
+/// Refuse a top-level file whose namespace belongs to a loaded pack.
+///
+/// Package theory files are loaded through [`packs::PackageLoader`] directly,
+/// so this check only guards files the user loads. It keeps a user file from
+/// injecting declarations into an official namespace, where the flat ledger
+/// would merge them with the pack's.
+fn reject_pack_namespace(
+    path: &str,
+    namespace: Option<&str>,
+    packs: &[packs::LoadedPackInfo],
+) -> Result<(), String> {
+    let Some(namespace) = namespace else {
+        return Ok(());
+    };
+    if packs.iter().any(|pack| pack.namespace == namespace) {
+        return Err(std_deduce_lang::LoadError::new(format!(
+            "不能向已加载包 `{namespace}` 添加声明；请使用独立 namespace"
+        ))
+        .render(path));
+    }
+    Ok(())
 }
 
 /// Format a coverage list so the separator cannot be confused with an item.

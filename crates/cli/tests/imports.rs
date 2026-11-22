@@ -6,7 +6,7 @@
 //! directory the test runner was started from.
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -261,6 +261,10 @@ fn a_locked_package_can_be_imported_and_proven() {
     assert!(
         out.contains("推导已通过独立校验。"),
         "the imported rule must prove the case goal:\n{out}"
+    );
+    assert!(
+        out.contains("  导入 pkg.a"),
+        "the load report lists the top-level file's imports:\n{out}"
     );
 }
 
@@ -621,6 +625,80 @@ fn the_same_package_can_be_imported_by_a_later_load() {
 }
 
 #[test]
+fn a_pack_loaded_earlier_in_the_session_is_rechecked_for_drift() {
+    let temp = TempDir::new("loaded-pack-drift");
+    temp.package("pkg.a", "pkg.a", &theory("pkg.a"));
+    temp.lock();
+    // The first file only imports the pack, so the second file can declare the
+    // same case objects without colliding with them.
+    let first = temp.write("first.std", "import pkg.a\n");
+    let second = temp.write("second.std", &case_source(&["pkg.a"], "pkg.a"));
+
+    // The registry must change between the two loads, so the REPL is driven
+    // one command at a time: write the first load, wait for its report, then
+    // rewrite and re-lock the pack before the second load.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_std-deduce"))
+        .current_dir(temp.root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the CLI");
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut stdout_reader = BufReader::new(stdout);
+    writeln!(stdin, ":load {}", first.display()).expect("write the first load");
+    stdin.flush().expect("flush the first load");
+
+    let mut out = String::new();
+    loop {
+        let mut line = String::new();
+        let read = stdout_reader
+            .read_line(&mut line)
+            .expect("read the load report");
+        assert_ne!(read, 0, "the REPL exited before the first load:\n{out}");
+        out.push_str(&line);
+        if line.starts_with("已加载") {
+            break;
+        }
+    }
+
+    fs::write(
+        temp.lawpacks().join("pkg.a/lawpack.toml"),
+        "[pack]\nname = \"pkg.a\"\nversion = \"0.2.0\"\n\
+         jurisdiction = \"CN\"\nterritory = \"CN\"\nnamespace = \"pkg.a\"\n\n\
+         [[files]]\npath = \"theory.std\"\nkind = \"theory\"\n",
+    )
+    .unwrap();
+    temp.lock();
+
+    writeln!(stdin, ":load {}", second.display()).expect("write the second load");
+    writeln!(stdin, ":quit").expect("write quit");
+    stdin.flush().expect("flush the remaining input");
+    stdout_reader
+        .read_to_string(&mut out)
+        .expect("read the remaining output");
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr is piped")
+        .read_to_string(&mut err)
+        .expect("read stderr");
+    let status = child.wait().expect("wait for the CLI");
+    assert_eq!(status.code(), Some(ERROR), "stdout:\n{out}\nstderr:\n{err}");
+    // The REPL reports a failed command on stdout, where the report is.
+    assert!(
+        out.contains("已在会话中加载"),
+        "stdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        out.contains(VERSION) && out.contains("0.2.0"),
+        "stdout:\n{out}\nstderr:\n{err}"
+    );
+}
+
+#[test]
 fn a_dependency_cycle_names_the_cycle() {
     let temp = TempDir::new("cycle");
     temp.write_pack(
@@ -687,6 +765,32 @@ fn bad_theory_paths_are_rejected() {
     let output = run_in(absolute.root(), &[format!(":load {}", case.display())]);
     assert_exit(&output, ERROR);
     assert!(stderr(&output).contains("相对路径"), "{}", stderr(&output));
+}
+
+/// `theory.std:hidden` names a Windows alternate data stream: the directory
+/// scan and the lock hash never see it, but `fs::read` would open it. The path
+/// is rejected on every platform; the lock still builds because it hashes
+/// regular files, not manifest paths.
+#[test]
+fn an_ads_style_theory_path_is_rejected_but_the_lock_still_builds() {
+    let temp = TempDir::new("path-ads");
+    temp.write_pack(
+        "pkg.a",
+        &manifest("pkg.a", Some("pkg.a"), &[("theory.std:hidden", "theory")]),
+        &[("theory.std", &theory("pkg.a"))],
+    );
+
+    let locked = run_in(temp.root(), &[":lock lawpacks".to_string()]);
+    assert_exit(&locked, PROVED);
+    assert!(stdout(&locked).contains("已写入"), "{}", stdout(&locked));
+
+    let case = temp.write("case.std", &case_source(&["pkg.a"], "pkg.a"));
+    let output = run_in(temp.root(), &[format!(":load {}", case.display())]);
+    assert_exit(&output, ERROR);
+    let err = stderr(&output);
+    assert!(err.contains("theory.std:hidden"), "{err}");
+    assert!(err.contains("不能包含 `:`"), "{err}");
+    assert!(err.contains("Windows 备用数据流"), "{err}");
 }
 
 #[test]
@@ -925,6 +1029,97 @@ fn a_namespaced_module_loaded_by_path_still_shows_a_bare_namespace() {
         .unwrap_or_else(|| panic!("no module declaration:\n{out}"));
     assert!(line.trim_end().ends_with("[plain]"), "{line:?}");
     assert!(!line.contains('@'), "{line:?}");
+}
+
+#[test]
+fn an_import_of_a_namespace_loaded_by_path_skips_the_registry() {
+    let temp = TempDir::new("loaded-namespace");
+    let module = temp.write("module.std", "namespace a\nsort a.公民\n");
+    let case = temp.write("case.std", "import a\nobj 张三 : a.公民\n");
+
+    // There is no `lawpacks` directory at all: the import is already satisfied
+    // by the module in the session, so the registry must not be opened.
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", module.display()),
+            format!(":load {}", case.display()),
+            ":inspect".to_string(),
+        ],
+    );
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    assert!(
+        !temp.lawpacks().exists(),
+        "an already loaded namespace must not make the loader require a registry"
+    );
+    assert!(
+        out.contains("  导入 a"),
+        "the load report lists the top-level file's imports:\n{out}"
+    );
+    let module_line = out
+        .lines()
+        .find(|line| line.trim_start().starts_with("sort  a.公民"))
+        .unwrap_or_else(|| panic!("no module declaration:\n{out}"));
+    assert!(module_line.trim_end().ends_with("[a]"), "{module_line:?}");
+    assert!(!module_line.contains('@'), "{module_line:?}");
+}
+
+#[test]
+fn a_file_cannot_declare_into_a_pack_namespace_it_imports() {
+    let temp = TempDir::new("imported-namespace-injection");
+    temp.package("pkg.a", "pkg.a", &theory("pkg.a"));
+    temp.lock();
+    let case = temp.write(
+        "case.std",
+        "import pkg.a\nnamespace pkg.a\nsort pkg.a.伪造\n",
+    );
+
+    // The pack is loaded during this very `:load`, so the top-level file's
+    // namespace is checked against the packages loaded above as well.
+    let output = run_in(temp.root(), &[format!(":load {}", case.display())]);
+    assert_exit(&output, ERROR);
+    let err = stderr(&output);
+    assert!(err.contains("不能向已加载包 `pkg.a` 添加声明"), "{err}");
+    assert!(
+        !stdout(&output).contains("已加载"),
+        "a rejected file must not report a loaded theory:\n{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_mixed_import_set_loads_only_the_pack_from_the_registry() {
+    let temp = TempDir::new("mixed-import");
+    temp.package("pkg.a", "pkg.a", &theory("pkg.a"));
+    temp.lock();
+    let module = temp.write("module.std", "namespace local\nsort local.公民\n");
+    let case = temp.write(
+        "case.std",
+        "import pkg.a\nimport local\nobj 张三 : pkg.a.公民\n",
+    );
+
+    // `local` is already loaded by path and may not be looked up in the
+    // registry; only `pkg.a` takes the package path.
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", module.display()),
+            format!(":load {}", case.display()),
+            ":inspect".to_string(),
+        ],
+    );
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    assert!(out.contains("[pkg.a@0.1.0]"), "{out}");
+    assert!(
+        out.lines()
+            .any(|line| line.trim_start().starts_with("sort  local.公民")
+                && line.ends_with("[local]")),
+        "a file-loaded namespace keeps the bare suffix:\n{out}"
+    );
 }
 
 #[cfg(unix)]
