@@ -48,7 +48,7 @@ fn run(command: &str) -> Output {
 }
 
 fn run_in(current_dir: Option<&Path>, command: &str) -> Output {
-    let mut process = Command::new(env!("CARGO_BIN_EXE_std-deduce-cli"));
+    let mut process = Command::new(env!("CARGO_BIN_EXE_std-deduce"));
     process.arg(command);
     if let Some(dir) = current_dir {
         process.current_dir(dir);

@@ -79,7 +79,7 @@ fn theory_with_quote(quote: &str) -> String {
 }
 
 fn run(commands: &[String]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_std-deduce-cli"))
+    Command::new(env!("CARGO_BIN_EXE_std-deduce"))
         .args(commands)
         .output()
         .unwrap_or_else(|error| panic!("failed to run the CLI: {error}"))

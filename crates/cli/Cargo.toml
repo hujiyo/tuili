@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "The command-line interface."
 
+[[bin]]
+name = "std-deduce"
+path = "src/main.rs"
+
 [dependencies]
 std-deduce-kernel = { path = "../kernel" }
 std-deduce-lang = { path = "../lang" }

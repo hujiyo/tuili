@@ -1,6 +1,21 @@
 //! Command-line interface.
 //!
-//! Commands are line-oriented:
+//! The binary has a batch entry point and a line-oriented session:
+//!
+//! ```text
+//! std-deduce                       start the REPL
+//! std-deduce <file> [commands...]  load a theory file, then run the commands
+//! std-deduce check <file> [...]    the same batch entry as a plain file
+//! std-deduce repl                  start the REPL
+//! std-deduce --help | -h           print usage
+//! std-deduce --version | -V        print `std-deduce <version>`
+//! std-deduce <command> [...]       run every argument as a colon command
+//! ```
+//!
+//! A batch load uses the same path as `:load`, so it prints the same report. A
+//! file that does not pass its checks prints `path: 错误：...` on stderr and
+//! exits `1`, and the remaining commands are not run; a malformed invocation is
+//! still a usage error (`2`). Commands are line-oriented:
 //!
 //! ```text
 //! :load <file>            load a theory file
@@ -8,7 +23,8 @@
 //! :why <term>             derive, print the certificate's tree, and check it
 //! :gap <term>             explain what is missing for a goal
 //! :cert <term>            derive and print the goal's certificate JSON
-//! :check <file> [goal]    check a certificate, optionally bound to a goal
+//! :verify-cert <file> [goal]
+//!                         check a certificate, optionally bound to a goal
 //! :packs [dir]            list the legal-pack manifests under a directory
 //! :lock [dir]             hash the packs and write the std.lock registry lock
 //! :audit [dir]            check rule-source quotations against article corpora
@@ -87,7 +103,7 @@
 //! `MissingPremise` obligation and an unresolved conflict becomes an
 //! `UnresolvedConflict` obligation in that JSON.
 //!
-//! `:check` requires a loaded theory and runs two layers in order:
+//! `:verify-cert` requires a loaded theory and runs two layers in order:
 //!
 //! 1. [`std_deduce_cert::check`] rebuilds every rule instance and checks the
 //!    recorded `unless` conditions and the root's conflict status;
@@ -102,17 +118,20 @@
 //! parsed, or either layer fails. A logical pass with a kernel failure is
 //! therefore a `2`, never a `0`.
 //!
-//! `:check <file> <goal>` additionally binds the certificate to the goal: after
-//! both layers accept the certificate, the proposition proved by its root must
-//! be definitionally equal to the elaborated goal. A gap root, a missing root
-//! or a different proposition makes the binding fail (exit `2`) and prints
+//! `:verify-cert <file> <goal>` additionally binds the certificate to the goal:
+//! after both layers accept the certificate, the proposition proved by its root
+//! must be definitionally equal to the elaborated goal. A gap root, a missing
+//! root or a different proposition makes the binding fail (exit `2`) and prints
 //! `目标绑定：失败（...）`; a match prints `目标绑定：通过（根命题与目标在内核下等价）`
 //! and keeps the original `0`/`1` outcome. A file path containing whitespace
-//! is written in double quotes before the goal (`:check "<path>" <goal>`);
+//! is written in double quotes before the goal (`:verify-cert "<path>" <goal>`);
 //! without quotes, an argument that is exactly an existing file is taken as a
-//! path, which preserves the old space-containing `:check <file>` form. In all
+//! path, which preserves the unquoted form for a space-containing file. In all
 //! other cases the first whitespace separates the path from the goal. Without a
 //! goal, no binding line is printed and the output is unchanged.
+//!
+//! `:check` is not an alias: it reports that it was renamed to `:verify-cert`
+//! and exits `2`.
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -151,8 +170,8 @@ impl Outcome {
 
 struct Session {
     lib: Library,
-    /// Whether a theory has been loaded. `:check` needs an environment, so it
-    /// refuses to run before any `:load`.
+    /// Whether a theory has been loaded. `:verify-cert` needs an environment,
+    /// so it refuses to run before any `:load`.
     loaded: bool,
 }
 
@@ -164,6 +183,28 @@ impl Session {
         }
     }
 
+    /// Load a theory file into the session and print the load report.
+    ///
+    /// Both `:load` and the batch entry point go through this one function, so
+    /// they cannot report or fail differently. The library load is
+    /// all-or-nothing; `loaded` and `lib` change only after a full success.
+    fn load_theory(&mut self, path: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        let src = std::fs::read_to_string(path).map_err(|e| format!("读取 `{path}` 失败：{e}"))?;
+        let report = self.lib.load(path, &src).map_err(|e| e.to_string())?;
+        self.loaded = true;
+        writeln!(out, "已加载 `{path}`。").ok();
+        for d in &report.declared {
+            writeln!(out, "  + {d}").ok();
+        }
+        for c in &report.checked {
+            writeln!(out, "  ✓ {c}").ok();
+        }
+        for s in &report.shown {
+            writeln!(out, "  · {s}").ok();
+        }
+        Ok(Outcome::Proved)
+    }
+
     fn handle(&mut self, line: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let line = line.trim();
         if line.is_empty() || line.starts_with("--") {
@@ -173,23 +214,7 @@ impl Session {
             let (cmd, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             let arg = arg.trim();
             match cmd {
-                "load" => {
-                    let src = std::fs::read_to_string(arg)
-                        .map_err(|e| format!("读取 `{arg}` 失败：{e}"))?;
-                    let report = self.lib.load(arg, &src).map_err(|e| e.to_string())?;
-                    self.loaded = true;
-                    writeln!(out, "已加载 `{arg}`。").ok();
-                    for d in &report.declared {
-                        writeln!(out, "  + {d}").ok();
-                    }
-                    for c in &report.checked {
-                        writeln!(out, "  ✓ {c}").ok();
-                    }
-                    for s in &report.shown {
-                        writeln!(out, "  · {s}").ok();
-                    }
-                    Ok(Outcome::Proved)
-                }
+                "load" => self.load_theory(arg, out),
                 "inspect" => {
                     // The ledger is flat, so recover each declaration's source
                     // namespace from the theory that recorded it. Case files
@@ -269,7 +294,11 @@ impl Session {
                 }
                 "why" | "gap" => self.query(cmd, arg, out),
                 "cert" => self.export_certificate(arg, out),
-                "check" => self.check_certificate(arg, out),
+                "verify-cert" => self.verify_certificate(arg, out),
+                "check" => Err(
+                    ":check 已改名为 :verify-cert；检查源文件请直接运行 std-deduce <文件>"
+                        .to_owned(),
+                ),
                 "packs" => self.list_packs(arg, out),
                 "lock" => self.lock_packs(arg, out),
                 "audit" => self.audit_sources(arg, out),
@@ -519,26 +548,28 @@ impl Session {
     /// the first whitespace separates the path from the goal. When a goal is
     /// given, the root's proposition must be definitionally equal to it; a gap
     /// root, a missing root and a mismatch all fail the binding (exit `2`).
-    fn check_certificate(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+    fn verify_certificate(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !self.loaded {
-            write_check_not_run(out, "尚未加载理论");
-            return Err("尚未加载理论：:check 需要环境才能校验证书，请先 :load <文件>".into());
+            write_verify_cert_not_run(out, "尚未加载理论");
+            return Err(
+                "尚未加载理论：:verify-cert 需要环境才能校验证书，请先 :load <文件>".into(),
+            );
         }
         if arg.is_empty() {
-            return Err("用法：:check <证书文件> [目标命题]".into());
+            return Err("用法：:verify-cert <证书文件> [目标命题]".into());
         }
-        let (path, goal) = split_check_argument(arg)?;
+        let (path, goal) = split_verify_cert_argument(arg)?;
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) => {
-                write_check_not_run(out, "读取证书失败");
+                write_verify_cert_not_run(out, "读取证书失败");
                 return Err(format!("读取证书 `{path}` 失败：{e}"));
             }
         };
         let certificate = match Certificate::from_json(&text) {
             Ok(certificate) => certificate,
             Err(e) => {
-                write_check_not_run(out, "证书 JSON 无效");
+                write_verify_cert_not_run(out, "证书 JSON 无效");
                 return Err(format!("证书 `{path}` 不是有效的证书 JSON：{e}"));
             }
         };
@@ -1034,17 +1065,17 @@ fn directory_arg(arg: &str, default: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Split `:check`'s argument into a file path and an optional goal.
+/// Split `:verify-cert`'s argument into a file path and an optional goal.
 ///
 /// A leading double quote delimits a path that may contain whitespace; the
 /// rest of the argument is the goal. Without quotes, an argument that names an
-/// existing file is taken whole, which preserves the old `:check <file>` form
-/// for paths containing spaces. Otherwise the first whitespace separates the
-/// path from the goal.
-fn split_check_argument(arg: &str) -> Result<(&str, Option<&str>), String> {
+/// existing file is taken whole, which preserves the unquoted form for paths
+/// containing spaces. Otherwise the first whitespace separates the path from
+/// the goal.
+fn split_verify_cert_argument(arg: &str) -> Result<(&str, Option<&str>), String> {
     let arg = arg.trim();
     if arg.is_empty() {
-        return Err("用法：:check <证书文件> [目标命题]".into());
+        return Err("用法：:verify-cert <证书文件> [目标命题]".into());
     }
     if let Some(rest) = arg.strip_prefix('"') {
         let Some(end) = rest.find('"') else {
@@ -1087,8 +1118,8 @@ fn effective_range(info: &PackInfo) -> String {
     }
 }
 
-/// Print the four labelled lines when `:check` cannot reach either layer.
-fn write_check_not_run(out: &mut impl Write, reason: &str) {
+/// Print the four labelled lines when `:verify-cert` cannot reach either layer.
+fn write_verify_cert_not_run(out: &mut impl Write, reason: &str) {
     writeln!(out, "逻辑校验：未运行（{reason}）").ok();
     writeln!(out, "内核证明：未运行（{reason}）").ok();
     writeln!(out, "侧条件：未评估（{reason}）").ok();
@@ -1327,30 +1358,89 @@ fn parse_term(s: &str) -> Result<std_deduce_lang::ast::Term, String> {
     }
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let mut session = Session::new();
-    let mut out = io::stdout();
+fn print_help(out: &mut impl Write) {
+    writeln!(
+        out,
+        "std-deduce {} — 法律规则演绎系统",
+        env!("CARGO_PKG_VERSION")
+    )
+    .ok();
+    writeln!(out).ok();
+    writeln!(out, "用法：").ok();
+    writeln!(out, "  std-deduce                         进入 REPL").ok();
+    writeln!(
+        out,
+        "  std-deduce <文件.std> [命令...]    加载文件；成功后依次执行后续冒号命令"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  std-deduce check <文件.std> [...]  等价于直接给文件（check 是批处理入口）"
+    )
+    .ok();
+    writeln!(out, "  std-deduce repl                    进入 REPL").ok();
+    writeln!(
+        out,
+        "  std-deduce <冒号命令> [...]        把每个参数当命令执行，例如 :load <文件>"
+    )
+    .ok();
+    writeln!(out, "  std-deduce --help | -h             显示本用法").ok();
+    writeln!(
+        out,
+        "  std-deduce --version | -V          显示版本（std-deduce <version>）"
+    )
+    .ok();
+    writeln!(out).ok();
+    writeln!(
+        out,
+        "证书命令为 :verify-cert <证书文件> [目标命题]；原来的 :check 已改名。"
+    )
+    .ok();
+}
 
-    // Non-interactive: run every argument as a command.
-    if args.len() > 1 {
-        let mut worst = 0;
-        for a in &args[1..] {
-            match session.handle(a, &mut out) {
-                Ok(o) => worst = worst.max(o.exit_code()),
-                Err(e) => {
-                    eprintln!("错误：{e}");
-                    std::process::exit(2);
-                }
+fn print_version(out: &mut impl Write) {
+    writeln!(out, "std-deduce {}", env!("CARGO_PKG_VERSION")).ok();
+}
+
+/// Run every argument as a colon command and return the process exit code.
+///
+/// The worst outcome wins. A command error (including the removed `:check`)
+/// stops the run and is a usage error (`2`).
+fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write) -> i32 {
+    let mut worst = 0;
+    for command in commands {
+        match session.handle(command, out) {
+            Ok(outcome) => worst = worst.max(outcome.exit_code()),
+            Err(error) => {
+                eprintln!("错误：{error}");
+                return 2;
             }
         }
-        if worst != 0 {
-            std::process::exit(worst);
-        }
-        return;
     }
+    worst
+}
 
-    println!("std-deduce 0.1 — 输入 :help 查看命令。");
+/// Load one theory file and then run the remaining commands.
+///
+/// A failed load prints `path: 错误：...` on stderr and exits `1`: the file did
+/// not pass its checks, while the invocation itself was well-formed. Remaining
+/// commands are not run.
+fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut impl Write) -> i32 {
+    if let Err(error) = session.load_theory(file, out) {
+        eprintln!("{file}: 错误：{error}");
+        return 1;
+    }
+    run_commands(session, commands, out)
+}
+
+/// Run the interactive session on stdin, returning the worst command outcome.
+fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
+    writeln!(
+        out,
+        "std-deduce {} — 输入 :help 查看命令。",
+        env!("CARGO_PKG_VERSION")
+    )
+    .ok();
     let stdin = io::stdin();
     let mut worst = 0;
     for line in stdin.lock().lines() {
@@ -1359,24 +1449,57 @@ fn main() {
             break;
         }
         if line.trim() == ":help" {
-            println!(
+            writeln!(
+                out,
                 ":load <文件>  :inspect  :given <命题>  :why <命题>  :gap <命题>  \
-                 :cert <命题>  :check <证书文件> [目标命题]  :packs [目录]  :lock [目录]  \
-                 :audit [目录]（只核对带 quote 的来源）  :quit"
-            );
+                 :cert <命题>  :verify-cert <证书文件> [目标命题]  :packs [目录]  \
+                 :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
+            )
+            .ok();
             continue;
         }
-        match session.handle(&line, &mut out) {
+        match session.handle(&line, out) {
             Ok(outcome) => worst = worst.max(outcome.exit_code()),
-            Err(e) => {
-                println!("错误：{e}");
+            Err(error) => {
+                writeln!(out, "错误：{error}").ok();
                 worst = 2;
             }
         }
     }
     // Interactive mode used to ignore every result; stdin input now settles
     // the exit code on the worst command, the same way argv mode does.
-    if worst != 0 {
-        std::process::exit(worst);
+    worst
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut session = Session::new();
+    let mut out = io::stdout();
+
+    let code = match args.first().map(String::as_str) {
+        None => run_repl(&mut session, &mut out),
+        Some("--help" | "-h") => {
+            print_help(&mut out);
+            0
+        }
+        Some("--version" | "-V") => {
+            print_version(&mut out);
+            0
+        }
+        Some("repl") if args.len() == 1 => run_repl(&mut session, &mut out),
+        Some("repl") => {
+            eprintln!("错误：用法：std-deduce repl（不接受额外参数）");
+            2
+        }
+        Some("check") if args.len() >= 2 => run_batch(&mut session, &args[1], &args[2..], &mut out),
+        Some("check") => {
+            eprintln!("错误：用法：std-deduce check <文件.std> [命令...]");
+            2
+        }
+        Some(first) if first.starts_with(':') => run_commands(&mut session, &args, &mut out),
+        Some(_) => run_batch(&mut session, &args[0], &args[1..], &mut out),
+    };
+    if code != 0 {
+        std::process::exit(code);
     }
 }

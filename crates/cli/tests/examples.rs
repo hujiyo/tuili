@@ -25,7 +25,7 @@ fn example(name: &str) -> String {
 }
 
 fn run(commands: Vec<String>) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_std-deduce-cli"))
+    Command::new(env!("CARGO_BIN_EXE_std-deduce"))
         .args(commands)
         .output()
         .unwrap_or_else(|e| panic!("failed to run the CLI: {e}"))
@@ -400,7 +400,7 @@ fn negation_experiment_two_fake_proof_is_rejected_at_load() {
 }
 
 /// A proved root is not a successful query if the same certificate still
-/// carries an unrelated unresolved conflict: `:check` would exit `1`, and
+/// carries an unrelated unresolved conflict: `:verify-cert` would exit `1`, and
 /// `:why` must not report a cleaner result than the certificate checker.
 #[test]
 fn a_proved_root_with_an_unrelated_unresolved_conflict_is_not_a_success() {
@@ -540,7 +540,7 @@ pred 违法 : 公民 → Prop
 obj 张三 : 公民
 "#,
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_std-deduce-cli"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_std-deduce"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

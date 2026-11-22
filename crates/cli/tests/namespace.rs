@@ -77,7 +77,7 @@ impl Drop for TempDir {
 }
 
 fn run(commands: Vec<String>) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_std-deduce-cli"))
+    Command::new(env!("CARGO_BIN_EXE_std-deduce"))
         .args(commands)
         .output()
         .unwrap_or_else(|e| panic!("failed to run the CLI: {e}"))

@@ -69,6 +69,17 @@ unique 应适用 1           -- 一个谓词的第 1 个参数单值：同一案
 cargo run -p std-deduce-cli
 ```
 
+无参数进入 REPL。也可以像 Lean 一样直接加载一个文件后退出：
+
+```powershell
+cargo run -q -p std-deduce-cli -- examples/constitution-39.std
+```
+
+二进制名是 `std-deduce`，包名仍是 `std-deduce-cli`。批处理加载失败时 stderr 为
+`路径: 错误：...` 并以 `1` 退出；`std-deduce check <文件.std>` 与直接给文件等价；
+`std-deduce repl` 显式进入 REPL；`--help` / `-h` 打印用法，`--version` / `-V` 打印
+`std-deduce <版本>`。
+
 交互命令：
 
 | 命令 | 作用 |
@@ -79,18 +90,18 @@ cargo run -p std-deduce-cli
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导 |
 | `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告 |
 | `:cert <命题>` | 跑推理并把该目标的证书 JSON（缩进）写到 stdout；推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations` |
-| `:check <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 JSON：先跑 `cert::check`，再跑 `kernel_proof`，两段分开报告；必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标 |
+| `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 JSON：先跑 `cert::check`，再跑 `kernel_proof`，两段分开报告；必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标 |
 | `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、描述与文件数；若目录里有 `std.lock`，再重新哈希并校验；不导入规则，不要求 `:load` |
 | `:lock [目录]` | 对目录（默认 `lawpacks`）里的所有包计算内容哈希，写入 `<目录>/std.lock`；坏包/坏文件/重复包名时打印错误并退出 `2`，不写部分锁 |
 | `:audit [目录]` | 只核对已加载理论里 `quote` 非空的 `source`：法名匹配语料标题/别名，版本、条号、引文（删除全部空白后逐字比较）、条文哈希（条文原文含换行的 SHA-256）与管辖逐项检查；`quote` 为空的来源不参与核对，单独计数且不影响退出码。默认语料目录 `law/corpus`，按 `<law>/<version>.json` 严格布局。至少一条带引文来源且全部命中才退出 `0`；一条带引文来源都没有时报“没有可核对的引文”并退出 `1`；坏语料退出 `2` |
 
 `:cert` 的 JSON 写在 `:load` 报告之后，从第一个 `{` 起才是证书。保存证书后，
-在另一个会话里加载同一理论再检查：
+在另一个会话里加载同一理论再检查（`:check` 已改名为 `:verify-cert`）：
 
 ```powershell
 cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':cert 不受侵犯 张三 甲宅'
 # 把上一条输出中第一个 { 起的内容保存为 cert.json
-cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':check cert.json'
+cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':verify-cert cert.json'
 ```
 
 非交互模式（命令行参数）的退出码如下：
@@ -100,15 +111,18 @@ cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':check c
 | `:why` | 两层证书检查都通过、根已证明且无未决义务 | 缺口、未决冲突、被否决的结论，或根已证明但仍有未决义务 | 命令/解析错误、证书生成或渲染失败，或任一层证书检查失败 |
 | `:gap` | 目标可以推出 | 缺口、未决冲突或被否决的结论 | 命令或解析错误 |
 | `:cert` | 根已证明 | 根是缺口 | 用法、解析、转换或序列化错误 |
-| `:check` | 两段都通过、根已证明且无未决义务 | 两段都通过，但根是缺口 / 有 `open_obligations` / 有未决冲突 | 未加载、读不到、坏 JSON、逻辑校验失败、内核证明失败，或给了目标但根命题不等价/根为缺口/没有根 |
+| `:verify-cert` | 两段都通过、根已证明且无未决义务 | 两段都通过，但根是缺口 / 有 `open_obligations` / 有未决冲突 | 未加载、读不到、坏 JSON、逻辑校验失败、内核证明失败，或给了目标但根命题不等价/根为缺口/没有根 |
 | `:packs` | 扫描成功；空目录也是成功 | 当前没有 `1` 的结局 | 目录不存在/不可读、坏清单/坏目录项，或 `std.lock` 校验失败（好包仍会列出） |
 | `:lock` | 所有包成功扫描并写入锁 | 当前没有 `1` 的结局 | 目录/清单/包内文件错误、重复包名或写锁失败；不写部分锁 |
 | `:audit` | 至少一条带引文来源，且全部命中 | 没有带引文来源（没有可核对的引文），或有引文来源未命中/未核对 | 尚未 `:load`，或语料本身坏了（坏布局、坏 JSON、重复 `(law, version)`） |
+| `std-deduce <文件.std>` | 文件加载成功，且后续命令全部成功 | 文件加载失败，或后续查询是缺口/未决冲突 | 后续命令错误或用法错误 |
 
 也可以一次性执行：
 
 ```powershell
 cargo run -q -p std-deduce-cli -- ':load examples/constitution-39.std' ':why 不受侵犯 张三 甲宅'
+# 批处理入口：先加载文件，再依次执行后面的命令
+cargo run -q -p std-deduce-cli -- examples/constitution-39.std ':why 不受侵犯 张三 甲宅'
 ```
 
 输出示例：
@@ -365,9 +379,11 @@ rule cn.constitution.非法搜查即侵犯 :
   （标题/别名、版本、条号、
   空白归一化后的逐字引文、条文原文含换行的 SHA-256、管辖）。`text_sha256` 只校验形状，是出处元数据，
   不重算也不校验。该 crate 依赖 `serde` / `serde_json` / `toml` / `sha2`。
-- **`crates/cli`**：会话与命令；`:why` 生成证书、从证书渲染推导树，并对同一份证书依次运行
-  `cert::check` 与 `cert::kernel_proof`；冲突分支展示的推导同样从证书渲染并用 `cert::check` 复核。
-  `:cert` 导出证书，`:check` 依次运行 `cert::check` 与 `cert::kernel_proof`，把逻辑、内核、侧条件和需人判断分成四行报告；
+- **`crates/cli`**：`std-deduce` 二进制的批处理入口把第一个文件参数交给与 `:load` 相同的加载路径，
+  成功后执行剩余命令；加载失败打印 `路径: 错误：...` 并退出 `1`。会话命令里，`:why` 生成证书、从证书渲染
+  推导树，并对同一份证书依次运行 `cert::check` 与 `cert::kernel_proof`；冲突分支展示的推导同样从证书渲染
+  并用 `cert::check` 复核。`:cert` 导出证书，`:verify-cert` 依次运行 `cert::check` 与 `cert::kernel_proof`，
+  把逻辑、内核、侧条件和需人判断分成四行报告；
   可选的目标绑定要求证书根命题与目标内核等价。`:packs` 扫描清单、在有锁时重新哈希校验，`:lock` 生成锁；
   `:audit` 只核对带 `quote` 的来源；无 `quote` 的来源不参与核对、不影响退出码；汇总后按语料打印
   `coverage` 声明的形式化/索引/开放概念计数与列表。三者都转义外部文本
@@ -384,12 +400,12 @@ rule cn.constitution.非法搜查即侵犯 :
   根是缺口时明确说明"证书有效，但根为缺口，结论未被证明。"并以 `1` 退出；
   任一层失败时报告失败层并以 `2` 退出。冲突分支展示的推导同样先转成证书再渲染，并用 `cert::check` 复核。
   `:why` 送检的是整份推导证书（含与目标无关的事实节点），不是只检查根可达子图；
-  保守闭包若拒绝无关节点，`:why` 也会以 `2` 退出，与 `:check` 的立场一致。
-- `:check` 依次运行两段：`cert::check` 检查规则实例、阻断条件与根冲突状态，
+  保守闭包若拒绝无关节点，`:why` 也会以 `2` 退出，与 `:verify-cert` 的立场一致。
+- `:verify-cert` 依次运行两段：`cert::check` 检查规则实例、阻断条件与根冲突状态，
   `kernel_proof` 再把单调骨架翻译成证明项交给内核。逻辑通过但内核失败时退出 `2`，
   不会把"逻辑有效"当成"证书有效"；`kernel_proof` 本身仍不检查 `unless` 和优先级。
   带目标时还要求证书根命题与目标内核等价：证书本身合法但证明的是另一个命题，仍以 `2` 退出。
-  这一绑定只在调用者给出目标时生效；`:check <file>` 单独使用仍只回答"这份证书自身是否有效"。
+  这一绑定只在调用者给出目标时生效；`:verify-cert <file>` 单独使用仍只回答"这份证书自身是否有效"。
 - `:packs` 只读清单与锁：坏清单、悬空符号链接、越界 junction 都会报错并退出 `2`，好包仍会列出；
   清单里的 description、路径与错误文本会先转义控制字符，不能借换行或终端转义伪造输出行。
   目录里有 `std.lock` 时会重新扫描并哈希：缺包、多包、版本不符、哈希不符或锁本身是符号链接都退出 `2`；
@@ -489,7 +505,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 404 个：kernel 19、lang 48、reason 41、cert 101、cli 94、lawpack 101（含 1 个 doc test）。
+`cargo test --workspace` 共 415 个：kernel 19、lang 48、reason 41、cert 101、cli 105、lawpack 101（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -558,13 +574,19 @@ cargo test --workspace
 - `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
   `[ns]` 后缀；限定名 `:why` 通过证书复核；`a` 的事实不满足 `b` 的目标；交换两个模块的加载顺序后
   `:why` / `:cert` 结果一致；模块内未限定引用加载失败。
-- `crates/cli/tests/cert.rs`（19）：`:cert` / `:check` 端到端——导出的 JSON 往返并通过检查器；
-  `:check` 分行报告逻辑与内核两段；缺口证书退出 `1` 且产生 `MissingPremise`；
+- `crates/cli/tests/cert.rs`（20）：`:cert` / `:verify-cert` 端到端——导出的 JSON 往返并通过检查器；
+  `:verify-cert` 分行报告逻辑与内核两段；缺口证书退出 `1` 且产生 `MissingPremise`；
   未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在逻辑层失败；
   逻辑层接受、内核因绑定类型不符拒绝时退出 `2` 并给出节点；证书不存在、不是 JSON、未 `:load` 时失败。
   另含目标绑定与单点变异：删前提、换绑定、换结论、复用错误节点、追加已成立 blocker、
   改根后带目标失败/不带目标仍合法、合法目标通过、缺口根不能绑定目标、定义等价目标通过；
-  以及含空格路径（不加引号只当路径、加引号可带目标）、缺根、目标无法解析。
+  以及含空格路径（不加引号只当路径、加引号可带目标）、缺根、目标无法解析；
+  旧 `:check` 不再作为别名，报改名错误并退出 `2`。
+- `crates/cli/tests/entry.rs`（10）：二进制入口端到端——批处理加载成功退出 `0` 并打印加载报告；
+  坏文件退出 `1`，stderr 带路径与错误且不执行后续命令；含空格路径按单个参数加载；
+  `check` 子命令与直接给文件输出一致；加载后继续执行 `:why`；`--help` / `-h` 列出批处理与
+  `:verify-cert`；`--version` / `-V` 输出 `std-deduce <版本>`；无参数与 `repl` 都进入 REPL；
+  `check` 缺文件与 `repl` 带多余参数报用法错误（`2`）。
 - `crates/cli/tests/audit.rs`（29）：`:audit` 端到端——带引文来源命中与正确哈希退出 `0`；规则带正确 `quote`
   加事实 `axiom` 无 `quote` 时仍退出 `0`（1 命中、1 无引文）；只有无引文来源时退出 `1` 并报“没有可核对的引文”，
   但仍打印覆盖声明；改一个字、哈希不符或格式非法、版本不符、无条号、多版本歧义、无对应语料、管辖不符退出 `1`；
