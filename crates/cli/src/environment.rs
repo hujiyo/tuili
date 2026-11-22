@@ -12,10 +12,13 @@
 //! Preparation is lazy: `:packs`, `:lock`, `:inspect` and a REPL that never
 //! loads a file do not touch it. The whole preparation runs on the caller's
 //! cloned [`Library`] and package list, so a profile, lock, version, trust or
-//! package error leaves the session untouched. Certificates stay v2 and do not
-//! record the environment; that identity belongs to certificate v3.
+//! package error leaves the session untouched. Its preload report is returned
+//! to the caller and printed only after the whole load commits, so a file that
+//! fails afterwards never claims the environment loaded. Certificates stay v2
+//! and do not record the environment; that identity belongs to certificate v3.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -83,14 +86,17 @@ impl Environment {
     /// profile, a bad lock, a missing pack, a version mismatch and insufficient
     /// trust all fail. Explicit `--profile` requires the registry and the
     /// profile. The already-selected state is reused on later loads.
+    ///
+    /// The returned preload report is not printed here: the caller prints it
+    /// only after the whole load commits, so a file that fails after a
+    /// successful environment preparation never claims the environment loaded.
     pub(crate) fn ensure_loaded(
         &mut self,
         lib: &mut Library,
         packs: &mut Vec<LoadedPackInfo>,
-        out: &mut impl Write,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         if !matches!(self.state, State::Uninitialized) {
-            return Ok(());
+            return Ok(None);
         }
         let cwd = current_dir()?;
         let root = cwd.join("lawpacks");
@@ -103,7 +109,7 @@ impl Environment {
                 ));
             }
             self.state = State::Disabled;
-            return Ok(());
+            return Ok(None);
         }
 
         let profiles = scan_profiles(&root).map_err(render_profile_errors)?;
@@ -115,7 +121,7 @@ impl Environment {
                 Some(profile) => profile.clone(),
                 None => {
                     self.state = State::Disabled;
-                    return Ok(());
+                    return Ok(None);
                 }
             },
         };
@@ -128,29 +134,37 @@ impl Environment {
             lib,
             packs,
         )?;
-        print_preload(&active, &packs[start..], out)?;
+        let report = preload_report(&active, &packs[start..])?;
         self.state = State::Enabled(active);
-        Ok(())
+        Ok(Some(report))
     }
 
-    /// Append the `--no-default-packs` hint to a load error, when useful.
+    /// Append the `--no-default-packs` hint to a failed file load, when useful.
     ///
     /// The hint only diagnoses a closed environment; it never changes an exit
-    /// code. Reading the default profile here is explicitly best-effort: if the
-    /// registry or profile cannot be read in the closed mode, no hint is added
-    /// and the original error is returned unchanged.
-    pub(crate) fn annotate_error(&self, error: String) -> String {
+    /// code. `imports` are the file's own import list: a pack the file already
+    /// imports is not a missing environment pack, so an unknown name under it
+    /// is the file's own problem and gets no hint. The owning pack is looked up
+    /// in the current registry (every manifest's name and namespace, longest
+    /// prefix), so a dependency of the profile is named too. Reading the
+    /// registry here is explicitly best-effort: if it cannot be scanned, no
+    /// hint is added and the original error is returned unchanged.
+    pub(crate) fn annotate_error(&self, error: String, imports: &[String]) -> String {
         if !matches!(self.state, State::Closed) {
             return error;
         }
         let Some(name) = unknown_name(&error) else {
             return error;
         };
-        let Some(pack) = self.default_pack_for(name) else {
+        let Some(pack) = self.pack_for_name(name) else {
             return error;
         };
+        if imports.contains(&pack) {
+            return error;
+        }
         format!(
-            "{error}\n提示：`{}` 来自默认环境包 `{}`；--no-default-packs 已关闭默认环境，请写 `import {}` 或去掉该选项。",
+            "{error}\n提示：`{}` 可能来自法律包 `{}`；--no-default-packs 已关闭默认环境，\
+             请写 `import {}` 或去掉 --no-default-packs。",
             escape_path(name),
             escape_path(&pack),
             escape_path(&pack)
@@ -175,21 +189,33 @@ impl Environment {
         Some(format!("（环境外：{}）", pack.trust))
     }
 
-    /// The default profile's direct pack that owns `name`, if readable.
+    /// The registry pack whose name or namespace owns `name`, if readable.
     ///
-    /// This is a diagnostic helper for the closed mode: it reads the default
-    /// profile from the current directory and gives up silently when the
-    /// registry or profile is unavailable. It is not a load path.
-    fn default_pack_for(&self, name: &str) -> Option<String> {
+    /// This is a diagnostic helper for the closed mode: it scans the current
+    /// directory's registry and matches the longest declared name/namespace
+    /// prefix, so a dependency pack of the default profile is found too. It
+    /// gives up silently when the registry is unavailable; it is not a load
+    /// path.
+    fn pack_for_name(&self, name: &str) -> Option<String> {
         let cwd = std::env::current_dir().ok()?;
-        let profiles = scan_profiles(&cwd.join("lawpacks")).ok()?;
-        let profile = select_default(&profiles).ok()??;
-        profile
-            .packs
-            .iter()
-            .filter(|pack| name.starts_with(&format!("{}.", pack.name)))
-            .max_by_key(|pack| pack.name.len())
-            .map(|pack| pack.name.clone())
+        let found = std_deduce_lawpack::scan(&cwd.join("lawpacks")).ok()?;
+        let mut best: Option<(usize, String)> = None;
+        for pack in &found.packs {
+            let info = &pack.manifest.pack;
+            let candidates = std::iter::once(&info.name).chain(info.namespace.as_ref());
+            for candidate in candidates {
+                if !name.starts_with(&format!("{candidate}.")) {
+                    continue;
+                }
+                let better = best
+                    .as_ref()
+                    .is_none_or(|(length, _)| candidate.len() > *length);
+                if better {
+                    best = Some((candidate.len(), info.name.clone()));
+                }
+            }
+        }
+        best.map(|(_, pack)| pack)
     }
 }
 
@@ -335,16 +361,13 @@ fn ensure_trust(profile: &Profile, pack: &str, actual: Trust) -> Result<(), Stri
     ))
 }
 
-/// Print the preload lines before the theory's own load report.
-fn print_preload(
-    active: &Active,
-    infos: &[LoadedPackInfo],
-    out: &mut impl Write,
-) -> Result<(), String> {
+/// Build the preload lines printed before the theory's own load report.
+fn preload_report(active: &Active, infos: &[LoadedPackInfo]) -> Result<String, String> {
     let allowed_non_official =
         active.allow_community_packs && infos.iter().any(|info| info.trust < Trust::Official);
+    let mut report = String::new();
     writeln!(
-        out,
+        report,
         "默认环境 {}：已加载 {} 个包{}",
         active.profile.name,
         infos.len(),
@@ -354,7 +377,7 @@ fn print_preload(
             ""
         }
     )
-    .ok();
+    .expect("写入 String 不会失败");
 
     let direct: BTreeSet<&str> = active
         .profile
@@ -367,20 +390,21 @@ fn print_preload(
             .iter()
             .find(|info| info.name == entry.name)
             .ok_or_else(|| format!("内部错误：默认环境包 `{}` 没有加载记录", entry.name))?;
-        writeln!(out, "  {}@{}（{}）", info.name, info.version, info.trust).ok();
+        writeln!(report, "  {}@{}（{}）", info.name, info.version, info.trust)
+            .expect("写入 String 不会失败");
     }
     for info in infos {
         if direct.contains(info.name.as_str()) {
             continue;
         }
         writeln!(
-            out,
+            report,
             "  {}@{}（{}，依赖）",
             info.name, info.version, info.trust
         )
-        .ok();
+        .expect("写入 String 不会失败");
     }
-    Ok(())
+    Ok(report)
 }
 
 /// Print the success report of `std env`.

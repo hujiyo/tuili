@@ -258,8 +258,9 @@ profile 时不启用默认环境，也不打开注册表校验锁；纯逻辑文
 依赖闭包中不在 profile 直接列表里的包标成 `（依赖）`。
 
 默认环境只在第一次加载时懒加载，`:packs` / `:lock` / `:inspect` 和纯 REPL 启动不触发。
-加载在克隆的 `Library` 与包记录上进行，失败不会留下半加载的声明或包记录。预加载报告在文件
-加载报告之前打印：
+加载在克隆的 `Library` 与包记录上进行，失败不会留下半加载的声明或包记录。预加载报告只有在
+**本次文件加载整体成功**后才打印；环境准备成功但文件随后失败时，报告被丢弃，REPL 下一次成功
+加载会重新准备并打印一次。成功时预加载报告在文件加载报告之前打印：
 
 ```
 默认环境 cn.default：已加载 1 个包
@@ -275,9 +276,12 @@ profile 时不启用默认环境，也不打开注册表校验锁；纯逻辑文
 cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-默认环境.std ':why cn.constitution.不受侵犯 张三 甲宅'
 ```
 
-`--no-default-packs` 下文件使用未加载的 `cn.constitution.*` 名字而失败时，错误后追加一行提示，
-指出来自哪个默认环境包，并建议写 `import cn.constitution` 或去掉该选项。提示只做诊断，不改变
-退出码：批处理仍 `1`，`:load` 仍 `2`。显式 import 一个环境外的包仍是用户的决定，系统不禁止。
+`--no-default-packs` 下文件本身加载失败、且错误是 `未知名称 \`...\`` 时，错误后追加一行提示：
+按当前 `lawpacks/` 注册表里所有清单的 `name` / `namespace` 最长前缀匹配，指出该名字可能来自哪个
+法律包，并建议写 `import <包名>` 或去掉 `--no-default-packs`。文件已经 import 该包时不提示
+（名字不存在是文件自己的问题）；依赖闭包里的包也能被命名。提示只做诊断，只在文件加载失败时
+出现，不改变退出码：批处理仍 `1`，`:load` 仍 `2`。显式 import 一个环境外的包仍是用户的决定，
+系统不禁止。
 
 临时注册表示例：
 
@@ -563,7 +567,8 @@ pred cn.criminal.盗窃 : cn.constitution.公民 → Prop
   `Session` 供 `:inspect` 显示 `[name@version]`；没有 `import` 且默认环境未启用/已关闭、或 import
   全部已由文件加载时不读取注册表。环境选项只在开头连续解析；第一次 `:load` 时 `environment` 模块
   按 profile 在克隆的库与包记录上加载默认环境（失败整体回滚），`std-deduce env` 独立检查并加载
-  环境且只用 `0`/`2` 退出码；`--no-default-packs` 关闭预加载并给缺包错误追加诊断提示。
+  环境且只用 `0`/`2` 退出码；`--no-default-packs` 关闭预加载，并给文件本身加载失败时的缺包
+  错误追加诊断提示（已 import 该包或查询错误不提示）。
   `:packs` 扫描清单、在有锁时重新哈希校验，`:lock` 生成锁；
   `:audit` 只核对带 `quote` 的来源；无 `quote` 的来源不参与核对、不影响退出码；汇总后按语料打印
   `coverage` 声明的形式化/索引/开放概念计数与列表。除 `:load` 的包文件外，三者都只读不导入规则，
@@ -698,7 +703,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 538 个：kernel 19、lang 76、reason 41、cert 101、cli 174、lawpack 127（含 1 个 doc test）。
+`cargo test --workspace` 共 543 个：kernel 19、lang 76、reason 41、cert 101、cli 179、lawpack 127（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -777,7 +782,7 @@ cargo test --workspace
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
   另有一条 `:inspect` 用例：结构化来源字段逐行输出，引文中的换行被转义、不会破坏行结构；
   两条 `:given` 用例（argv 与 stdin 交互）：登记事实的来源显示为「用户输入交互会话」，不出现空 `「」`。
-- `crates/cli/tests/environment.rs`（22）：默认环境与 `std env` 端到端——仓库根下 `env` 打印
+- `crates/cli/tests/environment.rs`（27）：默认环境与 `std env` 端到端——仓库根下 `env` 打印
   `cn.default`、description、`official`、版本映射与锁哈希、锁校验与环境加载通过；`--profile cn`
   解析别名；`--no-default-packs` 下 env 报告未启用但仍校验锁，事实-only 示例加载失败并追加
   包名与 `import` 提示，显式导入示例仍通过；事实-only 示例在默认环境下 `:why` 证明并先打印预加载行；
@@ -785,7 +790,9 @@ cargo test --workspace
   临时注册表验证 profile 只加载环境内 official 包（`:inspect` 不含社区声明）、显式导入社区包标
   `（环境外：community）`、依赖闭包计入环境与预加载计数、社区包进 profile 需
   `--allow-community-packs`、版本不符/缺包/坏 profile/坏 theory/坏锁的错误与回滚；没有默认 profile 时
-  批处理不打开注册表；没有 `lawpacks/` 时纯逻辑文件照常工作。
+  批处理不打开注册表；没有 `lawpacks/` 时纯逻辑文件照常工作；环境准备成功但文件随后失败时
+  不打印预加载行、REPL 重试只打印一次；缺包提示只出现在文件加载失败、已 import 的包不提示、
+  profile 依赖包能被命名、`:why` 等查询错误不追加提示。
 - `crates/cli/tests/official_pack.rs`（5）：官方宪法包端到端——`:packs lawpacks` 列出
   `cn.constitution 0.1.0`、文件数与通过锁校验；导入示例的 `:why` 证明第三十九条；
   `:inspect` 对包内 5 个声明显示 `[cn.constitution@0.1.0]`；加载官方示例后，用户文件若声明

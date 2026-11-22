@@ -27,8 +27,10 @@
 //! version constraints and trust level, and they are loaded before the file.
 //! A failed preparation fails the load. `--no-default-packs` turns this off
 //! without affecting explicit imports; `--profile` selects a profile by name or
-//! alias. Profiles and the environment are session objects only: certificates
-//! remain v2 and do not record them.
+//! alias. The preload lines are printed only after the whole load commits, so a
+//! failed file never claims that the environment loaded. Profiles and the
+//! environment are session objects only: certificates remain v2 and do not
+//! record them.
 //!
 //! A batch load uses the same path as `:load`, so it prints the same report. A
 //! file that does not pass its checks prints `path:line:col: error: ...` on
@@ -384,7 +386,8 @@ impl Session {
     /// The first load first prepares the default legal environment when the
     /// current directory declares one. The whole load runs on cloned session
     /// state: a failed environment preparation, import, package or file load
-    /// leaves no declarations or package records behind. Imports resolve against
+    /// leaves no declarations or package records behind, and the preload report
+    /// is printed only after the file load commits. Imports resolve against
     /// the session's loaded namespaces first: one that a file already introduced
     /// needs no registry, while one that came from a pack is still re-checked
     /// for version/hash drift. Only the remaining imports scan the registry
@@ -406,7 +409,7 @@ impl Session {
         let mut lib = self.lib.clone();
         let mut loaded_packs = self.packs.clone();
         let mut environment = self.environment.clone();
-        environment.ensure_loaded(&mut lib, &mut loaded_packs, out)?;
+        let preload = environment.ensure_loaded(&mut lib, &mut loaded_packs)?;
 
         // A top-level file may not declare inside a namespace a loaded pack
         // owns: the flat ledger would merge them and `:inspect` could not tell
@@ -442,12 +445,24 @@ impl Session {
         }
 
         // The case/module file itself is loaded last, after its dependencies.
-        // If it fails, the cloned library and package list are dropped.
-        let report = lib.load(path, &src).map_err(|e| e.render(path))?;
+        // If it fails, the cloned library and package list are dropped and the
+        // pending preload report is never printed.
+        let report = match lib.load(path, &src) {
+            Ok(report) => report,
+            Err(error) => {
+                let error = error.render(path);
+                return Err(environment.annotate_error(error, &imports));
+            }
+        };
         self.lib = lib;
         self.packs = loaded_packs;
         self.environment = environment;
         self.loaded = true;
+        // The preload lines are printed only now that the whole load committed:
+        // a failed file never claims that the environment loaded.
+        if let Some(report) = preload {
+            write!(out, "{report}").ok();
+        }
         self.print_load_report(path, &report, out);
         Ok(Outcome::Proved)
     }
@@ -1783,7 +1798,7 @@ fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write
         match session.handle(command, out) {
             Ok(outcome) => worst = worst.max(outcome.exit_code()),
             Err(error) => {
-                eprintln!("错误：{}", session.environment.annotate_error(error));
+                eprintln!("错误：{error}");
                 return 2;
             }
         }
@@ -1800,7 +1815,7 @@ fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write
 /// commands are not run.
 fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut impl Write) -> i32 {
     if let Err(error) = session.load_theory(file, out) {
-        eprintln!("{}", session.environment.annotate_error(error));
+        eprintln!("{error}");
         return 1;
     }
     run_commands(session, commands, out)
@@ -1834,7 +1849,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
         match session.handle(&line, out) {
             Ok(outcome) => worst = worst.max(outcome.exit_code()),
             Err(error) => {
-                writeln!(out, "错误：{}", session.environment.annotate_error(error)).ok();
+                writeln!(out, "错误：{error}").ok();
                 worst = 2;
             }
         }

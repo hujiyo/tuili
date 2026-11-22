@@ -303,6 +303,120 @@ fn a_repl_load_with_no_default_packs_gets_the_same_pack_hint() {
 }
 
 #[test]
+fn a_file_that_fails_after_environment_preparation_prints_no_preload_lines() {
+    let temp = TempDir::new("file-fails-after-env");
+    let file = temp.write("bad.std", "obj 张三 : cn.constitution.不存在\n");
+    let path = file.display().to_string();
+    let output = check_stderr(
+        run_in(&repo_root(), &args(&[path.as_str()])),
+        LOAD_FAILED,
+        &["未知名称"],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("默认环境"),
+        "a failed file load must not claim the environment loaded:\n{out}"
+    );
+    assert!(
+        !out.contains("已加载"),
+        "a failed file load prints no report:\n{out}"
+    );
+}
+
+#[test]
+fn a_repl_retry_prints_the_preload_lines_only_once() {
+    let temp = TempDir::new("repl-preload-once");
+    let bad = temp.write("bad.std", "obj 张三 : cn.constitution.不存在\n");
+    let input = format!(
+        ":load {}\n:load {}\n:quit\n",
+        bad.display(),
+        example("宪法第三十九条-默认环境.std")
+    );
+    let output = run_repl_in(&repo_root(), &[], &input);
+    let code = output.status.code();
+    let out = stdout(&output);
+    let err = stderr(&output);
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "the failed first :load keeps the worst exit code\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert_eq!(
+        out.matches("默认环境 cn.default").count(),
+        1,
+        "the failed attempt discards its report; only the successful load prints it:\n{out}"
+    );
+    assert!(out.contains("已加载 `"), "the second load succeeds:\n{out}");
+}
+
+#[test]
+fn an_imported_pack_gets_no_missing_pack_hint() {
+    let temp = TempDir::new("imported-name-no-hint");
+    let file = temp.write(
+        "bad.std",
+        "import cn.constitution\nobj 张三 : cn.constitution.不存在\n",
+    );
+    let path = file.display().to_string();
+    let output = check_stderr(
+        run_in(&repo_root(), &args(&["--no-default-packs", path.as_str()])),
+        LOAD_FAILED,
+        &["未知名称", "cn.constitution.不存在"],
+    );
+    let err = stderr(&output);
+    assert!(
+        !err.contains("提示：") && !err.contains("请写 `import"),
+        "an already imported pack is not a missing environment pack:\n{err}"
+    );
+}
+
+#[test]
+fn a_missing_name_inside_a_profile_dependency_is_named_in_the_hint() {
+    let temp = TempDir::new("dependency-hint");
+    temp.write_pack("pkg.b", "0.1.0", "official", &theory("pkg.b"));
+    temp.write_pack(
+        "pkg.a",
+        "0.1.0",
+        "official",
+        &theory_importing("pkg.a", "pkg.b"),
+    );
+    temp.write_profile(
+        "cn.default.toml",
+        &profile_text("cn.default", None, &[("pkg.a", "0.1")]),
+    );
+    temp.lock();
+
+    let file = temp.write("bad.std", "obj 张三 : pkg.b.公民\n");
+    let path = file.display().to_string();
+    let output = check_stderr(
+        run_in(temp.path(), &args(&["--no-default-packs", path.as_str()])),
+        LOAD_FAILED,
+        &["提示：", "可能来自法律包 `pkg.b`", "import pkg.b"],
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("--no-default-packs"),
+        "the hint offers removing the flag:\n{err}"
+    );
+}
+
+#[test]
+fn a_query_error_gets_no_missing_pack_hint() {
+    let output = check_stderr(
+        run_in(
+            &repo_root(),
+            &args(&["--no-default-packs", ":why cn.constitution.不存在 张三"]),
+        ),
+        ERROR,
+        &["未知名称"],
+    );
+    assert!(
+        !stderr(&output).contains("提示："),
+        "the hint is only for failed file loads:\n{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn an_explicit_import_still_works_with_no_default_packs() {
     let output = check(
         run_in(
