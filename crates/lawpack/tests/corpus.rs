@@ -14,7 +14,8 @@ const TEXT_39_SHA256: &str =
     "sha256:b0102d49a2563dde914e6247384e97403529aeb110f467434e620d1d08735fdb";
 const ABC_SHA256: &str = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
-/// The 64-digit hash used by the general fixture; only its shape matters.
+/// SHA-256 of the staging constitution text. The repository corpus records the
+/// same value as provenance; the general fixture only relies on its shape.
 const FIXTURE_SHA256: &str =
     "sha256:ee6e873b9595a23b87d25fde0dfa9324dd9c338e71bfdd952dd08e06ae798749";
 
@@ -66,8 +67,19 @@ fn constitution_json() -> String {
 
 /// Insert a coverage declaration into the fixture corpus.
 fn constitution_with_coverage(formalized: &str, open_concepts: &str) -> String {
+    constitution_with_coverage_fields(formalized, open_concepts, Some("声明"))
+}
+
+fn constitution_with_coverage_fields(
+    formalized: &str,
+    open_concepts: &str,
+    notes: Option<&str>,
+) -> String {
+    let notes = notes
+        .map(|notes| format!(",\n    \"notes\": \"{notes}\""))
+        .unwrap_or_default();
     let coverage = format!(
-        "  \"coverage\": {{\n    \"formalized\": [{formalized}],\n    \"open_concepts\": [{open_concepts}],\n    \"notes\": \"声明\"\n  }},\n"
+        "  \"coverage\": {{\n    \"formalized\": [{formalized}],\n    \"open_concepts\": [{open_concepts}]{notes}\n  }},\n"
     );
     constitution_json().replace("  \"articles\": [", &format!("{coverage}  \"articles\": ["))
 }
@@ -143,6 +155,49 @@ fn article_number_value(number: &str) -> u32 {
         }
     }
     total + current
+}
+
+/// Render an article number in the canonical Chinese form used by the corpus.
+fn canonical_article_number(value: u32) -> String {
+    let digit = |value: u32| {
+        "零一二三四五六七八九"
+            .chars()
+            .nth(value as usize)
+            .unwrap_or_else(|| panic!("not a digit: {value}"))
+    };
+    let below_hundred = |value: u32| -> String {
+        if value < 10 {
+            digit(value).to_string()
+        } else if value < 20 {
+            if value == 10 {
+                "十".to_owned()
+            } else {
+                format!("十{}", digit(value % 10))
+            }
+        } else if value.is_multiple_of(10) {
+            format!("{}十", digit(value / 10))
+        } else {
+            format!("{}十{}", digit(value / 10), digit(value % 10))
+        }
+    };
+    let body = if value < 100 {
+        below_hundred(value)
+    } else {
+        let hundreds = value / 100;
+        let rest = value % 100;
+        let tens = rest / 10;
+        let ones = rest % 10;
+        if rest == 0 {
+            format!("{}百", digit(hundreds))
+        } else if rest < 10 {
+            format!("{}百零{}", digit(hundreds), digit(rest))
+        } else if ones == 0 {
+            format!("{}百{}十", digit(hundreds), digit(tens))
+        } else {
+            format!("{}百{}十{}", digit(hundreds), digit(tens), digit(ones))
+        }
+    };
+    format!("第{body}条")
 }
 
 fn constitution() -> Corpus {
@@ -348,12 +403,23 @@ fn coverage_parses_and_may_have_no_open_concepts() {
 }
 
 #[test]
+fn coverage_without_notes_parses() {
+    let text = constitution_with_coverage_fields(r#""第三十九条""#, r#""住宅""#, None);
+    let corpus = Corpus::parse(&text).expect("coverage.notes is optional");
+    let coverage = corpus.coverage.expect("coverage was parsed");
+    assert_eq!(coverage.notes, None);
+}
+
+#[test]
 fn coverage_rejects_unknown_duplicate_or_blank_formalized_numbers() {
     for (formalized, expected) in [
         (r#""第四十条""#, "不在 articles"),
-        (r#""第三十九条", " 第三十九条 ""#, "重复"),
+        (r#""第三十九条", "第三十九条""#, "重复"),
         (r#""""#, "coverage.formalized[0]"),
         ("", "不能为空"),
+        (r#"" 第三十九条""#, "首尾空白"),
+        (r#""第三十九条 ""#, "首尾空白"),
+        (r#""\t第三十九条""#, "首尾空白"),
     ] {
         let text = constitution_with_coverage(formalized, "");
         let error = parse_error(&text);
@@ -369,6 +435,8 @@ fn coverage_rejects_duplicate_or_blank_open_concepts() {
     for (concepts, expected) in [
         (r#""住宅", "住宅""#, "重复"),
         (r#""住宅", " ""#, "coverage.open_concepts[1]"),
+        (r#"" 住宅""#, "首尾空白"),
+        (r#""住宅 ""#, "首尾空白"),
     ] {
         let text = constitution_with_coverage(r#""第三十九条""#, concepts);
         let error = parse_error(&text);
@@ -873,14 +941,10 @@ fn the_repository_constitution_corpus_parses() {
     assert_eq!(corpus.effective_from.as_deref(), Some("1982-12-04"));
     assert_eq!(corpus.retrieved_at.as_deref(), Some("2026-11-22"));
     assert_eq!(corpus.text_sha256.as_deref(), Some(FIXTURE_SHA256));
-    assert!(
-        corpus
-            .notes
-            .as_deref()
-            .is_some_and(|notes| notes.contains("序言未入库")),
-        "{:?}",
-        corpus.notes
-    );
+    let notes = corpus.notes.as_deref().unwrap_or_default();
+    assert!(notes.contains("序言未入库"), "{notes}");
+    assert!(notes.contains("1982-12-04"), "{notes}");
+    assert!(notes.contains("2018 修正文本"), "{notes}");
 
     assert_eq!(corpus.articles.len(), 143);
     let values: Vec<u32> = corpus
@@ -937,6 +1001,21 @@ fn the_repository_constitution_corpus_parses() {
         "{:?}",
         coverage.notes
     );
+}
+
+#[test]
+fn the_repository_constitution_article_numbers_are_canonical() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../law/corpus");
+    let scan = corpus::scan(&root).expect("the repository corpus directory is readable");
+    assert!(scan.errors.is_empty(), "{:?}", scan.errors);
+    let corpus = &scan.corpora[0].corpus;
+    let actual: Vec<&str> = corpus
+        .articles
+        .iter()
+        .map(|article| article.number.as_str())
+        .collect();
+    let expected: Vec<String> = (1..=143).map(canonical_article_number).collect();
+    assert_eq!(actual, expected);
 }
 
 struct TempDir {

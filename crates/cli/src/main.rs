@@ -934,6 +934,21 @@ impl Session {
     }
 }
 
+/// Format a coverage list so the separator cannot be confused with an item.
+///
+/// Each item is wrapped in `「」`; an empty list prints `（无）` so the line does
+/// not end at a bare colon.
+fn quoted_list(items: &[String]) -> String {
+    if items.is_empty() {
+        return "（无）".to_owned();
+    }
+    items
+        .iter()
+        .map(|item| format!("「{}」", escape_control(item)))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
 /// Print each loaded corpus's declared coverage.
 ///
 /// This is a declaration from the corpus file: the audit displays it but does
@@ -952,18 +967,8 @@ fn write_coverage(out: &mut impl Write, corpora: &[Corpus]) {
                     coverage.open_concepts.len()
                 )
                 .ok();
-                writeln!(
-                    out,
-                    "  形式化：{}",
-                    escape_control(&coverage.formalized.join("、"))
-                )
-                .ok();
-                writeln!(
-                    out,
-                    "  开放概念：{}",
-                    escape_control(&coverage.open_concepts.join("、"))
-                )
-                .ok();
+                writeln!(out, "  形式化：{}", quoted_list(&coverage.formalized)).ok();
+                writeln!(out, "  开放概念：{}", quoted_list(&coverage.open_concepts)).ok();
                 if let Some(notes) = &coverage.notes {
                     writeln!(out, "  备注：{}", escape_control(notes)).ok();
                 }

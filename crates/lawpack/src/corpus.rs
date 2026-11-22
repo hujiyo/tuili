@@ -10,8 +10,8 @@
 //! Parsing is strict: `deny_unknown_fields`, a supported format version, real
 //! calendar dates, a well-formed `sha256:` value, a non-empty article list,
 //! unique article numbers and, when present, a coverage declaration whose
-//! `formalized` numbers exist and whose lists contain no blanks or duplicates.
-//! A broken corpus is an error, never a skipped file.
+//! `formalized` numbers exist and whose lists contain no blanks, padding or
+//! duplicates. A broken corpus is an error, never a skipped file.
 //!
 //! The audit reads exactly the fields of a rule's `source` that bear on the
 //! quotation: the instrument name, the article number, the version, the quoted
@@ -264,6 +264,7 @@ impl Coverage {
         let mut seen = BTreeSet::new();
         for (index, number) in self.formalized.iter().enumerate() {
             require_text(&format!("coverage.formalized[{index}]"), number)?;
+            require_unpadded(&format!("coverage.formalized[{index}]"), number)?;
             let normalized = normalize_space(number);
             if !seen.insert(normalized.clone()) {
                 return Err(format!("coverage.formalized 条号 `{number}` 重复"));
@@ -277,6 +278,7 @@ impl Coverage {
         let mut concepts = BTreeSet::new();
         for (index, concept) in self.open_concepts.iter().enumerate() {
             require_text(&format!("coverage.open_concepts[{index}]"), concept)?;
+            require_unpadded(&format!("coverage.open_concepts[{index}]"), concept)?;
             let normalized = normalize_space(concept);
             if !concepts.insert(normalized) {
                 return Err(format!("coverage.open_concepts 概念 `{concept}` 重复"));
@@ -299,6 +301,18 @@ fn parse_at(path: &Path, text: &str) -> Result<Corpus, CorpusError> {
 fn require_text(field: &str, value: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         Err(format!("{field} 不能为空"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Reject leading or trailing whitespace instead of silently trimming it.
+///
+/// A declaration is shown as written; trimming it would change what the corpus
+/// claims without reporting the error.
+fn require_unpadded(field: &str, value: &str) -> Result<(), String> {
+    if value.trim() != value {
+        Err(format!("{field} 不能有首尾空白"))
     } else {
         Ok(())
     }

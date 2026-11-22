@@ -9,7 +9,7 @@
   "source_url": "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html",
   "retrieved_at": "2026-11-22",
   "text_sha256": "sha256:ee6e873b9595a23b87d25fde0dfa9324dd9c338e71bfdd952dd08e06ae798749",
-  "notes": "序言未入库；官方只维护宪法包（刑法、民法典留在 staging，不入库）。",
+  "notes": "序言未入库；官方只维护宪法包（刑法、民法典留在 staging，不入库）。effective_from 是宪法原施行日 1982-12-04，条文为 2018 修正文本。",
   "coverage": {
     "formalized": ["第五条", "第三十七条", "第三十九条", "第四十六条"],
     "open_concepts": ["非法", "住宅", "侵犯", "人身自由"],
