@@ -804,8 +804,8 @@ corpus = "cn.test/2018"
 }
 
 #[test]
-fn packs_rejects_a_symlinked_corpus() {
-    let temp = TempDir::new("corpus-symlink");
+fn packs_rejects_a_non_regular_corpus() {
+    let temp = TempDir::new("corpus-non-regular");
     let manifest = r#"
 [pack]
 name = "cn.test"
@@ -821,8 +821,9 @@ corpus = "cn.test/2018"
     fs::write(&target, CORPUS_V2).unwrap();
     let link = corpus_dir.join("2018.json");
     if !create_file_symlink(&target, &link) {
-        eprintln!("skipping: cannot create a symbolic link");
-        return;
+        // Windows without symlink privilege: a directory exercises the same
+        // `is_file` rejection without weakening the assertion.
+        fs::create_dir_all(&link).unwrap();
     }
 
     let output = run(&format!(

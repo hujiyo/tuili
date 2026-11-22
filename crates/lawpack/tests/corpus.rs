@@ -553,6 +553,33 @@ fn coverage_enforces_status_specific_fields() {
             "{}",
         ),
         (
+            coverage_entry(
+                "第三十九条",
+                "partial",
+                r#""rules": ["cn.test.r"], "note": "\u202e""#,
+            ),
+            "note 不能为空",
+            "{}",
+        ),
+        (
+            coverage_entry(
+                "第三十九条",
+                "partial",
+                r#""rules": ["cn.test.r"], "note": "\u061c""#,
+            ),
+            "note 不能为空",
+            "{}",
+        ),
+        (
+            coverage_entry(
+                "第三十九条",
+                "partial",
+                r#""rules": ["cn.test.r"], "note": "\u00ad""#,
+            ),
+            "note 不能为空",
+            "{}",
+        ),
+        (
             coverage_entry("第三十九条", "indexed", r#""rules": ["cn.test.r"]"#),
             "不能声明 rules",
             "{}",

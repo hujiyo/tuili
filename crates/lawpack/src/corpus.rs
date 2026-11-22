@@ -528,15 +528,21 @@ where
 /// A note made only of these characters is empty for a human reader even though
 /// `trim()` leaves it non-empty.
 fn is_invisible_format(character: char) -> bool {
-    matches!(
-        character,
-        '\u{200B}'..='\u{200F}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
-    )
+    character.is_control()
+        || matches!(
+            character,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+        )
 }
 
 /// Reject leading or trailing whitespace instead of silently trimming it.

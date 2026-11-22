@@ -371,8 +371,9 @@ axiom 张三年老 : cn.constitution.年老 张三
 }
 
 /// The second-chapter tail adds three freedoms, one equality right and eleven
-/// duties. Each of the 15 new rules gets its own direct query in one facts-only
-/// case; every target predicate is unique to its rule.
+/// duty-like conclusions, including one sacred duty that is not an enforceable
+/// legal obligation. Each of the 15 new rules gets its own direct query in one
+/// facts-only case; every target predicate is unique to its rule.
 #[test]
 fn a_facts_only_case_proves_the_second_chapter_tail() {
     let temp = TempDir::new("chapter-two-tail");
@@ -402,7 +403,7 @@ axiom 张三是妇女 : cn.constitution.妇女 张三
                 ":why cn.constitution.其他文化活动自由 张三".to_string(),
                 ":why cn.constitution.与男子平等权利 张三".to_string(),
                 ":why cn.constitution.维护国家统一和民族团结义务 张三".to_string(),
-                ":why cn.constitution.遵守宪法和法律义务 张三".to_string(),
+                ":why cn.constitution.遵守宪法法律义务 张三".to_string(),
                 ":why cn.constitution.保守国家秘密义务 张三".to_string(),
                 ":why cn.constitution.爱护公共财产义务 张三".to_string(),
                 ":why cn.constitution.遵守劳动纪律义务 张三".to_string(),
@@ -421,7 +422,7 @@ axiom 张三是妇女 : cn.constitution.妇女 张三
             "▸ cn.constitution.其他文化活动自由 张三  ⟨cn.constitution.公民有其他文化活动自由⟩",
             "▸ cn.constitution.与男子平等权利 张三  ⟨cn.constitution.妇女享有与男子平等权利⟩",
             "▸ cn.constitution.维护国家统一和民族团结义务 张三  ⟨cn.constitution.公民有维护国家统一和民族团结义务⟩",
-            "▸ cn.constitution.遵守宪法和法律义务 张三  ⟨cn.constitution.公民有遵守宪法和法律义务⟩",
+            "▸ cn.constitution.遵守宪法法律义务 张三  ⟨cn.constitution.公民有遵守宪法法律义务⟩",
             "▸ cn.constitution.保守国家秘密义务 张三  ⟨cn.constitution.公民有保守国家秘密义务⟩",
             "▸ cn.constitution.爱护公共财产义务 张三  ⟨cn.constitution.公民有爱护公共财产义务⟩",
             "▸ cn.constitution.遵守劳动纪律义务 张三  ⟨cn.constitution.公民有遵守劳动纪律义务⟩",

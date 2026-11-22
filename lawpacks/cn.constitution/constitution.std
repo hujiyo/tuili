@@ -1,5 +1,5 @@
 -- 中华人民共和国宪法官方包 v0.4.0：形式化第三十三至五十六条中的选定权利与义务。
--- 第二章第二批为第四十七、四十八、五十二至五十六条；国家机构章与第五条尚未形式化。
+-- 第二章第二批为第四十七、四十八、五十二至五十六条；第四十九至五十一条因亲属/保护救济/不得损害本体未建模；国家机构章与第五条尚未形式化。
 -- 不是整条或整部宪法的完整形式化；"非法""住宅""侵犯""年满十八周岁"等概念由案件事实或人的判断提供。
 namespace cn.constitution
 
@@ -569,18 +569,18 @@ rule cn.constitution.公民有维护国家统一和民族团结义务 :
          jurisdiction "CN" retrieved_at "2026-11-22"
          hash "sha256:5f1ff5208e5a1602cd08fe1d3bae71ac33bd0b7d033912402c501eb8d4888f9f"
 
--- 第五十三条：遵守宪法和法律、保守国家秘密、爱护公共财产等义务。
-pred cn.constitution.遵守宪法和法律义务 : cn.constitution.人 → Prop
+-- 第五十三条：遵守宪法法律、保守国家秘密、爱护公共财产等义务。
+pred cn.constitution.遵守宪法法律义务 : cn.constitution.人 → Prop
 pred cn.constitution.保守国家秘密义务 : cn.constitution.人 → Prop
 pred cn.constitution.爱护公共财产义务 : cn.constitution.人 → Prop
 pred cn.constitution.遵守劳动纪律义务 : cn.constitution.人 → Prop
 pred cn.constitution.遵守公共秩序义务 : cn.constitution.人 → Prop
 pred cn.constitution.尊重社会公德义务 : cn.constitution.人 → Prop
 
-rule cn.constitution.公民有遵守宪法和法律义务 :
+rule cn.constitution.公民有遵守宪法法律义务 :
   params x : cn.constitution.人
   premise cn.constitution.公民 x
-  conclude cn.constitution.遵守宪法和法律义务 x
+  conclude cn.constitution.遵守宪法法律义务 x
   source text "宪法" locator "第五十三条" version "2018"
          quote "中华人民共和国公民必须遵守宪法和法律，保守国家秘密，爱护公共财产，遵守劳动纪律，遵守公共秩序，尊重社会公德。"
          url "http://www.npc.gov.cn/c2/c30834/201905/t20190521_281393.html"
