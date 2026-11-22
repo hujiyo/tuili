@@ -277,11 +277,12 @@ cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-默认环境.st
 ```
 
 `--no-default-packs` 下文件本身加载失败、且错误是 `未知名称 \`...\`` 时，错误后追加一行提示：
-按当前 `lawpacks/` 注册表里所有清单的 `name` / `namespace` 最长前缀匹配，指出该名字可能来自哪个
-法律包，并建议写 `import <包名>` 或去掉 `--no-default-packs`。文件已经 import 该包时不提示
-（名字不存在是文件自己的问题）；依赖闭包里的包也能被命名。提示只做诊断，只在文件加载失败时
-出现，不改变退出码：批处理仍 `1`，`:load` 仍 `2`。显式 import 一个环境外的包仍是用户的决定，
-系统不禁止。
+只考虑当前 `lawpacks/` 注册表里 `namespace` 与 `name` 相同、因而可 `import` 的包，按包名最长前缀
+匹配，指出该名字可能来自哪个法律包，并建议写 `import <包名>` 或去掉 `--no-default-packs`。
+缺 namespace 或 namespace 与 name 不同的包不可导入，既不被建议，也不会用更长的 namespace
+遮蔽同前缀的可导入包。文件已经 import 该包时不提示（名字不存在是文件自己的问题）；依赖闭包里
+的包也能被命名。提示只做诊断，只在文件加载失败时出现，不改变退出码：批处理仍 `1`，`:load`
+仍 `2`。显式 import 一个环境外的包仍是用户的决定，系统不禁止。
 
 临时注册表示例：
 
@@ -703,7 +704,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 543 个：kernel 19、lang 76、reason 41、cert 101、cli 179、lawpack 127（含 1 个 doc test）。
+`cargo test --workspace` 共 546 个：kernel 19、lang 76、reason 41、cert 101、cli 182、lawpack 127（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -782,7 +783,7 @@ cargo test --workspace
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
   另有一条 `:inspect` 用例：结构化来源字段逐行输出，引文中的换行被转义、不会破坏行结构；
   两条 `:given` 用例（argv 与 stdin 交互）：登记事实的来源显示为「用户输入交互会话」，不出现空 `「」`。
-- `crates/cli/tests/environment.rs`（27）：默认环境与 `std env` 端到端——仓库根下 `env` 打印
+- `crates/cli/tests/environment.rs`（30）：默认环境与 `std env` 端到端——仓库根下 `env` 打印
   `cn.default`、description、`official`、版本映射与锁哈希、锁校验与环境加载通过；`--profile cn`
   解析别名；`--no-default-packs` 下 env 报告未启用但仍校验锁，事实-only 示例加载失败并追加
   包名与 `import` 提示，显式导入示例仍通过；事实-only 示例在默认环境下 `:why` 证明并先打印预加载行；
@@ -792,7 +793,8 @@ cargo test --workspace
   `--allow-community-packs`、版本不符/缺包/坏 profile/坏 theory/坏锁的错误与回滚；没有默认 profile 时
   批处理不打开注册表；没有 `lawpacks/` 时纯逻辑文件照常工作；环境准备成功但文件随后失败时
   不打印预加载行、REPL 重试只打印一次；缺包提示只出现在文件加载失败、已 import 的包不提示、
-  profile 依赖包能被命名、`:why` 等查询错误不追加提示。
+  profile 依赖包能被命名、`:why` 等查询错误不追加提示；namespace 与 name 不同或缺少 namespace
+  的包不被建议 import，更长的不可导入 namespace 不会遮蔽同前缀可导入包。
 - `crates/cli/tests/official_pack.rs`（5）：官方宪法包端到端——`:packs lawpacks` 列出
   `cn.constitution 0.1.0`、文件数与通过锁校验；导入示例的 `:why` 证明第三十九条；
   `:inspect` 对包内 5 个声明显示 `[cn.constitution@0.1.0]`；加载官方示例后，用户文件若声明

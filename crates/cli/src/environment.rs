@@ -189,33 +189,35 @@ impl Environment {
         Some(format!("（环境外：{}）", pack.trust))
     }
 
-    /// The registry pack whose name or namespace owns `name`, if readable.
+    /// The registry pack whose name owns `name`, if it can be imported.
     ///
     /// This is a diagnostic helper for the closed mode: it scans the current
-    /// directory's registry and matches the longest declared name/namespace
-    /// prefix, so a dependency pack of the default profile is found too. It
-    /// gives up silently when the registry is unavailable; it is not a load
-    /// path.
+    /// directory's registry and matches the longest importable pack-name
+    /// prefix, so a dependency pack of the default profile is found too. Only a
+    /// pack whose `namespace` equals its name can be imported, and only such a
+    /// pack is suggested: a missing namespace, a different namespace and a
+    /// longer unimportable namespace are skipped. It gives up silently when the
+    /// registry is unavailable; it is not a load path.
     fn pack_for_name(&self, name: &str) -> Option<String> {
         let cwd = std::env::current_dir().ok()?;
         let found = std_deduce_lawpack::scan(&cwd.join("lawpacks")).ok()?;
-        let mut best: Option<(usize, String)> = None;
+        let mut best: Option<String> = None;
         for pack in &found.packs {
             let info = &pack.manifest.pack;
-            let candidates = std::iter::once(&info.name).chain(info.namespace.as_ref());
-            for candidate in candidates {
-                if !name.starts_with(&format!("{candidate}.")) {
-                    continue;
-                }
-                let better = best
-                    .as_ref()
-                    .is_none_or(|(length, _)| candidate.len() > *length);
-                if better {
-                    best = Some((candidate.len(), info.name.clone()));
-                }
+            if info.namespace.as_deref() != Some(info.name.as_str()) {
+                continue;
+            }
+            if !name.starts_with(&format!("{}.", info.name)) {
+                continue;
+            }
+            if best
+                .as_ref()
+                .is_none_or(|current| info.name.len() > current.len())
+            {
+                best = Some(info.name.clone());
             }
         }
-        best.map(|(_, pack)| pack)
+        best
     }
 }
 

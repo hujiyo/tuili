@@ -400,6 +400,81 @@ fn a_missing_name_inside_a_profile_dependency_is_named_in_the_hint() {
 }
 
 #[test]
+fn an_unimportable_namespace_pack_gets_no_import_hint() {
+    let temp = TempDir::new("nonimportable-namespace");
+    temp.write_pack_with_namespace(
+        "pkg.shadow",
+        "0.1.0",
+        "official",
+        Some("pkg.a.b"),
+        &theory("pkg.a.b"),
+    );
+    let file = temp.write("bad.std", "obj 张三 : pkg.a.b.不存在\n");
+    let path = file.display().to_string();
+    let output = check_stderr(
+        run_in(temp.path(), &args(&["--no-default-packs", path.as_str()])),
+        LOAD_FAILED,
+        &["未知名称", "pkg.a.b.不存在"],
+    );
+    let err = stderr(&output);
+    assert!(
+        !err.contains("提示："),
+        "a pack whose namespace differs from its name cannot be imported:\n{err}"
+    );
+    assert!(
+        !err.contains("import pkg.shadow"),
+        "never suggest an import that must fail:\n{err}"
+    );
+}
+
+#[test]
+fn a_pack_without_a_namespace_gets_no_import_hint() {
+    let temp = TempDir::new("no-namespace-hint");
+    temp.write_pack_with_namespace("pkg.bare", "0.1.0", "official", None, &theory("pkg.bare"));
+    let file = temp.write("bad.std", "obj 张三 : pkg.bare.不存在\n");
+    let path = file.display().to_string();
+    let output = check_stderr(
+        run_in(temp.path(), &args(&["--no-default-packs", path.as_str()])),
+        LOAD_FAILED,
+        &["未知名称", "pkg.bare.不存在"],
+    );
+    let err = stderr(&output);
+    assert!(
+        !err.contains("提示："),
+        "a pack without a namespace cannot be imported:\n{err}"
+    );
+    assert!(
+        !err.contains("import pkg.bare"),
+        "never suggest an import that must fail:\n{err}"
+    );
+}
+
+#[test]
+fn an_importable_prefix_is_not_shadowed_by_a_longer_unimportable_namespace() {
+    let temp = TempDir::new("no-namespace-shadowing");
+    temp.write_pack("pkg.a", "0.1.0", "official", &theory("pkg.a"));
+    temp.write_pack_with_namespace(
+        "pkg.shadow",
+        "0.1.0",
+        "official",
+        Some("pkg.a.b"),
+        &theory("pkg.a.b"),
+    );
+    let file = temp.write("bad.std", "obj 张三 : pkg.a.b.不存在\n");
+    let path = file.display().to_string();
+    let output = check_stderr(
+        run_in(temp.path(), &args(&["--no-default-packs", path.as_str()])),
+        LOAD_FAILED,
+        &["提示：", "可能来自法律包 `pkg.a`"],
+    );
+    let err = stderr(&output);
+    assert!(
+        !err.contains("pkg.shadow"),
+        "an unimportable namespace must not shadow the importable pkg.a:\n{err}"
+    );
+}
+
+#[test]
 fn a_query_error_gets_no_missing_pack_hint() {
     let output = check_stderr(
         run_in(
@@ -935,19 +1010,32 @@ impl TempDir {
     }
 
     fn write_pack(&self, name: &str, version: &str, trust: &str, theory: &str) -> PathBuf {
+        self.write_pack_with_namespace(name, version, trust, Some(name), theory)
+    }
+
+    fn write_pack_with_namespace(
+        &self,
+        name: &str,
+        version: &str,
+        trust: &str,
+        namespace: Option<&str>,
+        theory: &str,
+    ) -> PathBuf {
         let dir = self.lawpacks().join(name);
         fs::create_dir_all(&dir)
             .unwrap_or_else(|error| panic!("create {}: {error}", dir.display()));
-        fs::write(
-            dir.join("lawpack.toml"),
-            format!(
-                "[pack]\nname = \"{name}\"\nversion = \"{version}\"\n\
-                 jurisdiction = \"CN\"\nterritory = \"CN\"\n\
-                 namespace = \"{name}\"\ntrust = \"{trust}\"\n\n\
-                 [[files]]\npath = \"theory.std\"\nkind = \"theory\"\n"
-            ),
-        )
-        .unwrap_or_else(|error| panic!("write manifest: {error}"));
+        let mut manifest = format!(
+            "[pack]\nname = \"{name}\"\nversion = \"{version}\"\n\
+             jurisdiction = \"CN\"\nterritory = \"CN\"\n"
+        );
+        if let Some(namespace) = namespace {
+            manifest.push_str(&format!("namespace = \"{namespace}\"\n"));
+        }
+        manifest.push_str(&format!(
+            "trust = \"{trust}\"\n\n[[files]]\npath = \"theory.std\"\nkind = \"theory\"\n"
+        ));
+        fs::write(dir.join("lawpack.toml"), manifest)
+            .unwrap_or_else(|error| panic!("write manifest: {error}"));
         fs::write(dir.join("theory.std"), theory)
             .unwrap_or_else(|error| panic!("write theory: {error}"));
         dir
