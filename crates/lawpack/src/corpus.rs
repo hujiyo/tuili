@@ -58,8 +58,8 @@ pub struct Corpus {
     #[serde(default)]
     pub retrieved_at: Option<String>,
     /// SHA-256 of the source text this corpus was excerpted from, as
-    /// `sha256:` followed by 64 lowercase hex digits. Recorded provenance:
-    /// the audit does not recompute it.
+    /// `sha256:` followed by 64 lowercase hex digits. Recorded provenance
+    /// only: neither parsing nor the audit recomputes or verifies it.
     #[serde(default)]
     pub text_sha256: Option<String>,
     /// Free-form note, for example how a correction was recorded in the
@@ -246,47 +246,94 @@ fn require_text(field: &str, value: &str) -> Result<(), String> {
 
 /// Scan `root` for corpora laid out as `<law-id>/<version>.json`.
 ///
-/// Only direct child directories are read, and only their regular `.json`
-/// files. Files outside that layout are not corpora and are ignored. The only
-/// fatal conditions are that `root` itself cannot be read; a missing or empty
-/// corpus directory is an empty successful scan, which the caller must not
-/// mistake for a passing audit.
+/// The layout is strict: the root may contain only law directories, each law
+/// directory may contain only regular `<version>.json` files, the directory
+/// name must equal the corpus's `law`, and the file stem must equal its
+/// `version`. A nested directory, a non-`.json` file, a root-level file or a
+/// name mismatch is reported as an error, never skipped. The only fatal
+/// conditions are that `root` itself or one of its direct entries cannot be
+/// read; a missing or empty corpus directory is an empty successful scan,
+/// which the caller must not mistake for a passing audit.
 ///
 /// A `(law, version)` pair may appear only once. A duplicate is reported and
-/// the later file is not added, so the caller can report every error.
+/// the later file is not added, so the caller can report every error. The
+/// strict layout makes this unreachable through the filesystem today, but the
+/// check stays so a future loader cannot silently replace one corpus with
+/// another.
 pub fn scan(root: &Path) -> Result<Scan, CorpusError> {
     let entries = fs::read_dir(root).map_err(|error| {
         CorpusError::new(root.to_path_buf(), format!("无法读取语料目录：{error}"))
     })?;
-    let mut dirs = Vec::new();
+    let mut errors = Vec::new();
+    let mut law_dirs = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
             CorpusError::new(root.to_path_buf(), format!("无法读取目录项：{error}"))
         })?;
+        let path = entry.path();
         let file_type = entry.file_type().map_err(|error| {
-            CorpusError::new(entry.path(), format!("无法读取目录项类型：{error}"))
+            CorpusError::new(path.clone(), format!("无法读取目录项类型：{error}"))
         })?;
-        if file_type.is_dir() {
-            dirs.push(entry.path());
+        if !file_type.is_dir() {
+            errors.push(CorpusError::new(
+                path,
+                "语料根目录下只能有 <law> 目录；发现布局外的文件或链接",
+            ));
+            continue;
         }
+        let Some(name) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
+            errors.push(CorpusError::new(path, "语料目录名不是有效的 UTF-8"));
+            continue;
+        };
+        law_dirs.push((path, name));
     }
     // Directory order is platform-dependent; sort it so output is stable.
-    dirs.sort();
+    law_dirs.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut corpora = Vec::new();
-    let mut errors = Vec::new();
     let mut seen: BTreeMap<(String, String), PathBuf> = BTreeMap::new();
-    for dir in dirs {
-        let files = match corpus_files(&dir) {
-            Ok(files) => files,
+    for (dir, dir_name) in law_dirs {
+        let (files, layout_errors) = match corpus_files(&dir) {
+            Ok(found) => found,
             Err(error) => {
                 errors.push(error);
                 continue;
             }
         };
+        let has_layout_errors = !layout_errors.is_empty();
+        errors.extend(layout_errors);
+        if files.is_empty() && !has_layout_errors {
+            errors.push(CorpusError::new(
+                dir,
+                "法律目录下没有任何语料；期望 <version>.json",
+            ));
+            continue;
+        }
         for path in files {
             match Corpus::read(&path) {
                 Ok(corpus) => {
+                    if corpus.law != dir_name {
+                        errors.push(CorpusError::new(
+                            path,
+                            format!("语料 law `{}` 与目录名 `{dir_name}` 不符", corpus.law),
+                        ));
+                        continue;
+                    }
+                    let stem = path.file_stem().and_then(|stem| stem.to_str());
+                    if stem != Some(corpus.version.as_str()) {
+                        errors.push(CorpusError::new(
+                            path,
+                            format!(
+                                "语料 version `{}` 与文件名主干不符；文件名必须是 `<version>.json`",
+                                corpus.version
+                            ),
+                        ));
+                        continue;
+                    }
                     let key = (corpus.law.clone(), corpus.version.clone());
                     if let Some(first) = seen.get(&key) {
                         errors.push(CorpusError::new(
@@ -310,29 +357,48 @@ pub fn scan(root: &Path) -> Result<Scan, CorpusError> {
     Ok(Scan { corpora, errors })
 }
 
-fn corpus_files(dir: &Path) -> Result<Vec<PathBuf>, CorpusError> {
+/// List the `.json` files directly under one law directory, reporting every
+/// entry that is not a regular `<version>.json` file.
+fn corpus_files(dir: &Path) -> Result<(Vec<PathBuf>, Vec<CorpusError>), CorpusError> {
     let entries = fs::read_dir(dir).map_err(|error| {
         CorpusError::new(dir.to_path_buf(), format!("无法读取语料目录：{error}"))
     })?;
     let mut files = Vec::new();
+    let mut errors = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
             CorpusError::new(dir.to_path_buf(), format!("无法读取目录项：{error}"))
         })?;
+        let path = entry.path();
         let file_type = entry.file_type().map_err(|error| {
-            CorpusError::new(entry.path(), format!("无法读取目录项类型：{error}"))
+            CorpusError::new(path.clone(), format!("无法读取目录项类型：{error}"))
         })?;
-        if !file_type.is_file() {
+        if file_type.is_dir() {
+            errors.push(CorpusError::new(
+                path,
+                "法律目录下不能有子目录；语料必须是 <law>/<version>.json",
+            ));
             continue;
         }
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) == Some(CORPUS_EXTENSION) {
-            files.push(path);
+        if !file_type.is_file() {
+            errors.push(CorpusError::new(
+                path,
+                "法律目录下只能有普通 <version>.json 文件",
+            ));
+            continue;
         }
+        if path.extension().and_then(|extension| extension.to_str()) != Some(CORPUS_EXTENSION) {
+            errors.push(CorpusError::new(
+                path,
+                "法律目录下只能有 <version>.json 语料文件",
+            ));
+            continue;
+        }
+        files.push(path);
     }
     // File order is platform-dependent; sort it so output is stable.
     files.sort();
-    Ok(files)
+    Ok((files, errors))
 }
 
 /// The source fields an audit reads.
@@ -349,7 +415,8 @@ pub struct Citation<'a> {
     pub version: &'a str,
     /// The quoted wording. Required for a check to happen.
     pub quote: &'a str,
-    /// `sha256:<64 lowercase hex>` of the article text, when recorded.
+    /// `sha256:<64 lowercase hex>` of the article text exactly as stored
+    /// (UTF-8, including newlines), when recorded.
     pub hash: &'a str,
     /// Jurisdiction code, compared with `Corpus::jurisdiction` when non-empty.
     pub jurisdiction: &'a str,
@@ -372,7 +439,7 @@ pub enum Audit {
     Ambiguous,
     /// The quotation differs from the article text.
     Mismatch,
-    /// The recorded hash is malformed or does not match the article text.
+    /// The recorded article-text hash is malformed or does not match it.
     HashMismatch,
     /// The citation lacks an instrument name or an article number.
     InvalidSource,
@@ -414,6 +481,10 @@ pub struct AuditResult {
     pub audit: Audit,
     /// The corpus selected for comparison, when one was selected.
     pub corpus: Option<CorpusId>,
+    /// Whether a well-formed `hash` was actually compared with the SHA-256 of
+    /// the article text. `false` when the hash is empty, malformed, or the
+    /// check failed before reaching the hash step.
+    pub hash_checked: bool,
     /// A human-readable explanation; empty for a hit.
     pub detail: String,
 }
@@ -429,7 +500,8 @@ pub struct AuditResult {
 /// Quotation comparison removes every Unicode whitespace character from both
 /// sides and then compares the remaining characters; punctuation, digits and
 /// letters must match exactly. A missing hash is not a failure, but it also
-/// fixes nothing: the caller should report it as unfixed.
+/// fixes nothing: the caller should report it as unfixed. A recorded hash is
+/// the SHA-256 of the article text exactly as stored, including newlines.
 pub fn audit(corpora: &[Corpus], citation: &Citation<'_>) -> AuditResult {
     if citation.quote.trim().is_empty() {
         return result(Audit::NoQuote, None, "没有引文原文");
@@ -477,12 +549,13 @@ pub fn audit(corpora: &[Corpus], citation: &Citation<'_>) -> AuditResult {
     if strip_whitespace(citation.quote) != strip_whitespace(&article.text) {
         return result(Audit::Mismatch, id, "引文与条文不一致");
     }
+    let mut hash_checked = false;
     if !citation.hash.is_empty() {
         if !is_sha256(citation.hash) {
             return result(
                 Audit::HashMismatch,
                 id,
-                "哈希格式无效：应为 sha256: 加 64 位小写十六进制",
+                "条文哈希格式无效：应为 sha256: 加 64 位小写十六进制",
             );
         }
         let actual = format!(
@@ -490,11 +563,14 @@ pub fn audit(corpora: &[Corpus], citation: &Citation<'_>) -> AuditResult {
             hex::encode(&Sha256::digest(article.text.as_bytes()))
         );
         if actual != citation.hash {
-            return result(Audit::HashMismatch, id, "引文哈希不符");
+            let mut checked = result(Audit::HashMismatch, id, "条文哈希不符");
+            checked.hash_checked = true;
+            return checked;
         }
+        hash_checked = true;
     }
     if !citation.jurisdiction.is_empty() && citation.jurisdiction != corpus.jurisdiction {
-        return result(
+        let mut checked = result(
             Audit::JurisdictionMismatch,
             id,
             format!(
@@ -502,14 +578,19 @@ pub fn audit(corpora: &[Corpus], citation: &Citation<'_>) -> AuditResult {
                 citation.jurisdiction, corpus.jurisdiction
             ),
         );
+        checked.hash_checked = hash_checked;
+        return checked;
     }
-    result(Audit::Hit, id, String::new())
+    let mut checked = result(Audit::Hit, id, String::new());
+    checked.hash_checked = hash_checked;
+    checked
 }
 
 fn result(audit: Audit, corpus: Option<CorpusId>, detail: impl Into<String>) -> AuditResult {
     AuditResult {
         audit,
         corpus,
+        hash_checked: false,
         detail: detail.into(),
     }
 }

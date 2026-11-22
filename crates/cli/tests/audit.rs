@@ -107,7 +107,7 @@ fn a_matching_quote_passes() {
         "{out}"
     );
     assert!(
-        out.contains("引文哈希：0 条已固定，1 条未固定哈希。"),
+        out.contains("条文哈希：0 条已固定并核验，1 条未固定，0 条未核验或格式非法。"),
         "{out}"
     );
 }
@@ -128,7 +128,7 @@ fn a_matching_hash_passes() {
     assert_exit(&output, PROVED);
     let out = stdout(&output);
     assert!(
-        out.contains("引文哈希：1 条已固定，0 条未固定哈希。"),
+        out.contains("条文哈希：1 条已固定并核验，0 条未固定，0 条未核验或格式非法。"),
         "{out}"
     );
 }
@@ -150,8 +150,12 @@ fn a_wrong_hash_fails() {
     assert_exit(&output, UNVERIFIED);
     let out = stdout(&output);
     let line = line_starting_with(&out, '✗');
-    assert!(line.contains("哈希不符"), "{line}");
+    assert!(line.contains("条文哈希不符"), "{line}");
     assert!(line.contains("cn.constitution@2018"), "{line}");
+    assert!(
+        out.contains("条文哈希：1 条已固定并核验，0 条未固定，0 条未核验或格式非法。"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -231,17 +235,33 @@ fn a_broken_corpus_exits_two() {
 }
 
 #[test]
-fn a_duplicate_corpus_exits_two() {
-    let temp = TempDir::new("duplicate");
+fn a_misplaced_corpus_exits_two() {
+    let temp = TempDir::new("misplaced");
     let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
-    let body = corpus_json("2018", ARTICLE_39_JSON);
-    temp.corpus("corpus/cn.constitution/2018.json", &body);
-    temp.corpus("corpus/cn.constitution-copy/2018.json", &body);
+    // The file is named 2019.json but declares version 2018: the strict layout
+    // requires the file stem to equal the version.
+    temp.corpus(
+        "corpus/cn.constitution/2019.json",
+        &corpus_json("2018", ARTICLE_39_JSON),
+    );
 
     let output = session(&theory, &temp.path().join("corpus"));
     assert_exit(&output, ERROR);
     let out = stdout(&output);
-    assert!(out.contains("重复"), "{out}");
+    assert!(out.contains("文件名主干"), "{out}");
+    assert!(!out.contains("核对 "), "{out}");
+}
+
+#[test]
+fn a_nested_corpus_file_exits_two() {
+    let temp = TempDir::new("nested");
+    let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
+    temp.corpus("corpus/cn.constitution/2018/nested.json", "not json");
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("子目录"), "{out}");
     assert!(!out.contains("核对 "), "{out}");
 }
 
@@ -421,6 +441,137 @@ fn every_source_is_counted_and_one_unverified_source_fails_the_run() {
         out.contains("核对 2 条来源，命中 1，不一致 0，未核对 1。"),
         "{out}"
     );
+}
+
+#[test]
+fn a_jurisdiction_mismatch_fails() {
+    let temp = TempDir::new("jurisdiction");
+    let clause = format!(
+        "text \"宪法\" locator \"第三十九条\" version \"2018\" jurisdiction \"US\" quote \"{QUOTE_39}\""
+    );
+    let theory = temp.theory("theory.std", &theory(&clause));
+    temp.corpus(
+        "corpus/cn.constitution/2018.json",
+        &corpus_json("2018", ARTICLE_39_JSON),
+    );
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, UNVERIFIED);
+    let out = stdout(&output);
+    let line = line_starting_with(&out, '✗');
+    assert!(line.contains("管辖不符"), "{line}");
+    assert!(line.contains("US") && line.contains("CN"), "{line}");
+    assert!(
+        out.contains("核对 1 条来源，命中 0，不一致 1，未核对 0。"),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_invalid_hash_format_fails_and_is_not_counted_as_fixed() {
+    let temp = TempDir::new("bad-hash-format");
+    let clause = format!(
+        "text \"宪法\" locator \"第三十九条\" version \"2018\" quote \"{QUOTE_39}\" hash \"sha256:abc\""
+    );
+    let theory = temp.theory("theory.std", &theory(&clause));
+    temp.corpus(
+        "corpus/cn.constitution/2018.json",
+        &corpus_json("2018", ARTICLE_39_JSON),
+    );
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, UNVERIFIED);
+    let out = stdout(&output);
+    let line = line_starting_with(&out, '✗');
+    assert!(line.contains("条文哈希格式无效"), "{line}");
+    assert!(
+        out.contains("条文哈希：0 条已固定并核验，0 条未固定，1 条未核验或格式非法。"),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_unknown_corpus_field_exits_two() {
+    let temp = TempDir::new("unknown-field");
+    let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
+    let body = corpus_json("2018", ARTICLE_39_JSON)
+        .replace("\"format\": 1,", "\"format\": 1,\n  \"bogus\": 1,");
+    temp.corpus("corpus/cn.constitution/2018.json", &body);
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("bogus"), "{out}");
+    assert!(!out.contains("核对 "), "{out}");
+    assert!(stderr(&output).contains("语料错误"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_corpus_text_hash_is_reported_as_unchecked_metadata() {
+    let temp = TempDir::new("text-hash-note");
+    let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
+    let body = corpus_json("2018", ARTICLE_39_JSON).replace(
+        "\"jurisdiction\": \"CN\",",
+        "\"jurisdiction\": \"CN\",\n  \"text_sha256\": \"sha256:0000000000000000000000000000000000000000000000000000000000000000\",",
+    );
+    temp.corpus("corpus/cn.constitution/2018.json", &body);
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("语料的 text_sha256 仅为出处元数据，未重算、未校验"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_report_escapes_invisible_formatting_characters_and_a_backslash() {
+    let temp = TempDir::new("escape-format");
+    let theory = temp.theory("theory.std", &theory_with_quote(QUOTE_39));
+    // The unknown field name carries ESC, U+2028, U+202E and one literal
+    // backslash; serde reports it by name, and the audit must escape it.
+    let body = format!(
+        "{{\n  \"format\": 1,\n  \"law\": \"cn.constitution\",\n  \"title\": \"中华人民共和国宪法\",\n  \"aliases\": [],\n  \"version\": \"2018\",\n  \"jurisdiction\": \"CN\",\n  \"articles\": [ {{ \"number\": \"第三十九条\", \"text\": \"{ARTICLE_39_JSON}\" }} ],\n  \"\\u001b[31m\\u2028\\u202e\\\\\": 1\n}}"
+    );
+    temp.corpus("corpus/cn.constitution/2018.json", &body);
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(
+        out.contains("\\u{001B}[31m\\u{2028}\\u{202E}\\\\"),
+        "{out:?}"
+    );
+    assert!(!out.contains('\u{001B}'), "{out:?}");
+    assert!(!out.contains('\u{2028}'), "{out:?}");
+    assert!(!out.contains('\u{202E}'), "{out:?}");
+}
+
+#[test]
+fn the_report_escapes_invisible_characters_in_a_source_version() {
+    let temp = TempDir::new("escape-version");
+    // `\\` in the theory file becomes one literal backslash after lexing.
+    let version = "v\u{2028}\u{202E}\\\\";
+    let theory = temp.theory(
+        "theory.std",
+        &format!(
+            "sort 公民\nsource text \"宪法\" locator \"第三十九条\" version \"{version}\" quote \"{QUOTE_39}\"\n"
+        ),
+    );
+    temp.corpus(
+        "corpus/cn.constitution/2018.json",
+        &corpus_json("2018", ARTICLE_39_JSON),
+    );
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, UNVERIFIED);
+    let out = stdout(&output);
+    let line = line_starting_with(&out, '✗');
+    assert!(line.contains("版本不符"), "{line:?}");
+    assert!(line.contains("v\\u{2028}\\u{202E}\\\\"), "{line:?}");
+    assert!(!line.contains('\u{2028}'), "{line:?}");
+    assert!(!line.contains('\u{202E}'), "{line:?}");
 }
 
 struct TempDir {

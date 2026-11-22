@@ -53,13 +53,15 @@
 //! matches the stored article after removing all Unicode whitespace, as `?`
 //! when it has no quotation or no corpus matches (unverified), and as `✗` for
 //! every other failure: a missing article, a version mismatch, an ambiguous
-//! instrument name, changed wording, a wrong hash, an invalid source or a
-//! jurisdiction mismatch. Only a run with at least one source and every source
-//! `✓` exits `0`; an unverified source is never a pass. A missing or empty
-//! corpus directory leaves every source unverified (exit `1`), while a
-//! malformed corpus or a duplicate `(law, version)` exits `2`. All text from a
-//! source, a corpus or a path is escaped before printing, so a newline in a
-//! quotation cannot forge another output line.
+//! instrument name, changed wording, a wrong article-text hash, an invalid
+//! source or a jurisdiction mismatch. Only a run with at least one source and
+//! every source `✓` exits `0`; an unverified source is never a pass. A missing
+//! or empty corpus directory leaves every source unverified (exit `1`), while
+//! a corpus with a broken layout or JSON, or a duplicate `(law, version)`,
+//! exits `2`. All text from a source, a corpus or a path is escaped before
+//! printing, so a newline in a quotation cannot forge another output line. A
+//! corpus's `text_sha256` is provenance metadata only and is neither
+//! recomputed nor verified.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -111,7 +113,7 @@ use std::path::{Path, PathBuf};
 
 use std_deduce_cert::{render, Certificate, CheckReport, Node as CertNode, ObligationKind};
 use std_deduce_kernel::conv::convertible;
-use std_deduce_kernel::env::{Ctx, DeclKind, Env, SourceRef};
+use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::{elab, Library};
@@ -679,7 +681,7 @@ impl Session {
     fn list_packs(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let root = packs_root(arg)?;
         let found =
-            std_deduce_lawpack::scan(&root).map_err(|error| escape_field(&error.to_string()))?;
+            std_deduce_lawpack::scan(&root).map_err(|error| escape_control(&error.to_string()))?;
 
         for pack in &found.packs {
             let info = &pack.manifest.pack;
@@ -695,7 +697,7 @@ impl Session {
             )
             .ok();
             if let Some(description) = &info.description {
-                writeln!(out, "  {}", escape_field(description)).ok();
+                writeln!(out, "  {}", escape_control(description)).ok();
             }
             if !pack.manifest.files.is_empty() {
                 writeln!(out, "  文件 {} 个", pack.manifest.files.len()).ok();
@@ -706,7 +708,7 @@ impl Session {
             writeln!(out, "没有找到法律包。").ok();
         }
         for error in &found.errors {
-            writeln!(out, "{}", escape_field(&error.to_string())).ok();
+            writeln!(out, "{}", escape_control(&error.to_string())).ok();
         }
         // A broken manifest already fails the listing. Scanning the registry
         // again for the lock would print the same manifest error twice and
@@ -725,7 +727,7 @@ impl Session {
                 }
                 Err(errors) => {
                     for error in &errors {
-                        writeln!(out, "{}", escape_field(&error.to_string())).ok();
+                        writeln!(out, "{}", escape_control(&error.to_string())).ok();
                     }
                     Some(errors.len())
                 }
@@ -738,7 +740,7 @@ impl Session {
                 writeln!(
                     out,
                     "{}",
-                    escape_field(&format!("{}：无法读取锁文件：{error}", lock_path.display()))
+                    escape_control(&format!("{}：无法读取锁文件：{error}", lock_path.display()))
                 )
                 .ok();
                 Some(1)
@@ -762,7 +764,7 @@ impl Session {
             Ok(lockfile) => lockfile,
             Err(errors) => {
                 for error in &errors {
-                    writeln!(out, "{}", escape_field(&error.to_string())).ok();
+                    writeln!(out, "{}", escape_control(&error.to_string())).ok();
                 }
                 return Err(format!("{} 个错误，std.lock 未写入", errors.len()));
             }
@@ -770,7 +772,7 @@ impl Session {
         let path = root.join(LOCK_FILE);
         lockfile
             .write(&path)
-            .map_err(|error| escape_field(&error.to_string()))?;
+            .map_err(|error| escape_control(&error.to_string()))?;
         writeln!(
             out,
             "已写入 {}（{} 个包）",
@@ -790,9 +792,13 @@ impl Session {
     /// Every source is printed on one line and counted as a hit, a mismatch or
     /// unverified. Only a run with at least one source and no mismatch or
     /// unverified source exits `0`. A missing or empty corpus directory leaves
-    /// every source unverified (exit `1`); it is never a pass. A corpus that
-    /// cannot be read or parsed, or a duplicate `(law, version)`, is a corpus
-    /// error (exit `2`).
+    /// every source unverified (exit `1`); it is never a pass. A corpus with a
+    /// broken layout or JSON, or a duplicate `(law, version)`, is a corpus
+    /// error (exit `2`). A recorded `hash` is the SHA-256 of the article text
+    /// exactly as stored, including newlines; the summary distinguishes hashes
+    /// that were fixed and verified, absent hashes and hashes that could not be
+    /// verified or are malformed. `text_sha256` in a corpus is provenance
+    /// metadata only and is neither recomputed nor verified.
     fn audit_sources(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !self.loaded {
             writeln!(out, "语料核对：未运行（尚未加载理论）").ok();
@@ -803,7 +809,7 @@ impl Session {
             Ok(scan) => {
                 if !scan.errors.is_empty() {
                     for error in &scan.errors {
-                        writeln!(out, "{}", escape_field(&error.to_string())).ok();
+                        writeln!(out, "{}", escape_control(&error.to_string())).ok();
                     }
                     return Err(format!("{} 个语料错误，未进行核对", scan.errors.len()));
                 }
@@ -824,27 +830,31 @@ impl Session {
                 writeln!(
                     out,
                     "{}（所有来源都未核对）",
-                    escape_field(&error.to_string())
+                    escape_control(&error.to_string())
                 )
                 .ok();
                 Vec::new()
             }
         };
 
+        if corpora.iter().any(|corpus| corpus.text_sha256.is_some()) {
+            writeln!(
+                out,
+                "注：语料的 text_sha256 仅为出处元数据，未重算、未校验。"
+            )
+            .ok();
+        }
+
         let mut total = 0;
         let mut hit = 0;
         let mut mismatch = 0;
         let mut unverified = 0;
-        let mut with_hash = 0;
-        let mut without_hash = 0;
+        let mut fixed_hash = 0;
+        let mut unfixed_hash = 0;
+        let mut unchecked_hash = 0;
         for decl in self.lib.env.iter() {
             for source in &decl.sources {
                 total += 1;
-                if source.hash.is_empty() {
-                    without_hash += 1;
-                } else {
-                    with_hash += 1;
-                }
                 let citation = Citation {
                     text: &source.text,
                     locator: &source.locator,
@@ -854,10 +864,17 @@ impl Session {
                     jurisdiction: &source.jurisdiction,
                 };
                 let checked = corpus::audit(&corpora, &citation);
+                if checked.hash_checked {
+                    fixed_hash += 1;
+                } else if source.hash.is_empty() {
+                    unfixed_hash += 1;
+                } else {
+                    unchecked_hash += 1;
+                }
                 let label = format!(
                     "「{}{}」",
-                    escape_field(&source.text),
-                    escape_field(&source.locator)
+                    escape_control(&source.text),
+                    escape_control(&source.locator)
                 );
                 let line = if checked.audit.is_hit() {
                     hit += 1;
@@ -865,19 +882,19 @@ impl Session {
                         .corpus
                         .as_ref()
                         .ok_or_else(|| "内部错误：引文命中但没有对应的语料".to_owned())?;
-                    format!("✓ {label}← {}", escape_field(&id.to_string()))
+                    format!("✓ {label}← {}", escape_control(&id.to_string()))
                 } else if checked.audit.is_unverified() {
                     unverified += 1;
-                    format!("? {label}：{}（未核对）", escape_field(&checked.detail))
+                    format!("? {label}：{}（未核对）", escape_control(&checked.detail))
                 } else {
                     mismatch += 1;
                     match &checked.corpus {
                         Some(id) => format!(
                             "✗ {label}← {}：{}",
-                            escape_field(&id.to_string()),
-                            escape_field(&checked.detail)
+                            escape_control(&id.to_string()),
+                            escape_control(&checked.detail)
                         ),
-                        None => format!("✗ {label}：{}", escape_field(&checked.detail)),
+                        None => format!("✗ {label}：{}", escape_control(&checked.detail)),
                     }
                 };
                 writeln!(out, "{line}").ok();
@@ -891,7 +908,7 @@ impl Session {
         .ok();
         writeln!(
             out,
-            "引文哈希：{with_hash} 条已固定，{without_hash} 条未固定哈希。"
+            "条文哈希：{fixed_hash} 条已固定并核验，{unfixed_hash} 条未固定，{unchecked_hash} 条未核验或格式非法。"
         )
         .ok();
         if total == 0 {
@@ -926,7 +943,7 @@ fn corpus_root(arg: &str) -> Result<PathBuf, String> {
 fn directory_arg(arg: &str, default: &str) -> Result<PathBuf, String> {
     if arg.is_empty() {
         Ok(std::env::current_dir()
-            .map_err(|error| format!("无法取得当前目录：{}", escape_field(&error.to_string())))?
+            .map_err(|error| format!("无法取得当前目录：{}", escape_control(&error.to_string())))?
             .join(default))
     } else {
         Ok(PathBuf::from(arg))
@@ -971,28 +988,8 @@ fn fail_goal_binding(out: &mut impl Write, detail: impl std::fmt::Display) -> Re
     Err(format!("目标绑定失败：{detail}"))
 }
 
-/// Escape control characters so one external value cannot inject another
-/// output line or a terminal control sequence. Newline, carriage return and
-/// tab get their short forms; every other control character, including ESC,
-/// becomes `\u{XXXX}`.
-fn escape_field(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            ch if ch.is_control() => {
-                escaped.push_str(&format!("\\u{{{:04X}}}", ch as u32));
-            }
-            ch => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
 fn escape_path(path: &Path) -> String {
-    escape_field(&path.display().to_string())
+    escape_control(&path.display().to_string())
 }
 
 /// Render a pack's effective date range. A missing endpoint is shown as

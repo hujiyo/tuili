@@ -18,6 +18,19 @@ const ABC_SHA256: &str = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9
 const FIXTURE_SHA256: &str =
     "sha256:ee6e873b9595a23b87d25fde0dfa9324dd9c338e71bfdd952dd08e06ae798749";
 
+/// Exact official text of the five articles shipped in the repository corpus.
+const OFFICIAL_33: &str = "凡具有中华人民共和国国籍的人都是中华人民共和国公民。\n\
+中华人民共和国公民在法律面前一律平等。\n\
+国家尊重和保障人权。\n\
+任何公民享有宪法和法律规定的权利，同时必须履行宪法和法律规定的义务。";
+const OFFICIAL_35: &str = "中华人民共和国公民有言论、出版、集会、结社、游行、示威的自由。";
+const OFFICIAL_37: &str = "中华人民共和国公民的人身自由不受侵犯。\n\
+任何公民，非经人民检察院批准或者决定或者人民法院决定，并由公安机关执行，不受逮捕。\n\
+禁止非法拘禁和以其他方法非法剥夺或者限制公民的人身自由，禁止非法搜查公民的身体。";
+const OFFICIAL_39: &str = "中华人民共和国公民的住宅不受侵犯。禁止非法搜查或者非法侵入公民的住宅。";
+const OFFICIAL_46: &str = "中华人民共和国公民有受教育的权利和义务。\n\
+国家培养青年、少年、儿童在品德、智力、体质等方面全面发展。";
+
 fn corpus_json(law: &str, title: &str, aliases: &str, version: &str, articles: &str) -> String {
     format!(
         r#"{{
@@ -248,6 +261,7 @@ fn exact_quote_hits() {
     assert!(result.detail.is_empty());
     assert!(result.audit.is_hit());
     assert!(!result.audit.is_unverified());
+    assert!(!result.hash_checked, "no hash was recorded");
 }
 
 #[test]
@@ -422,6 +436,7 @@ fn hash_match_is_a_hit() {
         },
     );
     assert_eq!(checked.audit, Audit::Hit);
+    assert!(checked.hash_checked);
 }
 
 #[test]
@@ -434,6 +449,20 @@ fn hash_is_computed_over_the_article_text_with_newlines() {
         },
     );
     assert_eq!(checked.audit, Audit::Hit);
+    assert!(checked.hash_checked);
+}
+
+#[test]
+fn a_valid_hash_is_not_checked_when_the_quote_differs() {
+    let checked = corpus::audit(
+        &[ascii_corpus()],
+        &Citation {
+            hash: ABC_SHA256,
+            ..citation("测试法", "第一条", "abd")
+        },
+    );
+    assert_eq!(checked.audit, Audit::Mismatch);
+    assert!(!checked.hash_checked);
 }
 
 #[test]
@@ -447,7 +476,12 @@ fn wrong_hash_is_a_hash_mismatch() {
         },
     );
     assert_eq!(checked.audit, Audit::HashMismatch);
-    assert!(checked.detail.contains("哈希不符"), "{}", checked.detail);
+    assert!(
+        checked.detail.contains("条文哈希不符"),
+        "{}",
+        checked.detail
+    );
+    assert!(checked.hash_checked, "a well-formed hash was compared");
 }
 
 #[test]
@@ -470,6 +504,7 @@ fn malformed_hash_is_a_hash_mismatch() {
             "`{value}`: {}",
             checked.detail
         );
+        assert!(!checked.hash_checked, "`{value}` was never compared");
     }
 }
 
@@ -485,6 +520,21 @@ fn jurisdiction_mismatch_is_a_failure() {
     assert_eq!(checked.audit, Audit::JurisdictionMismatch);
     assert!(checked.detail.contains("US"), "{}", checked.detail);
     assert!(checked.detail.contains("CN"), "{}", checked.detail);
+    assert!(!checked.hash_checked, "no hash was recorded");
+}
+
+#[test]
+fn a_hash_is_checked_before_the_jurisdiction() {
+    let checked = corpus::audit(
+        &[ascii_corpus()],
+        &Citation {
+            hash: ABC_SHA256,
+            jurisdiction: "US",
+            ..citation("测试法", "第一条", "abc")
+        },
+    );
+    assert_eq!(checked.audit, Audit::JurisdictionMismatch);
+    assert!(checked.hash_checked);
 }
 
 #[test]
@@ -526,7 +576,7 @@ fn article_lookup_normalizes_whitespace() {
 }
 
 #[test]
-fn scan_loads_corpora_in_stable_order_and_ignores_other_files() {
+fn scan_loads_corpora_in_stable_order() {
     let temp = TempDir::new("scan");
     temp.write(
         "cn.a/2018.json",
@@ -536,8 +586,6 @@ fn scan_loads_corpora_in_stable_order_and_ignores_other_files() {
         "cn.b/2019.json",
         &corpus_json("cn.b", "乙法", "[]", "2019", &article("第一条", "b")),
     );
-    temp.write("cn.a/notes.txt", "not a corpus");
-    temp.write("README.txt", "not a corpus");
 
     let scan = corpus::scan(temp.path()).expect("the directory is readable");
     assert!(scan.errors.is_empty(), "{:?}", scan.errors);
@@ -547,6 +595,98 @@ fn scan_loads_corpora_in_stable_order_and_ignores_other_files() {
         .map(|loaded| loaded.corpus.law.as_str())
         .collect();
     assert_eq!(laws, ["cn.a", "cn.b"]);
+}
+
+#[test]
+fn scan_rejects_entries_outside_the_layout() {
+    let temp = TempDir::new("layout");
+    temp.write(
+        "cn.a/2018.json",
+        &corpus_json("cn.a", "甲法", "[]", "2018", &article("第一条", "a")),
+    );
+    temp.write("README.txt", "not a corpus");
+    temp.write("cn.a/notes.txt", "not a corpus");
+    temp.write("cn.a/2018/nested.json", "not json");
+
+    let scan = corpus::scan(temp.path()).expect("the directory is readable");
+    assert_eq!(scan.corpora.len(), 1, "the valid corpus still loads");
+    assert_eq!(scan.errors.len(), 3, "{:?}", scan.errors);
+    assert!(
+        scan.errors
+            .iter()
+            .any(|error| error.message().contains("根目录")),
+        "{:?}",
+        scan.errors
+    );
+    assert!(
+        scan.errors
+            .iter()
+            .any(|error| error.message().contains("子目录")),
+        "{:?}",
+        scan.errors
+    );
+    assert!(
+        scan.errors
+            .iter()
+            .any(|error| error.message().contains("<version>.json")),
+        "{:?}",
+        scan.errors
+    );
+    assert!(
+        scan.errors
+            .iter()
+            .any(|error| error.path().ends_with("cn.a/2018") && error.message().contains("子目录")),
+        "the nested directory must not be skipped silently: {:?}",
+        scan.errors
+    );
+}
+
+#[test]
+fn scan_rejects_a_directory_name_that_does_not_match_law() {
+    let temp = TempDir::new("dir-name");
+    temp.write(
+        "cn.other/2018.json",
+        &corpus_json("cn.a", "甲法", "[]", "2018", &article("第一条", "a")),
+    );
+
+    let scan = corpus::scan(temp.path()).expect("the directory is readable");
+    assert!(scan.corpora.is_empty());
+    assert_eq!(scan.errors.len(), 1);
+    let message = scan.errors[0].message();
+    assert!(message.contains("目录名"), "{message}");
+    assert!(message.contains("cn.a"), "{message}");
+    assert!(message.contains("cn.other"), "{message}");
+}
+
+#[test]
+fn scan_rejects_a_file_name_that_does_not_match_version() {
+    let temp = TempDir::new("file-name");
+    temp.write(
+        "cn.a/2019.json",
+        &corpus_json("cn.a", "甲法", "[]", "2018", &article("第一条", "a")),
+    );
+
+    let scan = corpus::scan(temp.path()).expect("the directory is readable");
+    assert!(scan.corpora.is_empty());
+    assert_eq!(scan.errors.len(), 1);
+    let message = scan.errors[0].message();
+    assert!(message.contains("文件名主干"), "{message}");
+    assert!(message.contains("2018"), "{message}");
+}
+
+#[test]
+fn scan_rejects_an_empty_law_directory() {
+    let temp = TempDir::new("empty-law");
+    temp.dir("cn.a");
+
+    let scan = corpus::scan(temp.path()).expect("the directory is readable");
+    assert!(scan.corpora.is_empty());
+    assert_eq!(scan.errors.len(), 1);
+    assert!(
+        scan.errors[0].message().contains("没有任何语料"),
+        "{:?}",
+        scan.errors
+    );
 }
 
 #[test]
@@ -570,20 +710,6 @@ fn scan_reports_bad_json_but_keeps_valid_corpora() {
     assert_eq!(scan.corpora.len(), 1);
     assert_eq!(scan.errors.len(), 1);
     assert!(scan.errors[0].message().contains("JSON 解析失败"));
-}
-
-#[test]
-fn scan_reports_duplicate_law_and_version() {
-    let temp = TempDir::new("duplicate");
-    let body = corpus_json("cn.a", "甲法", "[]", "2018", &article("第一条", "a"));
-    temp.write("cn.a/2018.json", &body);
-    temp.write("cn.a-copy/2018.json", &body);
-
-    let scan = corpus::scan(temp.path()).expect("the directory is readable");
-    assert_eq!(scan.corpora.len(), 1);
-    assert_eq!(scan.errors.len(), 1);
-    assert!(scan.errors[0].message().contains("重复"));
-    assert!(scan.errors[0].message().contains("cn.a@2018"));
 }
 
 #[test]
@@ -625,37 +751,18 @@ fn the_repository_constitution_corpus_parses() {
             "第四十六条"
         ]
     );
-    assert_eq!(
-        corpus
-            .article("第三十三条")
-            .expect("article 33")
-            .text
-            .lines()
-            .count(),
-        4
-    );
-    assert_eq!(
-        corpus
-            .article("第三十七条")
-            .expect("article 37")
-            .text
-            .lines()
-            .count(),
-        3
-    );
-    assert_eq!(
-        corpus.article("第三十九条").expect("article 39").text,
-        "中华人民共和国公民的住宅不受侵犯。禁止非法搜查或者非法侵入公民的住宅。"
-    );
-    assert_eq!(
-        corpus
-            .article("第四十六条")
-            .expect("article 46")
-            .text
-            .lines()
-            .count(),
-        2
-    );
+    for (number, expected) in [
+        ("第三十三条", OFFICIAL_33),
+        ("第三十五条", OFFICIAL_35),
+        ("第三十七条", OFFICIAL_37),
+        ("第三十九条", OFFICIAL_39),
+        ("第四十六条", OFFICIAL_46),
+    ] {
+        let article = corpus
+            .article(number)
+            .unwrap_or_else(|| panic!("missing {number}"));
+        assert_eq!(article.text, expected, "{number}");
+    }
 }
 
 struct TempDir {
@@ -677,6 +784,13 @@ impl TempDir {
 
     fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn dir(&self, relative: &str) -> PathBuf {
+        let path = self.path.join(relative);
+        fs::create_dir_all(&path)
+            .unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
+        path
     }
 
     fn write(&self, relative: &str, text: &str) -> PathBuf {

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std_deduce_kernel::env::escape_control;
+
 const PROVED: i32 = 0;
 const ERROR: i32 = 2;
 
@@ -64,6 +66,11 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Render a path exactly as the CLI's output escaping does.
+fn escaped_path(path: &Path) -> String {
+    escape_control(&path.display().to_string())
+}
+
 fn assert_exit(output: &Output, expected: i32) {
     let code = output.status.code();
     assert_eq!(
@@ -85,7 +92,7 @@ fn packs_lists_a_valid_pack() {
     let out = stdout(&output);
     let pack_line = format!(
         "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  {}",
-        temp.path().join("cn.constitution").display()
+        escaped_path(&temp.path().join("cn.constitution"))
     );
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
@@ -123,14 +130,14 @@ fn packs_lists_good_packs_and_reports_bad_manifests() {
     assert_eq!(lines.len(), 5, "{out:?}");
     let good_line = format!(
         "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  {}",
-        temp.path().join("good").display()
+        escaped_path(&temp.path().join("good"))
     );
     assert_eq!(lines[0], good_line);
     assert_eq!(lines[1], "  示例包");
     assert_eq!(lines[2], "  文件 2 个");
     let bad = temp.path().join("bad").join("lawpack.toml");
     assert!(
-        lines[3].starts_with(&format!("{}：", bad.display())),
+        lines[3].starts_with(&format!("{}：", escaped_path(&bad))),
         "{out:?}"
     );
     assert!(lines[3].contains("jurisdiction"), "{out:?}");
@@ -152,7 +159,7 @@ fn packs_fails_when_the_directory_does_not_exist() {
     assert!(stdout(&output).is_empty(), "{}", stdout(&output));
 
     let err = stderr(&output);
-    assert!(err.contains(&missing.display().to_string()), "{err}");
+    assert!(err.contains(&escaped_path(&missing)), "{err}");
     assert!(err.contains("无法读取法律包目录"), "{err}");
 }
 
@@ -210,7 +217,7 @@ fn packs_rejects_a_dangling_manifest_symlink() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 2, "{out:?}");
     assert!(
-        lines[0].starts_with(&format!("{}：", link.display())),
+        lines[0].starts_with(&format!("{}：", escaped_path(&link))),
         "{out:?}"
     );
     assert!(lines[0].contains("符号链接"), "{out:?}");
@@ -240,7 +247,7 @@ description = "x\r\ty\u0007\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fak
     assert_eq!(lines.len(), 3, "{out:?}");
     let pack_line = format!(
         "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  {}",
-        temp.path().join("cn.constitution").display()
+        escaped_path(&temp.path().join("cn.constitution"))
     );
     assert_eq!(lines[0], pack_line);
     assert_eq!(
@@ -276,7 +283,7 @@ territory = "CN"
     assert_eq!(lines.len(), 2, "{out:?}");
     let path = temp.path().join("bad").join("lawpack.toml");
     assert!(
-        lines[0].starts_with(&format!("{}：", path.display())),
+        lines[0].starts_with(&format!("{}：", escaped_path(&path))),
         "{out:?}"
     );
     assert!(lines[0].contains("bad\\nfake.pack"), "{out:?}");
@@ -316,7 +323,7 @@ fn lock_writes_a_lock_that_packs_verifies() {
     assert_exit(&output, PROVED);
     assert_eq!(
         stdout(&output),
-        format!("已写入 {}（2 个包）\n", lock_path.display())
+        format!("已写入 {}（2 个包）\n", escaped_path(&lock_path))
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
     let lock_text = fs::read_to_string(&lock_path).expect("the lock exists");
@@ -501,7 +508,7 @@ fn packs_skips_lock_verification_when_a_manifest_is_bad() {
     assert_exit(&output, ERROR);
     let out = stdout(&output);
     let bad_manifest = root.join("bad").join("lawpack.toml");
-    let reported = format!("{}：", bad_manifest.display());
+    let reported = format!("{}：", escaped_path(&bad_manifest));
     assert_eq!(out.matches(&reported).count(), 1, "{out}");
     assert!(out.contains(LOCK_NOT_RUN), "{out}");
     assert!(!out.contains("锁定校验：通过"), "{out}");
