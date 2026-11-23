@@ -82,7 +82,14 @@
 //! :packs [dir]            list the legal-pack manifests under a directory
 //! :lock [dir]             hash the packs and write the std.lock registry lock
 //! :audit [dir]            check rule-source quotations against article corpora
-//! :given <term>           add an assumption by hand
+//! :given <term>           register a fact asserted by the user
+//! :fact [list]            list the facts in the ledger with their identities
+//! :fact show <term>       show the facts equivalent to a proposition
+//! :fact add <term>        register a fact asserted by the user
+//! :fact assumed <term>    register a fact assumed for the analysis
+//! :fact disputed <term>   register a fact disputed by the other side
+//! :fact verified <term> / :fact stipulated <term>
+//!                         refused: those identities only come from case files
 //! :quit
 //! ```
 //!
@@ -275,7 +282,7 @@ use std_deduce_cert::{
     PriorityEdge, PriorityOrigin, ResolutionBasis, Source, TrustLevel,
 };
 use std_deduce_kernel::conv::convertible;
-use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
+use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, FactIdentity, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr, Name};
 use std_deduce_lang::module::escape_path;
@@ -750,12 +757,22 @@ impl Session {
                             DeclKind::Obj => "obj  ",
                             DeclKind::Pred => "pred ",
                             DeclKind::Axiom => "axiom",
+                            DeclKind::Fact { .. } => "fact ",
                             DeclKind::Def { .. } => "def  ",
                             DeclKind::Rule(_) => "rule ",
                             DeclKind::Interpretation(_) => "interp",
                             DeclKind::Contrary { .. } => "contr ",
                             DeclKind::Unique { .. } => "uniq  ",
                             DeclKind::Priority { .. } => "prior ",
+                        };
+                        // A fact shows who asserts it, so the ledger line
+                        // carries the Chinese identity label. An `Axiom`
+                        // asserts nothing and has no identity to show.
+                        let identity = match &decl.kind {
+                            DeclKind::Fact { identity } => {
+                                format!("  〔{}〕", identity.label_zh())
+                            }
+                            _ => String::new(),
                         };
                         // A priority has no user-written name: its ledger name
                         // is a synthetic key. Print the surface declaration the
@@ -780,7 +797,12 @@ impl Session {
                                 .map(|ns| format!(" [{ns}]"))
                                 .unwrap_or_default(),
                         };
-                        writeln!(out, "  {kind} {name} : {}{namespace}", print_expr(&decl.ty)).ok();
+                        writeln!(
+                            out,
+                            "  {kind} {name} : {}{identity}{namespace}",
+                            print_expr(&decl.ty)
+                        )
+                        .ok();
                         for s in &decl.sources {
                             writeln!(out, "       ← {}", s.one_line()).ok();
                             for line in s.full().lines() {
@@ -791,33 +813,13 @@ impl Session {
                     Ok(Outcome::Proved)
                 }
                 "given" => {
-                    let t = parse_term(arg)?;
-                    let e = elab::elab_top(&self.lib.env, &t)
-                        .map_err(|e| self.environment.annotate_closed_error(e.msg))?;
-                    check::check(&self.lib.env, &Ctx::new(), &e, &Expr::Sort(0))
-                        .map_err(|e| self.environment.annotate_closed_error(e.to_string()))?;
-                    writeln!(out, "已登记假设：{}", print_expr(&e)).ok();
-                    // Stash it on the library as an assumption of the current
-                    // session, recorded as a declaration for auditability.
-                    let mut lib = self.lib.clone();
-                    let name = format!("已知{}", lib.env.len());
-                    let decl = std_deduce_kernel::Decl {
-                        name: std_deduce_kernel::name(&name),
-                        kind: DeclKind::Axiom,
-                        ty: e,
-                        sources: vec![SourceRef {
-                            text: "用户输入".into(),
-                            locator: "交互会话".into(),
-                            ..Default::default()
-                        }],
-                        index: 0,
-                    };
-                    lib.env
-                        .insert(decl, &Ctx::new())
-                        .map_err(|e| e.to_string())?;
-                    self.lib = lib;
+                    let e = self.proposition(arg)?;
+                    writeln!(out, "已登记用户陈述：{}", print_expr(&e)).ok();
+                    let name = format!("已知{}", self.lib.env.len());
+                    self.insert_fact(e, FactIdentity::UserAsserted, name)?;
                     Ok(Outcome::Proved)
                 }
+                "fact" => self.fact_command(arg, out),
                 "why" | "gap" => self.query(cmd, arg, out),
                 "cert" => self.export_certificate(arg, out),
                 "verify-cert" => self.verify_certificate(arg, out),
@@ -835,6 +837,165 @@ impl Session {
             // Bare line: treated as a command.
             self.handle(&format!(":{line}"), out)
         }
+    }
+
+    /// Elaborate `arg` as a proposition in the current environment.
+    ///
+    /// Used by `:given` and `:fact`: a session fact is an assertion, so its
+    /// term must really be a proposition. Closed-environment name errors get
+    /// the same hint as a failed load.
+    fn proposition(&self, arg: &str) -> Result<Expr, String> {
+        let t = parse_term(arg)?;
+        let e = elab::elab_top(&self.lib.env, &t)
+            .map_err(|e| self.environment.annotate_closed_error(e.msg))?;
+        check::check(&self.lib.env, &Ctx::new(), &e, &Expr::Sort(0))
+            .map_err(|e| self.environment.annotate_closed_error(e.to_string()))?;
+        Ok(e)
+    }
+
+    /// Insert a fact the session asserts, with the session's own provenance.
+    ///
+    /// The session is cloned first, so a failed insert (a name collision)
+    /// leaves no partial declaration behind.
+    fn insert_fact(
+        &mut self,
+        prop: Expr,
+        identity: FactIdentity,
+        name: String,
+    ) -> Result<(), String> {
+        let decl = std_deduce_kernel::Decl {
+            name: std_deduce_kernel::name(&name),
+            kind: DeclKind::Fact { identity },
+            ty: prop,
+            sources: vec![SourceRef {
+                text: "用户输入".into(),
+                locator: "交互会话".into(),
+                ..Default::default()
+            }],
+            index: 0,
+        };
+        let mut lib = self.lib.clone();
+        lib.env
+            .insert(decl, &Ctx::new())
+            .map_err(|e| e.to_string())?;
+        self.lib = lib;
+        Ok(())
+    }
+
+    /// The first free `事实N` name, so a session can register several facts.
+    fn next_fact_name(&self) -> String {
+        let mut n = 1;
+        loop {
+            let candidate = format!("事实{n}");
+            if !self.lib.env.contains(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// `:fact` — inspect and register the facts in the ledger.
+    ///
+    /// `verified` and `stipulated` need the case file's source, so the session
+    /// refuses them: they say what a court found or what both sides agreed,
+    /// not what the person typing at the prompt says.
+    fn fact_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        let (subcommand, rest) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
+        let rest = rest.trim();
+        match subcommand {
+            "" | "list" => self.list_facts(out),
+            "show" => {
+                if rest.is_empty() {
+                    return Err("用法：:fact show <命题>".into());
+                }
+                self.show_facts(rest, out)
+            }
+            "add" | "assumed" | "disputed" => {
+                if rest.is_empty() {
+                    return Err(format!("用法：:fact {subcommand} <命题>"));
+                }
+                let identity = match subcommand {
+                    "add" => FactIdentity::UserAsserted,
+                    "assumed" => FactIdentity::Assumed,
+                    _ => FactIdentity::Disputed,
+                };
+                let e = self.proposition(rest)?;
+                writeln!(out, "{}", registered_fact_line(identity, &e)).ok();
+                let name = self.next_fact_name();
+                self.insert_fact(e, identity, name)?;
+                Ok(Outcome::Proved)
+            }
+            "verified" | "stipulated" => Err(format!(
+                "{subcommand} 只能写在案件文件的事实声明里，随 source 一起登记；\
+                 交互会话不能声明法院查明或双方无争议"
+            )),
+            other => Err(format!(
+                "未知 :fact 子命令 `{other}`；可选：list / show / add / assumed / disputed / verified / stipulated"
+            )),
+        }
+    }
+
+    /// Print every fact in the ledger, one line each.
+    fn list_facts(&self, out: &mut impl Write) -> Result<Outcome, String> {
+        let mut any = false;
+        for decl in self.lib.env.iter() {
+            let DeclKind::Fact { identity } = &decl.kind else {
+                continue;
+            };
+            any = true;
+            let source = match decl.sources.first() {
+                Some(source) => source.one_line(),
+                None => "（没有来源）".to_owned(),
+            };
+            let note = if identity.seeds_derivation() {
+                ""
+            } else {
+                "（争议事实，不参与推导）"
+            };
+            writeln!(
+                out,
+                "  {}  {}  [{}]  ← {source}{note}",
+                identity.label_zh(),
+                print_expr(&decl.ty),
+                decl.name
+            )
+            .ok();
+        }
+        if !any {
+            writeln!(out, "账本里还没有事实。").ok();
+        }
+        Ok(Outcome::Proved)
+    }
+
+    /// Print the facts definitionally equal to `arg`.
+    fn show_facts(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        let goal = self.proposition(arg)?;
+        let env = &self.lib.env;
+        let mut found = false;
+        for decl in env.iter() {
+            let DeclKind::Fact { identity } = &decl.kind else {
+                continue;
+            };
+            if !convertible(env, &Ctx::new(), &decl.ty, &goal)
+                .map_err(|error| format!("无法比较事实与命题：{error}"))?
+            {
+                continue;
+            }
+            found = true;
+            writeln!(out, "身份：{}", identity.label_zh()).ok();
+            writeln!(out, "名称：{}", decl.name).ok();
+            writeln!(out, "命题：{}", print_expr(&decl.ty)).ok();
+            for source in &decl.sources {
+                writeln!(out, "  ← {}", source.one_line()).ok();
+                for line in source.full().lines() {
+                    writeln!(out, "    {line}").ok();
+                }
+            }
+        }
+        if !found {
+            return Err("没有登记为事实的命题".into());
+        }
+        Ok(Outcome::Proved)
     }
 
     fn query(&mut self, cmd: &str, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
@@ -1965,11 +2126,11 @@ fn expr_consts<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
 /// kind declarations are recorded first, then the facts: an object is a plain
 /// individual only when its type is a sort from a loaded pack — an object of a
 /// sort this case declared, or of `Prop`/`Type`/a function type, is recorded
-/// (`obj`). An axiom is recorded when its type is not a proposition (a universe
-/// or a function type) or mentions any recorded extension (`axiom`). A plain
-/// `obj 张三 : <pack sort>` and a fact stated with pack declarations are not
-/// extensions. Recording the kinds first lets a later fact see the names this
-/// same file introduced.
+/// (`obj`). A fact is recorded when its type mentions any recorded extension
+/// (`fact`); a plain fact stated with pack declarations and case objects is
+/// not an extension. A non-proposition `axiom` is a local concept of its own
+/// and is recorded too. Recording the kinds first lets a later fact see the
+/// names this same file introduced.
 fn record_case_extensions(
     lib: &Library,
     existing: &BTreeSet<String>,
@@ -1989,6 +2150,7 @@ fn record_case_extensions(
             DeclKind::Unique { .. } => "unique",
             DeclKind::Obj
             | DeclKind::Axiom
+            | DeclKind::Fact { .. }
             | DeclKind::Interpretation(_)
             | DeclKind::Priority { .. } => continue,
         };
@@ -2018,24 +2180,26 @@ fn record_case_extensions(
                     extensions.insert(name, "obj");
                 }
             }
-            DeclKind::Axiom => {
+            DeclKind::Fact { .. } => {
                 let mut consts = Vec::new();
                 expr_consts(&decl.ty, &mut consts);
-                // An axiom whose type is not a proposition is a concept of its
-                // own: `axiom P : Prop`, `axiom P : Type` and
-                // `axiom 恶意 : 人 → Prop` are local predicates or types without
-                // a `pred` declaration. A proposition that mentions a recorded
-                // extension depends on one as well; a plain fact stated with pack
-                // declarations and case objects does neither.
-                let is_proposition =
-                    check::check(&lib.env, &Ctx::new(), &decl.ty, &Expr::Sort(0)).is_ok();
-                if !is_proposition
-                    || consts
-                        .iter()
-                        .any(|const_name| extensions.contains_key(*const_name))
+                // A fact's type is a proposition. It is a case extension only
+                // when that proposition mentions a concept this case
+                // introduced; a plain fact stated with pack declarations and
+                // case objects does not.
+                if consts
+                    .iter()
+                    .any(|const_name| extensions.contains_key(*const_name))
                 {
-                    extensions.insert(name, "axiom");
+                    extensions.insert(name, "fact");
                 }
+            }
+            DeclKind::Axiom => {
+                // The language gives every proposition-typed `axiom` a
+                // `Fact`; an `Axiom` is therefore a constant the case declared
+                // itself (`axiom P : Prop`, `axiom 恶意 : 人 → Prop`), which
+                // is exactly a local legal concept.
+                extensions.insert(name, "axiom");
             }
             _ => {}
         }
@@ -3086,6 +3250,15 @@ fn describe(p: &Provenance) -> String {
     }
 }
 
+/// The success line for a fact the session just registered.
+fn registered_fact_line(identity: FactIdentity, prop: &Expr) -> String {
+    let mut line = format!("已登记{}：{}", identity.label_zh(), print_expr(prop));
+    if !identity.seeds_derivation() {
+        line.push_str("（争议事实，不参与推导）");
+    }
+    line
+}
+
 fn parse_term(s: &str) -> Result<std_deduce_lang::ast::Term, String> {
     // Wrap a bare term as `#check <term>`, which is the one place the
     // grammar admits a bare expression at the top level.
@@ -3245,9 +3418,9 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
         if line.trim() == ":help" {
             writeln!(
                 out,
-                ":load <文件>  :inspect  :given <命题>  :why <命题>  :gap <命题>  \
-                 :cert <命题>  :verify-cert <证书文件> [目标命题]  :packs [目录]  \
-                 :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
+                ":load <文件>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
+                 :why <命题>  :gap <命题>  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
+                 :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )
             .ok();
             continue;

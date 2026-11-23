@@ -140,14 +140,95 @@ pub fn escape_control(value: &str) -> String {
     escaped
 }
 
+/// Who asserts a fact.
+///
+/// The identity is part of the evidence: "the court found it" and "the user
+/// says so" are different claims even when the proposition is the same. The
+/// ledger records the identity so that it can be inspected and audited; it
+/// does not make the fact stronger or weaker than it is recorded as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FactIdentity {
+    /// Found by a court or stated in an official document.
+    Verified,
+    /// Stated by the user.
+    UserAsserted,
+    /// Assumed for the sake of the analysis.
+    Assumed,
+    /// Disputed by the other side.
+    Disputed,
+    /// Agreed by both sides.
+    Stipulated,
+}
+
+impl FactIdentity {
+    /// The keyword written after `identity`.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            FactIdentity::Verified => "verified",
+            FactIdentity::UserAsserted => "user_asserted",
+            FactIdentity::Assumed => "assumed",
+            FactIdentity::Disputed => "disputed",
+            FactIdentity::Stipulated => "stipulated",
+        }
+    }
+
+    /// The identity named by a keyword, or `None` for an unknown keyword.
+    pub fn from_keyword(s: &str) -> Option<Self> {
+        match s {
+            "verified" => Some(FactIdentity::Verified),
+            "user_asserted" => Some(FactIdentity::UserAsserted),
+            "assumed" => Some(FactIdentity::Assumed),
+            "disputed" => Some(FactIdentity::Disputed),
+            "stipulated" => Some(FactIdentity::Stipulated),
+            _ => None,
+        }
+    }
+
+    /// The Chinese label shown by `:inspect` and `:fact`.
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            FactIdentity::Verified => "法院查明",
+            FactIdentity::UserAsserted => "用户陈述",
+            FactIdentity::Assumed => "分析假设",
+            FactIdentity::Disputed => "对方争议",
+            FactIdentity::Stipulated => "双方无争议",
+        }
+    }
+
+    /// Whether this identity is a strict fact.
+    ///
+    /// Strictness is not yet consulted by conflict resolution: every fact
+    /// whose identity seeds a derivation still enters the fact base as a
+    /// strict fact. The predicate records the distinction the ledger makes.
+    pub fn is_strict(self) -> bool {
+        matches!(self, FactIdentity::Verified | FactIdentity::Stipulated)
+    }
+
+    /// Whether a fact with this identity seeds a derivation.
+    ///
+    /// A disputed fact asserts what the other side claims, not what is the
+    /// case, so it must not be used as a premise. Every other identity is a
+    /// claim the fact base can derive from for now.
+    pub fn seeds_derivation(self) -> bool {
+        !matches!(self, FactIdentity::Disputed)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclKind {
     /// A new sort: `sort 公民`.
     Sort,
     /// A predicate symbol: `pred 侵害 : 公民 → 行为 → Prop`.
     Pred,
-    /// A bare assumption: `axiom 条款 : ...`.
+    /// A constant whose declared type is not a proposition: `axiom 假 : Prop`,
+    /// `axiom 恶意 : 人 → Prop`. It names a concept and asserts nothing.
     Axiom,
+    /// An asserted proposition together with who asserts it:
+    /// `axiom 侵占事实 : 侵占 张三`, followed on its own line by
+    /// `identity verified`. The declared type must be a proposition
+    /// (`Sort 0`); a claim about who asserts it belongs with the claim
+    /// itself, not with the type.
+    Fact { identity: FactIdentity },
     /// An individual constant: `obj 张三 : 公民`.
     Obj,
     /// `def ... := ...`; unfolds during conversion.
@@ -305,6 +386,13 @@ impl Env {
 
     /// Add a declaration. The type is checked to live in a sort, so a typo
     /// in a predicate signature cannot enter the ledger.
+    ///
+    /// The declared type also decides which kind is admissible: a `Fact`
+    /// asserts a proposition, so its declared type must be one (`Sort 0`);
+    /// an `Axiom` only names a constant, so its declared type must not be a
+    /// proposition. Accepting either mismatch would put a claim into the
+    /// ledger without an identity, or record an identity on something that is
+    /// not a claim.
     pub fn insert(&mut self, mut decl: Decl, ctx: &Ctx) -> Result<Name> {
         if self.decls.contains_key(&decl.name) {
             return Err(Error::DuplicateName(decl.name.to_string()));
@@ -313,6 +401,25 @@ impl Env {
         match &ty_ty {
             Expr::Sort(_) => {}
             other => return Err(Error::NotASort(other.clone())),
+        }
+        // `Sort 0` is `Prop`. Conversion, not syntax, decides whether the
+        // declared type is a proposition, so this agrees with the language
+        // loader, which checks the same property definitionally.
+        let is_proposition = crate::conv::convertible(self, ctx, &ty_ty, &Expr::Sort(0))?;
+        match &decl.kind {
+            DeclKind::Fact { .. } if !is_proposition => {
+                return Err(Error::other(format!(
+                    "`{}` 被声明为事实，但它的类型不是命题：事实的类型必须是命题",
+                    decl.name
+                )))
+            }
+            DeclKind::Axiom if is_proposition => {
+                return Err(Error::other(format!(
+                    "`{}` 的类型是命题：断言命题必须用事实（Fact）并给出身份",
+                    decl.name
+                )))
+            }
+            _ => {}
         }
         if let DeclKind::Def { body } = &decl.kind {
             check::check(self, ctx, body, &decl.ty)?;

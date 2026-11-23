@@ -9,7 +9,9 @@
 //! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | priority | command
 //! sort     := 'sort' IDENT source?
 //! pred     := 'pred' IDENT ':' term source?
-//! axiom    := 'axiom' IDENT ':' term source?
+//! axiom    := 'axiom' IDENT ':' term (source | identity)*
+//!             -- source and identity each at most once, in either order;
+//!             -- identity must start its own line: 'identity' KEYWORD
 //! def      := 'def' IDENT ':' term ':=' term source?
 //! rule     := 'rule' IDENT clause+
 //! clause   := 'params' binder (',' binder)*
@@ -32,6 +34,8 @@
 //! The parser is line-oriented at the item/clause level: a newline ends a
 //! clause unless a term is syntactically incomplete. This keeps rule blocks
 //! looking like prose, which is what a legal reader needs.
+
+use std_deduce_kernel::FactIdentity;
 
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
@@ -343,8 +347,24 @@ impl Parser {
                 let name = self.ident()?;
                 self.expect(&Tok::Colon, "`:`")?;
                 let ty = self.term()?;
+                // The identity clause may come before or after `source`.
                 let source = self.optional_source()?;
-                Ok(Item::Axiom { name, ty, source })
+                let identity = self.optional_identity()?;
+                let source = match source {
+                    Some(source) => Some(source),
+                    None => self.optional_source()?,
+                };
+                if identity.is_some() && self.identity_clause_follows() {
+                    return self.err(format!(
+                        "`axiom {name}` 的 identity 子句重复：一个事实只能有一个身份"
+                    ));
+                }
+                Ok(Item::Axiom {
+                    name,
+                    ty,
+                    source,
+                    identity,
+                })
             }
             "def" => {
                 self.bump();
@@ -589,6 +609,80 @@ impl Parser {
             self.pos = save;
             Ok(None)
         }
+    }
+
+    /// Parse an optional `identity <keyword>` clause.
+    ///
+    /// The clause must start its own line. `identity` is also an ordinary
+    /// identifier, so the clause is recognised only when the next token is
+    /// one of the five identity keywords; otherwise the position is restored
+    /// and the line is left to the next declaration. A declaration-shaped
+    /// line (`identity 定义 : ...`) is left alone the same way, so it is
+    /// reported at its own position instead of being swallowed into this
+    /// declaration. A line that clearly attempts the clause
+    /// (`identity verifiedd`) reports the unknown keyword here.
+    fn optional_identity(&mut self) -> PResult<Option<FactIdentity>> {
+        let save = self.pos;
+        self.skip_newlines_in_list();
+        let on_new_line = self.pos > save;
+        if !self.keyword("identity") {
+            self.pos = save;
+            return Ok(None);
+        }
+        let (line, col) = {
+            let token = self.here();
+            (token.line, token.col)
+        };
+        // A type line is protected by `application()`: an `identity` written
+        // there is parsed as an argument. A `source` clause is not, so the
+        // clause after it must be told to start a fresh line explicitly.
+        if !on_new_line {
+            return Err(ParseError {
+                msg: "`identity` 子句必须另起一行".into(),
+                line,
+                col,
+            });
+        }
+        match self.peek_at(1).clone() {
+            Tok::Ident(keyword) => {
+                if let Some(identity) = FactIdentity::from_keyword(&keyword) {
+                    self.bump(); // `identity`
+                    self.bump(); // the keyword
+                    return Ok(Some(identity));
+                }
+                // `identity <name> : ...` is shaped like a new declaration,
+                // not like an identity clause. Leave it to the item parser.
+                if self.peek_at(2) == &Tok::Colon {
+                    self.pos = save;
+                    return Ok(None);
+                }
+                Err(ParseError {
+                    msg: format!(
+                        "未知事实身份 `{keyword}`；可选：verified / user_asserted / assumed / disputed / stipulated"
+                    ),
+                    line,
+                    col,
+                })
+            }
+            _ => Err(ParseError {
+                msg: "`identity` 之后缺少事实身份关键字；可选：verified / user_asserted / assumed / disputed / stipulated".into(),
+                line,
+                col,
+            }),
+        }
+    }
+
+    /// Whether another complete `identity <known keyword>` clause follows on
+    /// the next line. Only a complete clause counts: a declaration-shaped
+    /// line is not ours to consume, and the duplicate check must not turn it
+    /// into an identity error.
+    fn identity_clause_follows(&mut self) -> bool {
+        let save = self.pos;
+        self.skip_newlines_in_list();
+        let follows = self.keyword("identity")
+            && matches!(self.peek_at(1), Tok::Ident(keyword) if FactIdentity::from_keyword(keyword).is_some());
+        self.pos = save;
+        follows
     }
 
     /// `source text "宪法" locator "第三十九条" version "2018"`

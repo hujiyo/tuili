@@ -6,7 +6,7 @@
 //! which is what keeps the trusted core small.
 
 use std_deduce_kernel::env::{Decl, Env, SourceRef};
-use std_deduce_kernel::{Error, Expr};
+use std_deduce_kernel::{Error, Expr, FactIdentity};
 
 use crate::ast::{Defeater, Item, Term};
 use crate::elab;
@@ -179,6 +179,7 @@ impl Library {
                     name: n,
                     ty,
                     source,
+                    identity,
                 } => {
                     // An asserted fact without provenance is not auditable: it
                     // would enter the fact base as if it had been proved. A
@@ -193,9 +194,38 @@ impl Library {
                     }
                     let ety = elab::elab_top(&next.env, &ty)
                         .map_err(|e| LoadError::new(format!("`axiom {n}`：{}", e.msg)))?;
+                    // The elaborated type decides what the declaration is. A
+                    // proposition is a fact and needs an identity; anything
+                    // else only names a constant and must not carry one.
+                    let is_proposition = std_deduce_kernel::check::check(
+                        &next.env,
+                        &std_deduce_kernel::Ctx::new(),
+                        &ety,
+                        &Expr::Sort(0),
+                    )
+                    .is_ok();
+                    let kind = if is_proposition {
+                        // A case file (no namespace) states what its user
+                        // says; a module states what the package assumes.
+                        // `verified` and `stipulated` are never a default:
+                        // only an explicit clause may claim them.
+                        let identity = identity.unwrap_or(if namespace.is_some() {
+                            FactIdentity::Assumed
+                        } else {
+                            FactIdentity::UserAsserted
+                        });
+                        std_deduce_kernel::DeclKind::Fact { identity }
+                    } else {
+                        if identity.is_some() {
+                            return Err(LoadError::new(format!(
+                                "`axiom {n}` 声明的不是命题，不能有事实身份；命题常量请用 `axiom`（不带 identity）"
+                            )));
+                        }
+                        std_deduce_kernel::DeclKind::Axiom
+                    };
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
-                        kind: std_deduce_kernel::DeclKind::Axiom,
+                        kind,
                         ty: ety,
                         sources: source.into_iter().map(to_source).collect(),
                         index: 0,

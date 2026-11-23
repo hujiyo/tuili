@@ -26,7 +26,8 @@
 3. **没有 `sorry`。** 推不出的目标生成一个**缺口节点**，列出候选规则和缺哪些前提。洞是显示的，不是关掉的。
 4. **出处是第一等公民。** 每条规则、每个事实都带着 `source` 字段（文本 / 条号 / 版本 / 引文 / 链接 / 管辖 / 抓取时间 / 哈希 / 备注），推导树的每个节点都打印它来自哪一条。
    加载时 `rule` 与 `axiom` 必须有出处：缺失或来源只有空白都会报错并指出声明名；`Reasoner::assume` 同样拒绝空来源与空白来源。
-   `:given` 登记的事实来源是「用户输入交互会话」，不会打印空 `「」`。
+   `:given` 与 `:fact add` 登记的事实来源是「用户输入交互会话」，不会打印空 `「」`。
+   `axiom` 还可以另起一行写 `identity <身份>` 子句，记录谁在断言：`verified`（法院查明）、`user_asserted`（用户陈述）、`assumed`（分析假设）、`disputed`（对方争议）、`stipulated`（双方无争议）；`:inspect` 把命题事实显示为 `fact` 并附中文标签，`:fact` 命令查看和登记这些身份。类型是命题的 `axiom` 必须有身份：不写时案件文件默认 `user_asserted`、带 namespace 的模块默认 `assumed`，`verified` / `stipulated` 只能显式写出；类型不是命题的 `axiom`（如 `axiom 假 : Prop`）只声明常量，不能带身份。`disputed` 的事实不进入事实库、不参与推导；其余四种身份的事实当前都按严格事实参与冲突裁决。
    `:audit` 能把已填写的引文与仓库语料逐字核对；空 `quote` 的来源不参与核对，也不影响其退出码，但仍不会阻止加载。
 
 ## 推理语义：最小不动点
@@ -54,7 +55,7 @@ unique 应适用 1           -- 一个谓词的第 1 个参数单值：同一案
 
 | 情形 | 裁决 |
 |---|---|
-| 一侧是已知事实（`axiom` / `:given`） | 事实胜出，规则结论不进事实库 |
+| 一侧是已知事实（`axiom` / `:given` / `:fact`） | 事实胜出，规则结论不进事实库（`disputed` 事实不参与推导，不算“已知事实”） |
 | 两侧都是规则，且一条带出处的优先声明让一侧覆盖另一侧 | 胜出方进事实库，被否决方不进 |
 | 两侧都是规则，声明的优先关系不足以裁决（没有、覆盖不全、双向覆盖或落在环内） | **未决**，两条结论都不进事实库，并报告原因 |
 
@@ -112,8 +113,9 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 | 命令 | 作用 |
 |---|---|
 | `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则 |
-| `:inspect` | 打印声明台账（含出处与全部来源字段）；`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`、类型不是包内 `sort` 的 `obj`、类型不是命题（`Prop`/`Type`/函数类型）或引用案件扩展的 `axiom` 标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
-| `:given <命题>` | 手工登记一条已知事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示 |
+| `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
+| `:given <命题>` | 以「用户陈述」身份手工登记一条事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示 |
+| `:fact [list]` / `:fact show <命题>` / `:fact add <命题>` / `:fact assumed <命题>` / `:fact disputed <命题>` | 查看和登记带身份的事实。`list` 列出账本里所有事实，每行是 `身份标签  命题  [名称]  ← 第一条来源`，争议事实注明“争议事实，不参与推导”；`show` 按内核定义等价查找并打印身份、名称、命题与全部来源，找不到时报“没有登记为事实的命题”；`add` / `assumed` / `disputed` 分别以用户陈述、分析假设、对方争议登记本次会话的事实（来源「用户输入交互会话」，名称 `事实N`），争议事实不参与推导。`verified` / `stipulated` 只能在案件文件里随 `source` 声明，交互命令拒绝 |
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导，并说明原因（没有声明、声明了但不足以裁决时逐条列出声明与出处、见证无法重建、两侧都是已知事实）；已裁决时打印胜出方、被否决方与裁决依据（哪条边、谁声明、出处）。当前环境有优先级环时先打印一行环警告。证书若应用了案件本地规则，会在未决义务汇总前打印 `  本地扩展：…`，按未决义务退出 `1`，不打印 `推导已通过独立校验。` |
 | `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告；有优先级环时同样先打印环警告 |
 | `:cert <命题>` | 先跑推理，再用当前环境身份（规范 profile 名、`--as-of`/`--jurisdiction` 记录的法律基准日与管辖代码、包名/版本/锁哈希/信任级别、链接语料文件的哈希；未给两个选项时为显式 `null`）盖章，最后把证书 JSON（缩进）写到 stdout。这两个字段只记录、不参与推理。必须先 `:load`。推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations`；身份构建或序列化失败时不写任何 JSON：非交互入口（命令行参数）把错误写到 stderr，交互 REPL 沿用命令错误写 stdout 的既有约定。封闭环境里应用了案件本地规则时，`open_obligations` 追加 `local-extension` 项；退出码仍只按根是否可达决定（根可达时为 `0`） |
@@ -496,7 +498,7 @@ cn.constitution 0.4.0  CN/CN  1982-12-04..未注明  official（本项目审核�
 法律概念必须来自已加载的法律包。`--allow-case-rules` 只在封闭环境里有意义，必须与 `--closed-env`
 同用；两者默认都不开，不开时原有加载与证书行为不变。封闭模式对会话里的每次顶层 `:load` 都生效。
 
-封闭环境允许 `import <包>`、`obj`/`axiom` 事实、`:given` 与查询；案件可以使用包里的
+封闭环境允许 `import <包>`、`obj`/`axiom` 事实、`:given`/`:fact` 与查询；案件可以使用包里的
 `sort`/`pred`/`obj` 和规则。但事实的类型也受检查：`obj` 必须声明在已加载法律包里的 `sort`
 （如 `obj 张三 : cn.constitution.人`），`Prop`、`Type`、函数/命题类型、`def` 类型一律拒绝；
 `axiom` 的类型必须真的是命题（如 `cn.constitution.中国国籍 张三`），`axiom P : Prop`、
@@ -530,17 +532,17 @@ module.std: error: 封闭环境（--closed-env）只接受案件文件（不带 
 
 `--allow-case-rules` 下这些声明和异常 `obj`/`axiom` 都可以加载。`:inspect` 的标记范围是：
 正常的 `obj`（类型是包内 sort）和正常事实（类型是命题、且不引用任何案件扩展）不标；类型不是
-包内 sort 的 `obj`、类型不是命题（`Prop`/`Type`/函数类型）或引用了案件扩展的 `axiom`，以及
-`sort`/`pred`/`def`/`rule`/`contrary`/`unique` 都标 ` [案件扩展]`。例如：
+包内 sort 的 `obj`、只声明常量的 `axiom`（类型是 `Prop`/`Type`/函数类型等非命题）、引用了案件
+扩展的命题事实，以及 `sort`/`pred`/`def`/`rule`/`contrary`/`unique` 都标 ` [案件扩展]`。例如：
 
 ```text
 obj   甲 : cn.constitution.人
 obj   恶意 : cn.constitution.人 → Prop [案件扩展]
 obj   新类型 : Type [案件扩展]
 obj   命题对象 : Prop [案件扩展]
-axiom 甲有中国国籍 : cn.constitution.中国国籍 甲
+fact  甲有中国国籍 : cn.constitution.中国国籍 甲  〔用户陈述〕
 axiom 法律命题 : Prop [案件扩展]
-axiom 恶意命题 : 恶意 甲 [案件扩展]
+fact  恶意命题 : 恶意 甲  〔用户陈述〕 [案件扩展]
 axiom 函数命题 : cn.constitution.人 → Prop [案件扩展]
 ```
 
@@ -567,7 +569,7 @@ axiom 函数命题 : cn.constitution.人 → Prop [案件扩展]
 - 证书环境身份仍只记录 profile、法律包、链接语料与 `as_of`/管辖，不记录案件文件或案件扩展；推理
   环境是平面账本，规则声明本身不带来源标签，单凭证书的节点和规则名不能证明某条规则来自案件文件，
   可核对的显式标记是 `local-extension` 义务（以及 `:inspect` 的 ` [案件扩展]`）。
-- `obj`/`axiom` 与 `:given` 仍是用户事实；区分法院查明、用户陈述、AI 假设与待举证留给 M2-4 事实账本。
+- `obj` 是案件对象；`axiom`、`:given`、`:fact` 登记事实并记录身份（法院查明 / 用户陈述 / 分析假设 / 对方争议 / 双方无争议）。身份目前只用于记录与展示：除 `disputed` 外的事实都按严格事实参与推导，冲突裁决仍按“非 disputed 事实都是严格事实”。
 - `contrary`/`unique` 目前只在 `:inspect` 标记，不进入证书义务。
 
 三条演示命令：
@@ -905,6 +907,7 @@ sort 公民                    -- 一个类别
 obj 张三 : 公民              -- 一个个体（类型必须是类别，不能是命题）
 pred 侵害 : 公民 → 住宅 → Prop
 axiom 事实 : 非法搜查 张三 甲宅
+  identity verified                  -- 谁在断言；必须另起一行，可在 source 之前或之后
 def 别名 : 公民 := 某人
 
 rule 住宅不受侵犯 :
@@ -952,6 +955,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 出处要求的当前范围：
 
 - `rule` 与 `axiom` 必须有 `source`，且至少一条来源的 `text` 与 `locator` 去掉空白后都非空；否则加载失败，错误指出声明名。
+- 类型是命题的 `axiom` 以事实身份进入账本：显式写 `identity <身份>`，或按文件取默认值（案件文件 `user_asserted`、带 namespace 的模块 `assumed`）；`verified` / `stipulated` 永不默认。类型不是命题的 `axiom` 声明的是常量，不能带身份。五种身份的关键字与中文标签是 `verified` / 法院查明、`user_asserted` / 用户陈述、`assumed` / 分析假设、`disputed` / 对方争议、`stipulated` / 双方无争议；`disputed` 不参与推导，其余身份目前都按严格事实参与裁决。
 - `sort` / `pred` / `obj` / `def` 豁免：类型、词汇与定义不是断言，其来源由法律包清单与审计层承担。
 - `contrary` / `unique` 豁免：冲突与唯一性声明不是事实断言，来源核验留给审计层。
 - `interpret` 可以解析，但加载期显式拒绝：解释语义尚未实现（M2-8），推理器不消费解释。
@@ -1188,10 +1192,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   加载时即被拒绝——否则实例化后结论会是 `?x`，那是一个不闭合的洞。
   代价是完全没有前提的规则暂时写不了；「凡公民皆有 X」现在可以写成
   `premise 公民 x → conclude X x`，不需要量词公理的实例化支持。
-- **非命题声明不被拒。** 默认模式下，`pred` / `axiom` / `def` 的共域不校验必须是 `Prop`；
-  封闭环境另有 `obj`/`axiom` 的类型边界（见「封闭环境与案件扩展」）。
-  推理时已跳过声明型 axiom（`axiom 假 : Prop` 这类只声明常量、不断言命题），
-  但账本本身仍接受形状不对的声明。
+- **命题断言与非命题声明由账本区分。** 类型是命题的 `axiom` 以 `Fact` 进入账本并带身份；类型不是命题的（`axiom 假 : Prop`、`axiom 恶意 : 人 → Prop`）以 `Axiom` 进入账本，只声明常量，推理时跳过。`Env::insert` 拒绝错配：事实的类型必须是命题，`Axiom` 的类型不能是命题。`pred` / `def` 的共域仍不强制必须是 `Prop`；封闭环境另有 `obj`/`axiom` 的类型边界（见「封闭环境与案件扩展」）。
 - **法律包导入已接通；官方宪法包 v0.4.0 形式化第三十三至五十六条中的选定句子。** `:load` 遇到
   `import` 时先看已加载的 namespace，未加载的才扫描 `lawpacks`、校验 `std.lock`，并递归加载
   `kind = "theory"` 的包文件，`:inspect` 显示 `[包名@版本]`；默认环境还会在第一次加载时按 profile
@@ -1228,21 +1229,27 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 750 个：kernel 20、lang 94、reason 52、cert 140、cli 280、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 768 个：kernel 23、lang 102、reason 53、cert 141、cli 285、lawpack 164（含 1 个 doc test）。
 
-- `crates/kernel/tests/kernel.rs`（20）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
+- `crates/kernel/tests/kernel.rs`（23）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
   `types_stay_predicative`（Type 层不许自包含），以及规则常量的两条：
   类型是 `∀ 参数, 前提 → 结论`，应用到全部参数与前提后正好得到结论；
   少给一个前提时剩下的是函数类型而不是结论，证明本身也不能当命题用。
-  另有一条固定的加载期拒绝：参数与前提 binder 重名；以及来源渲染的几条：
+  另有一条固定的加载期拒绝：参数与前提 binder 重名；事实与常量声明的类型边界：
+  `Fact` 的类型必须是命题、`Axiom` 不能断言命题；`FactIdentity` 五个关键字/中文标签/
+  `is_strict`/`seeds_derivation` 的表驱动用例；以及来源渲染的几条：
   `one_line` 保持旧格式并转义控制字符、字面反斜杠与不可见格式字符，`full` 逐行列出全部非空字段并转义。
-- `crates/lang/tests/lang.rs`（19）：最小规则和 `contrary` 声明能加载；参数/前提 binder 重名、
+- `crates/lang/tests/lang.rs`（27）：最小规则和 `contrary` 声明能加载；参数/前提 binder 重名、
   未命名前提生成的 `_p{i}` 重名、参数只出现在 `unless` 里、以及完全未使用的参数都拒绝加载；
   规则与断言事实缺 `source` 或来源只有空白时加载失败且错误指出声明名，补上后加载成功；
   缺来源先于类型错误报告，失败的加载不改变库内容；
   `sort`/`pred`/`obj`/`def`/`contrary`/`unique` 无来源仍可加载；解析错误把行列保留在
   `LoadError` 里，消息不再内嵌“第 X 行第 Y 列”，`render` 输出 Lean 风格诊断。
+  事实身份一组：`identity` 在 `source` 前后都可写、`verified` 生效、案件文件默认 `user_asserted`、
+  模块默认 `assumed`；未知身份关键字、缺关键字、重复子句、写在 source 同一行都报解析错误；
+  非命题 `axiom` 无身份可加载、带身份被拒；声明形状的 `identity 定义 : …` 不被前一条事实吞掉，
+  由项解析器在它自己的行列报错。
 - `crates/lang/src/module.rs`（4 个单元测试）：`LoadError` 的 Lean 风格渲染——有位置时
   `x.std:2:3: error: ...`，无位置时 `x.std: error: ...`；`Display` 始终只输出消息本身；
   `escape_path` 保留 Windows 反斜杠，把换行/回车/制表符与控制、格式字符写成短转义或
@@ -1287,7 +1294,7 @@ cargo test --workspace
   以及越界根/越界假设/越界前提和可达、不可达的节点环都返回带节点编号的错误；来源备注、假设标签、
   规则名、绑定参数、缺口备注、候选规则名与表达式常量/binder 名中的换行及控制/格式字符会被转义，
   不能伪造 `▸` 推导行。
-- `crates/cert/tests/check.rs`（73）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
+- `crates/cert/tests/check.rs`（74）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
   缺失/重复/未闭合绑定、结论或前提漂移、已成立的 `unless`、缺口当前提、越界索引和
   非命题假设等伪造都会被拒绝；根是缺口时 `root_proved = false`。
   冲突记录按环境复核：`defeated/assumption`、`defeated/priority` 与四种未决原因都能通过合法记录；
@@ -1298,7 +1305,7 @@ cargo test --workspace
   环境规则推出的 blocker 不能被“删掉推导节点”绕过：直接、多跳、ground/变量结论模式、链式传播、
   嵌套前提、参数头、未使用的 blocker assumption 都拒绝；alpha/eta 变体按内核 `convertible` 命中；
   高阶应用、绑定变量下的应用和超出项大小上限的传播失败关闭；
-  无 `unless` 的证书不触发闭包及其上限。
+  无 `unless` 的证书不触发闭包及其上限；`disputed` 的环境事实不是已证明命题，不阻断步骤。
 - `crates/cert/src/key.rs`（2 个单元测试）：表达式身份按 AST 结构编码，`Var(i)` 与同名 `Const`
   不同键，binder 名不影响键。
 - `crates/cert/tests/kernel_proof.rs`（8）：证书的单调骨架到内核证明项——合法证书的根逐步通过内核；
@@ -1311,14 +1318,15 @@ cargo test --workspace
   provenance 和裁决保留；独立包换加载顺序后证书逐字节相同；未决冲突的 `open_obligations`
   描述写明原因（没有声明、声明了但不足以裁决并给出落在环内的条数）；无法编码的 de Bruijn 索引
   给出带节点位置的错误。
-- `crates/reason/tests/reason.rs`（45）：各条承诺的回归测试，含三条关键的：
+- `crates/reason/tests/reason.rs`（46）：各条承诺的回归测试，含三条关键的：
   "阻断条件撤回早先结论"、"阻断条件未被证明时不阻断"、"伪造推导被校验器拒绝"；
   另有三条 alpha/eta 用例：两种变体的 blocker 都阻断规则，`verify` 也拒绝 alpha 变体的伪造步骤。
   伪造一类另有四条独立用例钉住：跳过前提、引用无关前提、绑定漂移（结论与前提不一致）、
   阻断条件已成立。此外 `a_rule_with_an_unconstrained_parameter_is_rejected_at_load`
   钉住"参数只出现在结论或 `unless` 里、没有前提约束的规则不许加载"，
   `an_assumption_without_a_source_is_rejected` 与 `an_assumption_with_a_blank_source_is_rejected`
-  钉住空来源和空白来源假设被拒绝，且拒绝的假设不进事实库。
+  钉住空来源和空白来源假设被拒绝，且拒绝的假设不进事实库；事实身份一组按表驱动验证
+  `verified`/`user_asserted`/`assumed`/`stipulated` 进入事实库、`disputed` 不进入。
 - 冲突一组：`conflict_requires_a_contrary_declaration`（没有声明就不猜）、
   `contrary_assumptions_are_unresolved_and_kept_out_of_the_fact_base`（未决胜出方不进库）、
   `superiority_resolves_a_conflict_and_the_loser_stays_out`（优先级裁决且下游不触发）、
@@ -1332,13 +1340,16 @@ cargo test --workspace
   `a_three_way_priority_cycle_makes_every_pair_unusable`（三元环里任何一对都不能裁决）、
   `an_unrelated_cycle_does_not_disturb_another_pair`（无关的环不影响另一对规则）与
   `priorities_are_not_transitive`（`a over b`、`b over c` 推不出 `a over c`）。
-- `crates/cli/tests/examples.rs`（21）：`examples/` 下除默认环境示例外的每个 `.std` 一条端到端用例
+- `crates/cli/tests/examples.rs`（26）：`examples/` 下除默认环境示例外的每个 `.std` 一条端到端用例
   （默认环境示例由 `environment.rs` 覆盖）——
   加载文件、执行查询，断言退出码（证成 0，缺口 / 冲突 1）和关键输出；
   其中 `宪法第三十九条-导入包.std` 以仓库根为工作目录，经官方包与锁导入后证明查询；另有两条例外路径：
   根已证明但仍有无关未决冲突时不打印成功行；保守闭包无法清除 blocker 时 `:why` 失败关闭、退出 `2`。
   另有一条 `:inspect` 用例：结构化来源字段逐行输出，引文中的换行被转义、不会破坏行结构；
   两条 `:given` 用例（argv 与 stdin 交互）：登记事实的来源显示为「用户输入交互会话」，不出现空 `「」`。
+  `:fact` 一组：`add`/`assumed`/`disputed` 的登记文案与 `list` 的身份标签/名称/来源、争议事实不参与
+  推导（`:why` 为缺口）、`show` 按内核等价命中与未命中、`verified`/`stipulated` 被拒；
+  `:inspect` 显示 `fact` 与中文身份标签（显式 `verified` 与案件文件默认 `user_asserted`）。
 - `crates/cli/tests/environment.rs`（30）：默认环境与 `std env` 端到端——仓库根下 `env` 打印
   `cn.default`、description、`official`、版本映射与锁哈希、锁校验与环境加载通过；`--profile cn`
   解析别名；`--no-default-packs` 下 env 报告未启用但仍校验锁，事实-only 示例加载失败并追加

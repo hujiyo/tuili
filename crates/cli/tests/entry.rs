@@ -277,6 +277,7 @@ fn the_repl_entry_forms_start_the_session() {
         let out = stdout(&output);
         assert!(out.contains("std-deduce"), "{args:?}: {out}");
         assert!(out.contains(":verify-cert"), "{args:?}: {out}");
+        assert!(out.contains(":fact"), "{args:?}: {out}");
         assert!(!out.contains(":check <证书文件>"), "{args:?}: {out}");
     }
 }

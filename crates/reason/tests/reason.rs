@@ -41,9 +41,11 @@ fn p(name: &str) -> Expr {
 fn assemble(lib: &Library, goal: &Expr) -> (std_deduce_reason::Derivation, Result<(), String>) {
     let mut r = Reasoner::new(&lib.env);
     for decl in lib.env.iter() {
-        if let DeclKind::Axiom = &decl.kind {
-            r.assume(&decl.ty, decl.sources.clone(), Some(decl.name.to_string()))
-                .unwrap();
+        if let DeclKind::Fact { identity } = &decl.kind {
+            if identity.seeds_derivation() {
+                r.assume(&decl.ty, decl.sources.clone(), Some(decl.name.to_string()))
+                    .unwrap();
+            }
         }
     }
     r.saturate().unwrap();
@@ -896,6 +898,30 @@ axiom f : 侵占 张三
     assert!(r.knows(&Expr::app(p("侵占"), p("张三"))));
 }
 
+/// Every identity except `disputed` seeds the fact base; a disputed fact only
+/// records what the other side claims, so it must not be used as a premise.
+#[test]
+fn fact_identities_control_derivation_seeding() {
+    let base = "sort 公民\npred 侵占 : 公民 → Prop\nobj 张三 : 公民\n";
+    let goal = Expr::app(p("侵占"), p("张三"));
+    for (identity, seeds) in [
+        ("verified", true),
+        ("user_asserted", true),
+        ("assumed", true),
+        ("stipulated", true),
+        ("disputed", false),
+    ] {
+        let src = format!(
+            "{base}axiom f : 侵占 张三\n  identity {identity}\n  source text \"测试\" locator \"夹具\"\n"
+        );
+        let lib = load(&src);
+        let mut r = Reasoner::new(&lib.env);
+        r.assume_ledger_axioms().unwrap();
+        r.saturate().unwrap();
+        assert_eq!(r.knows(&goal), seeds, "identity `{identity}`");
+    }
+}
+
 /// A rule's declared type ends in its conclusion, so it is a proposition and
 /// would pass the proposition guard in `assume_ledger_axioms`. It must still
 /// not be assumed: rules drive the reasoner, they are not facts.
@@ -992,8 +1018,10 @@ rule 免责 :
 
     let mut r = Reasoner::new(&lib.env);
     for d in lib.env.iter() {
-        if let DeclKind::Axiom = &d.kind {
-            r.assume(&d.ty, d.sources.clone(), None).unwrap();
+        if let DeclKind::Fact { identity } = &d.kind {
+            if identity.seeds_derivation() {
+                r.assume(&d.ty, d.sources.clone(), None).unwrap();
+            }
         }
     }
     r.saturate().unwrap();
@@ -1141,8 +1169,10 @@ rule 免责 :
     let exempt = Expr::app(p("不负刑事责任"), p("甲行为"));
     let mut r = Reasoner::new(&lib.env);
     for d in lib.env.iter() {
-        if let DeclKind::Axiom = &d.kind {
-            r.assume(&d.ty, d.sources.clone(), None).unwrap();
+        if let DeclKind::Fact { identity } = &d.kind {
+            if identity.seeds_derivation() {
+                r.assume(&d.ty, d.sources.clone(), None).unwrap();
+            }
         }
     }
     r.saturate().unwrap();
@@ -1176,8 +1206,10 @@ rule 规则 :
     let concl = Expr::app(p("结论"), p("甲行为"));
     let mut r = Reasoner::new(&lib.env);
     for d in lib.env.iter() {
-        if let DeclKind::Axiom = &d.kind {
-            r.assume(&d.ty, d.sources.clone(), None).unwrap();
+        if let DeclKind::Fact { identity } = &d.kind {
+            if identity.seeds_derivation() {
+                r.assume(&d.ty, d.sources.clone(), None).unwrap();
+            }
         }
     }
     r.saturate().unwrap();

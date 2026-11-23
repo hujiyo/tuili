@@ -277,7 +277,7 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
         proved.insert(fact_key, proposition);
     }
 
-    // A proposition asserted by an environment axiom is known whether or not
+    // A proposition asserted by an environment fact is known whether or not
     // the certificate carries a node for it. Without this, a trimmed
     // certificate could drop the blocker's own node and pass.
     for (fact_key, proposition) in environment_propositions(env)? {
@@ -1186,31 +1186,36 @@ fn canonical_edges(edges: &[PriorityEdge]) -> Result<Vec<String>, String> {
         .collect()
 }
 
-/// Every environment axiom whose declared type is a proposition, keyed by its
+/// Every environment fact whose declared type is a proposition, keyed by its
 /// normalized form.
 ///
-/// `axiom h : 侵占 张三` asserts the proposition `侵占 张三`; a declaration
-/// whose declared type is not a proposition (`axiom 假 : Prop`) only names a
-/// proposition constant and is skipped. The kernel's inference decides the
-/// sort; the name is never guessed at.
+/// A `Fact` asserts a proposition; its identity decides whether it seeds a
+/// derivation, exactly as in `Reasoner::assume_ledger_axioms`. A `Disputed`
+/// fact asserts only what the other side claims, so it is not a proved
+/// proposition and must not block a step here. `Axiom` declarations
+/// (`axiom 假 : Prop`) only name a proposition constant and are skipped. The
+/// kernel's inference decides the sort; the name is never guessed at.
 fn environment_propositions(env: &Env) -> Result<BTreeMap<String, Expr>, CheckError> {
     let mut facts = BTreeMap::new();
     for decl in env.iter() {
-        if !matches!(decl.kind, DeclKind::Axiom) {
+        let DeclKind::Fact { identity } = &decl.kind else {
+            continue;
+        };
+        if !identity.seeds_derivation() {
             continue;
         }
         let declared_sort = kernel_check::infer(env, &Ctx::new(), &decl.ty)
             .and_then(|ty| normalize(env, &Ctx::new(), &ty))
             .map_err(|error| CheckError {
                 node: None,
-                message: format!("环境公理 `{}` 的类型无法检查：{error}", decl.name),
+                message: format!("环境事实 `{}` 的类型无法检查：{error}", decl.name),
             })?;
         if declared_sort != Expr::Sort(0) {
             continue;
         }
         let proposition = normalize(env, &Ctx::new(), &decl.ty).map_err(|error| CheckError {
             node: None,
-            message: format!("环境公理 `{}` 无法规范化，无法比较：{error}", decl.name),
+            message: format!("环境事实 `{}` 无法规范化，无法比较：{error}", decl.name),
         })?;
         facts.insert(expression_key(&proposition), proposition);
     }

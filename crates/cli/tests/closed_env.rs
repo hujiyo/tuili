@@ -550,7 +550,7 @@ fn allow_case_rules_marks_abnormal_objects_and_axioms() {
     // unmarked.
     assert!(!line("obj   甲 :").contains("[案件扩展]"), "{out}");
     assert!(
-        !line("axiom 甲有中国国籍 :").contains("[案件扩展]"),
+        !line("fact  甲有中国国籍 :").contains("[案件扩展]"),
         "{out}"
     );
     // The abnormal types and the fact built on them are extensions.
@@ -558,7 +558,7 @@ fn allow_case_rules_marks_abnormal_objects_and_axioms() {
     assert!(line("obj   新类型 :").contains("[案件扩展]"), "{out}");
     assert!(line("obj   命题对象 :").contains("[案件扩展]"), "{out}");
     assert!(line("axiom 法律命题 :").contains("[案件扩展]"), "{out}");
-    assert!(line("axiom 甲恶意 :").contains("[案件扩展]"), "{out}");
+    assert!(line("fact  甲恶意 :").contains("[案件扩展]"), "{out}");
 }
 
 #[test]
@@ -614,7 +614,7 @@ fn allow_case_rules_marks_local_sorts_and_function_type_axioms() {
         "an object of a pack sort stays unmarked:\n{out}"
     );
     assert!(
-        !line("axiom 张三有中国国籍 :").contains("[案件扩展]"),
+        !line("fact  张三有中国国籍 :").contains("[案件扩展]"),
         "a plain fact stays unmarked:\n{out}"
     );
 }
@@ -635,8 +635,8 @@ fn given_unknown_name_gets_the_closed_hint() {
         ],
     );
     assert!(
-        !stdout(&output).contains("已登记假设"),
-        "a rejected assumption must not enter the ledger:\n{}",
+        !stdout(&output).contains("已登记用户陈述"),
+        "a rejected fact must not enter the ledger:\n{}",
         stdout(&output)
     );
 }
@@ -772,12 +772,12 @@ fn allow_case_rules_marks_the_ledger() {
         .find(|line| line.contains("rule  省人大法工委解释"))
         .unwrap_or_else(|| panic!("no local rule line:\n{out}"));
     assert!(rule_line.contains("[案件扩展]"), "{rule_line}");
-    // Facts are not legal concepts: `obj` and `axiom` stay unmarked.
-    let axiom_line = out
+    // Facts are not legal concepts: `obj` and `fact` stay unmarked.
+    let fact_line = out
         .lines()
-        .find(|line| line.contains("axiom 孙志刚有中国国籍"))
-        .unwrap_or_else(|| panic!("no axiom line:\n{out}"));
-    assert!(!axiom_line.contains("[案件扩展]"), "{axiom_line}");
+        .find(|line| line.contains("fact  孙志刚有中国国籍"))
+        .unwrap_or_else(|| panic!("no fact line:\n{out}"));
+    assert!(!fact_line.contains("[案件扩展]"), "{fact_line}");
 }
 
 #[test]

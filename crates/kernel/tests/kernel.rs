@@ -261,7 +261,13 @@ fn rule_constant_env() -> Env {
     add("P", DeclKind::Pred, Expr::pi(c("公民"), Expr::Sort(0)));
     add("Q", DeclKind::Pred, Expr::pi(c("公民"), Expr::Sort(0)));
     add("甲", DeclKind::Obj, c("公民"));
-    add("h", DeclKind::Axiom, Expr::app(c("P"), c("甲")));
+    add(
+        "h",
+        DeclKind::Fact {
+            identity: FactIdentity::Verified,
+        },
+        Expr::app(c("P"), c("甲")),
+    );
     let rdecl = RuleDecl {
         params: vec![(name("x"), c("公民"))],
         premises: vec![(None, Expr::app(c("P"), Expr::Var(0)))],
@@ -541,4 +547,131 @@ fn source_full_prints_every_non_empty_field_and_escapes_control_characters() {
 
     let sparse = std_deduce_kernel::env::SourceRef::new("宪法", "第三十九条");
     assert_eq!(sparse.full(), "文本：宪法\n条号：第三十九条");
+}
+
+/// A `Fact` asserts a proposition, so its declared type must be one.
+#[test]
+fn a_fact_must_assert_a_proposition() {
+    let mut env = Env::new();
+    let ctx = Ctx::new();
+    env.insert(
+        Decl {
+            name: name("公民"),
+            kind: DeclKind::Sort,
+            ty: Expr::Sort(1),
+            sources: vec![],
+            index: 0,
+        },
+        &ctx,
+    )
+    .unwrap();
+    // `公民` is a sort, not a proposition.
+    let err = env
+        .insert(
+            Decl {
+                name: name("坏事实"),
+                kind: DeclKind::Fact {
+                    identity: FactIdentity::Verified,
+                },
+                ty: c("公民"),
+                sources: vec![],
+                index: 0,
+            },
+            &ctx,
+        )
+        .expect_err("a fact whose declared type is not a proposition must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("事实的类型必须是命题"), "got: {msg}");
+}
+
+/// An `Axiom` only names a constant, so it may not carry an asserted
+/// proposition without an identity.
+#[test]
+fn an_axiom_must_not_assert_a_proposition() {
+    let mut env = Env::new();
+    let ctx = Ctx::new();
+    env.insert(
+        Decl {
+            name: name("公民"),
+            kind: DeclKind::Sort,
+            ty: Expr::Sort(1),
+            sources: vec![],
+            index: 0,
+        },
+        &ctx,
+    )
+    .unwrap();
+    env.insert(
+        Decl {
+            name: name("P"),
+            kind: DeclKind::Pred,
+            ty: Expr::pi(c("公民"), Expr::Sort(0)),
+            sources: vec![],
+            index: 0,
+        },
+        &ctx,
+    )
+    .unwrap();
+    env.insert(
+        Decl {
+            name: name("甲"),
+            kind: DeclKind::Obj,
+            ty: c("公民"),
+            sources: vec![],
+            index: 0,
+        },
+        &ctx,
+    )
+    .unwrap();
+    let err = env
+        .insert(
+            Decl {
+                name: name("坏公理"),
+                kind: DeclKind::Axiom,
+                ty: Expr::app(c("P"), c("甲")),
+                sources: vec![],
+                index: 0,
+            },
+            &ctx,
+        )
+        .expect_err("an axiom that asserts a proposition must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("断言命题必须用事实") && msg.contains("身份"),
+        "got: {msg}"
+    );
+}
+
+/// The five identities round-trip through their keyword and carry the
+/// labels, strictness and derivation roles the fact ledger reports.
+#[test]
+fn fact_identities_round_trip_keywords_labels_and_roles() {
+    let cases = [
+        (FactIdentity::Verified, "verified", "法院查明", true, true),
+        (
+            FactIdentity::UserAsserted,
+            "user_asserted",
+            "用户陈述",
+            false,
+            true,
+        ),
+        (FactIdentity::Assumed, "assumed", "分析假设", false, true),
+        (FactIdentity::Disputed, "disputed", "对方争议", false, false),
+        (
+            FactIdentity::Stipulated,
+            "stipulated",
+            "双方无争议",
+            true,
+            true,
+        ),
+    ];
+    for (identity, keyword, label, strict, seeds) in cases {
+        assert_eq!(identity.keyword(), keyword);
+        assert_eq!(FactIdentity::from_keyword(keyword), Some(identity));
+        assert_eq!(identity.label_zh(), label);
+        assert_eq!(identity.is_strict(), strict, "{keyword} strictness");
+        assert_eq!(identity.seeds_derivation(), seeds, "{keyword} seeds");
+    }
+    assert_eq!(FactIdentity::from_keyword("verifiedd"), None);
+    assert_eq!(FactIdentity::from_keyword(""), None);
 }

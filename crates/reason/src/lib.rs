@@ -410,16 +410,17 @@ impl<'a> Reasoner<'a> {
         Ok(())
     }
 
-    /// Register every axiom in the ledger as an assumption.
+    /// Register every fact in the ledger as an assumption.
     ///
-    /// An axiom has two shapes, and they assert different things:
+    /// A `Fact` records who asserts it. The five identities are not yet
+    /// treated differently by conflict resolution: every fact whose identity
+    /// seeds a derivation enters the fact base as a strict fact. A `Disputed`
+    /// fact is not seeded at all — it asserts what the other side claims, not
+    /// what is the case.
     ///
-    /// - `axiom h : 侵占 张三` — the declared type is a proposition; what it
-    ///   asserts is that proposition.
-    /// - `axiom 假 : Prop` — the declared type is a *sort*; this only declares
-    ///   a proposition constant. Asserting it would mean asserting `Prop`,
-    ///   which lives in `Type`. Such declarations contribute nothing to
-    ///   reasoning and are skipped.
+    /// `Axiom` declarations (`axiom 假 : Prop`) only name a constant and
+    /// assert nothing. Such declarations contribute nothing to reasoning and
+    /// are skipped.
     ///
     /// Rules are declarations too, but they drive the reasoner rather than
     /// seed it, so they are not assumptions.
@@ -428,12 +429,21 @@ impl<'a> Reasoner<'a> {
         // order, so it must not depend on the order independent packages were
         // loaded in.
         let env = self.env;
-        let mut axioms: Vec<&Decl> = env
+        let mut facts: Vec<&Decl> = env
             .iter()
-            .filter(|decl| matches!(decl.kind, DeclKind::Axiom))
+            .filter(|decl| {
+                matches!(
+                    &decl.kind,
+                    DeclKind::Fact { identity } if identity.seeds_derivation()
+                )
+            })
             .collect();
-        axioms.sort_by(|a, b| a.name.cmp(&b.name));
-        for decl in axioms {
+        facts.sort_by(|a, b| a.name.cmp(&b.name));
+        for decl in facts {
+            // The language gives every proposition-typed `axiom` a `Fact`
+            // entry, but the reasoner also accepts environments built
+            // directly, so it still refuses to assume a declaration whose
+            // type is not a proposition.
             if !declared_type_is_prop(self.env, &decl.ty) {
                 continue;
             }
@@ -1421,10 +1431,10 @@ fn close_pattern(p: &Expr, binding: &[(Name, Expr)]) -> Expr {
     }
 }
 
-/// Is an axiom's declared type itself a proposition?
+/// Is a fact's declared type itself a proposition?
 ///
-/// `侵占 张三 : Prop` — yes, so the axiom asserts that proposition.
-/// `Prop : Type 1` — no, so the axiom only names a proposition constant.
+/// `侵占 张三 : Prop` — yes, so the ledger entry asserts that proposition.
+/// `Prop : Type 1` — no, so the entry only names a constant.
 fn declared_type_is_prop(env: &Env, ty: &Expr) -> bool {
     check::infer(env, &Ctx::new(), ty)
         .ok()

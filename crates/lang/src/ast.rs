@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use std_deduce_kernel::FactIdentity;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
     /// `Prop`
@@ -63,10 +65,15 @@ pub enum Item {
         source: Option<SourceSpec>,
     },
     /// `axiom 张三是公民 : 公民 张三`
+    ///
+    /// The elaborated type decides what the declaration is: a proposition is
+    /// a fact and carries an identity (written `identity <keyword>` or
+    /// defaulted from the file); anything else only names a constant.
     Axiom {
         name: String,
         ty: Term,
         source: Option<SourceSpec>,
+        identity: Option<FactIdentity>,
     },
     /// `def 合法搜查 := ... : T`
     Def {

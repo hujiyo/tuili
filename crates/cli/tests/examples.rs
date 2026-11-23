@@ -454,7 +454,7 @@ fn negation_theorems_and_axioms_load_and_inspect() {
     check(
         session("否定-定理与公理.std", &[":inspect"]),
         PROVED,
-        &["假 : Prop", "非 : Prop → Prop", "axiom 经典双重否定消去"],
+        &["假 : Prop", "非 : Prop → Prop", "fact  经典双重否定消去"],
     );
     // The classical elimination axiom is assumed as a fact, so the reasoner
     // can use it directly.
@@ -622,7 +622,7 @@ obj 张三 : 公民
     let output = check(
         session_with_theory(&theory, &[":given 违法 张三", ":inspect"]),
         PROVED,
-        &["← 「用户输入交互会话」"],
+        &["已登记用户陈述：违法 张三", "← 「用户输入交互会话」"],
     );
     let out = stdout(&output);
     assert!(
@@ -661,6 +661,154 @@ obj 张三 : 公民
     }
     let output = child.wait_with_output().expect("the CLI exits");
     check(output, PROVED, &["← 「用户输入交互会话」"]);
+}
+
+/// `:fact` registers a fact with an explicit identity and lists it with that
+/// identity. `disputed` is recorded but announced as not participating.
+#[test]
+fn fact_command_registers_and_lists_facts_with_identities() {
+    let theory = TempTheory::new(
+        "fact-register",
+        r#"
+sort 公民
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+obj 李四 : 公民
+obj 王五 : 公民
+"#,
+    );
+    let output = check(
+        session_with_theory(
+            &theory,
+            &[
+                ":fact add 违法 张三",
+                ":fact assumed 违法 李四",
+                ":fact disputed 违法 王五",
+                ":fact list",
+            ],
+        ),
+        PROVED,
+        &[
+            "已登记用户陈述：违法 张三",
+            "已登记分析假设：违法 李四",
+            "已登记对方争议：违法 王五（争议事实，不参与推导）",
+            "用户陈述  违法 张三  [事实1]  ← 「用户输入交互会话」",
+            "分析假设  违法 李四  [事实2]  ← 「用户输入交互会话」",
+            "对方争议  违法 王五  [事实3]  ← 「用户输入交互会话」（争议事实，不参与推导）",
+        ],
+    );
+    assert!(
+        !stdout(&output).contains("已登记假设"),
+        ":fact must use the identity labels"
+    );
+}
+
+/// A disputed fact is recorded, but it does not enter the fact base: the
+/// proposition stays a gap. A user-asserted fact with the same shape does.
+#[test]
+fn a_disputed_fact_does_not_seed_a_derivation() {
+    let theory = TempTheory::new(
+        "fact-disputed",
+        r#"
+sort 公民
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+"#,
+    );
+    check(
+        session_with_theory(&theory, &[":fact disputed 违法 张三", ":why 违法 张三"]),
+        GAP_OR_CONFLICT,
+        &["? 违法 张三", "结论未被证明"],
+    );
+    check(
+        session_with_theory(&theory, &[":fact add 违法 张三", ":why 违法 张三"]),
+        PROVED,
+        &["· 违法 张三", "推导已通过独立校验"],
+    );
+}
+
+/// `:fact show` finds a fact up to kernel equivalence and prints its identity,
+/// name and provenance; an unregistered proposition is a clear error.
+#[test]
+fn fact_show_reports_identity_name_and_sources() {
+    let theory = TempTheory::new(
+        "fact-show",
+        r#"
+sort 公民
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+obj 李四 : 公民
+"#,
+    );
+    check(
+        session_with_theory(&theory, &[":fact add 违法 张三", ":fact show 违法 张三"]),
+        PROVED,
+        &["身份：用户陈述", "名称：事实1", "← 「用户输入交互会话」"],
+    );
+    check_stderr(
+        session_with_theory(&theory, &[":fact show 违法 李四"]),
+        2,
+        &["没有登记为事实的命题"],
+    );
+}
+
+/// The session cannot claim what a court found or what both sides agreed:
+/// those identities come from a case file, with its source.
+#[test]
+fn fact_verified_and_stipulated_are_refused_in_a_session() {
+    let theory = TempTheory::new(
+        "fact-refused",
+        r#"
+sort 公民
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+"#,
+    );
+    for (subcommand, needle) in [("verified", "verified"), ("stipulated", "stipulated")] {
+        let command = format!(":fact {subcommand} 违法 张三");
+        let output = check_stderr(
+            session_with_theory(&theory, &[command.as_str()]),
+            2,
+            &[
+                "只能写在案件文件的事实声明里",
+                "交互会话不能声明法院查明或双方无争议",
+            ],
+        );
+        assert!(
+            stderr(&output).contains(needle),
+            "the refusal must name {needle}:\n{}",
+            stderr(&output)
+        );
+    }
+}
+
+/// A fact declared in a file shows its Chinese identity label in `:inspect`;
+/// an explicit `verified` is honoured and a case file defaults to the user's
+/// assertion.
+#[test]
+fn inspect_shows_the_fact_identity_label() {
+    let theory = TempTheory::new(
+        "inspect-identity",
+        r#"
+sort 公民
+pred 违法 : 公民 → Prop
+obj 张三 : 公民
+axiom 判决事实 : 违法 张三
+  identity verified
+  source text "判决" locator "第一页"
+axiom 陈述事实 : 违法 张三
+  source text "笔录" locator "第一页"
+"#,
+    );
+    check(
+        session_with_theory(&theory, &[":inspect", ":why 违法 张三"]),
+        PROVED,
+        &[
+            "fact  判决事实 : 违法 张三  〔法院查明〕",
+            "fact  陈述事实 : 违法 张三  〔用户陈述〕",
+            "推导已通过独立校验",
+        ],
+    );
 }
 
 /// Every example file that has a regression test in this crate

@@ -29,8 +29,8 @@ rule r :
   source text "测试" locator "一"
 "#;
 
-/// The same rule as `THEORY`, plus an environment axiom that proves its
-/// `unless` condition. A certificate may omit the axiom's node; the checker
+/// The same rule as `THEORY`, plus an environment fact that proves its
+/// `unless` condition. A certificate may omit the fact's node; the checker
 /// must not.
 const AXIOM_THEORY: &str = r#"
 sort 公民
@@ -40,6 +40,27 @@ pred 无辜 : 公民 → Prop
 obj 张三 : 公民
 
 axiom 无辜事实 : 无辜 张三
+  source text "测试" locator "夹具"
+
+rule r :
+  params p : 公民
+  premise 侵占 p
+  conclude 违法 p
+  unless 无辜 p
+  source text "测试" locator "一"
+"#;
+
+/// The same fact, but disputed: it records what the other side claims, so it
+/// is not a proved proposition and must not block the step.
+const DISPUTED_THEORY: &str = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+pred 违法 : 公民 → Prop
+pred 无辜 : 公民 → Prop
+obj 张三 : 公民
+
+axiom 无辜事实 : 无辜 张三
+  identity disputed
   source text "测试" locator "夹具"
 
 rule r :
@@ -844,6 +865,10 @@ fn axiom_env() -> Env {
     env_from("cert-check-axiom", AXIOM_THEORY)
 }
 
+fn disputed_env() -> Env {
+    env_from("cert-check-disputed", DISPUTED_THEORY)
+}
+
 fn dependent_env() -> Env {
     env_from("cert-check-dependent", DEPENDENT_THEORY)
 }
@@ -1330,6 +1355,14 @@ fn environment_axiom_blocks_unless_when_the_certificate_omits_its_node() {
     assert_eq!(error.node, Some(1), "{error}");
     assert!(error.message.contains("阻断条件"), "{error}");
     assert!(error.message.contains("无辜"), "{error}");
+}
+
+/// A disputed environment fact is not a proved proposition, so the checker
+/// must not let it block a step — the reasoner does not seed it either.
+#[test]
+fn a_disputed_environment_fact_does_not_block_a_step() {
+    let cert = legal_certificate();
+    check(&disputed_env(), &cert).expect("a disputed fact is not an asserted premise");
 }
 
 #[test]

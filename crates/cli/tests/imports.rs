@@ -554,7 +554,7 @@ axiom pkg.a.可以 : pkg.b.守法 pkg.b.张三
     assert_exit(&output, PROVED);
     let out = stdout(&output);
     let dependency = line_index(&out, "  pred  pkg.b.守法");
-    let importer = line_index(&out, "  axiom pkg.a.可以");
+    let importer = line_index(&out, "  fact  pkg.a.可以");
     assert!(
         dependency < importer,
         "a dependency's declarations must be loaded before the importer's:\n{out}"
