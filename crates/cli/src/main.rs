@@ -21,11 +21,30 @@
 //! `--no-default-packs` disables the default environment,
 //! `--allow-community-packs` lowers the trust gate of the selected profile (it
 //! never accepts an `official` claim the registry's whitelist does not cover),
-//! and `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` record the
+//! `--closed-env` enables the closed environment, `--allow-case-rules` lifts
+//! its case-declaration check (only together with `--closed-env`), and
+//! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` record the
 //! certificate's legal as-of date and jurisdiction code. The last two are
 //! identity fields only: they are validated at parse time, stamped into a
 //! `:cert` certificate and compared exactly by `:verify-cert`; they never affect
 //! preparation or reasoning.
+//!
+//! In the closed environment a top-level `:load` accepts only a case file (no
+//! `namespace`): modules are legal packs and must be imported. The case may
+//! state facts (`obj`, `axiom`) and query, but by default it may not declare
+//! `sort`/`pred`/`def`/`rule`/`contrary`/`unique`, and its facts may not smuggle
+//! a concept through their type: an object must be declared at a sort from a
+//! loaded pack (not `Prop`, `Type` or a function type), and an axiom's type must
+//! be a proposition. The error names what was rejected and points at
+//! `--allow-case-rules`. With that flag the declarations load and are recorded
+//! as case extensions: `:inspect` marks them ` [案件扩展]` (including an object
+//! or axiom whose type invented a concept), and a certificate that applies a
+//! case rule records one `local-extension` open obligation, so `:why` and
+//! `:verify-cert` report that a human must judge the result instead of claiming
+//! an unqualified proof. A name the loaded packs do not define gets a
+//! closed-environment hint instead of being invented for the case. Without
+//! `--closed-env` a case file behaves exactly as before and no extension is
+//! recorded.
 //!
 //! When the current directory contains `lawpacks/profiles` with a
 //! `default = true` profile, the first theory load prepares that environment
@@ -78,8 +97,9 @@
 //! leaves no half-loaded declarations or package information behind. A
 //! top-level file may not declare inside a namespace an already loaded pack
 //! owns. `:inspect` shows `[name@version]` only for declarations a loaded pack
-//! itself contributed, and still `[ns]` for a namespaced module loaded
-//! directly from a file.
+//! itself contributed, ` [案件扩展]` for a closed-environment case's own legal
+//! concepts, and still `[ns]` for a namespaced module loaded directly from a
+//! file.
 //!
 //! `:packs` reads manifests but imports nothing and does not require a loaded
 //! theory. With no argument it scans `lawpacks` in the current working
@@ -197,11 +217,14 @@
 //!    kernel terms and has the kernel check every step.
 //!
 //! The two layers are printed separately, together with the side conditions
-//! and whether a human must decide something. The process exits `0` only when
-//! both layers pass, the root is proved and nothing is left open; `1` when
-//! both layers pass but the root is a gap, an open obligation remains or a
-//! recorded conflict is unresolved; and `2` when the file cannot be read or
-//! parsed, or either layer fails. A logical pass with a kernel failure is
+//! and whether a human must decide something. A certificate that records a
+//! `local-extension` obligation (its proof applied a rule the case file
+//! declared) gets one `  本地扩展：...` line after the four report lines and
+//! before any goal binding, and counts as an open obligation. The process exits
+//! `0` only when both layers pass, the root is proved and nothing is left open;
+//! `1` when both layers pass but the root is a gap, an open obligation remains
+//! or a recorded conflict is unresolved; and `2` when the file cannot be read
+//! or parsed, or either layer fails. A logical pass with a kernel failure is
 //! therefore a `2`, never a `0`.
 //!
 //! `:verify-cert <file> <goal>` additionally binds the certificate to the goal:
@@ -232,7 +255,7 @@ use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
     render, Certificate, CheckReport, EnvironmentDifference, EnvironmentIdentity,
-    EnvironmentRecord, Node as CertNode, ObligationKind, TrustLevel,
+    EnvironmentRecord, Node as CertNode, ObligationKind, OpenObligation, TrustLevel,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
@@ -342,11 +365,22 @@ fn parse_invocation(args: &[String]) -> Result<(environment::Options, Invocation
                 options.allow_community_packs = true;
                 index += 1;
             }
+            "--closed-env" => {
+                options.closed_env = true;
+                index += 1;
+            }
+            "--allow-case-rules" => {
+                options.allow_case_rules = true;
+                index += 1;
+            }
             _ => break,
         }
     }
     if options.profile.is_some() && options.no_default_packs {
         return Err("用法错误：--profile 与 --no-default-packs 不能同时使用".to_owned());
+    }
+    if options.allow_case_rules && !options.closed_env {
+        return Err("用法错误：--allow-case-rules 需要同时给 --closed-env".to_owned());
     }
 
     let rest = &args[index..];
@@ -455,6 +489,11 @@ struct Session {
     /// Packs loaded through the registry, in load order. A package loaded from
     /// a file path directly has no entry; its declarations still show `[ns]`.
     packs: Vec<packs::LoadedPackInfo>,
+    /// Declarations top-level case files contributed while the closed
+    /// environment allowed case-local rules, by name, with the declaration's
+    /// kind label (`rule`, `pred`, ...). Empty outside the closed mode, so
+    /// `:inspect` and certificates are unchanged there.
+    case_extensions: BTreeMap<String, &'static str>,
     /// The lazily prepared default legal environment.
     environment: environment::Environment,
 }
@@ -465,6 +504,7 @@ impl Session {
             lib: Library::new(),
             loaded: false,
             packs: Vec::new(),
+            case_extensions: BTreeMap::new(),
             environment: environment::Environment::new(options),
         }
     }
@@ -507,6 +547,11 @@ impl Session {
     /// needs no registry, while one that came from a pack is still re-checked
     /// for version/hash drift. Only the remaining imports scan the registry
     /// once, verify the lock once, and load every package (dependencies first).
+    ///
+    /// In the closed environment the file must be a case file, its declarations
+    /// are checked before the loader runs, and the legal concepts it adds are
+    /// recorded as case extensions once the load commits. A failed load records
+    /// nothing, exactly like the cloned library and package list it drops.
     fn load_theory(&mut self, path: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let src = std::fs::read_to_string(path)
             .map_err(|e| format!("{}: error: 读取失败：{e}", escape_path(path)))?;
@@ -559,6 +604,29 @@ impl Session {
             reject_pack_namespace(path, namespace, &loaded_packs)?;
         }
 
+        // A closed environment accepts case files only, and by default the case
+        // may not declare legal concepts of its own. The check runs after the
+        // imports resolved, so `import` still works, and before `lib.load`, so a
+        // rejected file never enters the ledger.
+        if environment.closed_env() {
+            check_closed_case_file(
+                path,
+                &items,
+                namespace,
+                environment.allow_case_rules(),
+                &lib.env,
+            )?;
+        }
+        // The declarations a case file adds are the difference around
+        // `lib.load`; capture the existing names before it runs. Only the closed
+        // mode records them, so the default session keeps an empty map.
+        let existing_names: BTreeSet<String> = if environment.closed_env() {
+            lib.env.iter().map(|decl| decl.name.to_string()).collect()
+        } else {
+            BTreeSet::new()
+        };
+        let mut case_extensions = self.case_extensions.clone();
+
         // The case/module file itself is loaded last, after its dependencies.
         // If it fails, the cloned library and package list are dropped and the
         // pending preload report is never printed.
@@ -566,11 +634,16 @@ impl Session {
             Ok(report) => report,
             Err(error) => {
                 let error = error.render(path);
-                return Err(environment.annotate_error(error, &imports));
+                let error = environment.annotate_error(error, &imports);
+                return Err(environment.annotate_closed_error(error));
             }
         };
+        if environment.closed_env() {
+            record_case_extensions(&lib, &existing_names, &mut case_extensions);
+        }
         self.lib = lib;
         self.packs = loaded_packs;
+        self.case_extensions = case_extensions;
         self.environment = environment;
         self.loaded = true;
         // The preload lines are printed only now that the whole load committed:
@@ -668,6 +741,13 @@ impl Session {
                         };
                         let namespace = match pack_by_decl.get(decl.name.as_ref()) {
                             Some(pack) => format!(" [{}@{}]", pack.name, pack.version),
+                            // A closed-environment case may declare its own
+                            // legal concepts; they are marked as case
+                            // extensions instead of a namespace, which a case
+                            // file never has.
+                            None if self.case_extensions.contains_key(decl.name.as_ref()) => {
+                                " [案件扩展]".to_owned()
+                            }
                             None => namespaces
                                 .get(decl.name.as_ref())
                                 .map(|ns| format!(" [{ns}]"))
@@ -691,9 +771,10 @@ impl Session {
                 }
                 "given" => {
                     let t = parse_term(arg)?;
-                    let e = elab::elab_top(&self.lib.env, &t).map_err(|e| e.msg)?;
+                    let e = elab::elab_top(&self.lib.env, &t)
+                        .map_err(|e| self.environment.annotate_closed_error(e.msg))?;
                     check::check(&self.lib.env, &Ctx::new(), &e, &Expr::Sort(0))
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| self.environment.annotate_closed_error(e.to_string()))?;
                     writeln!(out, "已登记假设：{}", print_expr(&e)).ok();
                     // Stash it on the library as an assumption of the current
                     // session, recorded as a declaration for auditability.
@@ -828,7 +909,8 @@ impl Session {
             d.root = Some(id);
         }
 
-        let certificate = reason_certificate(&d)?;
+        let mut certificate = reason_certificate(&d)?;
+        self.mark_case_extensions(&mut certificate);
         // The tree is printed from the certificate, then that same certificate
         // is checked by both layers: the tree the user sees and the object
         // being checked cannot diverge.
@@ -874,6 +956,9 @@ impl Session {
             })
             .count();
         if !certificate.open_obligations.is_empty() || unresolved > 0 {
+            // A certificate that applied a case-local rule names it before the
+            // summary, so the reader knows what the open obligation is.
+            write_local_extension_lines(out, &certificate);
             writeln!(
                 out,
                 "证书有效且根已证明，但仍有未决义务（open_obligations {} 项，未决冲突 {} 项），不能报告为无保留的证明。",
@@ -957,7 +1042,8 @@ impl Session {
             d.root = Some(id);
         }
 
-        let certificate = reason_certificate(&d)?.with_environment(self.identity()?);
+        let mut certificate = reason_certificate(&d)?.with_environment(self.identity()?);
+        self.mark_case_extensions(&mut certificate);
         let json = certificate
             .to_json_pretty()
             .map_err(|e| format!("证书序列化失败：{e}"))?;
@@ -967,6 +1053,50 @@ impl Session {
         } else {
             Outcome::Gap
         })
+    }
+
+    /// Record the case-local rules a certificate applied as one obligation.
+    ///
+    /// A rule a case file declared is not law from an audited pack. When the
+    /// closed environment allowed such rules, the certificate must say so: one
+    /// `local-extension` obligation names every case rule the proof applied and
+    /// the nodes that apply them, so no consumer can mistake the conclusion for
+    /// one derived from pack rules alone. A certificate that applied none is
+    /// left untouched, and the default session records no case extensions at
+    /// all, so its certificates never carry the obligation.
+    fn mark_case_extensions(&self, certificate: &mut Certificate) {
+        let mut used: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (index, node) in certificate.nodes.iter().enumerate() {
+            let CertNode::RuleApplication { rule, .. } = node else {
+                continue;
+            };
+            if self.case_extensions.get(rule).copied() != Some("rule") {
+                continue;
+            }
+            let nodes = used.entry(rule.as_str()).or_default();
+            if !nodes.contains(&index) {
+                nodes.push(index);
+            }
+        }
+        if used.is_empty() {
+            return;
+        }
+        let mut nodes: Vec<usize> = used.values().flatten().copied().collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        let names = used
+            .keys()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join("、");
+        certificate.open_obligations.push(OpenObligation {
+            id: LOCAL_EXTENSION_ID.to_owned(),
+            kind: ObligationKind::NeedsHumanDetermination,
+            description: format!(
+                "规则 {names} 由案件文件声明，未经官方包审核；本证书的推导依赖这些规则"
+            ),
+            nodes,
+        });
     }
 
     /// Check a certificate against the loaded environment, without rerunning
@@ -1086,6 +1216,10 @@ impl Session {
             human_summary(&certificate, requires_human, unresolved)
         )
         .ok();
+
+        // Case-local rules are recorded as an open obligation; name them so
+        // "需人判断：是" points at what needs a human.
+        write_local_extension_lines(out, &certificate);
 
         // A root is successful only when both layers agree on it and nothing
         // is left to a human or an unresolved conflict.
@@ -1628,6 +1762,234 @@ fn reject_pack_namespace(
     Ok(())
 }
 
+/// The obligation id a certificate uses to list case-local rules it applied.
+const LOCAL_EXTENSION_ID: &str = "local-extension";
+
+/// Check a top-level file against the closed-environment rules.
+///
+/// The closed environment accepts only a case file, so a module (a file with a
+/// `namespace`) is refused: modules are legal packs and enter through `import`.
+/// The case may state facts (`obj`, `axiom`) and query, but its legal concepts
+/// must come from the loaded packs. A case that declares sorts, predicates,
+/// definitions, rules, contraries or uniques is refused unless
+/// `--allow-case-rules` is given; the error names what was declared so the
+/// author can move it into a pack or opt in explicitly.
+///
+/// Facts are checked too, because their *type* can carry a new legal concept:
+/// an object must be declared at a sort from a loaded pack (not `Prop`, `Type`
+/// or a function type), and an axiom's type must be a proposition (not `Prop`,
+/// `Type` or a function type). A type that does not elaborate is left to
+/// `lib.load`, which reports the unknown name with the closed-environment hint.
+fn check_closed_case_file(
+    path: &str,
+    items: &[Item],
+    namespace: Option<&str>,
+    allow_case_rules: bool,
+    env: &Env,
+) -> Result<(), String> {
+    if namespace.is_some() {
+        return Err(std_deduce_lang::LoadError::new(
+            "封闭环境（--closed-env）只接受案件文件（不带 namespace）；\
+             模块文件必须作为法律包用 import 加载，不能直接 :load",
+        )
+        .render(path));
+    }
+    if allow_case_rules {
+        return Ok(());
+    }
+    let mut declarations: Vec<String> = Vec::new();
+    for item in items {
+        match item {
+            // A type that does not elaborate is left to `lib.load`, which
+            // reports the unknown name with a closed-environment hint, so it is
+            // not reported twice.
+            Item::Obj { name, ty, .. } => {
+                if let Ok(ety) = elab::elab_top(env, ty) {
+                    if !is_pack_sort(env, &ety) {
+                        declarations.push(format!("obj {name}（类型必须是已加载法律包里的 sort）"));
+                    }
+                }
+            }
+            Item::Axiom { name, ty, .. } => {
+                if let Ok(ety) = elab::elab_top(env, ty) {
+                    if check::check(env, &Ctx::new(), &ety, &Expr::Sort(0)).is_err() {
+                        declarations.push(format!(
+                            "axiom {name}（类型必须是命题，不能用 Prop/Type/函数类型造新概念）"
+                        ));
+                    }
+                }
+            }
+            _ => {
+                if let Some(declaration) = case_declaration(item) {
+                    declarations.push(declaration);
+                }
+            }
+        }
+    }
+    if declarations.is_empty() {
+        return Ok(());
+    }
+    let listed = declarations
+        .iter()
+        .take(8)
+        .map(|declaration| format!("`{declaration}`"))
+        .collect::<Vec<_>>()
+        .join("、");
+    let listed = if declarations.len() > 8 {
+        format!("{listed} 等 {} 项", declarations.len())
+    } else {
+        listed
+    };
+    Err(std_deduce_lang::LoadError::new(format!(
+        "封闭环境（--closed-env）拒绝案件文件声明：{listed}。\
+         案件文件只能 import 法律包并使用包内的 sort/pred/obj 与规则；\
+         确需案件本地规则时加 --allow-case-rules（证书会把它标记为本地扩展）。"
+    ))
+    .render(path))
+}
+
+/// The closed-environment description of a declaration item, if it is one.
+///
+/// `contrary` and `unique` carry two names (the second is not a declaration
+/// name), so they are written as the source writes them. `obj` and `axiom` have
+/// no description here: their allowedness depends on the elaborated type and is
+/// checked separately.
+fn case_declaration(item: &Item) -> Option<String> {
+    match item {
+        Item::Sort { name, .. } => Some(format!("sort {name}")),
+        Item::Pred { name, .. } => Some(format!("pred {name}")),
+        Item::Def { name, .. } => Some(format!("def {name}")),
+        Item::Rule { name, .. } => Some(format!("rule {name}")),
+        Item::Contrary { left, right, .. } => Some(format!("contrary {left} {right}")),
+        Item::Unique { pred, index, .. } => Some(format!("unique {pred} {index}")),
+        _ => None,
+    }
+}
+
+/// Whether an object's declared type is a sort from a loaded pack.
+///
+/// A plain individual is declared at a pack sort, for example
+/// `obj 张三 : cn.constitution.人`. Any other type — `Prop`, `Type`, a function
+/// type or a definition — would let the case name a legal concept, which the
+/// closed environment does not allow without `--allow-case-rules`. This runs
+/// before `lib.load`, so no case sort exists yet; [`record_case_extensions`]
+/// additionally excludes sorts the case itself declared.
+fn is_pack_sort(env: &Env, ty: &Expr) -> bool {
+    let Expr::Const(name) = ty else {
+        return false;
+    };
+    matches!(
+        env.get(name.as_ref()).map(|decl| &decl.kind),
+        Some(DeclKind::Sort)
+    )
+}
+
+/// Collect every constant name an expression mentions.
+fn expr_consts<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
+    match expr {
+        Expr::Sort(_) | Expr::Var(_) => {}
+        Expr::Const(name) => out.push(name.as_ref()),
+        Expr::Pi {
+            domain, codomain, ..
+        } => {
+            expr_consts(domain, out);
+            expr_consts(codomain, out);
+        }
+        Expr::Lam { domain, body, .. } => {
+            expr_consts(domain, out);
+            expr_consts(body, out);
+        }
+        Expr::App { func, arg } => {
+            expr_consts(func, out);
+            expr_consts(arg, out);
+        }
+        Expr::Let { value, body, .. } => {
+            expr_consts(value, out);
+            expr_consts(body, out);
+        }
+    }
+}
+
+/// Record the declarations a case file added to the ledger.
+///
+/// `existing` is the set of declaration names from before the file loaded. The
+/// kind declarations are recorded first, then the facts: an object is a plain
+/// individual only when its type is a sort from a loaded pack — an object of a
+/// sort this case declared, or of `Prop`/`Type`/a function type, is recorded
+/// (`obj`). An axiom is recorded when its type is not a proposition (a universe
+/// or a function type) or mentions any recorded extension (`axiom`). A plain
+/// `obj 张三 : <pack sort>` and a fact stated with pack declarations are not
+/// extensions. Recording the kinds first lets a later fact see the names this
+/// same file introduced.
+fn record_case_extensions(
+    lib: &Library,
+    existing: &BTreeSet<String>,
+    extensions: &mut BTreeMap<String, &'static str>,
+) {
+    for decl in lib.env.iter() {
+        let name = decl.name.to_string();
+        if existing.contains(&name) {
+            continue;
+        }
+        let label = match &decl.kind {
+            DeclKind::Sort => "sort",
+            DeclKind::Pred => "pred",
+            DeclKind::Def { .. } => "def",
+            DeclKind::Rule(_) => "rule",
+            DeclKind::Contrary { .. } => "contrary",
+            DeclKind::Unique { .. } => "unique",
+            DeclKind::Obj | DeclKind::Axiom | DeclKind::Interpretation(_) => continue,
+        };
+        extensions.insert(name, label);
+    }
+    for decl in lib.env.iter() {
+        let name = decl.name.to_string();
+        if existing.contains(&name) {
+            continue;
+        }
+        match &decl.kind {
+            DeclKind::Obj => {
+                // The sort must come from a loaded pack, not from this case.
+                // The kind pass above already recorded this file's own sorts,
+                // and earlier loads recorded theirs, so their objects are
+                // marked as extensions too.
+                let is_pack_sort = match &decl.ty {
+                    Expr::Const(const_name) => {
+                        matches!(
+                            lib.env.get(const_name.as_ref()).map(|decl| &decl.kind),
+                            Some(DeclKind::Sort)
+                        ) && !extensions.contains_key(const_name.as_ref())
+                    }
+                    _ => false,
+                };
+                if !is_pack_sort {
+                    extensions.insert(name, "obj");
+                }
+            }
+            DeclKind::Axiom => {
+                let mut consts = Vec::new();
+                expr_consts(&decl.ty, &mut consts);
+                // An axiom whose type is not a proposition is a concept of its
+                // own: `axiom P : Prop`, `axiom P : Type` and
+                // `axiom 恶意 : 人 → Prop` are local predicates or types without
+                // a `pred` declaration. A proposition that mentions a recorded
+                // extension depends on one as well; a plain fact stated with pack
+                // declarations and case objects does neither.
+                let is_proposition =
+                    check::check(&lib.env, &Ctx::new(), &decl.ty, &Expr::Sort(0)).is_ok();
+                if !is_proposition
+                    || consts
+                        .iter()
+                        .any(|const_name| extensions.contains_key(*const_name))
+                {
+                    extensions.insert(name, "axiom");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Format a coverage list so the separator cannot be confused with an item.
 ///
 /// Each item is wrapped in `「」`; an empty list prints `（无）` so the line does
@@ -2073,6 +2435,26 @@ fn write_verify_cert_checks_not_run(out: &mut impl Write, reason: &str) {
     writeln!(out, "需人判断：未评估（{reason}）").ok();
 }
 
+/// Print one `  本地扩展：...` line per case-local-extension obligation.
+///
+/// The description comes from the certificate, so it is escaped before it is
+/// printed: a hand-edited certificate must not be able to forge another output
+/// line.
+fn write_local_extension_lines(out: &mut impl Write, certificate: &Certificate) {
+    for obligation in certificate
+        .open_obligations
+        .iter()
+        .filter(|obligation| obligation.id == LOCAL_EXTENSION_ID)
+    {
+        writeln!(
+            out,
+            "  本地扩展：{}",
+            escape_control(&obligation.description)
+        )
+        .ok();
+    }
+}
+
 /// The summary appended to a passing environment line.
 fn environment_summary(record: &EnvironmentRecord) -> String {
     format!(
@@ -2492,6 +2874,16 @@ fn print_help(out: &mut impl Write) {
     writeln!(
         out,
         "  --allow-community-packs      允许 profile 包含非官方信任级别的包"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  --closed-env                 封闭环境：案件文件只能使用已加载法律包里的声明与规则"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  --allow-case-rules           在封闭环境中允许案件本地规则（证书会标记为本地扩展）"
     )
     .ok();
     writeln!(out).ok();

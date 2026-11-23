@@ -589,3 +589,49 @@ fn a_windows_path_in_a_load_error_is_not_backslash_doubled() {
         );
     }
 }
+
+#[test]
+fn allow_case_rules_requires_the_closed_environment() {
+    let output = run(&[
+        "--allow-case-rules".to_owned(),
+        example("宪法案例-齐玉苓.std"),
+    ]);
+    assert_exit(&output, USAGE_ERROR);
+    let err = stderr(&output);
+    assert!(
+        err.contains("--allow-case-rules 需要同时给 --closed-env"),
+        "{err}"
+    );
+    assert!(
+        stdout(&output).is_empty(),
+        "a usage error must not load the file:\n{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn help_lists_the_closed_environment_options() {
+    let output = run(&["--help".to_owned()]);
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(out.contains("--closed-env"), "{out}");
+    assert!(
+        out.contains("案件文件只能使用已加载法律包里的声明与规则"),
+        "{out}"
+    );
+    assert!(out.contains("--allow-case-rules"), "{out}");
+    assert!(out.contains("证书会标记为本地扩展"), "{out}");
+}
+
+#[test]
+fn closed_env_after_a_file_is_a_usage_error() {
+    let output = run(&[example("constitution-39.std"), "--closed-env".to_owned()]);
+    assert_exit(&output, USAGE_ERROR);
+    let err = stderr(&output);
+    assert!(err.contains("未知选项"), "{err}");
+    assert!(
+        stdout(&output).contains("已加载"),
+        "the file itself loaded before the usage error:\n{}",
+        stdout(&output)
+    );
+}

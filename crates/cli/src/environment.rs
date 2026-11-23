@@ -27,12 +27,22 @@
 //! stamped into the certificate's environment identity by `:cert`. They never
 //! affect which packs load or how the reasoner derives; `:verify-cert` compares
 //! them exactly, so a certificate is checked against the same values.
+//!
+//! `--closed-env` is the closed-environment mode: a top-level `:load` may only
+//! load a *case* file, and the case may only use the declarations and rules its
+//! imported packs provide. `--allow-case-rules` lifts that declaration check and
+//! lets the case declare its own sorts, predicates, definitions, rules,
+//! contraries and uniques; those declarations are recorded as case extensions
+//! and a certificate that applies a case rule records an open obligation. The
+//! option is only valid together with `--closed-env`; without the closed mode a
+//! case file may declare what it needs, so the flag would have no meaning.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use std_deduce_kernel::env::escape_control;
 use std_deduce_lang::module::escape_path;
 use std_deduce_lang::Library;
 use std_deduce_lawpack::profile::{
@@ -42,13 +52,17 @@ use std_deduce_lawpack::Trust;
 
 use crate::packs::{render_pack_error, LoadedPackInfo, PackageLoader, Registry};
 
-/// Invocation options that affect the default environment and the
-/// certificate's environment identity.
+/// Invocation options that affect the default environment, the closed
+/// environment and the certificate's environment identity.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
     pub(crate) profile: Option<String>,
     pub(crate) no_default_packs: bool,
     pub(crate) allow_community_packs: bool,
+    /// Closed-environment mode: case files may not declare legal concepts.
+    pub(crate) closed_env: bool,
+    /// Allow case-local declarations in the closed environment.
+    pub(crate) allow_case_rules: bool,
     pub(crate) as_of: Option<String>,
     pub(crate) jurisdiction: Option<String>,
 }
@@ -229,6 +243,51 @@ impl Environment {
         }
         let pack = packs.iter().find(|pack| pack.name == name)?;
         Some(format!("（环境外：{}）", pack.trust))
+    }
+
+    /// Whether the closed-environment mode is on.
+    ///
+    /// The mode is a pure invocation switch: it does not depend on the
+    /// registry or the profile, and it applies to every top-level `:load` of
+    /// the session, not only to the first one.
+    pub(crate) fn closed_env(&self) -> bool {
+        self.options.closed_env
+    }
+
+    /// Whether the closed environment allows case-local declarations.
+    ///
+    /// The parser rejects `--allow-case-rules` without `--closed-env`, so this
+    /// is only ever true together with [`Environment::closed_env`].
+    pub(crate) fn allow_case_rules(&self) -> bool {
+        self.options.allow_case_rules
+    }
+
+    /// Append the closed-environment hint to a failed file load, when useful.
+    ///
+    /// The closed environment never invents a legal concept for a case file: a
+    /// name the loaded packs do not define is reported with a hint to load the
+    /// pack that covers it, or to allow case-local rules. The hint only
+    /// diagnoses; it never changes the exit code, and a failure without an
+    /// `未知名称` marker gets no hint.
+    pub(crate) fn annotate_closed_error(&self, error: String) -> String {
+        if !self.options.closed_env {
+            return error;
+        }
+        let Some(name) = unknown_name(&error) else {
+            return error;
+        };
+        let name = escape_control(name);
+        if self.options.allow_case_rules {
+            format!(
+                "{error}\n提示：已加载的法律包中没有 `{name}`；封闭环境不会为案件补造法律概念，\
+                 请加载覆盖它的法律包或检查名称拼写。"
+            )
+        } else {
+            format!(
+                "{error}\n提示：封闭环境不会为案件补造法律概念；已加载的法律包中没有 `{name}`。\
+                 请加载覆盖它的法律包，或加 --allow-case-rules 使用案件本地扩展（证书会标记）。"
+            )
+        }
     }
 
     /// The registry pack whose name owns `name`, if it can be imported.
@@ -527,7 +586,7 @@ fn current_dir() -> Result<PathBuf, String> {
 }
 
 /// The name an elaboration error reports as unknown, if any.
-fn unknown_name(error: &str) -> Option<&str> {
+pub(crate) fn unknown_name(error: &str) -> Option<&str> {
     let marker = "未知名称 `";
     let start = error.find(marker)? + marker.len();
     let rest = &error[start..];

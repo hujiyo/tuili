@@ -86,6 +86,10 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 `--profile <名字>` 选择 `lawpacks/profiles` 里的 profile，`--no-default-packs` 关闭默认环境
 （显式 `import` 仍可用），`--allow-community-packs` 跳过 profile 的最低信任级别要求、允许其包含
 非官方信任级别的包（不能绕过 `official` 声明的官方白名单核对）；
+`--closed-env` 打开封闭环境：顶层文件只能是案件文件（无 `namespace`），案件只能使用已加载法律包
+里的声明与规则；`--allow-case-rules` 允许封闭环境中的案件本地声明（`:inspect` 标 ` [案件扩展]`；
+证书的 `local-extension` 义务只覆盖实际应用的案件规则），它必须与 `--closed-env` 同用。两者默认
+关闭，原有加载行为不变；
 `--as-of <YYYY-MM-DD>` 与 `--jurisdiction <代码>` 把法律基准日和管辖代码写进证书的环境身份。
 后两者只影响 `:cert` / `:verify-cert`：`:cert` 记录它们，`:verify-cert` 必须看到同一组值，
 否则按环境差异拒绝；它们不改变加载哪些包，也不参与推理。`--as-of` 必须是真实日历日，
@@ -93,7 +97,8 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 `--help` / `-h` 打印用法，`--version` / `-V` 打印 `std-deduce <版本>`；两者只能作为唯一参数。
 选项只解析开头连续的一段；文件、`check`/`repl`/`env` 或冒号命令之后再出现 `-` 开头的参数仍按
 未知选项报用法错误（`2`），不会被当成文件读取，也不会被静默忽略。`--profile` 缺值、重复使用或与
-`--no-default-packs` 同时出现都是用法错误；`--as-of`/`--jurisdiction` 缺值、重复、非法值或
+`--no-default-packs` 同时出现都是用法错误；`--allow-case-rules` 未与 `--closed-env` 同用也是用法错误；
+`--as-of`/`--jurisdiction` 缺值、重复、非法值或
 值看起来像另一个选项也是用法错误。`env` 后的多余参数同样报用法错误，并提示选项要写在
 `env` 之前。文件名本身以 `-` 开头时写 `./-名字`；文件名正好是 `env` 时写 `./env`。
 
@@ -101,13 +106,13 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 
 | 命令 | 作用 |
 |---|---|
-| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表 |
-| `:inspect` | 打印声明台账（含出处与全部来源字段） |
-| `:given <命题>` | 手工登记一条已知事实 |
-| `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导 |
+| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则 |
+| `:inspect` | 打印声明台账（含出处与全部来源字段）；`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`、类型不是包内 `sort` 的 `obj`、类型不是命题（`Prop`/`Type`/函数类型）或引用案件扩展的 `axiom` 标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
+| `:given <命题>` | 手工登记一条已知事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示 |
+| `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导。证书若应用了案件本地规则，会在未决义务汇总前打印 `  本地扩展：…`，按未决义务退出 `1`，不打印 `推导已通过独立校验。` |
 | `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告 |
-| `:cert <命题>` | 先跑推理，再用当前环境身份（规范 profile 名、`--as-of`/`--jurisdiction` 记录的法律基准日与管辖代码、包名/版本/锁哈希/信任级别、链接语料文件的哈希；未给两个选项时为显式 `null`）盖章，最后把证书 JSON（缩进）写到 stdout。这两个字段只记录、不参与推理。必须先 `:load`。推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations`；身份构建或序列化失败时不写任何 JSON：非交互入口（命令行参数）把错误写到 stderr，交互 REPL 沿用命令错误写 stdout 的既有约定 |
-| `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 v3 JSON：先把证书环境身份与当前环境逐项比较（profile、`as_of`、管辖精确相等，包按名字集合、语料按 `(law, version)` 集合比较；差异逐条打印并转义），不一致或身份缺失时退出 `2`，两层证明检查都不运行。生成证书时用了 `--as-of`/`--jurisdiction`，校验时必须带同一组值；不带就等于记 `null`，会按差异拒绝。环境校验通过后，若证书记录了低于 `official` 的包，再追加一行 `  注意：证书记录了非官方包：…；结论依赖这些包的定义`（只提示，不改退出码与后面的四行结果）。一致后才跑 `cert::check` 与 `kernel_proof`，两段分开报告。必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标 |
+| `:cert <命题>` | 先跑推理，再用当前环境身份（规范 profile 名、`--as-of`/`--jurisdiction` 记录的法律基准日与管辖代码、包名/版本/锁哈希/信任级别、链接语料文件的哈希；未给两个选项时为显式 `null`）盖章，最后把证书 JSON（缩进）写到 stdout。这两个字段只记录、不参与推理。必须先 `:load`。推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations`；身份构建或序列化失败时不写任何 JSON：非交互入口（命令行参数）把错误写到 stderr，交互 REPL 沿用命令错误写 stdout 的既有约定。封闭环境里应用了案件本地规则时，`open_obligations` 追加 `local-extension` 项；退出码仍只按根是否可达决定（根可达时为 `0`） |
+| `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 v3 JSON：先把证书环境身份与当前环境逐项比较（profile、`as_of`、管辖精确相等，包按名字集合、语料按 `(law, version)` 集合比较；差异逐条打印并转义），不一致或身份缺失时退出 `2`，两层证明检查都不运行。生成证书时用了 `--as-of`/`--jurisdiction`，校验时必须带同一组值；不带就等于记 `null`，会按差异拒绝。环境校验通过后，若证书记录了低于 `official` 的包，再追加一行 `  注意：证书记录了非官方包：…；结论依赖这些包的定义`（只提示，不改退出码与后面的四行结果）。一致后才跑 `cert::check` 与 `kernel_proof`，两段分开报告。必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标。证书带 `local-extension` 时，在四行检查后打印 `  本地扩展：…`，按未决义务退出 `1` |
 | `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、信任标签、带 `  说明：` 前缀的描述与文件数；`maintainers` 非空时打印维护者，`audit_status = "reviewed"` 时打印审核人与日期；`official` 声明必须先用目录里的 `official.toml` 与 `std.lock` 核对名称、版本和锁哈希，通过才显示 `official（本项目审核）` 与 `  白名单：通过（official.toml）`，否则显示 `official（未通过白名单核对）`、打印 `路径: error: ...` 并退出 `2`（锁校验失败时只打印锁的错误行、不打印逐包白名单错误行，细节见「信任标签与官方白名单」）；清单声明 `corpus` 时再读取链接的条级语料并打印覆盖计数与本体缺口；若目录里有 `std.lock`，再重新哈希并校验；不导入规则，不要求 `:load`。校验清单、链接语料、锁与官方白名单，不检查 namespace 唯一性，也不保证包可导入——这些由 `:load` 检查 |
 | `:lock [目录]` | 对目录（默认 `lawpacks`）里的所有包计算内容哈希，写入 `<目录>/std.lock`；坏包/坏文件/重复包名时打印错误并退出 `2`，不写部分锁 |
 | `:audit [目录]` | 只核对已加载理论里 `quote` 非空的 `source`：法名匹配语料标题/别名，版本、条号、引文（删除全部空白后逐字比较）、条文哈希（条文原文含换行的 SHA-256）与管辖逐项检查；`quote` 为空的来源不参与核对，单独计数且不影响退出码。默认语料目录 `law/corpus`，按 `<law>/<version>.json` 严格布局。至少一条带引文来源且全部命中才退出 `0`；一条带引文来源都没有时报“没有可核对的引文”并退出 `1`；坏语料退出 `2` |
@@ -180,15 +185,15 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
 
 | 命令 | `0` | `1` | `2` |
 |---|---|---|---|
-| `:why` | 两层证书检查都通过、根已证明且无未决义务 | 缺口、未决冲突、被否决的结论，或根已证明但仍有未决义务 | 命令/解析错误、证书生成或渲染失败，或任一层证书检查失败 |
+| `:why` | 两层证书检查都通过、根已证明且无未决义务 | 缺口、未决冲突、被否决的结论，或根已证明但仍有未决义务（含 `local-extension`） | 命令/解析错误、证书生成或渲染失败，或任一层证书检查失败 |
 | `:gap` | 目标可以推出 | 缺口、未决冲突或被否决的结论 | 命令或解析错误 |
-| `:cert` | 根已证明 | 根是缺口 | 未 `:load`、用法/解析/转换错误、环境身份构建失败或序列化失败 |
-| `:verify-cert` | 两段都通过、根已证明且无未决义务 | 两段都通过，但根是缺口 / 有 `open_obligations` / 有未决冲突 | 未加载、读不到、坏 JSON、环境身份不一致或缺失、逻辑校验失败、内核证明失败，或给了目标但根命题不等价/根为缺口/没有根 |
+| `:cert` | 根已证明（即使证书带 `local-extension` 等未决义务） | 根是缺口 | 未 `:load`、用法/解析/转换错误、环境身份构建失败或序列化失败 |
+| `:verify-cert` | 两段都通过、根已证明且无未决义务 | 两段都通过，但根是缺口 / 有 `open_obligations`（含 `local-extension`）/ 有未决冲突 | 未加载、读不到、坏 JSON、环境身份不一致或缺失、逻辑校验失败、内核证明失败，或给了目标但根命题不等价/根为缺口/没有根 |
 | `:packs` | 扫描成功；空目录也是成功 | 当前没有 `1` 的结局 | 目录不存在/不可读、坏清单/坏目录项、链接语料缺失/坏/标识不符/非普通文件、`std.lock` 校验失败，或 `official` 声明未通过白名单核对（缺白名单、未列入、版本/哈希不符、没有锁、白名单文件坏；好包仍会列出） |
 | `:lock` | 所有包成功扫描并写入锁 | 当前没有 `1` 的结局 | 目录/清单/包内文件错误、重复包名或写锁失败；不写部分锁 |
 | `:audit` | 至少一条带引文来源，且全部命中 | 没有带引文来源（没有可核对的引文），或有引文来源未命中/未核对 | 尚未 `:load`，或语料本身坏了（坏布局、坏 JSON、重复 `(law, version)`） |
-| `:load` | 文件（以及默认环境与 import 的包）加载成功 | 当前没有 `1` 的结局 | 文件、profile、注册表、锁、包路径、包 namespace 或 import 失败 |
-| `std-deduce <文件.std>` | 文件加载成功，且后续命令全部成功 | 文件加载失败（含 profile/默认环境/import/注册表/锁失败），或后续查询是缺口/未决冲突 | 后续命令错误、未知选项或用法错误（含 `--as-of`/`--jurisdiction` 的缺值、重复与非法值） |
+| `:load` | 文件（以及默认环境与 import 的包）加载成功 | 当前没有 `1` 的结局 | 文件、profile、注册表、锁、包路径、包 namespace、import 或封闭环境检查失败 |
+| `std-deduce <文件.std>` | 文件加载成功，且后续命令全部成功 | 文件加载失败（含 profile/默认环境/import/注册表/锁/封闭环境失败），或后续查询是缺口/未决冲突 | 后续命令错误、未知选项或用法错误（含 `--as-of`/`--jurisdiction` 的缺值、重复与非法值，以及 `--allow-case-rules` 未配 `--closed-env`） |
 | `std-deduce env` | 环境已加载，或自动模式下没有默认 profile 可加载 | 当前没有 `1` 的结局 | 没有 `lawpacks/`、坏 profile、坏锁、缺包、版本不符或信任不足等环境错误 |
 
 `--as-of` / `--jurisdiction` 的校验发生在参数解析阶段：缺值、重复、不是真实日历日、
@@ -477,6 +482,99 @@ cn.constitution 0.4.0  CN/CN  1982-12-04..未注明  official（本项目审核�
 再变化，本次会话不会重新发现（TOCTOU 边界）。需要更强保证时重新 `:lock`、重新核对白名单并
 重启会话。**签名尚未实现**：当前没有发布者密钥、签名文件或签名验证；`official` 的保证来自
 上述文件与锁哈希的一致，不是密码学签名。
+
+### 封闭环境与案件扩展
+
+`--closed-env` 把会话切到封闭环境：顶层 `:load` 只接受**案件文件**（没有 `namespace`），
+法律概念必须来自已加载的法律包。`--allow-case-rules` 只在封闭环境里有意义，必须与 `--closed-env`
+同用；两者默认都不开，不开时原有加载与证书行为不变。封闭模式对会话里的每次顶层 `:load` 都生效。
+
+封闭环境允许 `import <包>`、`obj`/`axiom` 事实、`:given` 与查询；案件可以使用包里的
+`sort`/`pred`/`obj` 和规则。但事实的类型也受检查：`obj` 必须声明在已加载法律包里的 `sort`
+（如 `obj 张三 : cn.constitution.人`），`Prop`、`Type`、函数/命题类型、`def` 类型一律拒绝；
+`axiom` 的类型必须真的是命题（如 `cn.constitution.中国国籍 张三`），`axiom P : Prop`、
+`axiom P : Type`、函数类型都不是命题，拒绝。
+
+默认拒绝案件自己声明 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`，也拒绝上面这些违规
+`obj`/`axiom`；后两类会带原因后缀。错误一次列出最多 8 项，其余写“等 N 项”，并提示
+`--allow-case-rules`。例如：
+
+```text
+examples/宪法案例-孙志刚.std: error: 封闭环境（--closed-env）拒绝案件文件声明：`sort 法源`、`pred 缺暂住证`、… 等 14 项。案件文件只能 import 法律包并使用包内的 sort/pred/obj 与规则；确需案件本地规则时加 --allow-case-rules（证书会把它标记为本地扩展）。
+case.std: error: 封闭环境（--closed-env）拒绝案件文件声明：`obj 恶意（类型必须是已加载法律包里的 sort）`、`axiom 法律命题（类型必须是命题，不能用 Prop/Type/函数类型造新概念）`。案件文件只能 import 法律包并使用包内的 sort/pred/obj 与规则；确需案件本地规则时加 --allow-case-rules（证书会把它标记为本地扩展）。
+```
+
+错误文案里的“证书会把它标记”对应 `:inspect` 的 ` [案件扩展]`；证书的 `local-extension`
+义务只在实际应用案件规则时写入（见下）。
+
+模块文件（带 `namespace`）在封闭环境里不能直接 `:load`，即使加了 `--allow-case-rules`：
+
+```text
+module.std: error: 封闭环境（--closed-env）只接受案件文件（不带 namespace）；模块文件必须作为法律包用 import 加载，不能直接 :load
+```
+
+未知名称不会被补造，错误后追加一行提示；有/无 `--allow-case-rules` 的文案不同（`:given`
+遇到未知名称也一样）：
+
+```text
+提示：封闭环境不会为案件补造法律概念；已加载的法律包中没有 `恶意侵占`。请加载覆盖它的法律包，或加 --allow-case-rules 使用案件本地扩展（证书会标记）。
+提示：已加载的法律包中没有 `恶意侵占`；封闭环境不会为案件补造法律概念，请加载覆盖它的法律包或检查名称拼写。
+```
+
+`--allow-case-rules` 下这些声明和异常 `obj`/`axiom` 都可以加载。`:inspect` 的标记范围是：
+正常的 `obj`（类型是包内 sort）和正常事实（类型是命题、且不引用任何案件扩展）不标；类型不是
+包内 sort 的 `obj`、类型不是命题（`Prop`/`Type`/函数类型）或引用了案件扩展的 `axiom`，以及
+`sort`/`pred`/`def`/`rule`/`contrary`/`unique` 都标 ` [案件扩展]`。例如：
+
+```text
+obj   甲 : cn.constitution.人
+obj   恶意 : cn.constitution.人 → Prop [案件扩展]
+obj   新类型 : Type [案件扩展]
+obj   命题对象 : Prop [案件扩展]
+axiom 甲有中国国籍 : cn.constitution.中国国籍 甲
+axiom 法律命题 : Prop [案件扩展]
+axiom 恶意命题 : 恶意 甲 [案件扩展]
+axiom 函数命题 : cn.constitution.人 → Prop [案件扩展]
+```
+
+导出证书时，只有推导实际应用了案件规则，才在 `open_obligations` 追加一条 `local-extension`；
+未使用的案件规则不产生义务：
+
+```json
+{
+  "id": "local-extension",
+  "kind": "needs_human_determination",
+  "description": "规则 `抵触宪法即无效`、`无效规范不得适用`、`省人大法工委解释` 由案件文件声明，未经官方包审核；本证书的推导依赖这些规则",
+  "nodes": [28, 29, 30]
+}
+```
+
+`:why` 在未决义务汇总前打印同一句 `  本地扩展：…`，按未决义务退出 `1`，不打印
+`推导已通过独立校验。`；`:verify-cert` 在四行检查之后打印该行，逻辑与内核校验可以通过，但退出 `1`。
+`:cert` 只按根是否可达退出：根可达时为 `0`，证书带着这条义务；根为缺口时为 `1`。
+
+封闭环境的边界：
+
+- `local-extension` 由导出端（`:cert` / `:why`）根据当前会话记录的案件扩展写入，不是证书层自己
+  推断的；它依赖实际加载的案件文件，带出去的证书只保留当时写入的这条义务。
+- 证书环境身份仍只记录 profile、法律包、链接语料与 `as_of`/管辖，不记录案件文件或案件扩展；推理
+  环境是平面账本，规则声明本身不带来源标签，单凭证书的节点和规则名不能证明某条规则来自案件文件，
+  可核对的显式标记是 `local-extension` 义务（以及 `:inspect` 的 ` [案件扩展]`）。
+- `obj`/`axiom` 与 `:given` 仍是用户事实；区分法院查明、用户陈述、AI 假设与待举证留给 M2-4 事实账本。
+- `contrary`/`unique` 目前只在 `:inspect` 标记，不进入证书义务。
+
+三条演示命令：
+
+```powershell
+# 打开封闭环境：孙志刚案声明案件本地规则，被拒并提示 --allow-case-rules
+cargo run -q -p std-deduce-cli -- --closed-env examples/宪法案例-孙志刚.std
+
+# 允许案件本地规则：看 [案件扩展] 标记
+cargo run -q -p std-deduce-cli -- --closed-env --allow-case-rules examples/宪法案例-孙志刚.std ':inspect'
+
+# 只写事实的案件：封闭环境照常证明
+cargo run -q -p std-deduce-cli -- --closed-env examples/宪法案例-齐玉苓.std ':why cn.constitution.受教育权 齐玉苓'
+```
 
 ## 条级语料与 `:audit`
 
@@ -972,7 +1070,8 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   加载时即被拒绝——否则实例化后结论会是 `?x`，那是一个不闭合的洞。
   代价是完全没有前提的规则暂时写不了；「凡公民皆有 X」现在可以写成
   `premise 公民 x → conclude X x`，不需要量词公理的实例化支持。
-- **非命题声明不被拒。** `pred` / `axiom` / `def` 的共域不校验必须是 `Prop`。
+- **非命题声明不被拒。** 默认模式下，`pred` / `axiom` / `def` 的共域不校验必须是 `Prop`；
+  封闭环境另有 `obj`/`axiom` 的类型边界（见「封闭环境与案件扩展」）。
   推理时已跳过声明型 axiom（`axiom 假 : Prop` 这类只声明常量、不断言命题），
   但账本本身仍接受形状不对的声明。
 - **法律包导入已接通；官方宪法包 v0.4.0 形式化第三十三至五十六条中的选定句子。** `:load` 遇到
@@ -1011,7 +1110,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 666 个：kernel 19、lang 76、reason 41、cert 122、cli 244、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 693 个：kernel 19、lang 76、reason 41、cert 122、cli 271、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -1160,7 +1259,7 @@ cargo test --workspace
   里被转义，一条差异一行；`--as-of 2026-11-23` + `--jurisdiction CN` 生成 v3 后 JSON 两字段有值、
   同值校验通过；换值、不带值、证书记 `null` 而当前给了值都按差异拒绝；带值不改变
   profile/packs/corpora，也不改变 `:packs`/`env`/`:why` 的输出。
-- `crates/cli/tests/entry.rs`（22）：二进制入口端到端——批处理加载成功退出 `0` 并打印加载报告；
+- `crates/cli/tests/entry.rs`（25）：二进制入口端到端——批处理加载成功退出 `0` 并打印加载报告；
   坏文件退出 `1`，stderr 带路径与错误且不执行后续命令；坏语法批处理输出 `路径:行:列: error:`
   且路径只出现一次、不出现 `错误：` 前缀；`:load` 坏语法保留 `错误：` 前缀并带同样位置；
   精化错误没有 AST span 时输出 `路径: error: ...`，不伪造行列号；含空格路径按单个参数加载；
@@ -1172,7 +1271,17 @@ cargo test --workspace
   `--as-of`/`--jurisdiction` 的非法日期、非法或空管辖代码、缺值、值像选项、重复使用、
   写在文件或 `env` 之后都退出 `2` 且 stderr 指明选项；非法值里的换行与 ESC 在错误文本中先转义
   （显示为 `\n`、`\u{001B}`），stderr 仍只有一行；
-  加载失败路径中的换行/ESC/U+202E 只产生一行转义诊断，Windows 反斜杠不被双写。
+  加载失败路径中的换行/ESC/U+202E 只产生一行转义诊断，Windows 反斜杠不被双写；
+  `--help` 列出 `--closed-env` 与 `--allow-case-rules` 及其说明；`--allow-case-rules` 未与
+  `--closed-env` 同用退出 `2` 且不加载文件；文件后的 `--closed-env` 按未知选项退出 `2`。
+- `crates/cli/tests/closed_env.rs`（24）：封闭环境与案件扩展端到端——默认拒绝案件本地
+  `sort`/`pred`/`def`/`rule`/`contrary`/`unique`，也拒绝类型不是包内 `sort` 的 `obj` 与
+  类型不是命题的 `axiom`（列出前 8 项与“等 N 项”并提示 `--allow-case-rules`）；模块文件即使加
+  `--allow-case-rules` 也被拒；只写事实的案件照常证明；`:inspect` 标记 ` [案件扩展]`，正常
+  `obj`/事实不标；扩展可累积且失败加载不记录；未被证明使用的案件规则不产生义务；`:cert` 写入
+  `local-extension`（`nodes` 去重升序）；`:why`/`:verify-cert` 打印 `  本地扩展：` 并按未决义务
+  退出 `1`，默认模式不标记；`:given` 未知名称提示有无 allow 两种文案；默认模式验证带义务证书、
+  `:cert`/`:why` 义务描述一致、封闭环境可导入社区包。
 - `crates/cli/tests/audit.rs`（29）：`:audit` 端到端——带引文来源命中与正确哈希退出 `0`；规则带正确 `quote`
   加事实 `axiom` 无 `quote` 时仍退出 `0`（1 命中、1 无引文）；只有无引文来源时退出 `1` 并报“没有可核对的引文”，
   但仍打印覆盖声明；改一个字、哈希不符或格式非法、版本不符、无条号、多版本歧义、无对应语料、管辖不符退出 `1`；
