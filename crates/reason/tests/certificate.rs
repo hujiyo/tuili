@@ -108,7 +108,7 @@ fn gap_certificate_is_valid_but_the_root_is_not_proved() {
 
 #[test]
 fn conflicts_keep_both_sides_provenance_and_resolution() {
-    let lib = example("宪法案例-河南种子案-裁决.std");
+    let lib = example("法律位阶-河南种子案-裁决.std");
     let goal = Expr::apps(
         Expr::constant("应适用"),
         [Expr::constant("种子法"), Expr::constant("汝阳种子公司案")],

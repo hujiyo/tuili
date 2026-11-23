@@ -1,0 +1,50 @@
+-- 齐玉苓案：包外批复与民事责任。
+--
+-- 宪法上的受教育权仍由官方包 `cn.constitution` 提供：齐玉苓有中国国籍，
+-- 包内规则推出公民身份与受教育权，本文件不重复声明这些概念。
+--
+-- 边界：最高人民法院《关于以侵犯姓名权的手段侵犯宪法保护的公民受教育的
+-- 基本权利是否应承担民事责任的批复》（法释〔2001〕25号）是包外的司法
+-- 解释，官方宪法包不包含它。因此「冒名顶替」「受教育权受侵害」「应承担
+-- 民事责任」只在本文件里作为本地谓词声明，供包外规则使用。
+--
+-- 该批复于 2008 年被《最高人民法院关于废止 2007 年底以前发布的有关司法
+-- 解释（第七批）的决定》废止。本文件只声明「批复已废止」这个命题，不预先
+-- 断言它成立：废止由事实层登记，答案随事实集变化。演示：
+--   :given 批复已废止
+--   :gap 应承担民事责任 顶替 齐玉苓
+
+import cn.constitution
+
+sort 行为
+sort 学校
+
+pred 冒名顶替 : 行为 → cn.constitution.人 → 学校 → Prop
+pred 受教育权受侵害 : 行为 → cn.constitution.人 → Prop
+pred 应承担民事责任 : 行为 → cn.constitution.人 → Prop
+pred 批复已废止 : Prop
+
+obj 齐玉苓 : cn.constitution.人
+obj 顶替 : 行为
+obj 济宁商校 : 学校
+
+axiom 齐玉苓有中国国籍 : cn.constitution.中国国籍 齐玉苓
+  source text "示例案情" locator "当事人身份" note "教学示例事实，非真实证据"
+axiom 陈晓琪冒名顶替 : 冒名顶替 顶替 齐玉苓 济宁商校
+  source text "示例案情" locator "冒名顶替行为" note "教学示例事实，非真实证据"
+
+rule 顶替侵害受教育权 :
+  params a : 行为, p : cn.constitution.人, s : 学校
+  premise 冒名顶替 a p s
+  premise cn.constitution.受教育权 p
+  conclude 受教育权受侵害 a p
+  source text "最高人民法院" locator "法释〔2001〕25号" version "2001"
+         note "批复认为冒名顶替侵犯了齐玉苓依据宪法享有的受教育基本权利"
+
+rule 侵害受教育权应承担民事责任 :
+  params a : 行为, p : cn.constitution.人
+  premise 受教育权受侵害 a p
+  conclude 应承担民事责任 a p
+  unless 批复已废止
+  source text "最高人民法院" locator "法释〔2001〕25号" version "2001"
+         note "批复的结论是应承担相应的民事责任；批复废止与否由事实层登记"

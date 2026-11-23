@@ -28,8 +28,11 @@ fn example(name: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Run the CLI from the repository root. `lawpacks/` is resolved relative to
+/// the working directory, so an `import` of an official pack only finds it there.
 fn run(commands: Vec<String>) -> Output {
     Command::new(env!("CARGO_BIN_EXE_std-deduce"))
+        .current_dir(repo_root())
         .args(commands)
         .output()
         .unwrap_or_else(|e| panic!("failed to run the CLI: {e}"))
@@ -140,23 +143,18 @@ fn constitution_39_loads_and_proves() {
 }
 
 /// The import example is facts-only: sorts, predicates and the rule come from
-/// `import cn.constitution`. The CLI must run from the repository root so the
-/// fixed `lawpacks/` registry is the one being exercised.
+/// `import cn.constitution`, and the fixed `lawpacks/` registry supplies them.
 #[test]
 fn constitution_39_import_example_proves_through_the_official_pack() {
-    let output = Command::new(env!("CARGO_BIN_EXE_std-deduce"))
-        .current_dir(repo_root())
-        .args([
-            example("宪法第三十九条-导入包.std"),
-            ":why cn.constitution.住宅受侵犯 张三 甲宅".to_string(),
-        ])
-        .output()
-        .unwrap_or_else(|e| panic!("failed to run the CLI: {e}"));
     check(
-        output,
+        session(
+            "宪法第三十九条-导入包.std",
+            &[":why cn.constitution.住宅受侵犯 张三 甲宅"],
+        ),
         PROVED,
         &[
             "已加载",
+            "导入 cn.constitution",
             "▸ cn.constitution.住宅受侵犯 张三 甲宅",
             "推导已通过独立校验",
         ],
@@ -188,21 +186,56 @@ fn complementary_predicates_report_an_unresolved_conflict() {
     );
 }
 
+/// The main file only proves the constitutional right: nationality to
+/// citizenship to the right to education, all from `cn.constitution`.
 #[test]
-fn qiyuling_proves_and_a_revoked_reply_blocks_the_last_step() {
+fn qiyuling_proves_the_constitutional_right_to_education() {
     check(
         load("宪法案例-齐玉苓.std"),
         PROVED,
-        &["已加载", "侵害受教育权应承担民事责任"],
+        &["已加载", "导入 cn.constitution"],
     );
     check(
+        session(
+            "宪法案例-齐玉苓.std",
+            &[":why cn.constitution.受教育权 齐玉苓"],
+        ),
+        PROVED,
+        &[
+            "▸ cn.constitution.受教育权 齐玉苓",
+            "▸ cn.constitution.公民 齐玉苓",
+            "推导已通过独立校验",
+        ],
+    );
+    // The reply's conclusion is not part of this theory: the predicate is
+    // unknown, and the CLI must say so rather than report a gap.
+    check_stderr(
         session("宪法案例-齐玉苓.std", &[":why 应承担民事责任 顶替 齐玉苓"]),
+        LOAD_ERROR,
+        &["未知名称"],
+    );
+}
+
+/// The reply is a separate theory: both files declare 齐玉苓 and her
+/// nationality, so they must never be loaded into the same session.
+#[test]
+fn qiyuling_reply_uses_out_of_pack_documents_and_the_revocation_blocks_it() {
+    check(
+        load("宪法案例-齐玉苓-批复.std"),
+        PROVED,
+        &["已加载", "导入 cn.constitution"],
+    );
+    check(
+        session(
+            "宪法案例-齐玉苓-批复.std",
+            &[":why 应承担民事责任 顶替 齐玉苓"],
+        ),
         PROVED,
         &["▸ 应承担民事责任 顶替 齐玉苓", "推导已通过独立校验"],
     );
     check(
         session(
-            "宪法案例-齐玉苓.std",
+            "宪法案例-齐玉苓-批复.std",
             &[":given 批复已废止", ":gap 应承担民事责任 顶替 齐玉苓"],
         ),
         GAP_OR_CONFLICT,
@@ -213,35 +246,80 @@ fn qiyuling_proves_and_a_revoked_reply_blocks_the_last_step() {
     );
 }
 
+/// The pack derives citizenship from nationality, so the detention fact is the
+/// only premise its owning rule misses; a session `:given` fills it and proves
+/// the pack rule.
 #[test]
-fn sun_zhigang_stays_a_gap_while_the_independent_rule_proves() {
+fn sun_zhigang_pack_gap_is_filled_by_a_given_detention_fact() {
     check(
         load("宪法案例-孙志刚.std"),
         PROVED,
-        &["已加载", "收容遣送第九条第六款"],
+        &["已加载", "导入 cn.constitution", "收容遣送第九条第六款"],
     );
+    let output = check(
+        session(
+            "宪法案例-孙志刚.std",
+            &[":gap cn.constitution.人身自由受侵犯 孙志刚"],
+        ),
+        GAP_OR_CONFLICT,
+        &[
+            "无法推出 cn.constitution.人身自由受侵犯 孙志刚",
+            "缺：cn.constitution.非法拘禁 孙志刚",
+        ],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("缺：cn.constitution.公民 孙志刚"),
+        "the pack derives citizenship from nationality; it is not a missing premise:\n{out}"
+    );
+    check(
+        session(
+            "宪法案例-孙志刚.std",
+            &[
+                ":given cn.constitution.非法拘禁 孙志刚",
+                ":why cn.constitution.人身自由受侵犯 孙志刚",
+            ],
+        ),
+        PROVED,
+        &[
+            "▸ cn.constitution.人身自由受侵犯 孙志刚",
+            "⟨cn.constitution.非法拘禁侵犯人身自由⟩",
+            "推导已通过独立校验",
+        ],
+    );
+}
+
+#[test]
+fn sun_zhigang_detention_stays_a_gap_while_the_independent_rule_proves() {
     check(
         session("宪法案例-孙志刚.std", &[":gap 应当收容 孙志刚"]),
         GAP_OR_CONFLICT,
-        &["无法推出 应当收容 孙志刚", "缺：无合法证件 孙志刚"],
+        &[
+            "无法推出 应当收容 孙志刚",
+            "缺：无合法证件 孙志刚；无正常居所 孙志刚；无正当生活来源 孙志刚",
+        ],
     );
     check(
         session("宪法案例-孙志刚.std", &[":why 不得收容 孙志刚"]),
         PROVED,
-        &["▸ 不得收容 孙志刚", "推导已通过独立校验"],
+        &[
+            "▸ 不得收容 孙志刚",
+            "⟨省人大法工委解释⟩",
+            "推导已通过独立校验",
+        ],
     );
 }
 
 #[test]
 fn henan_seed_conflict_is_reported_as_unresolved() {
     check(
-        load("宪法案例-河南种子案-冲突.std"),
+        load("法律位阶-河南种子案-冲突.std"),
         PROVED,
         &["已加载", "unique 应适用 1"],
     );
     check(
         session(
-            "宪法案例-河南种子案-冲突.std",
+            "法律位阶-河南种子案-冲突.std",
             &[":why 应适用 种子法 汝阳种子公司案"],
         ),
         GAP_OR_CONFLICT,
@@ -255,13 +333,13 @@ fn henan_seed_conflict_is_reported_as_unresolved() {
 #[test]
 fn henan_seed_hierarchy_resolves_the_conflict() {
     check(
-        load("宪法案例-河南种子案-裁决.std"),
+        load("法律位阶-河南种子案-裁决.std"),
         PROVED,
         &["已加载", "位阶决定应适用"],
     );
     check(
         session(
-            "宪法案例-河南种子案-裁决.std",
+            "法律位阶-河南种子案-裁决.std",
             &[":why 应适用 种子法 汝阳种子公司案"],
         ),
         PROVED,
@@ -273,7 +351,7 @@ fn henan_seed_hierarchy_resolves_the_conflict() {
     );
     check(
         session(
-            "宪法案例-河南种子案-裁决.std",
+            "法律位阶-河南种子案-裁决.std",
             &[":gap 应适用 河南省农作物种子管理条例 汝阳种子公司案"],
         ),
         GAP_OR_CONFLICT,
@@ -585,17 +663,19 @@ obj 张三 : 公民
     check(output, PROVED, &["← 「用户输入交互会话」"]);
 }
 
-/// Every example file that has a regression test above. The guard below keeps
-/// this table in step with the contents of `examples/`.
+/// Every example file that has a regression test in this crate
+/// (`宪法第三十九条-默认环境.std` is exercised by `environment.rs`). The guard
+/// below keeps this table in step with the contents of `examples/`.
 const COVERED_EXAMPLES: &[&str] = &[
     "constitution-39.std",
     "宪法第三十九条-导入包.std",
     "宪法第三十九条-默认环境.std",
     "冲突-互补谓词.std",
     "宪法案例-齐玉苓.std",
+    "宪法案例-齐玉苓-批复.std",
     "宪法案例-孙志刚.std",
-    "宪法案例-河南种子案-冲突.std",
-    "宪法案例-河南种子案-裁决.std",
+    "法律位阶-河南种子案-冲突.std",
+    "法律位阶-河南种子案-裁决.std",
     "刑法第二十条-基本.std",
     "刑法第二十条-防卫过当.std",
     "最高法-软件著作权-最高法知民终155号.std",
