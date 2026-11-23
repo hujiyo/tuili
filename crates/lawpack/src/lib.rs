@@ -48,9 +48,10 @@ mod lock;
 mod manifest;
 pub mod profile;
 
+pub use date::validate as validate_date;
 pub use load::{load, scan, LoadedPack, PackError, Scan, MANIFEST_FILE};
 pub use lock::{
     build_lock, hash_pack, verify_lock, LockReport, LockedPack, Lockfile, LOCK_FILE, LOCK_VERSION,
 };
 pub use manifest::Trust;
-pub use manifest::{Manifest, ManifestError, PackFile, PackInfo};
+pub use manifest::{validate_jurisdiction_code, Manifest, ManifestError, PackFile, PackInfo};

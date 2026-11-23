@@ -1,10 +1,13 @@
-//! Calendar-date validation, shared by pack manifests and corpora.
+//! Calendar-date validation, shared by pack manifests, corpora and the CLI.
 
 /// Check that `value` is a real `YYYY-MM-DD` calendar day.
 ///
 /// Only the shape and the calendar are checked; whether the date makes legal
-/// sense in its context is left to the caller.
-pub(crate) fn validate(field: &str, value: &str) -> Result<(), String> {
+/// sense in its context is left to the caller. `field` names the value in the
+/// error; the CLI passes the option name. Exposed as
+/// [`validate_date`](crate::validate_date) so a session option and a manifest
+/// accept exactly the same dates.
+pub fn validate(field: &str, value: &str) -> Result<(), String> {
     let bytes = value.as_bytes();
     let shaped = bytes.len() == 10
         && bytes[4] == b'-'

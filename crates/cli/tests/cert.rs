@@ -10,8 +10,8 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std_deduce_cert::{
-    check, Assumption, Binding, CertExpr, Certificate, FormatVersion, Metadata, Node,
-    ObligationKind,
+    check, Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, FormatVersion,
+    Metadata, Node, ObligationKind,
 };
 use std_deduce_kernel::Expr;
 use std_deduce_lang::Library;
@@ -190,6 +190,10 @@ fn certificate_round_trips_and_verify_cert_accepts_it() {
 
     let certificate = certificate_json(&generated);
     assert!(certificate.root.is_some(), "the goal is proved");
+    assert!(
+        matches!(certificate.environment, EnvironmentIdentity::Recorded(_)),
+        ":cert must stamp a recorded environment identity"
+    );
 
     let pretty = certificate.to_json_pretty().unwrap();
     let reparsed = Certificate::from_json(&pretty).expect("the exported JSON round-trips");
@@ -207,6 +211,7 @@ fn certificate_round_trips_and_verify_cert_accepts_it() {
     assert_exit(&checked, PROVED);
     let out = stdout(&checked);
     for label in [
+        "环境校验：通过",
         "逻辑校验：通过",
         "内核证明：通过",
         "侧条件：",
@@ -250,6 +255,7 @@ fn gap_certificate_is_valid_but_reports_root_not_proved() {
     let checked = verify_cert_file("刑法第二十条-基本.std", "gap", &certificate);
     assert_exit(&checked, GAP);
     let out = stdout(&checked);
+    assert!(out.contains("环境校验：通过"), "{out}");
     assert!(out.contains("逻辑校验：通过"), "{out}");
     assert!(out.contains("内核证明：通过"), "{out}");
     assert!(out.contains("根未被证明"), "{out}");
@@ -289,6 +295,7 @@ fn unresolved_conflicts_become_open_obligations() {
     let checked = verify_cert_file("冲突-互补谓词.std", "unresolved", &certificate);
     assert_exit(&checked, GAP);
     let out = stdout(&checked);
+    assert!(out.contains("环境校验：通过"), "{out}");
     assert!(out.contains("未决冲突 1 项"), "{out}");
     assert!(out.contains("冲突未决 1 项"), "{out}");
     assert!(out.contains("需人判断：是"), "{out}");
@@ -319,6 +326,7 @@ fn tampered_conclusion_or_binding_is_rejected() {
     let checked = verify_cert_file("constitution-39.std", "bad-conclusion", &bad_conclusion);
     assert_exit(&checked, ERROR);
     let out = stdout(&checked);
+    assert!(out.contains("环境校验：通过"), "{out}");
     assert!(out.contains("逻辑校验：失败"), "{out}");
     assert!(out.contains("内核证明：未运行"), "{out}");
     let err = stderr(&checked);
@@ -359,6 +367,7 @@ fn tampered_conclusion_or_binding_is_rejected() {
     };
     let kernel_failure = Certificate {
         format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::none(),
         assumptions: vec![Assumption {
             proposition: truth.clone(),
             sources: Vec::new(),
@@ -410,6 +419,8 @@ fn verify_cert_rejects_missing_and_malformed_files() {
         &[format!(":verify-cert {}", missing.display())],
     );
     assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("环境校验：未运行"), "{out}");
     let err = stderr(&checked);
     assert!(err.contains("读取证书"), "{err}");
     assert!(err.contains("失败"), "{err}");
@@ -420,6 +431,8 @@ fn verify_cert_rejects_missing_and_malformed_files() {
         &[format!(":verify-cert {}", malformed.path.display())],
     );
     assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("环境校验：未运行"), "{out}");
     let err = stderr(&checked);
     assert!(err.contains("不是有效的证书 JSON"), "{err}");
 }
@@ -451,14 +464,19 @@ fn verify_cert_escapes_a_read_failure_path_onto_one_line() {
 
 #[test]
 fn verify_cert_requires_a_loaded_environment() {
-    let certificate = Certificate::from_json(r#"{"format_version": 2, "nodes": [], "root": null}"#)
-        .expect("a minimal valid certificate");
+    let certificate = Certificate::from_json(
+        r#"{"format_version": 3, "environment": {"profile": null, "packs": [],
+            "corpora": [], "as_of": null, "jurisdiction": null},
+            "nodes": [], "root": null}"#,
+    )
+    .expect("a minimal valid certificate");
     let json = certificate.to_json_pretty().unwrap();
     let file = TempFile::new("no-env", &json);
 
     let checked = run(vec![format!(":verify-cert {}", file.path.display())]);
     assert_exit(&checked, ERROR);
     let out = stdout(&checked);
+    assert!(out.contains("环境校验：未运行"), "{out}");
     assert!(out.contains("逻辑校验：未运行"), "{out}");
     assert!(out.contains("内核证明：未运行"), "{out}");
     assert!(out.contains("侧条件：未评估"), "{out}");
@@ -595,6 +613,7 @@ fn swapped_root_stays_valid_but_fails_the_goal_binding() {
     let checked = verify_cert_file("刑法第二十条-基本.std", "swapped-root", &certificate);
     assert_exit(&checked, PROVED);
     let out = stdout(&checked);
+    assert!(out.contains("环境校验：通过"), "{out}");
     assert!(out.contains("逻辑校验：通过"), "{out}");
     assert!(out.contains("根为假设"), "{out}");
     assert!(!out.contains("目标绑定"), "{out}");
@@ -636,6 +655,7 @@ fn matching_goal_keeps_a_valid_certificate_passing() {
     assert_exit(&checked, PROVED);
     let out = stdout(&checked);
     for label in [
+        "环境校验：通过",
         "逻辑校验：通过",
         "内核证明：通过",
         "侧条件：",

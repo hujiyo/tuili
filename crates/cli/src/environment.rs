@@ -14,8 +14,18 @@
 //! cloned [`Library`] and package list, so a profile, lock, version, trust or
 //! package error leaves the session untouched. Its preload report is returned
 //! to the caller and printed only after the whole load commits, so a file that
-//! fails afterwards never claims the environment loaded. Certificates stay v2
-//! and do not record the environment; that identity belongs to certificate v3.
+//! fails afterwards never claims the environment loaded.
+//!
+//! The selected profile is a session object: [`Environment::profile_name`]
+//! exposes its canonical name for the certificate's environment identity, and
+//! no profile (`--no-default-packs`, no default profile, no registry) is
+//! recorded as an explicit `null`, never as a missing field.
+//!
+//! `--as-of <YYYY-MM-DD>` and `--jurisdiction <code>` are session options too:
+//! they are validated when the arguments are parsed, stored here, and only
+//! stamped into the certificate's environment identity by `:cert`. They never
+//! affect which packs load or how the reasoner derives; `:verify-cert` compares
+//! them exactly, so a certificate is checked against the same values.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -31,12 +41,15 @@ use std_deduce_lawpack::Trust;
 
 use crate::packs::{render_pack_error, LoadedPackInfo, PackageLoader, Registry};
 
-/// Invocation options that affect the default environment.
+/// Invocation options that affect the default environment and the
+/// certificate's environment identity.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
     pub(crate) profile: Option<String>,
     pub(crate) no_default_packs: bool,
     pub(crate) allow_community_packs: bool,
+    pub(crate) as_of: Option<String>,
+    pub(crate) jurisdiction: Option<String>,
 }
 
 /// An enabled environment: the profile that selected it, where the registry
@@ -169,6 +182,34 @@ impl Environment {
             escape_path(&pack),
             escape_path(&pack)
         )
+    }
+
+    /// The canonical name of the active profile, or `None` when no profile is
+    /// active (closed, disabled or not yet prepared).
+    ///
+    /// An alias selects the profile it names, so the returned name is always
+    /// [`Profile::name`], the identity the certificate records.
+    pub(crate) fn profile_name(&self) -> Option<&str> {
+        match &self.state {
+            State::Enabled(active) => Some(active.profile.name.as_str()),
+            State::Closed | State::Disabled | State::Uninitialized => None,
+        }
+    }
+
+    /// The `--as-of` value the session records, if any.
+    ///
+    /// It is an identity field only: it does not gate preparation and is not
+    /// read by the reasoner.
+    pub(crate) fn as_of(&self) -> Option<&str> {
+        self.options.as_of.as_deref()
+    }
+
+    /// The `--jurisdiction` value the session records, if any.
+    ///
+    /// It is an identity field only: it does not gate preparation and is not
+    /// read by the reasoner.
+    pub(crate) fn jurisdiction(&self) -> Option<&str> {
+        self.options.jurisdiction.as_deref()
     }
 
     /// The `（环境外：...）` suffix for an explicit import.

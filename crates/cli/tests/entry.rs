@@ -383,6 +383,193 @@ fn a_failed_load_path_with_control_characters_prints_one_escaped_line() {
 }
 
 #[test]
+fn help_lists_the_certificate_identity_options() {
+    for flag in ["--help", "-h"] {
+        let output = run(&[flag.to_owned()]);
+        assert_exit(&output, PROVED);
+        let out = stdout(&output);
+        assert!(out.contains("--as-of <YYYY-MM-DD>"), "{flag}: {out}");
+        assert!(out.contains("--jurisdiction <代码>"), "{flag}: {out}");
+        assert!(
+            out.contains("不参与推理"),
+            "the help must say the options do not affect reasoning:\n{flag}: {out}"
+        );
+        assert!(
+            out.contains(":cert / :verify-cert"),
+            "the help must name the commands the options affect:\n{flag}: {out}"
+        );
+    }
+}
+
+#[test]
+fn certificate_identity_option_errors_are_usage_errors() {
+    let cases: Vec<(&str, Vec<String>, &str)> = vec![
+        (
+            "impossible calendar day",
+            vec!["--as-of".into(), "2026-02-30".into(), "x.std".into()],
+            "--as-of `2026-02-30` 的日期 30 超出",
+        ),
+        (
+            "malformed date",
+            vec!["--as-of".into(), "2026-1-1".into(), "x.std".into()],
+            "--as-of `2026-1-1` 不是 YYYY-MM-DD 日期",
+        ),
+        (
+            "jurisdiction with a separator",
+            vec!["--jurisdiction".into(), "CN/".into(), "x.std".into()],
+            "--jurisdiction `CN/` 含非法字符",
+        ),
+        (
+            "non-ASCII jurisdiction",
+            vec!["--jurisdiction".into(), "中国".into(), "x.std".into()],
+            "--jurisdiction `中国` 含非法字符",
+        ),
+        (
+            "empty jurisdiction",
+            vec!["--jurisdiction".into(), String::new(), "x.std".into()],
+            "--jurisdiction 不能为空",
+        ),
+        (
+            "missing as-of value",
+            vec!["--as-of".into()],
+            "--as-of 缺少值",
+        ),
+        (
+            "missing jurisdiction value",
+            vec!["--jurisdiction".into()],
+            "--jurisdiction 缺少值",
+        ),
+        (
+            "as-of value looking like an option",
+            vec!["--as-of".into(), "--help".into()],
+            "--as-of 缺少值，`--help` 看起来是选项",
+        ),
+        (
+            "duplicate as-of",
+            vec![
+                "--as-of".into(),
+                "2026-11-23".into(),
+                "--as-of".into(),
+                "2026-11-24".into(),
+                "x.std".into(),
+            ],
+            "--as-of 只能使用一次",
+        ),
+        (
+            "duplicate jurisdiction",
+            vec![
+                "--jurisdiction".into(),
+                "CN".into(),
+                "--jurisdiction".into(),
+                "US".into(),
+                "x.std".into(),
+            ],
+            "--jurisdiction 只能使用一次",
+        ),
+        (
+            "as-of after env",
+            vec!["env".into(), "--as-of".into(), "2026-11-23".into()],
+            "env 之前",
+        ),
+    ];
+    for (case, arguments, needle) in cases {
+        let output = run(&arguments);
+        assert_exit(&output, USAGE_ERROR);
+        let err = stderr(&output);
+        assert!(
+            err.contains(needle),
+            "{case}: stderr does not contain {needle:?}\nstderr:\n{err}"
+        );
+        assert!(
+            stdout(&output).is_empty(),
+            "{case}: a usage error must not load anything:\n{}",
+            stdout(&output)
+        );
+    }
+
+    // An option after the file is still a usage error, but the batch entry has
+    // already loaded the file by then, the same as any other option-looking
+    // argument after a file.
+    for arguments in [
+        vec![
+            example("constitution-39.std"),
+            "--as-of".into(),
+            "2026-11-23".into(),
+        ],
+        vec![
+            example("constitution-39.std"),
+            "--jurisdiction".into(),
+            "CN".into(),
+        ],
+    ] {
+        let output = run(&arguments);
+        assert_exit(&output, USAGE_ERROR);
+        let err = stderr(&output);
+        assert!(err.contains("未知选项"), "{arguments:?}: {err}");
+        assert!(
+            stdout(&output).contains("已加载"),
+            "{arguments:?}: the file itself loads before the usage error:\n{}",
+            stdout(&output)
+        );
+    }
+}
+
+#[test]
+fn certificate_identity_option_errors_cannot_inject_a_diagnostic_line() {
+    // The lawpack validators embed the raw option value in their error text.
+    // A value carrying a newline or ESC must not break the usage diagnostic
+    // into a second line or reach the terminal raw, so both validators escape
+    // the whole error before it is prefixed.
+    let cases: Vec<(&str, Vec<String>, &str)> = vec![
+        (
+            "as-of with a newline",
+            vec![
+                "--as-of".into(),
+                "2026-11-2\n错误：伪造诊断".into(),
+                "x.std".into(),
+            ],
+            "`2026-11-2\\n错误：伪造诊断` 不是 YYYY-MM-DD 日期",
+        ),
+        (
+            "jurisdiction with ESC",
+            vec![
+                "--jurisdiction".into(),
+                "CN\u{001B}[31m伪造".into(),
+                "x.std".into(),
+            ],
+            "`CN\\u{001B}[31m伪造` 含非法字符",
+        ),
+    ];
+    for (case, arguments, escaped_needle) in cases {
+        let output = run(&arguments);
+        assert_exit(&output, USAGE_ERROR);
+        let err = stderr(&output);
+        assert_eq!(
+            err.lines().count(),
+            1,
+            "{case}: exactly one diagnostic line:\n{err:?}"
+        );
+        assert!(
+            err.contains("用法错误："),
+            "{case}: the usage prefix must stay:\n{err:?}"
+        );
+        assert!(
+            err.contains(escaped_needle),
+            "{case}: the control characters must be escaped:\n{err:?}"
+        );
+        assert!(!err.contains('\u{001B}'), "{case}: raw ESC:\n{err:?}");
+        assert!(
+            !err.trim_end_matches('\n').contains('\n'),
+            "{case}: the raw newline must not reach stderr:\n{err:?}"
+        );
+        assert!(
+            stdout(&output).is_empty(),
+            "{case}: a usage error must not load anything"
+        );
+    }
+}
+
+#[test]
 fn a_windows_path_in_a_load_error_is_not_backslash_doubled() {
     let dir = TempDir::new("backslash");
     let file = dir.write("坏文件.std", BAD_THEORY);

@@ -44,6 +44,10 @@ pub(crate) struct LoadedPackInfo {
     pub(crate) trust: Trust,
     pub(crate) hash: String,
     pub(crate) namespace: String,
+    /// The manifest's optional `<law-id>/<version>` corpus link. A certificate
+    /// records the corpus file's hash, so the identity builder needs the link
+    /// the pack was loaded with.
+    pub(crate) corpus: Option<String>,
     /// Ledger names added by this pack's theory files, across all of them.
     pub(crate) decls: BTreeSet<String>,
 }
@@ -312,6 +316,7 @@ impl<'a> PackageLoader<'a> {
             trust: manifest.pack.trust,
             hash,
             namespace,
+            corpus: manifest.pack.corpus.clone(),
             decls,
         });
         self.done.insert(name.to_owned());

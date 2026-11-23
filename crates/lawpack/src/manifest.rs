@@ -232,6 +232,16 @@ fn validate_corpus(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a jurisdiction or territory code.
+///
+/// The code must be non-empty and contain only ASCII letters, digits and `-`.
+/// `pack.jurisdiction` and `pack.territory` use this rule, and so does the
+/// CLI's `--jurisdiction` option, so both accept exactly the same codes.
+/// `field` names the value in the error.
+pub fn validate_jurisdiction_code(field: &str, value: &str) -> Result<(), String> {
+    validate_code(field, value).map_err(|error| error.to_string())
+}
+
 fn validate_code(field: &str, value: &str) -> Result<(), ManifestError> {
     if value.is_empty() {
         return Err(ManifestError::new(format!("{field} 不能为空")));

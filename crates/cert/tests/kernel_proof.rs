@@ -5,8 +5,8 @@
 //! proof term has the claimed conclusion.
 
 use std_deduce_cert::{
-    check as cert_check, kernel_proof, Assumption, Binding, CertExpr, Certificate, FormatVersion,
-    Node,
+    check as cert_check, kernel_proof, Assumption, Binding, CertExpr, Certificate,
+    EnvironmentIdentity, FormatVersion, Node,
 };
 use std_deduce_kernel::check::check as kernel_check;
 use std_deduce_kernel::norm::spine;
@@ -123,6 +123,7 @@ fn gap_node(proposition: CertExpr) -> Node {
 fn certificate(assumptions: Vec<Assumption>, nodes: Vec<Node>, root: Option<usize>) -> Certificate {
     Certificate {
         format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::Unrecorded,
         assumptions,
         nodes,
         root,

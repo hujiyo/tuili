@@ -2,13 +2,15 @@
 
 use serde_json::Value;
 use std_deduce_cert::{
-    Assumption, Binding, CertExpr, Certificate, Conflict, FormatVersion, GapCandidate, Metadata,
-    Node, ObligationKind, OpenObligation, Provenance, Resolution, Side, Source,
+    Assumption, Binding, CertExpr, Certificate, Conflict, CorpusRecord, EnvironmentIdentity,
+    EnvironmentRecord, ExplicitText, FormatVersion, GapCandidate, Metadata, Node, ObligationKind,
+    OpenObligation, PackRecord, Provenance, Resolution, Side, Source, TrustLevel,
 };
 use std_deduce_kernel::env::SourceRef;
 use std_deduce_kernel::{name, Expr};
 
-const SNAPSHOT: &str = include_str!("fixtures/certificate_v2.json");
+const SNAPSHOT: &str = include_str!("fixtures/certificate_v3.json");
+const V2_SNAPSHOT: &str = include_str!("fixtures/certificate_v2.json");
 
 fn constant(text: &str) -> CertExpr {
     CertExpr::Const {
@@ -67,6 +69,22 @@ fn sample_certificate() -> Certificate {
     let justified = app(constant("不负刑事责任"), constant("张三"));
     Certificate {
         format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::Recorded(EnvironmentRecord {
+            profile: ExplicitText::some("cn.default"),
+            packs: vec![PackRecord {
+                name: "cn.constitution".to_owned(),
+                version: "0.4.0".to_owned(),
+                hash: format!("sha256:{}", "0123456789abcdef".repeat(4)),
+                trust: TrustLevel::Official,
+            }],
+            corpora: vec![CorpusRecord {
+                law: "cn.constitution".to_owned(),
+                version: "2018".to_owned(),
+                file_sha256: format!("sha256:{}", "abcdef0123456789".repeat(4)),
+            }],
+            as_of: ExplicitText::none(),
+            jurisdiction: ExplicitText::none(),
+        }),
         assumptions: vec![Assumption {
             proposition: defence.clone(),
             sources: vec![source(
@@ -157,6 +175,7 @@ fn field_names_are_stable() {
     let expected = [
         "assumptions",
         "conflicts",
+        "environment",
         "format_version",
         "metadata",
         "nodes",
@@ -168,7 +187,26 @@ fn field_names_are_stable() {
         assert!(object.contains_key(field), "missing field `{field}`");
     }
 
-    assert_eq!(value["format_version"], 2);
+    assert_eq!(value["format_version"], 3);
+    let environment = value["environment"]
+        .as_object()
+        .expect("the environment is an inline object");
+    let environment_fields = ["profile", "packs", "corpora", "as_of", "jurisdiction"];
+    assert_eq!(environment.len(), environment_fields.len());
+    for field in environment_fields {
+        assert!(
+            environment.contains_key(field),
+            "missing environment field `{field}`"
+        );
+    }
+    assert_eq!(environment["profile"], "cn.default");
+    assert_eq!(environment["packs"][0]["name"], "cn.constitution");
+    assert_eq!(environment["packs"][0]["version"], "0.4.0");
+    assert_eq!(environment["packs"][0]["trust"], "official");
+    assert_eq!(environment["corpora"][0]["law"], "cn.constitution");
+    assert_eq!(environment["corpora"][0]["version"], "2018");
+    assert!(environment["as_of"].is_null());
+    assert!(environment["jurisdiction"].is_null());
     assert_eq!(value["nodes"][0]["kind"], "assumption");
     assert_eq!(value["nodes"][1]["kind"], "rule_application");
     assert_eq!(value["nodes"][2]["kind"], "gap");
@@ -208,22 +246,173 @@ fn a_true_v1_certificate_is_rejected_with_a_version_error() {
         message.contains("unsupported certificate format version 1"),
         "{message}"
     );
-    assert!(message.contains("supports 2"), "{message}");
+    assert!(message.contains("supports 3"), "{message}");
 }
 
 #[test]
-fn a_v2_certificate_without_the_new_source_fields_uses_defaults() {
+fn a_v2_certificate_is_rejected_before_its_missing_environment() {
+    // `certificate_v2.json` predates the mandatory environment object. The
+    // version probe must reject it on the version, not report a missing field
+    // the old writer could not have written.
+    let error = Certificate::from_json(V2_SNAPSHOT).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported certificate format version 2"),
+        "{message}"
+    );
+    assert!(message.contains("this build supports 3"), "{message}");
+    assert!(!message.contains("missing field"), "{message}");
+}
+
+#[test]
+fn source_fields_added_in_v2_still_use_defaults() {
     let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
     strip_new_source_fields(&mut value);
-    assert_eq!(value["format_version"], 2);
+    assert_eq!(value["format_version"], 3);
     let certificate = Certificate::from_json(&value.to_string())
-        .expect("v2 fields added with #[serde(default)] may be omitted");
+        .expect("source fields added with #[serde(default)] may be omitted");
     let source = &certificate.assumptions[0].sources[0];
     assert!(source.quote.is_empty());
     assert!(source.url.is_empty());
     assert!(source.jurisdiction.is_empty());
     assert!(source.retrieved_at.is_empty());
     assert!(source.hash.is_empty());
+}
+
+#[test]
+fn a_missing_environment_is_rejected() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("environment")
+        .expect("fixture has an environment");
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("missing field `environment`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_missing_environment_field_is_rejected_without_being_read_as_null() {
+    for field in ["profile", "packs", "corpora", "as_of", "jurisdiction"] {
+        let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+        value["environment"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field)
+            .unwrap_or_else(|| panic!("fixture has environment.{field}"));
+        let error = Certificate::from_json(&value.to_string()).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("missing field `{field}`")),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn an_explicit_null_profile_as_of_and_jurisdiction_are_accepted() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["environment"]["profile"] = Value::Null;
+    value["environment"]["as_of"] = Value::Null;
+    value["environment"]["jurisdiction"] = Value::Null;
+    let certificate =
+        Certificate::from_json(&value.to_string()).expect("explicit nulls are part of the format");
+    let EnvironmentIdentity::Recorded(environment) = &certificate.environment else {
+        panic!("a parsed certificate always records an environment");
+    };
+    assert!(environment.profile.is_none());
+    assert!(environment.as_of.is_none());
+    assert!(environment.jurisdiction.is_none());
+}
+
+#[test]
+fn environment_dates_and_jurisdiction_strings_are_accepted_and_validated() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["environment"]["as_of"] = Value::from("2026-11-21");
+    value["environment"]["jurisdiction"] = Value::from("CN");
+    Certificate::from_json(&value.to_string()).expect("a real date and a code are valid");
+
+    value["environment"]["as_of"] = Value::from("2026-02-30");
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(error.to_string().contains("as_of"), "{error}");
+
+    value["environment"]["as_of"] = Value::Null;
+    value["environment"]["jurisdiction"] = Value::from("CN!");
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(error.to_string().contains("jurisdiction"), "{error}");
+}
+
+#[test]
+fn an_unknown_environment_field_or_trust_level_is_rejected() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["environment"]["future_field"] = Value::Bool(true);
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown field `future_field`"),
+        "{error}"
+    );
+
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["environment"]["packs"][0]["trust"] = Value::from("trusted");
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(error.to_string().contains("trust"), "{error}");
+}
+
+#[test]
+fn malformed_environment_hashes_and_duplicates_are_rejected() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["environment"]["packs"][0]["hash"] = Value::from("sha256:ABC");
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(error.to_string().contains("hash"), "{error}");
+
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["environment"]["corpora"][0]["file_sha256"] = Value::from("ABC");
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(error.to_string().contains("file_sha256"), "{error}");
+
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    let packs = value["environment"]["packs"].as_array().unwrap();
+    let first = packs[0].clone();
+    value["environment"]["packs"]
+        .as_array_mut()
+        .unwrap()
+        .push(first);
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(error.to_string().contains("duplicated"), "{error}");
+}
+
+#[test]
+fn an_unrecorded_environment_cannot_be_serialized() {
+    let mut certificate = sample_certificate();
+    certificate.environment = EnvironmentIdentity::Unrecorded;
+    let error = certificate.to_json().unwrap_err();
+    assert!(
+        error.to_string().contains("not recorded"),
+        "the serialization error must say why: {error}"
+    );
+    let error = certificate.to_json_pretty().unwrap_err();
+    assert!(error.to_string().contains("not recorded"), "{error}");
+}
+
+#[test]
+fn an_environment_identity_only_deserializes_from_an_object() {
+    for text in ["null", "\"profile\"", "[]", "true"] {
+        let error = serde_json::from_str::<EnvironmentIdentity>(text)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("EnvironmentRecord") || error.contains("environment"),
+            "{text}: {error}"
+        );
+    }
+    let empty = serde_json::from_str::<EnvironmentIdentity>(
+        r#"{"profile":null,"packs":[],"corpora":[],"as_of":null,"jurisdiction":null}"#,
+    )
+    .expect("an object is the only accepted form");
+    assert_eq!(empty, EnvironmentIdentity::none());
 }
 
 #[test]
@@ -246,7 +435,7 @@ fn every_source_field_survives_a_json_round_trip() {
 
 #[test]
 fn unknown_format_version_is_rejected() {
-    let text = SNAPSHOT.replace("\"format_version\": 2", "\"format_version\": 999");
+    let text = SNAPSHOT.replace("\"format_version\": 3", "\"format_version\": 999");
     let error = Certificate::from_json(&text).unwrap_err();
     assert!(
         error

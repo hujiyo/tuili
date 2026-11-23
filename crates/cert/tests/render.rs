@@ -2,7 +2,8 @@
 //! own tree, including its labels, sources, bindings, gaps and errors.
 
 use std_deduce_cert::{
-    render, Assumption, Binding, CertExpr, Certificate, FormatVersion, GapCandidate, Node, Source,
+    render, Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, FormatVersion,
+    GapCandidate, Node, Source,
 };
 use std_deduce_kernel::env::SourceRef;
 
@@ -62,6 +63,7 @@ fn binding(parameter: &str, value: CertExpr) -> Binding {
 fn certificate(assumptions: Vec<Assumption>, nodes: Vec<Node>, root: Option<usize>) -> Certificate {
     Certificate {
         format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::Unrecorded,
         assumptions,
         nodes,
         root,

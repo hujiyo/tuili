@@ -6,7 +6,8 @@
 
 use std_deduce_cert::{
     check, Assumption, Binding, CertExpr, Certificate, CheckError, CheckReport, Conflict,
-    FormatVersion, Node, ObligationKind, OpenObligation, Provenance, Resolution, Side,
+    EnvironmentIdentity, FormatVersion, Node, ObligationKind, OpenObligation, Provenance,
+    Resolution, Side,
 };
 use std_deduce_kernel::Env;
 use std_deduce_lang::Library;
@@ -1086,6 +1087,7 @@ fn gap_node(proposition: CertExpr) -> Node {
 fn certificate(assumptions: Vec<Assumption>, nodes: Vec<Node>, root: Option<usize>) -> Certificate {
     Certificate {
         format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::Unrecorded,
         assumptions,
         nodes,
         root,

@@ -1090,7 +1090,10 @@ fn node_prop(n: &Node) -> Option<&Expr> {
 /// unresolved conflict becomes an `UnresolvedConflict` obligation; both carry
 /// the node or propositions they are about, and their description is the
 /// existing note or proposition text. No source, subject or object is
-/// invented for them. A generation timestamp stays empty.
+/// invented for them. A generation timestamp stays empty, and the environment
+/// identity is [`std_deduce_cert::EnvironmentIdentity::Unrecorded`]: this
+/// crate knows nothing about packs or corpora, so only the CLI can stamp a
+/// real identity before exporting.
 ///
 /// Every kernel expression goes through [`std_deduce_cert::CertExpr::try_from`].
 /// An expression that cannot be represented aborts the conversion with an
@@ -1230,6 +1233,10 @@ pub fn certificate(d: &Derivation) -> Result<std_deduce_cert::Certificate, Strin
 
     Ok(std_deduce_cert::Certificate {
         format_version: std_deduce_cert::FormatVersion::CURRENT,
+        // The reasoner knows nothing about profiles, pack versions or corpus
+        // files; the CLI stamps the real identity before exporting. The marker
+        // cannot be serialized, so this certificate can never reach disk.
+        environment: std_deduce_cert::EnvironmentIdentity::Unrecorded,
         assumptions,
         nodes,
         root: d.root,

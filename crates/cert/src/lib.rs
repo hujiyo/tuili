@@ -21,13 +21,28 @@
 //! does not know the version refuses the certificate instead of guessing at
 //! the index convention.
 //!
+//! ## Environment identity
+//!
+//! Version 3 makes [`Certificate::environment`] mandatory: the certificate
+//! records the profile, pack versions and hashes, trust levels and corpus file
+//! hashes of the environment it was produced in. The reasoner fills
+//! [`EnvironmentIdentity::Unrecorded`], which cannot be serialized, and the CLI
+//! stamps a real identity before exporting.
+//! `:verify-cert` compares the recorded identity with the current environment
+//! before running either proof layer, so a certificate does not silently cross
+//! a pack or corpus change. `as_of` and `jurisdiction` are explicit `null` when
+//! unspecified; the CLI's `--as-of` and `--jurisdiction` options record
+//! non-null values for them.
+//!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 2. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 3. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
+//! Version 2 certificates predate the environment identity and are refused
+//! with a version error before any missing-field error is reported.
 //!
 //! ## Checking
 //!
@@ -67,6 +82,7 @@ mod closure;
 mod key;
 
 pub mod check;
+pub mod environment;
 pub mod expr;
 pub mod model;
 pub mod proof;
@@ -75,6 +91,10 @@ pub mod source;
 pub mod version;
 
 pub use check::{check, CheckError, CheckReport};
+pub use environment::{
+    CorpusRecord, EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, ExplicitText,
+    PackRecord, TrustLevel, UnrecordedEnvironment,
+};
 pub use expr::{CertExpr, ExprEncodeError};
 pub use model::{
     Assumption, Binding, Certificate, Conflict, GapCandidate, Metadata, Node, NodeId,

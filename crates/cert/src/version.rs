@@ -5,7 +5,12 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The certificate format version this build reads and writes.
-pub const FORMAT_VERSION: u32 = 2;
+///
+/// Version 3 adds the mandatory `environment` identity after
+/// `format_version`. Version 2 certificates are refused rather than read with
+/// a guessed, empty environment: a proof whose packs and corpora are unknown
+/// cannot be checked against the current environment.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// A certificate format version.
 ///

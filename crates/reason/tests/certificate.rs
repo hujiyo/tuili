@@ -56,6 +56,9 @@ fn constitution_certificate_round_trips_and_checks() {
     assert!(d.root.is_some(), "the goal must be derived");
 
     let certificate = certificate(&d).expect("the derivation converts");
+    // The reasoner records no environment; an exported certificate needs one.
+    // This test runs against the theory alone, so an empty record is right.
+    let certificate = certificate.with_environment(cert::EnvironmentIdentity::none());
     let pretty = certificate.to_json_pretty().unwrap();
     let decoded = cert::Certificate::from_json(&pretty).expect("the JSON round-trips");
     assert_eq!(decoded, certificate);

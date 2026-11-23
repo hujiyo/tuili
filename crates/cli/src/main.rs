@@ -18,8 +18,13 @@
 //!
 //! Options must come before the file, subcommand or colon command:
 //! `--profile <name>` selects a profile from `lawpacks/profiles`,
-//! `--no-default-packs` disables the default environment and
-//! `--allow-community-packs` lowers the trust gate of the selected profile.
+//! `--no-default-packs` disables the default environment,
+//! `--allow-community-packs` lowers the trust gate of the selected profile, and
+//! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` record the certificate's
+//! legal as-of date and jurisdiction code. The last two are identity fields
+//! only: they are validated at parse time, stamped into a `:cert` certificate
+//! and compared exactly by `:verify-cert`; they never affect preparation or
+//! reasoning.
 //!
 //! When the current directory contains `lawpacks/profiles` with a
 //! `default = true` profile, the first theory load prepares that environment
@@ -28,9 +33,12 @@
 //! A failed preparation fails the load. `--no-default-packs` turns this off
 //! without affecting explicit imports; `--profile` selects a profile by name or
 //! alias. The preload lines are printed only after the whole load commits, so a
-//! failed file never claims that the environment loaded. Profiles and the
-//! environment are session objects only: certificates remain v2 and do not
-//! record them.
+//! failed file never claims that the environment loaded. The profile and the
+//! packs it loaded are session objects, but a certificate v3 records the
+//! environment identity it was produced in: the profile, the as-of date, the
+//! jurisdiction code and the loaded packs/corpora. `:cert` stamps it before
+//! writing, and `:verify-cert` compares it with the current environment before
+//! running the proof layers.
 //!
 //! A batch load uses the same path as `:load`, so it prints the same report. A
 //! file that does not pass its checks prints `path:line:col: error: ...` on
@@ -145,11 +153,23 @@
 //! successful query. A conclusion caught in an unresolved conflict is kept out
 //! of the fact base, but it is never dropped silently.
 //!
-//! `:cert` writes only the certificate JSON to stdout; a gap becomes a
-//! `MissingPremise` obligation and an unresolved conflict becomes an
-//! `UnresolvedConflict` obligation in that JSON.
+//! `:cert` requires a loaded theory and writes only the certificate JSON to
+//! stdout; a gap becomes a `MissingPremise` obligation and an unresolved
+//! conflict becomes an `UnresolvedConflict` obligation in that JSON. Before
+//! serialization the certificate is stamped with the environment identity:
+//! the canonical profile name, the `--as-of` date and `--jurisdiction` code
+//! (explicit `null` when the option was not given), every loaded pack's
+//! version, lock hash and trust level, and the hash of every corpus file a
+//! loaded pack links. An identity error writes no JSON; the argv entry points
+//! report it on stderr, while the REPL keeps its convention of reporting
+//! command errors on stdout.
 //!
-//! `:verify-cert` requires a loaded theory and runs two layers in order:
+//! `:verify-cert` requires a loaded theory and first compares the
+//! certificate's recorded environment identity with the current one. A
+//! certificate that records nothing cannot be compared, and any difference
+//! fails the check before either proof layer runs: the differences are printed
+//! one per line, the four proof lines say they did not run, and the process
+//! exits `2`. Only an environment match reaches the two layers, in order:
 //!
 //! 1. [`std_deduce_cert::check`] rebuilds every rule instance and checks the
 //!    recorded `unless` conditions and the root's conflict status;
@@ -180,6 +200,7 @@
 //! and exits `2`.
 
 mod environment;
+mod identity;
 mod packs;
 
 use std::collections::BTreeSet;
@@ -189,7 +210,10 @@ use std::path::{Path, PathBuf};
 
 use std_deduce_lang::ast::Item;
 
-use std_deduce_cert::{render, Certificate, CheckReport, Node as CertNode, ObligationKind};
+use std_deduce_cert::{
+    render, Certificate, CheckReport, EnvironmentDifference, EnvironmentIdentity,
+    EnvironmentRecord, Node as CertNode, ObligationKind,
+};
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
@@ -258,16 +282,33 @@ fn parse_invocation(args: &[String]) -> Result<(environment::Options, Invocation
                 if options.profile.is_some() {
                     return Err("用法错误：--profile 只能使用一次".to_owned());
                 }
-                let Some(name) = args.get(index + 1) else {
-                    return Err("用法错误：--profile 缺少值（用法：--profile <名字>）".to_owned());
-                };
-                if name.starts_with('-') {
-                    return Err(format!(
-                        "用法错误：--profile 缺少值，`{}` 看起来是选项",
-                        escape_path(name)
-                    ));
+                options.profile = Some(invocation_value(
+                    args,
+                    index,
+                    "--profile",
+                    "--profile <名字>",
+                )?);
+                index += 2;
+            }
+            "--as-of" => {
+                if options.as_of.is_some() {
+                    return Err("用法错误：--as-of 只能使用一次".to_owned());
                 }
-                options.profile = Some(name.clone());
+                let value = invocation_value(args, index, "--as-of", "--as-of <YYYY-MM-DD>")?;
+                std_deduce_lawpack::validate_date("--as-of", &value)
+                    .map_err(|error| format!("用法错误：{}", escape_control(&error)))?;
+                options.as_of = Some(value);
+                index += 2;
+            }
+            "--jurisdiction" => {
+                if options.jurisdiction.is_some() {
+                    return Err("用法错误：--jurisdiction 只能使用一次".to_owned());
+                }
+                let value =
+                    invocation_value(args, index, "--jurisdiction", "--jurisdiction <代码>")?;
+                std_deduce_lawpack::validate_jurisdiction_code("--jurisdiction", &value)
+                    .map_err(|error| format!("用法错误：{}", escape_control(&error)))?;
+                options.jurisdiction = Some(value);
                 index += 2;
             }
             "--no-default-packs" => {
@@ -351,6 +392,29 @@ fn parse_invocation(args: &[String]) -> Result<(environment::Options, Invocation
     }
 }
 
+/// The value that follows a leading option.
+///
+/// A missing value and a value that looks like another option are both usage
+/// errors: an option is never silently consumed as a value, and a typo never
+/// turns into a session setting.
+fn invocation_value(
+    args: &[String],
+    index: usize,
+    option: &str,
+    usage: &str,
+) -> Result<String, String> {
+    let Some(value) = args.get(index + 1) else {
+        return Err(format!("用法错误：{option} 缺少值（用法：{usage}）"));
+    };
+    if value.starts_with('-') {
+        return Err(format!(
+            "用法错误：{option} 缺少值，`{}` 看起来是选项",
+            escape_path(value)
+        ));
+    }
+    Ok(value.clone())
+}
+
 /// The usage error for an unexpected extra argument of `repl`.
 fn extra_argument_error(argument: &str, usage: &str) -> String {
     if argument.starts_with('-') {
@@ -380,6 +444,27 @@ impl Session {
             packs: Vec::new(),
             environment: environment::Environment::new(options),
         }
+    }
+
+    /// The environment identity an exported certificate records.
+    ///
+    /// The identity comes from the active profile, the session's `--as-of` /
+    /// `--jurisdiction` values, the packs this session has loaded (including
+    /// explicit imports) and the corpus files those packs link below
+    /// `<current directory>/law/corpus`. It is always a recorded identity: an
+    /// error here stops `:cert` before any JSON is written.
+    fn identity(&self) -> Result<EnvironmentIdentity, String> {
+        let corpus_root = std::env::current_dir()
+            .map_err(|error| format!("无法取得当前目录：{}", escape_control(&error.to_string())))?
+            .join("law")
+            .join("corpus");
+        identity::build(
+            self.environment.profile_name(),
+            self.environment.as_of(),
+            self.environment.jurisdiction(),
+            &self.packs,
+            &corpus_root,
+        )
     }
 
     /// Load a theory file into the session and print the load report.
@@ -814,7 +899,18 @@ impl Session {
     /// gap node as the root, with the same candidates `:gap` would report, so
     /// the exported certificate is still checkable and says `root_proved
     /// = false` rather than pretending to be a proof.
+    ///
+    /// The certificate is stamped with the current environment identity before
+    /// serialization. A theory must be loaded: the identity describes the
+    /// environment the proof was derived in, and an unrecorded certificate can
+    /// never be exported. Every failure happens before anything is written, so
+    /// stdout never carries half a JSON document.
     fn export_certificate(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if !self.loaded {
+            return Err(
+                "尚未加载理论：:cert 需要已加载的环境才能记录环境身份，请先 :load <文件>".into(),
+            );
+        }
         if arg.is_empty() {
             return Err("用法：:cert <目标命题>".into());
         }
@@ -838,7 +934,7 @@ impl Session {
             d.root = Some(id);
         }
 
-        let certificate = reason_certificate(&d)?;
+        let certificate = reason_certificate(&d)?.with_environment(self.identity()?);
         let json = certificate
             .to_json_pretty()
             .map_err(|e| format!("证书序列化失败：{e}"))?;
@@ -892,6 +988,11 @@ impl Session {
                 ));
             }
         };
+
+        // Layer 0: a certificate only means something in the environment that
+        // produced it. Compare the recorded identity before running either
+        // proof layer, so a pack or corpus change cannot be silently ignored.
+        self.check_certificate_environment(&certificate, out)?;
 
         // Layer 1: rebuild every rule instance from its own evidence and check
         // the recorded `unless` conditions and the root's conflict status.
@@ -979,6 +1080,56 @@ impl Session {
             self.check_goal_binding(goal, &certificate, out)?;
         }
         Ok(outcome)
+    }
+
+    /// Compare the certificate's recorded environment with the current one.
+    ///
+    /// The check passes only when both identities are recorded, the current
+    /// identity can be built, and there is no difference. Every failure prints
+    /// the environment outcome first, then the four proof lines as not run,
+    /// and returns an error so the process exits `2`; no proof layer runs.
+    fn check_certificate_environment(
+        &self,
+        certificate: &Certificate,
+        out: &mut impl Write,
+    ) -> Result<(), String> {
+        let current = match self.identity() {
+            Ok(current) => current,
+            Err(error) => {
+                writeln!(out, "环境校验：未运行（无法构造当前环境身份：{error}）").ok();
+                write_verify_cert_checks_not_run(out, "环境校验未运行");
+                return Err(format!("环境校验未运行：无法构造当前环境身份：{error}"));
+            }
+        };
+        let Some(current) = current.as_recorded() else {
+            // `identity::build` always records; if that ever changes, fail
+            // closed rather than treating "nothing recorded" as an empty match.
+            writeln!(out, "环境校验：未运行（当前环境身份未记录）").ok();
+            write_verify_cert_checks_not_run(out, "环境校验未运行");
+            return Err("环境校验未运行：当前环境身份未记录".into());
+        };
+        let differences = match certificate.environment.differences(current) {
+            Ok(differences) => differences,
+            Err(error) => {
+                writeln!(out, "环境校验：未运行（{error}）").ok();
+                write_verify_cert_checks_not_run(out, "环境校验未运行");
+                return Err(format!("环境校验未运行：{error}"));
+            }
+        };
+        if !differences.is_empty() {
+            writeln!(out, "环境校验：失败（{} 处差异）", differences.len()).ok();
+            for difference in &differences {
+                writeln!(out, "  - {}", environment_difference(difference)).ok();
+            }
+            write_verify_cert_checks_not_run(out, "环境校验失败");
+            return Err(format!(
+                "环境校验失败：证书记录的环境身份与当前环境不一致（{} 处差异）；\
+                 逻辑与内核校验未运行",
+                differences.len()
+            ));
+        }
+        writeln!(out, "环境校验：通过（{}）", environment_summary(current)).ok();
+        Ok(())
     }
 
     /// Check that the root node's proposition is the supplied goal.
@@ -1638,12 +1789,143 @@ fn effective_range(info: &PackInfo) -> String {
     }
 }
 
-/// Print the four labelled lines when `:verify-cert` cannot reach either layer.
+/// Print the five labelled lines when `:verify-cert` cannot reach any check.
 fn write_verify_cert_not_run(out: &mut impl Write, reason: &str) {
+    writeln!(out, "环境校验：未运行（{reason}）").ok();
+    write_verify_cert_checks_not_run(out, reason);
+}
+
+/// Print the four proof-layer lines as not run.
+fn write_verify_cert_checks_not_run(out: &mut impl Write, reason: &str) {
     writeln!(out, "逻辑校验：未运行（{reason}）").ok();
     writeln!(out, "内核证明：未运行（{reason}）").ok();
     writeln!(out, "侧条件：未评估（{reason}）").ok();
     writeln!(out, "需人判断：未评估（{reason}）").ok();
+}
+
+/// The summary appended to a passing environment line.
+fn environment_summary(record: &EnvironmentRecord) -> String {
+    format!(
+        "profile {}；包 {} 个；语料 {} 个；as_of {}；管辖 {}",
+        environment_text(record.profile.as_deref()),
+        record.packs.len(),
+        record.corpora.len(),
+        environment_text(record.as_of.as_deref()),
+        environment_text(record.jurisdiction.as_deref()),
+    )
+}
+
+/// One optional environment field, escaped and with `null` spelled out.
+fn environment_text(value: Option<&str>) -> String {
+    match value {
+        Some(text) => escape_control(text),
+        None => "未指定".to_owned(),
+    }
+}
+
+/// Render one environment difference as a single escaped line.
+///
+/// Every value that comes from the certificate is untrusted input: it is
+/// escaped so a newline or terminal escape sequence cannot forge another
+/// output line.
+fn environment_difference(difference: &EnvironmentDifference) -> String {
+    match difference {
+        EnvironmentDifference::Profile { recorded, current } => format!(
+            "profile 不一致：证书为 {}，当前为 {}",
+            environment_value(recorded.as_deref()),
+            environment_value(current.as_deref())
+        ),
+        EnvironmentDifference::AsOf { recorded, current } => format!(
+            "as_of 不一致：证书为 {}，当前为 {}",
+            environment_value(recorded.as_deref()),
+            environment_value(current.as_deref())
+        ),
+        EnvironmentDifference::Jurisdiction { recorded, current } => format!(
+            "管辖不一致：证书为 {}，当前为 {}",
+            environment_value(recorded.as_deref()),
+            environment_value(current.as_deref())
+        ),
+        EnvironmentDifference::MissingPack(pack) => format!(
+            "当前环境缺少证书记录的包 `{}@{}`（信任级别 {}，哈希 {}）",
+            escape_control(&pack.name),
+            escape_control(&pack.version),
+            pack.trust,
+            escape_control(&pack.hash)
+        ),
+        EnvironmentDifference::ExtraPack(pack) => format!(
+            "当前环境多出证书未记录的包 `{}@{}`（信任级别 {}，哈希 {}）",
+            escape_control(&pack.name),
+            escape_control(&pack.version),
+            pack.trust,
+            escape_control(&pack.hash)
+        ),
+        EnvironmentDifference::PackVersion {
+            name,
+            recorded,
+            current,
+        } => format!(
+            "包 `{}` 版本不一致：证书为 {}，当前为 {}",
+            escape_control(name),
+            escape_control(recorded),
+            escape_control(current)
+        ),
+        EnvironmentDifference::PackHash {
+            name,
+            version,
+            recorded,
+            current,
+        } => format!(
+            "包 `{}@{}` 哈希不一致：证书为 {}，当前为 {}",
+            escape_control(name),
+            escape_control(version),
+            escape_control(recorded),
+            escape_control(current)
+        ),
+        EnvironmentDifference::PackTrust {
+            name,
+            version,
+            recorded,
+            current,
+        } => format!(
+            "包 `{}@{}` 信任级别不一致：证书为 {}，当前为 {}",
+            escape_control(name),
+            escape_control(version),
+            recorded,
+            current
+        ),
+        EnvironmentDifference::MissingCorpus(corpus) => format!(
+            "当前环境缺少证书记录的语料 `{}@{}`（文件哈希 {}）",
+            escape_control(&corpus.law),
+            escape_control(&corpus.version),
+            escape_control(&corpus.file_sha256)
+        ),
+        EnvironmentDifference::ExtraCorpus(corpus) => format!(
+            "当前环境多出证书未记录的语料 `{}@{}`（文件哈希 {}）",
+            escape_control(&corpus.law),
+            escape_control(&corpus.version),
+            escape_control(&corpus.file_sha256)
+        ),
+        EnvironmentDifference::CorpusHash {
+            law,
+            version,
+            recorded,
+            current,
+        } => format!(
+            "语料 `{}@{}` 文件哈希不一致：证书为 {}，当前为 {}",
+            escape_control(law),
+            escape_control(version),
+            escape_control(recorded),
+            escape_control(current)
+        ),
+    }
+}
+
+/// One recorded/current environment field value, escaped; `null` is spelled out.
+fn environment_value(value: Option<&str>) -> String {
+    match value {
+        Some(text) => format!("`{}`", escape_control(text)),
+        None => "null".to_owned(),
+    }
 }
 
 /// Describe what the logical layer established about the root.
@@ -1924,6 +2206,16 @@ fn print_help(out: &mut impl Write) {
     .ok();
     writeln!(
         out,
+        "  --as-of <YYYY-MM-DD>         记录证书的法律基准日（只影响 :cert / :verify-cert，不参与推理）"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  --jurisdiction <代码>        记录证书的管辖代码（只影响 :cert / :verify-cert，不参与推理）"
+    )
+    .ok();
+    writeln!(
+        out,
         "  --no-default-packs           不加载默认环境（与 --profile 互斥；显式 import 仍可用）"
     )
     .ok();
@@ -1935,7 +2227,13 @@ fn print_help(out: &mut impl Write) {
     writeln!(out).ok();
     writeln!(
         out,
-        "证书命令为 :verify-cert <证书文件> [目标命题]；原来的 :check 已改名。"
+        "证书命令为 :verify-cert <证书文件> [目标命题]（先校验环境身份）；\
+         原来的 :check 已改名。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "--as-of / --jurisdiction 只写进证书环境身份，:verify-cert 比对同值；不参与推理。"
     )
     .ok();
 }

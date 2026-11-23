@@ -5,8 +5,10 @@
 //! [`OpenObligation::nodes`]. The data model does not validate any index;
 //! [`crate::check`] validates the proof's node references.
 
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
+use crate::environment::EnvironmentIdentity;
 use crate::expr::CertExpr;
 use crate::source::Source;
 use crate::version::FormatVersion;
@@ -17,13 +19,16 @@ pub type NodeId = usize;
 /// A proof certificate.
 ///
 /// The JSON object has exactly the fields below, in this order:
-/// `format_version`, `assumptions`, `nodes`, `root`, `conflicts`,
-/// `open_obligations`, `metadata`. Unknown fields are rejected.
+/// `format_version`, `environment`, `assumptions`, `nodes`, `root`,
+/// `conflicts`, `open_obligations`, `metadata`. Unknown fields are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Certificate {
     /// The format version. Only [`FormatVersion::CURRENT`] deserializes.
     pub format_version: FormatVersion,
+    /// The environment identity the certificate was produced in. Mandatory:
+    /// a certificate cannot be exported without one.
+    pub environment: EnvironmentIdentity,
     /// Assumptions used by the derivation, including their provenance and
     /// label. [`Node::Assumption`] refers to entries here by index.
     #[serde(default)]
@@ -55,9 +60,37 @@ impl Certificate {
         serde_json::to_string_pretty(self)
     }
 
+    /// Stamp the environment identity, replacing whatever the reasoner left.
+    ///
+    /// The reasoner produces an [`EnvironmentIdentity::Unrecorded`] certificate
+    /// because it has no access to the pack registry or corpus; the CLI calls
+    /// this before exporting so an unrecorded certificate can never reach disk.
+    pub fn with_environment(mut self, environment: EnvironmentIdentity) -> Self {
+        self.environment = environment;
+        self
+    }
+
     /// Parse JSON, rejecting an unknown or missing `format_version`.
+    ///
+    /// The version is probed first, using only the `format_version` field, so a
+    /// version 2 certificate reports the version error rather than the
+    /// `environment` field it could not have written. A fully parsed
+    /// certificate's environment record is then validated, so an exporter
+    /// cannot hand out duplicate pack names or a malformed corpus hash.
     pub fn from_json(text: &str) -> serde_json::Result<Self> {
-        serde_json::from_str(text)
+        #[derive(Deserialize)]
+        struct FormatProbe {
+            #[serde(rename = "format_version")]
+            _format_version: FormatVersion,
+        }
+
+        let _: FormatProbe = serde_json::from_str(text)?;
+        let certificate: Self = serde_json::from_str(text)?;
+        certificate
+            .environment
+            .validate()
+            .map_err(serde_json::Error::custom)?;
+        Ok(certificate)
     }
 }
 

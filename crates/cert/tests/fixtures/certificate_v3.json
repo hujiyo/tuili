@@ -1,0 +1,203 @@
+{
+  "format_version": 3,
+  "environment": {
+    "profile": "cn.default",
+    "packs": [
+      {
+        "name": "cn.constitution",
+        "version": "0.4.0",
+        "hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "trust": "official"
+      }
+    ],
+    "corpora": [
+      {
+        "law": "cn.constitution",
+        "version": "2018",
+        "file_sha256": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+      }
+    ],
+    "as_of": null,
+    "jurisdiction": null
+  },
+  "assumptions": [
+    {
+      "proposition": {
+        "kind": "app",
+        "func": {
+          "kind": "const",
+          "name": "不法侵害"
+        },
+        "arg": {
+          "kind": "const",
+          "name": "张三"
+        }
+      },
+      "sources": [
+        {
+          "text": "为了使国家、公共利益、本人或者他人的人身、财产和其他权利免受正在进行的不法侵害，而采取的制止不法侵害的行为，对不法侵害人造成损害的，属于正当防卫，不负刑事责任。",
+          "locator": "中华人民共和国刑法第二十条第一款",
+          "version": "2020年修正",
+          "effective": "2021-03-01",
+          "note": "按现行条文形式化",
+          "quote": "条文原文",
+          "url": "https://example.test/law?article=20",
+          "jurisdiction": "CN",
+          "retrieved_at": "2026-11-21",
+          "hash": "sha256:abc"
+        }
+      ],
+      "label": "事实：不法侵害正在进行"
+    }
+  ],
+  "nodes": [
+    {
+      "kind": "assumption",
+      "assumption": 0
+    },
+    {
+      "kind": "rule_application",
+      "rule": "正当防卫",
+      "conclusion": {
+        "kind": "app",
+        "func": {
+          "kind": "const",
+          "name": "不负刑事责任"
+        },
+        "arg": {
+          "kind": "const",
+          "name": "张三"
+        }
+      },
+      "premises": [
+        0
+      ],
+      "bindings": [
+        {
+          "parameter": "p",
+          "value": {
+            "kind": "const",
+            "name": "张三"
+          }
+        }
+      ],
+      "sources": [
+        {
+          "text": "正当防卫，不负刑事责任",
+          "locator": "中华人民共和国刑法第二十条第一款",
+          "version": "2020年修正",
+          "effective": "2021-03-01",
+          "note": "按现行条文形式化",
+          "quote": "条文原文",
+          "url": "https://example.test/law?article=20",
+          "jurisdiction": "CN",
+          "retrieved_at": "2026-11-21",
+          "hash": "sha256:abc"
+        }
+      ]
+    },
+    {
+      "kind": "gap",
+      "proposition": {
+        "kind": "app",
+        "func": {
+          "kind": "const",
+          "name": "赔偿"
+        },
+        "arg": {
+          "kind": "const",
+          "name": "张三"
+        }
+      },
+      "candidates": [
+        {
+          "rule": "侵权赔偿",
+          "missing": [
+            {
+              "kind": "app",
+              "func": {
+                "kind": "const",
+                "name": "损害"
+              },
+              "arg": {
+                "kind": "const",
+                "name": "张三"
+              }
+            }
+          ],
+          "blocked_by": [],
+          "sources": [
+            {
+              "text": "行为人因过错侵害他人民事权益造成损害的，应当承担侵权责任。",
+              "locator": "中华人民共和国民法典第一千一百六十五条",
+              "version": "2020年修正",
+              "effective": "2021-03-01",
+              "note": "按现行条文形式化",
+              "quote": "条文原文",
+              "url": "https://example.test/law?article=20",
+              "jurisdiction": "CN",
+              "retrieved_at": "2026-11-21",
+              "hash": "sha256:abc"
+            }
+          ]
+        }
+      ],
+      "note": "缺少损害事实"
+    }
+  ],
+  "root": 1,
+  "conflicts": [
+    {
+      "left": {
+        "kind": "app",
+        "func": {
+          "kind": "const",
+          "name": "不负刑事责任"
+        },
+        "arg": {
+          "kind": "const",
+          "name": "张三"
+        }
+      },
+      "right": {
+        "kind": "app",
+        "func": {
+          "kind": "const",
+          "name": "应负刑事责任"
+        },
+        "arg": {
+          "kind": "const",
+          "name": "张三"
+        }
+      },
+      "left_by": {
+        "kind": "rules",
+        "rules": [
+          "正当防卫"
+        ]
+      },
+      "right_by": {
+        "kind": "assumption"
+      },
+      "resolution": {
+        "kind": "defeated",
+        "winner": "left"
+      }
+    }
+  ],
+  "open_obligations": [
+    {
+      "id": "obligation-1",
+      "kind": "needs_human_determination",
+      "description": "「不法侵害」是否达到法定程度需要人判断",
+      "nodes": [
+        1
+      ]
+    }
+  ],
+  "metadata": {
+    "generated_at": "2026-11-21T12:00:00Z",
+    "tool": "std-deduce",
+    "tool_version": "0.1.0"
+  }
+}
