@@ -1,0 +1,5 @@
+# 官方发行白名单：只有此处列出的 name、version 与锁哈希完全一致的包才能声明 trust = "official"。
+[[pack]]
+name = "cn.constitution"
+version = "0.4.0"
+hash = "sha256:7e69a4302d72ddb6e3387a1b4c068faaf0d12f17bf35867fd07d4b55d2395407"

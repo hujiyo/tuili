@@ -7,7 +7,8 @@
 //! loaded into the session before the file itself. `--profile <name>` selects a
 //! profile explicitly, `--no-default-packs` disables the environment (explicit
 //! `import` still works), and `--allow-community-packs` lowers the trust gate
-//! for a profile.
+//! for a profile. The flag only lowers that gate: an `official` claim is still
+//! checked against the registry's official whitelist by the package loader.
 //!
 //! Preparation is lazy: `:packs`, `:lock`, `:inspect` and a REPL that never
 //! loads a file do not touch it. The whole preparation runs on the caller's

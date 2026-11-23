@@ -3,7 +3,8 @@
 //! A legal pack is a directory containing a `lawpack.toml` manifest. The
 //! manifest records the pack's identity, its jurisdiction and territory, its
 //! effective date range, the files that belong to it, and optionally a
-//! `<law-id>/<version>` link to its article corpus.
+//! `<law-id>/<version>` link to its article corpus. It also names the pack's
+//! maintainers and, for an official release, the reviewer and the review date.
 //!
 //! This crate validates the manifest's *format* only. It does not import rules,
 //! does not check that the listed files exist, and does not judge whether the
@@ -14,6 +15,12 @@
 //! which records the version and content hash of every pack. Verification
 //! compares a directory against its lock; it does not import or certify
 //! anything either.
+//!
+//! [`whitelist`] is the official-release whitelist, `<registry>/official.toml`.
+//! It lists the name, version and content hash of every release this project
+//! audited; a manifest that claims `trust = "official"` is honoured only for a
+//! listed release whose hash the lock confirms. A registry without the file
+//! publishes no audited release.
 //!
 //! [`profile`] describes the default legal environment: which packs it contains,
 //! the version constraints they must satisfy and the minimum trust level the
@@ -47,6 +54,7 @@ mod load;
 mod lock;
 mod manifest;
 pub mod profile;
+pub mod whitelist;
 
 pub use date::validate as validate_date;
 pub use load::{load, scan, LoadedPack, PackError, Scan, MANIFEST_FILE};
@@ -54,4 +62,7 @@ pub use lock::{
     build_lock, hash_pack, verify_lock, LockReport, LockedPack, Lockfile, LOCK_FILE, LOCK_VERSION,
 };
 pub use manifest::Trust;
-pub use manifest::{validate_jurisdiction_code, Manifest, ManifestError, PackFile, PackInfo};
+pub use manifest::{
+    validate_jurisdiction_code, AuditStatus, Manifest, ManifestError, PackFile, PackInfo,
+};
+pub use whitelist::{read_whitelist, Whitelist, WhitelistPack, OFFICIAL_FILE};

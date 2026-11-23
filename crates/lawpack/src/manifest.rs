@@ -1,5 +1,6 @@
 //! The manifest data model and its format validation.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer};
@@ -10,6 +11,8 @@ use crate::date;
 pub(crate) const MAX_NAME_LEN: usize = 128;
 /// Longest accepted version string, in bytes.
 pub(crate) const MAX_VERSION_LEN: usize = 64;
+/// Longest accepted maintainer or reviewer text, in bytes.
+pub(crate) const MAX_REVIEWER_LEN: usize = 128;
 
 /// How much a legal pack is trusted.
 ///
@@ -33,6 +36,28 @@ impl fmt::Display for Trust {
             Trust::Local => "local",
             Trust::Community => "community",
             Trust::Official => "official",
+        };
+        f.write_str(label)
+    }
+}
+
+/// Whether a pack release was reviewed by this project.
+///
+/// A manifest without `audit_status` is `unreviewed`, so a pack is never
+/// treated as reviewed by omission. Only an `official` pack may be `reviewed`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditStatus {
+    #[default]
+    Unreviewed,
+    Reviewed,
+}
+
+impl fmt::Display for AuditStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            AuditStatus::Unreviewed => "unreviewed",
+            AuditStatus::Reviewed => "reviewed",
         };
         f.write_str(label)
     }
@@ -74,6 +99,18 @@ pub struct PackInfo {
     /// Trust level; absence means `community`.
     #[serde(default)]
     pub trust: Trust,
+    /// Groups or people that maintain this pack. Required for `official`.
+    #[serde(default)]
+    pub maintainers: Vec<String>,
+    /// Review state; absence means `unreviewed`.
+    #[serde(default)]
+    pub audit_status: AuditStatus,
+    /// Who reviewed this release. Only a `reviewed` pack may set it.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub audited_by: Option<String>,
+    /// Review date, `YYYY-MM-DD`. Only a `reviewed` pack may set it.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub audited_at: Option<String>,
     /// First effective date, `YYYY-MM-DD`; an empty string means "not set".
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub effective_from: Option<String>,
@@ -128,9 +165,12 @@ impl Manifest {
     /// Parse and validate a manifest.
     ///
     /// Only format is checked: required fields, name/version/code character
-    /// sets and lengths, and dates that are real calendar days. Whether a date
-    /// range makes legal sense, whether listed files exist, and whether the
-    /// content is correct are all left to later steps.
+    /// sets and lengths, dates that are real calendar days, and the agreement
+    /// between `trust`, `audit_status` and the review fields — an `official`
+    /// pack must be `reviewed` and carry a reviewer and a review date, while a
+    /// non-official pack carries no review record. Whether a date range makes
+    /// legal sense, whether listed files exist, and whether the content is
+    /// correct are all left to later steps.
     pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
         let manifest: Manifest = toml::from_str(text)
             .map_err(|error| ManifestError::new(format!("TOML 解析失败：{error}")))?;
@@ -152,8 +192,103 @@ impl Manifest {
         if let Some(date) = &self.pack.effective_to {
             date::validate("pack.effective_to", date).map_err(ManifestError::new)?;
         }
+        self.validate_review()?;
         Ok(())
     }
+
+    /// Validate the maintainer list and the review record.
+    ///
+    /// `official` and `reviewed` are two sides of one claim, so they must agree:
+    /// an official pack states who maintains it, who reviewed it and when, and
+    /// a non-official pack carries no review record at all. `reviewed` without
+    /// both review fields, or either field without `reviewed`, is an error
+    /// instead of a half-filled record.
+    fn validate_review(&self) -> Result<(), ManifestError> {
+        let pack = &self.pack;
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for (index, maintainer) in pack.maintainers.iter().enumerate() {
+            validate_reviewer_text("pack.maintainers", Some(index + 1), maintainer)
+                .map_err(ManifestError::new)?;
+            if let Some(first) = seen.insert(maintainer, index + 1) {
+                return Err(ManifestError::new(format!(
+                    "pack.maintainers 第 {} 项与第 {first} 项重复：`{maintainer}`",
+                    index + 1
+                )));
+            }
+        }
+        if let Some(audited_by) = &pack.audited_by {
+            validate_reviewer_text("pack.audited_by", None, audited_by)
+                .map_err(ManifestError::new)?;
+        }
+        if let Some(audited_at) = &pack.audited_at {
+            date::validate("pack.audited_at", audited_at).map_err(ManifestError::new)?;
+        }
+
+        match (pack.trust, pack.audit_status) {
+            (Trust::Official, AuditStatus::Reviewed) => {}
+            (Trust::Official, AuditStatus::Unreviewed) => {
+                return Err(ManifestError::new(
+                    "pack.trust 是 official 时 pack.audit_status 必须是 `reviewed`",
+                ));
+            }
+            (_, AuditStatus::Reviewed) => {
+                return Err(ManifestError::new(format!(
+                    "包 `{}` 的 pack.audit_status 是 `reviewed`，但只有 trust = \"official\" 的包能带审核记录",
+                    pack.name
+                )));
+            }
+            (_, AuditStatus::Unreviewed) => {}
+        }
+        if pack.trust == Trust::Official {
+            if pack.maintainers.is_empty() {
+                return Err(ManifestError::new(
+                    "pack.trust 是 official 时 pack.maintainers 不能为空",
+                ));
+            }
+            if pack.audited_by.is_none() {
+                return Err(ManifestError::new(
+                    "pack.trust 是 official 时 pack.audited_by 必须存在",
+                ));
+            }
+            if pack.audited_at.is_none() {
+                return Err(ManifestError::new(
+                    "pack.trust 是 official 时 pack.audited_at 必须存在",
+                ));
+            }
+        } else if pack.audited_by.is_some() || pack.audited_at.is_some() {
+            return Err(ManifestError::new(format!(
+                "包 `{}` 填写了 pack.audited_by/pack.audited_at，但只有 trust = \"official\" 且 audit_status = \"reviewed\" 的包能带审核记录",
+                pack.name
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Validate one maintainer or reviewer string.
+///
+/// `index` is the 1-based position inside `pack.maintainers`; it is `None` for
+/// the single-valued `pack.audited_by`. The text must be non-empty, at most
+/// [`MAX_REVIEWER_LEN`] bytes, free of control characters (so it cannot forge
+/// an output line) and free of leading or trailing whitespace.
+fn validate_reviewer_text(field: &str, index: Option<usize>, value: &str) -> Result<(), String> {
+    let label = match index {
+        Some(index) => format!("{field} 第 {index} 项"),
+        None => field.to_owned(),
+    };
+    if value.is_empty() {
+        return Err(format!("{label}不能为空"));
+    }
+    if value.len() > MAX_REVIEWER_LEN {
+        return Err(format!("{label}长度不能超过 {MAX_REVIEWER_LEN}"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{label}含控制字符"));
+    }
+    if value.trim() != value {
+        return Err(format!("{label}不能有首尾空白"));
+    }
+    Ok(())
 }
 
 /// Validate an identity name (`pack.name` or a profile name/alias).

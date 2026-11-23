@@ -105,14 +105,24 @@ fn the_official_pack_is_listed_and_its_lock_verifies() {
         run_in_repo(&[":packs lawpacks".to_string()]),
         PROVED,
         &[
-            "cn.constitution 0.4.0  CN/CN  1982-12-04..未注明  official  ",
-            "中华人民共和国宪法官方包 v0.4.0（第三十三至五十六条中的选定权利与义务；非完整形式化）",
+            "cn.constitution 0.4.0  CN/CN  1982-12-04..未注明  official（本项目审核）  ",
+            "  维护者：std-deduce 维护组",
+            "  审核：已审核（审核人 std-deduce 官方包审核流程，2026-11-23）",
+            "  白名单：通过（official.toml）",
+            "  说明：中华人民共和国宪法官方包 v0.4.0（第三十三至五十六条中的选定权利与义务；非完整形式化）",
             "文件 1 个",
             "覆盖 cn.constitution@2018：形式化 6 / 部分 15 / 仅索引 17 / 待本体 105；开放概念 52",
             "本体缺口：「state_organs」 82、「property_economy」 11、「legal_norms」 3、「procedure」 3、「territory」 2、「deontic_harm」 1、「kinship」 1、「military」 1、「protection_remedy」 1",
             "锁定校验：通过（1 个包）",
         ],
     );
+    // The whitelist-confirmed release is the only thing that may read as audited.
+    let out = stdout(&output);
+    let first = out.lines().next().expect("the listing has a pack line");
+    assert!(first.starts_with("cn.constitution 0.4.0"), "{first}");
+    assert!(first.contains("official（本项目审核）"), "{first}");
+    assert!(!first.contains("未通过白名单核对"), "{first}");
+    assert!(out.contains("  白名单：通过（official.toml）"), "{out}");
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
 
@@ -772,11 +782,12 @@ fn a_corrupted_pack_file_fails_packs_and_load() {
     );
 }
 
-/// Copy the two files and the lock that make up the official pack.
+/// Copy the files and the lock that make up the official registry.
 fn copy_official_pack(root: &Path) {
     let source = repo_root().join("lawpacks");
     let target = root.join("lawpacks");
     copy_file(&source.join("std.lock"), &target.join("std.lock"));
+    copy_file(&source.join("official.toml"), &target.join("official.toml"));
     copy_file(
         &source.join("cn.constitution/lawpack.toml"),
         &target.join("cn.constitution/lawpack.toml"),

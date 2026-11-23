@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use std_deduce_cert::{Certificate, EnvironmentIdentity, ExplicitText, TrustLevel};
 use std_deduce_lawpack::corpus::hash_file;
-use std_deduce_lawpack::{build_lock, LOCK_FILE};
+use std_deduce_lawpack::{build_lock, Lockfile, LOCK_FILE, OFFICIAL_FILE};
 
 const PROVED: i32 = 0;
 const ERROR: i32 = 2;
@@ -57,7 +57,12 @@ fn manifest_text(version: &str) -> String {
     format!(
         "[pack]\nname = \"{PACK}\"\nversion = \"{version}\"\n\
          jurisdiction = \"CN\"\nterritory = \"CN\"\nnamespace = \"{PACK}\"\n\
-         trust = \"official\"\ncorpus = \"{PACK}/{CORPUS_VERSION}\"\n\n\
+         trust = \"official\"\n\
+         maintainers = [\"测试维护组\"]\n\
+         audit_status = \"reviewed\"\n\
+         audited_by = \"测试审核流程\"\n\
+         audited_at = \"2026-11-23\"\n\
+         corpus = \"{PACK}/{CORPUS_VERSION}\"\n\n\
          [[files]]\npath = \"theory.std\"\nkind = \"theory\"\n"
     )
 }
@@ -160,6 +165,22 @@ impl TempRoot {
         lockfile
             .write(&root.join(LOCK_FILE))
             .unwrap_or_else(|error| panic!("write lock: {error}"));
+        self.write_whitelist();
+    }
+
+    /// List every locked official pack in `official.toml`, using the hash the
+    /// lock recorded, so the registry's `official` claim can be verified.
+    fn write_whitelist(&self) {
+        let root = self.path.join("lawpacks");
+        let lockfile = Lockfile::read(&root.join(LOCK_FILE)).expect("the lock exists");
+        let mut text = String::new();
+        for entry in &lockfile.pack {
+            text.push_str(&format!(
+                "[[pack]]\nname = \"{}\"\nversion = \"{}\"\nhash = \"{}\"\n\n",
+                entry.name, entry.version, entry.hash
+            ));
+        }
+        self.write(&format!("lawpacks/{OFFICIAL_FILE}"), &text);
     }
 
     fn run(&self, arguments: &[String]) -> Output {

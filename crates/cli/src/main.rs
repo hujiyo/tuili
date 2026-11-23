@@ -19,12 +19,13 @@
 //! Options must come before the file, subcommand or colon command:
 //! `--profile <name>` selects a profile from `lawpacks/profiles`,
 //! `--no-default-packs` disables the default environment,
-//! `--allow-community-packs` lowers the trust gate of the selected profile, and
-//! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` record the certificate's
-//! legal as-of date and jurisdiction code. The last two are identity fields
-//! only: they are validated at parse time, stamped into a `:cert` certificate
-//! and compared exactly by `:verify-cert`; they never affect preparation or
-//! reasoning.
+//! `--allow-community-packs` lowers the trust gate of the selected profile (it
+//! never accepts an `official` claim the registry's whitelist does not cover),
+//! and `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` record the
+//! certificate's legal as-of date and jurisdiction code. The last two are
+//! identity fields only: they are validated at parse time, stamped into a
+//! `:cert` certificate and compared exactly by `:verify-cert`; they never affect
+//! preparation or reasoning.
 //!
 //! When the current directory contains `lawpacks/profiles` with a
 //! `default = true` profile, the first theory load prepares that environment
@@ -86,8 +87,13 @@
 //! containing spaces works without further quoting. Only direct child
 //! directories containing a regular `lawpack.toml` are packs; symbolic links
 //! and pack directories that resolve outside the root are errors. Each valid
-//! pack is printed on one line with its effective range and trust level, then
-//! an optional indented description and file count. A manifest may link an
+//! pack is printed on one line with its effective range and trust level — the
+//! level's label says whether this project audited the release: an `official`
+//! claim reads `official（本项目审核）` only when the whitelist confirms it and
+//! `official（未通过白名单核对）` otherwise, while the lower levels are marked as
+//! unaudited — then the maintainers, the review record of a reviewed release,
+//! the description behind a fixed `  说明：` prefix, the file count and, for an
+//! `official` claim, the official-whitelist verdict. A manifest may link an
 //! article corpus as `<law-id>/<version>`; `:packs` reads
 //! `<registry-parent>/law/corpus/<law-id>/<version>.json` and prints its
 //! coverage counts and named ontology gaps. A missing or invalid linked corpus
@@ -97,15 +103,25 @@
 //! newline or terminal escape sequence cannot forge another line. A root with
 //! no packs prints a "not found" line and succeeds.
 //!
-//! After the listing, `:packs` looks for `std.lock` in the same directory. When
-//! it is there, every pack is hashed and checked against the lock: a match
-//! prints `锁定校验：通过（N 个包）`, while a missing, changed, extra or
-//! differently versioned pack prints every error and makes the command exit
-//! `2`. Without a lock the command prints
-//! `锁定校验：未找到 std.lock（未锁定）` and keeps the listing's outcome. If
-//! the listing itself found manifest errors, lock verification is skipped and
-//! reported as `锁定校验：未运行（清单错误）`, so one bad manifest is reported
-//! once and the listing's exit code stands.
+//! In the same directory, `:packs` looks for `std.lock` and `official.toml`.
+//! When the lock is there, every pack is hashed and checked against it before
+//! the listing is printed: a match prints `锁定校验：通过（N 个包）`, while a
+//! missing, changed, extra or differently versioned pack prints every lock
+//! error and makes the command exit `2`; no per-pack whitelist verdict is
+//! printed then, and an `official` claim still reads
+//! `official（未通过白名单核对）`. An `official` claim is honoured only when
+//! `official.toml` lists the pack's name, version and locked hash; that prints
+//! `白名单：通过（official.toml）`. A missing whitelist, an unlisted release and a
+//! hash mismatch print a per-pack `path: error: ...` line, and an `official.toml`
+//! that cannot be read or validated prints one `path: error: ...` line of its
+//! own; every one of them makes the command exit `2`. A pack below `official`
+//! does not have to be listed by the whitelist, but a broken `official.toml` is
+//! still a registry error that fails the whole listing. Without a lock the
+//! command prints `锁定校验：未找到 std.lock（未锁定）` and keeps the listing's
+//! outcome, except for an `official` claim, which then has no hash to check and
+//! fails with a per-pack error. If the listing itself found manifest errors,
+//! lock verification is skipped and reported as `锁定校验：未运行（清单错误）`, so
+//! one bad manifest is reported once and the listing's exit code stands.
 //!
 //! `:lock` hashes every pack in the directory (default `lawpacks`) and writes
 //! `<dir>/std.lock`. An unreadable directory or file, a symbolic link inside a
@@ -169,7 +185,11 @@
 //! certificate that records nothing cannot be compared, and any difference
 //! fails the check before either proof layer runs: the differences are printed
 //! one per line, the four proof lines say they did not run, and the process
-//! exits `2`. Only an environment match reaches the two layers, in order:
+//! exits `2`. A passing environment line is followed, when the certificate
+//! records a pack below `official` trust, by one indented `注意：证书记录了非官方包：`
+//! line naming every such pack and its level; the warning changes neither the
+//! exit code nor the four proof lines. Only an environment match reaches the
+//! two layers, in order:
 //!
 //! 1. [`std_deduce_cert::check`] rebuilds every rule instance and checks the
 //!    recorded `unless` conditions and the root's conflict status;
@@ -203,7 +223,7 @@ mod environment;
 mod identity;
 mod packs;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -212,7 +232,7 @@ use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
     render, Certificate, CheckReport, EnvironmentDifference, EnvironmentIdentity,
-    EnvironmentRecord, Node as CertNode, ObligationKind,
+    EnvironmentRecord, Node as CertNode, ObligationKind, TrustLevel,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
@@ -221,7 +241,10 @@ use std_deduce_kernel::{check, Expr};
 use std_deduce_lang::module::escape_path;
 use std_deduce_lang::{elab, Library, LoadReport};
 use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus, CoverageStatus};
-use std_deduce_lawpack::{PackInfo, LOCK_FILE};
+use std_deduce_lawpack::{
+    read_whitelist, AuditStatus, PackError, PackInfo, Trust, Whitelist, LOCK_FILE, MANIFEST_FILE,
+    OFFICIAL_FILE,
+};
 use std_deduce_reason::{
     certificate as reason_certificate, Conflict, Provenance, Reasoner, Resolution, Side,
 };
@@ -1129,6 +1152,34 @@ impl Session {
             ));
         }
         writeln!(out, "环境校验：通过（{}）", environment_summary(current)).ok();
+        // The certificate is only as good as the packs it was derived from. A
+        // non-official pack is accepted when the current environment has it,
+        // but the reader must see that the conclusion depends on definitions
+        // this project did not audit.
+        let non_official: Vec<&std_deduce_cert::PackRecord> = current
+            .packs
+            .iter()
+            .filter(|pack| pack.trust != TrustLevel::Official)
+            .collect();
+        if !non_official.is_empty() {
+            let list = non_official
+                .iter()
+                .map(|pack| {
+                    format!(
+                        "{}@{}（{}）",
+                        escape_control(&pack.name),
+                        escape_control(&pack.version),
+                        pack.trust
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("、");
+            writeln!(
+                out,
+                "  注意：证书记录了非官方包：{list}；结论依赖这些包的定义"
+            )
+            .ok();
+        }
         Ok(())
     }
 
@@ -1210,18 +1261,61 @@ impl Session {
     /// linked corpus is escaped before printing, so a newline or escape
     /// sequence cannot forge another output line.
     ///
-    /// When `root/std.lock` exists, the registry is verified after the
-    /// listing. A verification error is printed per pack and fails the
-    /// command; a missing lock is only reported. Verification is skipped when
-    /// the listing already failed, so a bad manifest is reported once.
+    /// Each pack line shows its trust level as a label that says what the level
+    /// means, followed by the maintainers, for a reviewed release the reviewer
+    /// and date, the description behind a fixed `  说明：` prefix, and the file
+    /// count. A pack whose manifest claims `official` is checked against
+    /// `<root>/official.toml` before its line is printed: only a confirmed claim
+    /// reads `official（本项目审核）`, any other claim reads
+    /// `official（未通过白名单核对）`, and confirmation prints
+    /// `白名单：通过（official.toml）` because the whitelist lists exactly the
+    /// pack's name, version and locked hash. A missing whitelist, an unlisted
+    /// release and a missing lock print a per-pack `路径: error: ...` line; an
+    /// `official.toml` that cannot be read or validated prints one file-level
+    /// `路径: error: ...` line. Every such error fails the command, and so does a
+    /// failed lock verification (whose own error lines are printed instead of a
+    /// whitelist verdict). A pack below `official` does not need to be listed,
+    /// but a broken whitelist still fails the whole listing.
+    ///
+    /// When `root/std.lock` exists, the registry is verified before the listing
+    /// is printed, so the whitelist verdict compares the hash of the lock that
+    /// was just verified. Verification is skipped when the listing already
+    /// failed, so a bad manifest is reported once.
     fn list_packs(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let root = packs_root(arg)?;
         let found =
             std_deduce_lawpack::scan(&root).map_err(|error| escape_control(&error.to_string()))?;
 
+        // The whitelist decides whether an `official` claim is honoured, so it
+        // is read before the listing. A broken file is reported once, after the
+        // pack blocks, with the registry's other errors.
+        let mut whitelist_errors: Vec<PackError> = Vec::new();
+        let whitelist = match read_whitelist(&root) {
+            Ok(Some(whitelist)) => WhitelistState::Present(whitelist),
+            Ok(None) => WhitelistState::Missing,
+            Err(errors) => {
+                whitelist_errors = errors;
+                WhitelistState::Broken
+            }
+        };
+
+        // Verify the lock before printing anything: an official pack's verdict
+        // compares the hash the lock records, not a hash this command would
+        // have to trust on its own. The status line is printed after the pack
+        // blocks, as before.
+        let (lock, lock_status, lock_errors) = inspect_lock(&root, !found.errors.is_empty());
+
         let mut corpus_errors = 0;
+        let mut official_errors = 0;
         for pack in &found.packs {
             let info = &pack.manifest.pack;
+            let manifest_path = pack.dir.join(MANIFEST_FILE);
+            // The first line may only call a release audited when the
+            // whitelist confirms it, so the verdict is decided before the line
+            // is printed and reused for the whitelist report below.
+            let verdict = (info.trust == Trust::Official)
+                .then(|| official_verdict(&whitelist, &lock, &info.name, &info.version));
+            let confirmed = matches!(verdict, Some(OfficialVerdict::Confirmed));
             writeln!(
                 out,
                 "{} {}  {}/{}  {}  {}  {}",
@@ -1230,12 +1324,57 @@ impl Session {
                 info.jurisdiction,
                 info.territory,
                 effective_range(info),
-                info.trust,
+                trust_label(info.trust, confirmed),
                 escape_display_path(&pack.dir)
             )
             .ok();
+            if !info.maintainers.is_empty() {
+                writeln!(
+                    out,
+                    "  维护者：{}",
+                    info.maintainers
+                        .iter()
+                        .map(|maintainer| escape_control(maintainer))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                )
+                .ok();
+            }
+            if info.audit_status == AuditStatus::Reviewed {
+                match (&info.audited_by, &info.audited_at) {
+                    (Some(reviewer), Some(date)) => {
+                        writeln!(
+                            out,
+                            "  审核：已审核（审核人 {}，{}）",
+                            escape_control(reviewer),
+                            escape_control(date)
+                        )
+                        .ok();
+                    }
+                    // Manifest validation rejects a reviewed pack without both
+                    // fields, so this branch only renders a manifest the
+                    // validator let through rather than inventing a reviewer.
+                    _ => {
+                        writeln!(out, "  审核：已审核（缺少审核人或审核日期）").ok();
+                    }
+                }
+            }
+            if let Some(verdict) = verdict {
+                match verdict {
+                    OfficialVerdict::Confirmed => {
+                        writeln!(out, "  白名单：通过（{OFFICIAL_FILE}）").ok();
+                    }
+                    OfficialVerdict::Rejected(message) => {
+                        official_errors += 1;
+                        write_pack_error(out, &manifest_path, &message);
+                    }
+                    // The whitelist or lock error line already explains why no
+                    // per-pack verdict is possible.
+                    OfficialVerdict::Unverified => {}
+                }
+            }
             if let Some(description) = &info.description {
-                writeln!(out, "  {}", escape_control(description)).ok();
+                writeln!(out, "  说明：{}", escape_control(description)).ok();
             }
             if !pack.manifest.files.is_empty() {
                 writeln!(out, "  文件 {} 个", pack.manifest.files.len()).ok();
@@ -1257,52 +1396,24 @@ impl Session {
         for error in &found.errors {
             writeln!(out, "{}", escape_control(&error.to_string())).ok();
         }
-        // A broken manifest already fails the listing. Scanning the registry
-        // again for the lock would print the same manifest error twice and
-        // count it as a lock error, so verification waits for a clean listing.
-        if !found.errors.is_empty() {
-            writeln!(out, "锁定校验：未运行（清单错误）").ok();
-            return Err(listing_error(
-                found.errors.len(),
-                "法律包清单错误",
-                corpus_errors,
-            ));
+        if let Some(status) = lock_status {
+            writeln!(out, "{}", escape_control(&status)).ok();
+        }
+        for error in &lock_errors {
+            writeln!(out, "{}", escape_control(error)).ok();
+        }
+        for error in &whitelist_errors {
+            write_pack_error(out, error.path(), error.message());
         }
 
-        let lock_path = root.join(LOCK_FILE);
-        let lock_errors = match std::fs::symlink_metadata(&lock_path) {
-            Ok(_) => match std_deduce_lawpack::verify_lock(&root) {
-                Ok(report) => {
-                    writeln!(out, "锁定校验：通过（{} 个包）", report.verified).ok();
-                    None
-                }
-                Err(errors) => {
-                    for error in &errors {
-                        writeln!(out, "{}", escape_control(&error.to_string())).ok();
-                    }
-                    Some(errors.len())
-                }
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                writeln!(out, "锁定校验：未找到 std.lock（未锁定）").ok();
-                None
-            }
-            Err(error) => {
-                writeln!(
-                    out,
-                    "{}",
-                    escape_control(&format!("{}：无法读取锁文件：{error}", lock_path.display()))
-                )
-                .ok();
-                Some(1)
-            }
-        };
-
-        if let Some(count) = lock_errors {
-            return Err(listing_error(count, "锁定校验错误", corpus_errors));
-        }
-        if corpus_errors > 0 {
-            return Err(format!("{corpus_errors} 个语料错误"));
+        let errors = [
+            (found.errors.len(), "法律包清单错误"),
+            (lock_errors.len(), "锁定校验错误"),
+            (corpus_errors, "语料错误"),
+            (official_errors + whitelist_errors.len(), "官方白名单错误"),
+        ];
+        if errors.iter().any(|(count, _)| *count > 0) {
+            return Err(listing_error(&errors));
         }
         Ok(Outcome::Proved)
     }
@@ -1532,16 +1643,175 @@ fn quoted_list<S: AsRef<str>>(items: &[S]) -> String {
         .join("、")
 }
 
-/// Combine a listing error count with independently found corpus errors.
+/// Combine the independent error counts of a `:packs` run, omitting zeros.
 ///
 /// A manifest or lock error used to be returned alone even when a linked corpus
 /// had already failed to load; the stderr then under-reported the failures that
-/// stdout had shown. Both counts are reported instead.
-fn listing_error(primary: usize, label: &str, corpus_errors: usize) -> String {
-    if corpus_errors == 0 {
-        format!("{primary} 个{label}")
-    } else {
-        format!("{primary} 个{label}、{corpus_errors} 个语料错误")
+/// stdout had shown. Every nonzero count is reported instead.
+fn listing_error(counts: &[(usize, &str)]) -> String {
+    counts
+        .iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{count} 个{label}"))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+/// Print one `:packs` problem as `path: error: message`.
+///
+/// Both parts are escaped, so a manifest, a whitelist or a lock cannot forge
+/// another output line.
+fn write_pack_error(out: &mut impl Write, path: &Path, message: &str) {
+    writeln!(
+        out,
+        "{}: error: {}",
+        escape_display_path(path),
+        escape_control(message)
+    )
+    .ok();
+}
+
+/// What a trust level means, for a `:packs` listing line.
+///
+/// The label states the level's consequence, not only its wire name: an
+/// `official` claim reads as audited only when `official_confirmed` is true, and
+/// an unconfirmed claim says so instead of borrowing the audited label. The
+/// lower levels never claim an audit.
+fn trust_label(trust: Trust, official_confirmed: bool) -> &'static str {
+    match trust {
+        Trust::Official if official_confirmed => "official（本项目审核）",
+        Trust::Official => "official（未通过白名单核对）",
+        Trust::Community => "community（未经本项目审核）",
+        Trust::Local => "local（本地自建）",
+        Trust::Experimental => "experimental（实验性）",
+    }
+}
+
+/// What a `:packs` run established about one pack's `official` claim.
+enum OfficialVerdict {
+    /// The whitelist lists exactly the pack's name, version and locked hash.
+    Confirmed,
+    /// The claim is not covered; the message is the diagnostic to print.
+    Rejected(String),
+    /// The registry's own errors already explain why no verdict is possible
+    /// (a broken whitelist file or a failed lock check). The claim is still not
+    /// confirmed.
+    Unverified,
+}
+
+/// Decide whether an `official` claim is confirmed by the whitelist and lock.
+///
+/// An `official` pack is only audited when `official.toml` lists its name, the
+/// manifest's version and the locked content hash, all three at once. A
+/// registry without the file has no audited release, so the claim cannot be
+/// verified and is a rejection rather than a lower trust level: silently
+/// treating it as community would hide that the manifest asked for more.
+fn official_verdict(
+    whitelist: &WhitelistState,
+    lock: &LockState,
+    name: &str,
+    version: &str,
+) -> OfficialVerdict {
+    match (whitelist, lock) {
+        // The whitelist file's own error line already says why no per-pack
+        // verdict is possible.
+        (WhitelistState::Broken, _) => OfficialVerdict::Unverified,
+        // The lock hash was not established; the lock errors say why.
+        (_, LockState::Failed) => OfficialVerdict::Unverified,
+        (_, LockState::Missing) => OfficialVerdict::Rejected(format!(
+            "包 `{name}@{version}` 声明 trust = \"official\"，但注册表没有 std.lock，\
+             没有锁哈希可以核对官方白名单"
+        )),
+        (WhitelistState::Missing, LockState::Verified(_)) => OfficialVerdict::Rejected(format!(
+            "包 `{name}` 声明 trust = \"official\"，但注册表没有官方白名单 `{OFFICIAL_FILE}`"
+        )),
+        (WhitelistState::Present(whitelist), LockState::Verified(hashes)) => {
+            match hashes.get(name) {
+                Some(hash) if whitelist.covers(name, version, hash) => OfficialVerdict::Confirmed,
+                Some(_) => OfficialVerdict::Rejected(format!(
+                    "包 `{name}@{version}` 声明 trust = \"official\"，但未列入官方白名单，\
+                     或锁哈希与白名单不一致；official 只用于本项目审核过的发行版"
+                )),
+                // `verify_lock` already requires every directory pack to be
+                // locked, so a missing hash here would mean the lock check and
+                // this lookup disagree.
+                None => OfficialVerdict::Rejected(format!(
+                    "包 `{name}@{version}` 不在 std.lock 中，没有锁哈希可以核对官方白名单"
+                )),
+            }
+        }
+    }
+}
+
+/// What a `:packs` run learned about the registry's lock.
+enum LockState {
+    /// `<root>/std.lock` does not exist.
+    Missing,
+    /// The lock verified; these are the locked hashes by pack name.
+    Verified(BTreeMap<String, String>),
+    /// Verification failed, or was skipped because the listing failed.
+    Failed,
+}
+
+/// What a `:packs` run learned about the official whitelist.
+enum WhitelistState {
+    /// `<root>/official.toml` does not exist.
+    Missing,
+    /// The whitelist parsed.
+    Present(Whitelist),
+    /// The file exists but could not be read or validated; its errors were
+    /// collected by the caller.
+    Broken,
+}
+
+/// Verify `root/std.lock` without printing, and render its report lines.
+///
+/// Returns the state the whitelist verdict uses, the status line to print after
+/// the pack blocks (absent when verification failed, because the error lines
+/// are the report) and every error line. `listing_failed` skips verification so
+/// one bad manifest is not reported twice. A successful check returns the hashes
+/// of the lock it just compared with the directory, never a second read of the
+/// file.
+fn inspect_lock(root: &Path, listing_failed: bool) -> (LockState, Option<String>, Vec<String>) {
+    if listing_failed {
+        return (
+            LockState::Failed,
+            Some("锁定校验：未运行（清单错误）".to_owned()),
+            Vec::new(),
+        );
+    }
+    let lock_path = root.join(LOCK_FILE);
+    match fs::symlink_metadata(&lock_path) {
+        Ok(_) => match std_deduce_lawpack::verify_lock(root) {
+            Ok(report) => {
+                let hashes = report
+                    .lockfile
+                    .pack
+                    .into_iter()
+                    .map(|entry| (entry.name, entry.hash))
+                    .collect();
+                (
+                    LockState::Verified(hashes),
+                    Some(format!("锁定校验：通过（{} 个包）", report.verified)),
+                    Vec::new(),
+                )
+            }
+            Err(errors) => (
+                LockState::Failed,
+                None,
+                errors.iter().map(|error| error.to_string()).collect(),
+            ),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            LockState::Missing,
+            Some("锁定校验：未找到 std.lock（未锁定）".to_owned()),
+            Vec::new(),
+        ),
+        Err(error) => (
+            LockState::Failed,
+            None,
+            vec![format!("{}：无法读取锁文件：{error}", lock_path.display())],
+        ),
     }
 }
 

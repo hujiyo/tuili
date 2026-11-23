@@ -84,7 +84,8 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 `std-deduce check <文件.std>` 与直接给文件等价；`std-deduce repl` 显式进入 REPL；
 `std-deduce env` 检查并加载默认法律环境。环境与证书身份选项写在文件、子命令或冒号命令之前：
 `--profile <名字>` 选择 `lawpacks/profiles` 里的 profile，`--no-default-packs` 关闭默认环境
-（显式 `import` 仍可用），`--allow-community-packs` 允许 profile 包含非官方信任级别的包；
+（显式 `import` 仍可用），`--allow-community-packs` 跳过 profile 的最低信任级别要求、允许其包含
+非官方信任级别的包（不能绕过 `official` 声明的官方白名单核对）；
 `--as-of <YYYY-MM-DD>` 与 `--jurisdiction <代码>` 把法律基准日和管辖代码写进证书的环境身份。
 后两者只影响 `:cert` / `:verify-cert`：`:cert` 记录它们，`:verify-cert` 必须看到同一组值，
 否则按环境差异拒绝；它们不改变加载哪些包，也不参与推理。`--as-of` 必须是真实日历日，
@@ -106,8 +107,8 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导 |
 | `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告 |
 | `:cert <命题>` | 先跑推理，再用当前环境身份（规范 profile 名、`--as-of`/`--jurisdiction` 记录的法律基准日与管辖代码、包名/版本/锁哈希/信任级别、链接语料文件的哈希；未给两个选项时为显式 `null`）盖章，最后把证书 JSON（缩进）写到 stdout。这两个字段只记录、不参与推理。必须先 `:load`。推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations`；身份构建或序列化失败时不写任何 JSON：非交互入口（命令行参数）把错误写到 stderr，交互 REPL 沿用命令错误写 stdout 的既有约定 |
-| `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 v3 JSON：先把证书环境身份与当前环境逐项比较（profile、`as_of`、管辖精确相等，包按名字集合、语料按 `(law, version)` 集合比较；差异逐条打印并转义），不一致或身份缺失时退出 `2`，两层证明检查都不运行。生成证书时用了 `--as-of`/`--jurisdiction`，校验时必须带同一组值；不带就等于记 `null`，会按差异拒绝。一致后才跑 `cert::check` 与 `kernel_proof`，两段分开报告。必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标 |
-| `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、信任级别、描述与文件数；清单声明 `corpus` 时再读取链接的条级语料并打印覆盖计数与本体缺口；若目录里有 `std.lock`，再重新哈希并校验；不导入规则，不要求 `:load`。校验清单、链接语料与锁，不检查 namespace 唯一性，也不保证包可导入——这些由 `:load` 检查 |
+| `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 v3 JSON：先把证书环境身份与当前环境逐项比较（profile、`as_of`、管辖精确相等，包按名字集合、语料按 `(law, version)` 集合比较；差异逐条打印并转义），不一致或身份缺失时退出 `2`，两层证明检查都不运行。生成证书时用了 `--as-of`/`--jurisdiction`，校验时必须带同一组值；不带就等于记 `null`，会按差异拒绝。环境校验通过后，若证书记录了低于 `official` 的包，再追加一行 `  注意：证书记录了非官方包：…；结论依赖这些包的定义`（只提示，不改退出码与后面的四行结果）。一致后才跑 `cert::check` 与 `kernel_proof`，两段分开报告。必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标 |
+| `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、信任标签、带 `  说明：` 前缀的描述与文件数；`maintainers` 非空时打印维护者，`audit_status = "reviewed"` 时打印审核人与日期；`official` 声明必须先用目录里的 `official.toml` 与 `std.lock` 核对名称、版本和锁哈希，通过才显示 `official（本项目审核）` 与 `  白名单：通过（official.toml）`，否则显示 `official（未通过白名单核对）`、打印 `路径: error: ...` 并退出 `2`（锁校验失败时只打印锁的错误行、不打印逐包白名单错误行，细节见「信任标签与官方白名单」）；清单声明 `corpus` 时再读取链接的条级语料并打印覆盖计数与本体缺口；若目录里有 `std.lock`，再重新哈希并校验；不导入规则，不要求 `:load`。校验清单、链接语料、锁与官方白名单，不检查 namespace 唯一性，也不保证包可导入——这些由 `:load` 检查 |
 | `:lock [目录]` | 对目录（默认 `lawpacks`）里的所有包计算内容哈希，写入 `<目录>/std.lock`；坏包/坏文件/重复包名时打印错误并退出 `2`，不写部分锁 |
 | `:audit [目录]` | 只核对已加载理论里 `quote` 非空的 `source`：法名匹配语料标题/别名，版本、条号、引文（删除全部空白后逐字比较）、条文哈希（条文原文含换行的 SHA-256）与管辖逐项检查；`quote` 为空的来源不参与核对，单独计数且不影响退出码。默认语料目录 `law/corpus`，按 `<law>/<version>.json` 严格布局。至少一条带引文来源且全部命中才退出 `0`；一条带引文来源都没有时报“没有可核对的引文”并退出 `1`；坏语料退出 `2` |
 
@@ -168,7 +169,8 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
 没有给 `--as-of` / `--jurisdiction` 时对应字段是 `null`。这两个选项只记录进身份：不改默认环境、
 不改推理，校验时必须带同值。
 `packs` 按 `name` 排序，`corpora` 按 `(law, version)` 排序；`trust` 取
-`experimental` / `local` / `community` / `official`。`hash` 是锁里的包内容哈希，
+`experimental` / `local` / `community` / `official`，是加载期的快照：`official` 包在导入时已经通过
+`official.toml` 白名单与锁哈希核对，非官方包按清单记录。`hash` 是锁里的包内容哈希，
 `file_sha256` 是语料文件原始字节（CRLF 归一化为 LF）的 SHA-256，和语料里的
 `text_sha256`（整本官方文本的抓取出处元数据，不重算、不校验）不是一回事。
 版本 2 与版本 1 证书都被拒绝（`unsupported certificate format version 2` 等），
@@ -182,7 +184,7 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
 | `:gap` | 目标可以推出 | 缺口、未决冲突或被否决的结论 | 命令或解析错误 |
 | `:cert` | 根已证明 | 根是缺口 | 未 `:load`、用法/解析/转换错误、环境身份构建失败或序列化失败 |
 | `:verify-cert` | 两段都通过、根已证明且无未决义务 | 两段都通过，但根是缺口 / 有 `open_obligations` / 有未决冲突 | 未加载、读不到、坏 JSON、环境身份不一致或缺失、逻辑校验失败、内核证明失败，或给了目标但根命题不等价/根为缺口/没有根 |
-| `:packs` | 扫描成功；空目录也是成功 | 当前没有 `1` 的结局 | 目录不存在/不可读、坏清单/坏目录项、链接语料缺失/坏/标识不符/非普通文件，或 `std.lock` 校验失败（好包仍会列出） |
+| `:packs` | 扫描成功；空目录也是成功 | 当前没有 `1` 的结局 | 目录不存在/不可读、坏清单/坏目录项、链接语料缺失/坏/标识不符/非普通文件、`std.lock` 校验失败，或 `official` 声明未通过白名单核对（缺白名单、未列入、版本/哈希不符、没有锁、白名单文件坏；好包仍会列出） |
 | `:lock` | 所有包成功扫描并写入锁 | 当前没有 `1` 的结局 | 目录/清单/包内文件错误、重复包名或写锁失败；不写部分锁 |
 | `:audit` | 至少一条带引文来源，且全部命中 | 没有带引文来源（没有可核对的引文），或有引文来源未命中/未核对 | 尚未 `:load`，或语料本身坏了（坏布局、坏 JSON、重复 `(law, version)`） |
 | `:load` | 文件（以及默认环境与 import 的包）加载成功 | 当前没有 `1` 的结局 | 文件、profile、注册表、锁、包路径、包 namespace 或 import 失败 |
@@ -241,20 +243,24 @@ namespace 我的案件
    符号链接都在一次校验里报告，错误全部列出；一次 `:load` 只校验一次锁，不按 import 重复校验。
    锁校验是**校验时点**的语义：`verify_lock` 返回后文件再变化，本次加载不会重新发现；需要更强
    保证时重新 `:lock` 并重启会话。
-4. 按包名找到清单。可导入包的清单必须声明 `namespace`，且 `namespace` 必须等于包名：`import`
+4. 清单声明 `trust = "official"` 时，加载器还必须读取 `<lawpacks>/official.toml`，要求该包的
+   名称、版本与锁哈希同时被列出；缺白名单、未列入、版本或哈希不符都让整次加载失败，
+   `--allow-community-packs` 不能绕过。非 `official` 包不需要被白名单列出；但
+   `official.toml` 文件本身损坏仍是注册表错误，会让整个注册表打开失败。
+5. 按包名找到清单。可导入包的清单必须声明 `namespace`，且 `namespace` 必须等于包名：`import`
    写的是包名，而 `Library` 又要求导入名等于已加载 namespace。包内每个 `kind = "theory"` 文件的
    namespace 必须等于清单的 `namespace`，否则加载失败并指出文件名和两个 namespace。
-5. 只打开 `kind = "theory"` 的条目；`path` 必须是相对路径，不能是绝对路径、不能含 `..`，
+6. 只打开 `kind = "theory"` 的条目；`path` 必须是相对路径，不能是绝对路径、不能含 `..`，
    同一个包内不能重复，必须是普通文件、非符号链接、有效 UTF-8。路径分量不能含 `:`（Windows
    备用数据流：`theory.std:hidden` 会读写 `theory.std` 的隐藏流，目录扫描和锁哈希都看不到它，
    所以跨平台一律拒绝）；`:lock` 只哈希包目录里的普通文件，这种包仍能写出锁，但不能导入。
    一个 theory 文件都没有的包不能 import，报“包 `x` 没有可导入的 theory 文件”。
-6. 包内 theory 文件按 manifest 顺序加载；每个文件先解析它的 `import`，递归加载依赖包，再交给
+7. 包内 theory 文件按 manifest 顺序加载；每个文件先解析它的 `import`，递归加载依赖包，再交给
    `Library::load`。依赖先于 importer；多个包共用同一个依赖时只加载一次；`a → b → a` 报错
    并给出环路径。
-7. 整个 `:load` 在 `Library` 克隆和包记录克隆上完成；任何一步失败都丢弃克隆，不留半加载的
+8. 整个 `:load` 在 `Library` 克隆和包记录克隆上完成；任何一步失败都丢弃克隆，不留半加载的
    声明、包信息或 `loaded` 状态。
-8. 加载成功后 `Session` 记录包的 `name`、`version`、`hash`、`namespace` 与该包实际声明的名字。
+9. 加载成功后 `Session` 记录包的 `name`、`version`、`hash`、`namespace` 与该包实际声明的名字。
    `:inspect` 只给真正由该包声明的 namespaced 声明显示 `[name@version]`（如
    `[cn.constitution@0.4.0]`）；直接按文件加载的 namespaced 模块仍显示 `[ns]`；案件文件声明
    没有后缀。顶层文件的 namespace 若等于某个已加载包的 namespace，加载被拒绝并提示使用独立
@@ -316,7 +322,8 @@ version = "0.4"
 ```
 
 - `name` 与 `aliases` 的字符集、长度和首尾限制与包名相同；alias 不能被两个 profile 共用，
-  也不能与任何 profile 的 `name` 相同。`default = true` 最多一个。
+  也不能与任何 profile 的 `name` 相同。`default = true` 最多一个，且该 profile 必须要求
+  `trust = "official"`；按名字或别名 `--profile` 选中的 profile 仍可要求更低级别。
 - `profiles/` 里只允许普通 `.toml` 文件；子目录、符号链接、非 `.toml` 文件和坏 TOML 都让整次
   扫描失败，并列出全部错误，不静默跳过。
 - `trust` 是环境要求的最低信任级别，profile 缺省 `official`；取值 `official` / `community` /
@@ -326,14 +333,17 @@ version = "0.4"
   不接受 `0.10.0`、`0.2.0`；段按文本比较，不做数值归一化。
 - profile 文件不进入包内容哈希，`std.lock` 不记录它。
 
-清单的 `[pack]` 有可选 `trust` 字段（`official` / `community` / `local` / `experimental`），
-缺省 `community`，所以没写 trust 的包不会被当成官方包。官方 `cn.constitution` 声明
-`trust = "official"`。这个字段既用于默认环境的门禁，也在 `:packs` 的首行显示。
+清单的 `[pack]` 可选 `trust`（`official` / `community` / `local` / `experimental`，缺省
+`community`，所以没写 trust 的包不会被当成官方包），还可带 `maintainers`、`audit_status`、
+`audited_by`、`audited_at`。官方 `cn.constitution` 声明 `trust = "official"` 并带维护者与审核
+记录；这个字段既用于环境的最低信任级别门禁，也在 `:packs` 的首行显示为标签。字段要求与白名单
+核对见「信任标签与官方白名单」。
 
 第一次加载理论文件时（`:load` 或批处理文件入口），如果当前目录有 `lawpacks/` 且其中有
 `default = true` 的 profile，会话会先加载该环境；`--profile <名字>` 可按名称或别名显式选择，
-`--no-default-packs` 关闭默认环境，显式 `import` 仍然工作。`--allow-community-packs` 只在
-profile 默认环境生效，允许非官方包进入环境。`--as-of` / `--jurisdiction` 不参与环境准备：
+`--no-default-packs` 关闭默认环境，显式 `import` 仍然工作。`--allow-community-packs` 跳过
+所选 profile 的最低信任级别要求（直接包与依赖闭包都跳过），允许非官方包进入环境；它不能绕过
+`official` 声明的官方白名单核对。`--as-of` / `--jurisdiction` 不参与环境准备：
 给不给它们，加载的 profile 与包集合都相同。没有 `lawpacks/`、没有 `profiles/` 或没有默认
 profile 时不启用默认环境，也不打开注册表校验锁；纯逻辑文件照常工作。
 
@@ -367,7 +377,8 @@ cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-默认环境.st
 缺 namespace 或 namespace 与 name 不同的包不可导入，既不被建议，也不会用更长的 namespace
 遮蔽同前缀的可导入包。文件已经 import 该包时不提示（名字不存在是文件自己的问题）；依赖闭包里
 的包也能被命名。提示只做诊断，只在文件加载失败时出现，不改变退出码：批处理仍 `1`，`:load`
-仍 `2`。显式 import 一个环境外的包仍是用户的决定，系统不禁止。
+仍 `2`。显式 import 一个环境外的非 `official` 包仍是用户的决定，系统不禁止；`official` 包未列入
+白名单时，显式 import 也会被拒绝。
 
 临时注册表示例：
 
@@ -383,6 +394,89 @@ cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
 信任或包错误同样让本次加载失败；`std-deduce env` 的环境错误单独以 `2` 退出。`:packs` / `:lock`
 不参与这条加载路径；`--packs`、远程 registry、`std build/update` 仍未实现。证书 v3 记录
 profile、包版本/锁哈希/信任级别与链接语料文件的哈希；这些是导出时点的身份，不是持续校验。
+
+### 信任标签与官方白名单
+
+清单的 `[pack].trust` 取值 `official` / `community` / `local` / `experimental`，缺省 `community`；
+`:packs` 首行给出的是标签的含义，不只是字段值：
+
+| `trust` | `:packs` 首行标签 | 含义 |
+|---|---|---|
+| `official`，白名单核对通过 | `official（本项目审核）` | 本项目审计过的发行版：名称、版本与锁哈希都在 `lawpacks/official.toml` 中列出 |
+| `official`，未通过核对 | `official（未通过白名单核对）` | 清单自称官方，但缺少白名单、未列入、版本/锁哈希与白名单不符、没有 `std.lock`、锁校验失败或白名单文件损坏 |
+| `community` | `community（未经本项目审核）` | 社区提交的包；可审计，但未经本项目复核 |
+| `local` | `local（本地自建）` | 本地自建的包 |
+| `experimental` | `experimental（实验性）` | 实验性的包 |
+
+**“官方”指本项目审计过的发行版，不是立法机关认证，也不等于“法律上正确”。** 它回答的是
+“大家用的是不是同一份形式化、能不能复现”，不回答“这条规则在真实法庭上会不会赢”。
+
+`official` 同时要求清单与注册表：
+
+- 清单必须有非空 `maintainers`（字符串数组，每项非空、至多 128 字节、无控制字符、无首尾空白，
+  且互不重复）、`audit_status = "reviewed"`、非空 `audited_by` 和真实日历日的 `audited_at`
+  （`YYYY-MM-DD`）。`audit_status` 缺省 `unreviewed`；非 `official` 包不得带审核记录：
+  `audit_status = "reviewed"`，或出现 `audited_by` / `audited_at`，都让清单校验失败。
+- 注册表根的 `lawpacks/official.toml` 必须用 `[[pack]]` 列出该包的 `name`、`version` 与
+  `hash`，且 `hash` 必须等于 `std.lock` 记录的锁哈希；名称、版本、哈希三者同时一致才算通过。
+- 缺少白名单、白名单没有这一发行版、版本或哈希不符、没有 `std.lock`、锁校验失败或白名单文件
+  损坏，导入与 `:packs` 都失败：批处理文件入口退出 `1`，显式 `:load` 与 `:packs` 退出 `2`。
+  `--allow-community-packs` 只放宽 profile 的信任级别要求，不能绕过这道白名单核对。
+- 白名单文件本身严格读取：符号链接、非普通文件、坏 TOML、未知字段、非法 name/version/hash、
+  重复 `(name, version)` 都是错误；缺文件和空文件都表示“没有审计过的发行版”，`official` 声明
+  无法核对。
+
+`lawpacks/official.toml` 的格式：
+
+```toml
+[[pack]]
+name = "cn.constitution"
+version = "0.4.0"
+hash = "sha256:…"
+```
+
+仓库的官方白名单当前只有一条 `cn.constitution@0.4.0`，哈希与 `lawpacks/std.lock` 一致。
+
+`:packs` 的实际输出（官方宪法包，节选）：
+
+```text
+cn.constitution 0.4.0  CN/CN  1982-12-04..未注明  official（本项目审核）  …\\lawpacks\\cn.constitution
+  维护者：std-deduce 维护组
+  审核：已审核（审核人 std-deduce 官方包审核流程，2026-11-23）
+  白名单：通过（official.toml）
+  说明：中华人民共和国宪法官方包 v0.4.0（第三十三至五十六条中的选定权利与义务；非完整形式化）
+  文件 1 个
+  覆盖 cn.constitution@2018：形式化 6 / 部分 15 / 仅索引 17 / 待本体 105；开放概念 52
+  本体缺口：「state_organs」 82、…
+锁定校验：通过（1 个包）
+```
+
+首行依次是名称、版本、辖区/地域、生效范围、信任标签与包目录（末列路径按输出规则转义，字面反斜杠
+双写）；`maintainers` 非空时打印
+`  维护者：…`，`audit_status = "reviewed"` 时打印 `  审核：已审核（审核人 …，日期）`，
+描述固定以 `  说明：` 开头（自由文本因此不能冒充其他结论行）；只有 `official` 核对通过才打印
+`  白名单：通过（official.toml）`。核对失败时该包仍会列出，但标签是
+`official（未通过白名单核对）`，同时打印逐包 `路径: error: ...` 并以 `2` 退出；`official.toml`
+文件本身坏掉时只打印一条文件级 `路径: error: ...`，锁校验失败时只打印锁的错误行、不再打印逐包
+白名单结论（标签仍是 `official（未通过白名单核对）`）。非 `official` 包不需要被白名单列出，但
+白名单文件坏掉仍会让整个注册表打不开。`  说明：` 之后是清单作者任意填写的**未验证自由文本**，
+可以包含“白名单：通过”等字样；判断信任只能看首行的信任标签与独立成行的
+`  白名单：通过（official.toml）`，不要用整段输出做子串匹配。
+
+`:verify-cert` 在环境校验通过后，如果证书记录了非官方包，会追加一行：
+
+```text
+  注意：证书记录了非官方包：a@1.0.0（community）、b@1.0.0（local）；结论依赖这些包的定义
+```
+
+它只提示结论依赖了未经本项目审计的定义，不改变退出码，也不改变逻辑、内核、侧条件、需人判断
+四行结果。
+
+当前信任锚是**注册表检出**：`lawpacks/` 目录、`std.lock` 与 `official.toml` 一起构成
+“哪一版内容被审计过”的声明。核对发生在加载/列表时点；`verify_lock` 和白名单读取返回后文件
+再变化，本次会话不会重新发现（TOCTOU 边界）。需要更强保证时重新 `:lock`、重新核对白名单并
+重启会话。**签名尚未实现**：当前没有发布者密钥、签名文件或签名验证；`official` 的保证来自
+上述文件与锁哈希的一致，不是密码学签名。
 
 ## 条级语料与 `:audit`
 
@@ -704,18 +798,24 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   `convertible`；alpha/eta 和“绑定变量与同名常量”都不会因打印形式相同而混淆。
   它只依赖 `crates/kernel`，**不依赖 `crates/reason`**；已记录的冲突与裁决会被读取，但
   `defeated_by` / `prefer` 的优先级来源不在这里核验（`priority_sources_checked = false`）。
-- **`crates/lawpack`**：法律包清单、目录扫描、`std.lock`、内容哈希、默认环境 profile 与条级语料。清单记录
-  `name`、`version`、`jurisdiction`、`territory`、`namespace`、信任级别、生效范围、描述、可选
-  `corpus` 链接和文件列表；只校验 **格式**（必填、字符集、长度、真实日历日期、`<law>/<version>` 链接），
-  不导入规则、不打开清单里的文件、不判断法律内容。日期与管辖代码的校验以 `validate_date` /
-  `validate_jurisdiction_code` 公开，CLI 的 `--as-of` / `--jurisdiction` 复用同一套规则，
-  不会出现“清单能写、选项不能写”的两套格式。
+- **`crates/lawpack`**：法律包清单、官方发行白名单、目录扫描、`std.lock`、内容哈希、默认环境 profile 与条级语料。清单记录
+  `name`、`version`、`jurisdiction`、`territory`、`namespace`、`trust`、`maintainers`、`audit_status`、
+  `audited_by`、`audited_at`、生效范围、描述、可选 `corpus` 链接和文件列表；只校验 **格式**
+  （必填、字符集、长度、真实日历日期、`<law>/<version>` 链接、维护者/审核人文本规则，以及
+  `official` 必须同时有非空维护者、`audit_status = "reviewed"`、审核人与审核日期，非 `official`
+  不得带审核记录），不导入规则、不打开清单里的文件、不判断法律内容。日期与管辖代码的校验以
+  `validate_date` / `validate_jurisdiction_code` 公开，CLI 的 `--as-of` / `--jurisdiction` 复用
+  同一套规则，不会出现“清单能写、选项不能写”的两套格式。
   `[pack].trust` 是可选信任级别（`official` / `community` / `local` / `experimental`，缺省 `community`），
-  未知值在清单解析期报错。扫描只把含普通 `lawpack.toml` 的直接
+  未知值在清单解析期报错；`official` 声明只有在 `whitelist` 模块从 `<registry>/official.toml`
+  读出同一 `name`、`version` 与锁哈希时才被承认。`whitelist` 模块严格校验每条 `[[pack]]` 的名称、
+  版本、`sha256:` 哈希与 `(name, version)` 唯一性；缺文件表示没有审计过的发行版，空文件合法，
+  符号链接、非普通文件、坏 TOML、未知字段与坏条目都报错。扫描只把含普通 `lawpack.toml` 的直接
   子目录当作包；符号链接、越界 junction 与坏清单都进入错误，不静默跳过。锁文件记录每个包的
   `name@version` 与 SHA-256；哈希覆盖包内全部普通文件，路径用 `/`、内容做 CRLF→LF 归一化，并用长度前缀
   消除拼接歧义。`profile` 模块扫描 `<registry>/profiles/*.toml`：校验名称、别名、唯一默认 profile、
-  版本前缀约束与最低信任级别，提供默认/按名选择；profile 不进入包哈希或锁。
+  版本前缀约束与最低信任级别（`default = true` 必须要求 `official`，按名选择可更低），提供默认/按名
+  选择；profile 不进入包哈希或锁。
   `corpus` 模块按 `<law-id>/<version>.json` 严格布局加载条级语料：目录名必须等于 `law`、
   文件名主干必须等于 `version`，子目录、非 `.json` 文件与根下文件都报错；同时校验 JSON 格式、真实日期、
   哈希形状、条号唯一与 `(law, version)` 唯一，以及可选的 `coverage` 完整台账（每条文章一条且顺序一致、
@@ -732,8 +832,9 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   推导树，并对同一份证书依次运行 `cert::check` 与 `cert::kernel_proof`；冲突分支展示的推导同样从证书渲染
   并用 `cert::check` 复核。`:cert` 在 `:load` 之后导出证书，并先盖上当前环境身份；身份构建
   失败时 stdout 没有 JSON。`:verify-cert` 先比较证书环境身份与当前环境，差异逐条打印并退出 `2`，
-  两层证明检查都不运行；一致后才依次运行 `cert::check` 与 `cert::kernel_proof`，
-  把逻辑、内核、侧条件和需人判断分成四行报告（环境校验是它前面单独的一行）；
+  两层证明检查都不运行；一致后先打印环境校验行，若证书记录了非官方包再追加一行
+  `注意：证书记录了非官方包：…；结论依赖这些包的定义`，然后依次运行 `cert::check` 与
+  `cert::kernel_proof`，把逻辑、内核、侧条件和需人判断分成四行报告（环境校验是它前面单独的一行）；
   可选的目标绑定要求证书根命题与目标内核等价。`:load` 遇到 `import` 时先看当前会话已加载的
   namespace；未加载的（以及已由包加载、需要复核漂移的）才扫描当前目录的 `lawpacks`、校验
   `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件，并把包信息与包实际声明的名字记入
@@ -745,18 +846,22 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   按 profile 在克隆的库与包记录上加载默认环境（失败整体回滚），`std-deduce env` 独立检查并加载
   环境且只用 `0`/`2` 退出码；`--no-default-packs` 关闭预加载，并给文件本身加载失败时的缺包
   错误追加诊断提示（已 import 该包或查询错误不提示）。
-  `:packs` 扫描清单、显示信任级别，并在清单声明 `corpus` 时读取链接语料、打印覆盖计数与具名
-  本体缺口；目录里有锁时重新哈希校验。`:lock` 生成锁；`:audit` 只核对带 `quote` 的来源，无
+  `:packs` 扫描清单，显示信任标签、维护者与审核记录，并对 `official` 声明用 `official.toml`
+  和锁哈希核对；清单声明 `corpus` 时读取链接语料、打印覆盖计数与具名本体缺口；目录里有锁时
+  重新哈希校验。`:lock` 生成锁；`:audit` 只核对带 `quote` 的来源，无
   `quote` 的来源不参与核对、不影响退出码；汇总后按语料打印形式化/部分/仅索引/待本体计数、
   条号列表、本体缺口与开放概念。除 `:load` 的包文件外，三者都只读不导入规则，并转义外部文本
   （含不可见格式字符与字面反斜杠）。
 
-官方只维护宪法包：`lawpacks/cn.constitution`、`lawpacks/profiles/cn.default.toml` 与
+官方只维护宪法包：`lawpacks/cn.constitution/`（清单与 theory）、`lawpacks/std.lock`、
+`lawpacks/official.toml`（官方发行白名单，当前列出 `cn.constitution@0.4.0` 的名称、版本与锁哈希）、
+`lawpacks/profiles/cn.default.toml` 与
 `law/corpus/cn.constitution/2018.json`（143 条完整语料与完整覆盖台账；
 官方包 v0.4.0 有 2 个 sort、71 个 pred、56 条 rule，共 129 个声明，形式化第三十三至五十六条
 中的选定句子；第二章第二批是第四十七、四十八、五十二至五十六条。第五条、第三章国家机构仍未
 进入官方包；第五条由 `examples/宪法案例-孙志刚.std` 作为包外法源登记）。其他法律不进入
-官方注册表或默认环境；社区包可以放在本地 `lawpacks/` 并由显式 `import` 加载，但不能当成官方文本。
+官方注册表或默认环境；社区包可以放在本地 `lawpacks/` 并由显式 `import` 加载，或经
+`--allow-community-packs` 进入 profile，但不能声明为官方，也不能冒充官方文本。
 
 ### 证书链的当前边界
 
@@ -771,10 +876,12 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   不会把"逻辑有效"当成"证书有效"；`kernel_proof` 本身仍不检查 `unless` 和优先级。
   带目标时还要求证书根命题与目标内核等价：证书本身合法但证明的是另一个命题，仍以 `2` 退出。
   这一绑定只在调用者给出目标时生效；`:verify-cert <file>` 单独使用仍只回答"这份证书自身是否有效"。
-- `:packs` 只读清单、链接的语料与锁：坏清单、坏语料、悬空符号链接、越界 junction 都会报错并退出 `2`，好包仍会列出；
+- `:packs` 只读清单、链接的语料、锁与官方白名单：坏清单、坏语料、悬空符号链接、越界 junction 都会报错并退出 `2`，好包仍会列出；
   清单里的 description、路径与错误文本会先转义控制字符，不能借换行或终端转义伪造输出行。
   目录里有 `std.lock` 时会重新扫描并哈希：缺包、多包、版本不符、哈希不符或锁本身是符号链接都退出 `2`；
-  没有锁时只提示“未锁定”，仍按清单结果返回；清单本身有错时锁校验标记为“未运行（清单错误）”，先修清单。
+  没有锁时只提示“未锁定”，仍按清单结果返回，但 `official` 声明没有锁哈希可核对，按错误处理；
+  `official` 声明还必须由 `official.toml` 列出同一名称、版本和锁哈希，缺白名单、未列入或哈希不符都以 `2` 失败；
+  清单本身有错时锁校验标记为“未运行（清单错误）”，先修清单。
   `:lock` 遇到坏包不写任何锁；写锁前拒绝符号链接目标。
   `:packs` 不检查 namespace 唯一性，也不保证包可导入：两个包声明同一 namespace、清单 `path`
   含 `:` 等问题只在 `:load` / 包加载器里报错。链接语料在包外，**不进入 `std.lock` 的包哈希**；
@@ -795,6 +902,13 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   （`root_is_assumption = true`、`assumption_count = N`），是**在 N 条假设下的条件证明**，
   不是无条件结论。
 - "证书通过"只表示它和当前加载的理论、规则声明及检查规则一致，**不表示法律结论正确**。
+- 环境身份里的 `trust` 是**加载期**核对后的标签快照：`official` 包在导入时已经通过
+  `official.toml` 白名单与锁哈希核对，非官方包按清单记录。`:verify-cert` 比较身份时不会重新
+  读取白名单，加载后白名单、锁或包目录再变化也不会让已记录的身份自动失效；它是信任标签，不是
+  持续校验，也不等于“法律正确”。
+- `:verify-cert` 的环境校验通过后，若证书记录了低于 `official` 的包，会打印一行
+  `注意：证书记录了非官方包：a@1.0.0（community）、…；结论依赖这些包的定义`。这一行只说明
+  结论依赖了未经本项目审计的定义，不改变退出码，也不改变逻辑、内核、侧条件、需人判断四行结果。
 - 证书 v3 的环境身份是**导出时点**的快照：profile、包版本/锁哈希/信任级别、链接语料的文件哈希与
   可选的 `as_of` / 管辖。`:verify-cert` 在两层证明检查之前逐项比较这份身份与当前环境，任一差异都
   退出 `2`。语料不在 `std.lock` 里，所以改一个语料文件不会让锁失效，但会让证书的环境校验失败。
@@ -897,7 +1011,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 620 个：kernel 19、lang 76、reason 41、cert 122、cli 225、lawpack 137（含 1 个 doc test）。
+`cargo test --workspace` 共 666 个：kernel 19、lang 76、reason 41、cert 122、cli 244、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -998,7 +1112,8 @@ cargo test --workspace
   profile 依赖包能被命名、`:why` 等查询错误不追加提示；namespace 与 name 不同或缺少 namespace
   的包不被建议 import，更长的不可导入 namespace 不会遮蔽同前缀可导入包。
 - `crates/cli/tests/official_pack.rs`（13）：官方宪法包端到端——`:packs lawpacks` 列出
-  `cn.constitution 0.4.0`、v0.4.0 描述、信任级别、文件数、覆盖计数、本体缺口与通过锁校验；
+  `cn.constitution 0.4.0`、v0.4.0 描述、`official（本项目审核）` 标签、维护者、审核记录、
+  `白名单：通过（official.toml）`、文件数、覆盖计数、本体缺口与通过锁校验；
   导入示例的 `:why` 证明第三十九条；`:inspect` 对包内 129 个声明显示 `[cn.constitution@0.4.0]`；
   加载官方示例后，用户文件若声明 `namespace cn.constitution` 会被拒绝，`:inspect` 不出现注入的
   声明；`:audit` 命中 56 条带引文来源、核验条文哈希并打印 6/15/17/105 覆盖率与开放概念 52；
@@ -1066,12 +1181,21 @@ cargo test --workspace
   多条来源分别计数；带 `text_sha256` 的语料会注明它只是未校验的出处元数据；非法 hash 不计入“已固定”；
   `coverage` 存在时按语料逐条打印形式化/部分/仅索引/待本体计数、形式化与部分条号、本体缺口计数与
   开放概念列表（多项、空列表、无 `notes`、多语料顺序），没有时打印“未声明”，覆盖率文本同样转义。
-- `crates/cli/tests/packs.rs`（33）：`:packs` / `:lock` 端到端——合法清单逐行输出、信任级别、
+- `crates/cli/tests/packs.rs`（39）：`:packs` / `:lock` 端到端——合法清单逐行输出、四种信任标签、
+  维护者与审核记录、`official` 白名单通过/未列入/缺白名单/无锁/白名单文件坏（错误只转义一次）、
   含空格目录、好包+坏清单、根不存在/空目录、默认 `lawpacks`、悬空清单符号链接、description/错误/
-  路径中的换行、不可见格式字符、ESC、字面反斜杠与控制字符转义；清单 `corpus` 链接读取语料并打印
-  覆盖与本体缺口、缺失语料退出 `2`、链接语料的 `law`/`version` 与清单不符退出 `2`、符号链接语料
+  路径中的换行、不可见格式字符、ESC、字面反斜杠与控制字符转义、描述固定 `  说明：` 前缀因而
+  不能伪造白名单通过行；清单 `corpus` 链接读取语料并打印覆盖与本体缺口、缺失语料退出 `2`、
+  链接语料的 `law`/`version` 与清单不符退出 `2`、符号链接语料
   被拒绝、`:packs .` 的相对路径解析、锁定错误与语料错误同时报告、非法链接由清单校验拒绝；`:lock` 写锁、
   锁缺失/版本不符/哈希不符/多包/锁符号链接、坏包不覆盖旧锁、示例锁一致。
+- `crates/cli/tests/trust.rs`（13）：白名单与信任门禁端到端——白名单确认的 `official` 包可列出、
+  可 `import`、可作为默认环境加载；缺白名单、白名单列了别的版本、哈希不符、改包后重新 `:lock`
+  而白名单未更新、锁变化、无锁时 `:packs` 都不显示“本项目审核”并以 `2` 失败，批处理导入失败
+  退出 `1`、显式 `:load` 退出 `2`；坏 `official.toml` 打印单次转义的单行 `路径: error: ...`
+  且标签为未通过；依赖闭包里的 `official` 包未列入时默认环境与显式 import 都失败；`community`
+  包无需白名单；`--allow-community-packs` 不能绕过白名单；`:verify-cert` 逐项列出非官方包
+  （证书 JSON 的 `trust` 与清单一致），官方包不产生该提示。
 - `crates/lawpack/tests/corpus.rs`（58）：语料 JSON 必填/可选字段、未知字段、格式版本、`law` 字符集、
   坏日期、坏哈希、空 `articles`、空白归一化后的重复条号；v2 台账的解析、状态计数、条号一一对应与
   顺序、缺条/多条/重复、`formalized` 无 `rules`、`partial` 无 `note`、`needs_ontology` 无 `gap`/
@@ -1084,14 +1208,22 @@ cargo test --workspace
   的覆盖计数、56 条规则名与 `.std` 条号逐条一致，以及条文正文不含条号前缀；
   语料文件哈希固定 `sha256:` + 64 位小写十六进制的形状与已知摘要、CRLF 与 LF 同哈希、改一字节即变，
   以及缺失路径、目录与符号链接被拒绝。
-- `crates/lawpack/tests/lawpack.rs`（28）：清单必填/可选字段、字符集与长度、真实日历日期（含闰年）、
+- `crates/lawpack/tests/lawpack.rs`（40）：清单必填/可选字段、字符集与长度、真实日历日期（含闰年）、
+  维护者/审核人文本规则（空、超长、控制字符、首尾空白、重复）、`official` 必须 `reviewed` 且带
+  审核人与真实审核日期、非 `official` 不得带审核记录、未知 `audit_status` 拒绝、空审核字段视为未声明、
   未知字段、空日期、目录扫描、坏清单、悬空清单 symlink、symlink 越界、junction 越界与 `load` 的全有或全无语义；
   信任级别缺省 `community`、`official` 解析、未知值拒绝与排序；`corpus` 链接可选、空值视为未声明、
   格式与路径分隔符/`..` 校验。
-- `crates/lawpack/tests/profile.rs`（23）：profile 解析与扫描——必填/可选字段、profile 缺省 `official`、
+- `crates/lawpack/tests/profile.rs`（25）：profile 解析与扫描——必填/可选字段、profile 缺省 `official`、
+  `default = true` 必须要求 `official`、按名选择的 profile 可要求更低级别、
   无效名称/别名、重复包条目、空 packs、坏版本约束、未知字段、多个 default、重复 profile 名/alias、
   alias 与 profile 名冲突、缺失 `profiles/`、非 `.toml` 文件、子目录、文件与目录符号链接、坏 TOML、
   一次列出全部错误；版本前缀匹配正反例；默认/按名/按别名选择与未知 profile 的可用列表。
+- `crates/lawpack/tests/whitelist.rs`（13）：官方白名单——缺文件为 `None`、空文件合法且不覆盖任何发行版、
+  `name`/`version`/`hash` 三者精确匹配、同一包的第二个版本可共存、重复 `(name, version)` 拒绝、
+  坏名称/版本/哈希拒绝、未知字段与坏 TOML 报在 `official.toml` 路径、符号链接与非普通文件拒绝、
+  每条错误都报告。
 - `crates/lawpack/tests/lock.rs`（27）：锁文件往返、哈希确定性、改一字节即变、CRLF/LF 同哈希、
   NUL 拼接歧义回归、包内 `std.lock` 参与哈希、包内 symlink/非普通文件拒绝、缺锁/缺包/多包/
-  版本与哈希不符、锁符号链接、坏锁版本与坏 TOML、示例锁校验。
+  版本与哈希不符、锁符号链接、坏锁版本与坏 TOML、示例锁校验；`verify_lock` 的报告携带刚与目录
+  比对过的那份锁（调用方不再重读文件）。

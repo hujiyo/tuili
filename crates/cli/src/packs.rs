@@ -13,6 +13,11 @@
 //! before the package that imports them. An import whose namespace came from a
 //! pack is always resolved here, so a changed version or hash is reported.
 //!
+//! A package whose manifest claims `trust = "official"` is loaded only when the
+//! registry's `official.toml` lists its name, version and locked hash. A
+//! missing whitelist or an unlisted release fails the import; the trust gate
+//! option does not lower this check.
+//!
 //! The whole load runs on a cloned [`Library`] and a cloned package list. An
 //! error at any step therefore leaves the session exactly as it was: no
 //! declarations from a package and no package information survive a failed
@@ -26,7 +31,8 @@ use std_deduce_lang::ast::Item;
 use std_deduce_lang::module::escape_path;
 use std_deduce_lang::{Library, LoadError};
 use std_deduce_lawpack::{
-    scan, verify_lock, LoadedPack, Lockfile, Manifest, PackError, Trust, LOCK_FILE, MANIFEST_FILE,
+    read_whitelist, scan, verify_lock, LoadedPack, Manifest, PackError, Trust, Whitelist,
+    LOCK_FILE, MANIFEST_FILE, OFFICIAL_FILE,
 };
 
 /// A pack successfully loaded into the current session.
@@ -63,6 +69,10 @@ struct RegistryPack {
 pub(crate) struct Registry {
     root: PathBuf,
     packs: HashMap<String, RegistryPack>,
+    /// The official-release whitelist, absent when the registry has no
+    /// `official.toml`. A manifest's `official` claim is honoured only through
+    /// this list, so it travels with the registry that was opened.
+    whitelist: Option<Whitelist>,
 }
 
 impl Registry {
@@ -120,19 +130,30 @@ impl Registry {
         }
 
         // The lock is verified once for this whole load. `verify_lock` also
-        // reports every mismatch it finds instead of stopping at the first.
-        if let Err(lock_errors) = verify_lock(&root) {
-            return Err(lock_errors.iter().map(render_pack_error).collect());
-        }
+        // reports every mismatch it finds instead of stopping at the first, and
+        // returns the same lock it compared with the directory, so the hashes
+        // used below are the verified ones rather than a second read.
+        let report = verify_lock(&root).map_err(|lock_errors| {
+            lock_errors
+                .iter()
+                .map(render_pack_error)
+                .collect::<Vec<_>>()
+        })?;
 
         let lock_path = root.join(LOCK_FILE);
-        let lockfile =
-            Lockfile::read(&lock_path).map_err(|error| vec![render_pack_error(&error)])?;
-        let mut hashes: BTreeMap<String, String> = lockfile
+        let mut hashes: BTreeMap<String, String> = report
+            .lockfile
             .pack
             .into_iter()
             .map(|entry| (entry.name, entry.hash))
             .collect();
+
+        // The whitelist is read after the lock verified, so the hashes it is
+        // compared with are the ones the verification just compared. A file
+        // that cannot be read or validated fails the whole registry instead of
+        // letting an `official` claim through unchecked.
+        let whitelist = read_whitelist(&root)
+            .map_err(|errors| errors.iter().map(render_pack_error).collect::<Vec<_>>())?;
 
         let mut packs = HashMap::new();
         for pack in found.packs {
@@ -149,11 +170,51 @@ impl Registry {
                 },
             );
         }
-        Ok(Registry { root, packs })
+        Ok(Registry {
+            root,
+            packs,
+            whitelist,
+        })
     }
 
     fn find(&self, name: &str) -> Option<&RegistryPack> {
         self.packs.get(name)
+    }
+
+    /// Check that an `official` claim is covered by the whitelist.
+    ///
+    /// The claim is honoured only when `official.toml` lists the pack's name,
+    /// the manifest's version and the lock's content hash, all three at once.
+    /// A registry without the file has no audited release, so the claim cannot
+    /// be verified and is an error rather than a lower trust level: silently
+    /// treating it as community would hide that the manifest asked for more.
+    fn check_official(
+        &self,
+        manifest_path: &Path,
+        manifest: &Manifest,
+        hash: &str,
+    ) -> Result<(), String> {
+        let info = &manifest.pack;
+        let Some(whitelist) = &self.whitelist else {
+            return Err(diag(
+                manifest_path,
+                &format!(
+                    "包 `{}` 声明 trust = \"official\"，但注册表没有官方白名单 `{OFFICIAL_FILE}`",
+                    info.name
+                ),
+            ));
+        };
+        if !whitelist.covers(&info.name, &info.version, hash) {
+            return Err(diag(
+                manifest_path,
+                &format!(
+                    "包 `{}@{}` 声明 trust = \"official\"，但未列入官方白名单，或锁哈希与白名单不一致；\
+                     official 只用于本项目审核过的发行版",
+                    info.name, info.version
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// The registry root whose packs this instance describes.
@@ -256,6 +317,17 @@ impl<'a> PackageLoader<'a> {
             )
         };
         let manifest_path = dir.join(MANIFEST_FILE);
+        // An `official` claim is a statement about this project's audit, not
+        // about the manifest author's self-assessment: it is honoured only for
+        // a release the whitelist lists and the lock hash confirms. This gate
+        // runs for every import, explicit or profile-driven, and the
+        // `--allow-community-packs` option does not touch it: that flag lowers
+        // the profile's trust requirement, it never accepts an unverified
+        // `official` claim.
+        if manifest.pack.trust == Trust::Official {
+            self.registry
+                .check_official(&manifest_path, &manifest, &hash)?;
+        }
         let namespace = manifest.pack.namespace.clone().ok_or_else(|| {
             diag(
                 &manifest_path,

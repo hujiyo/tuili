@@ -343,6 +343,36 @@ fn a_profile_file_symlink_is_an_error() {
 }
 
 #[test]
+fn a_default_profile_must_require_official_trust() {
+    for trust in ["experimental", "local", "community"] {
+        let temp = TempDir::new("default-trust");
+        temp.write_profile(
+            "p.default.toml",
+            &profile_text(&format!("default = true\ntrust = \"{trust}\"")),
+        );
+        let error = scan_error(temp.path());
+        assert!(error.contains("default"), "{trust}: {error}");
+        assert!(error.contains("official"), "{trust}: {error}");
+    }
+}
+
+#[test]
+fn a_named_profile_may_require_a_lower_trust_level() {
+    for trust in ["experimental", "local", "community"] {
+        let temp = TempDir::new("named-trust");
+        temp.write_profile(
+            "p.named.toml",
+            &profile_text(&format!("default = false\ntrust = \"{trust}\"")),
+        );
+        let profiles = scan_profiles(temp.path())
+            .unwrap_or_else(|errors| panic!("{trust}: {}", render_errors(&errors)));
+        assert_eq!(profiles.len(), 1, "{trust}");
+        assert!(!profiles[0].default, "{trust}");
+        assert_eq!(profiles[0].trust.to_string(), trust);
+    }
+}
+
+#[test]
 fn version_matches_uses_segment_prefixes() {
     for (constraint, version, expected) in [
         ("0.1", "0.1", true),

@@ -4,6 +4,8 @@
 //! with version constraints and the minimum trust level the environment
 //! requires. `scan_profiles` validates every file and every cross-file rule;
 //! `select_default` and `select_named` then choose the environment to load.
+//! A profile that is the automatic default must require `official` trust; a
+//! profile selected by name may require a lower level.
 //!
 //! Profiles are not packs: they do not enter the content hash and `std.lock`
 //! never records them. Validation is strict and complete — a misspelled file
@@ -86,6 +88,15 @@ impl Profile {
             if self.aliases[..index].contains(alias) {
                 return Err(format!("profile `{}`：alias `{alias}` 重复", self.name));
             }
+        }
+        // The automatic default environment is what an ordinary load gets
+        // without asking, so it may only require packs this project audited. A
+        // profile selected explicitly may still declare a lower level.
+        if self.default && self.trust != Trust::Official {
+            return Err(format!(
+                "profile `{}`：default = true 的 profile 必须要求 trust = \"official\"，当前是 `{}`",
+                self.name, self.trust
+            ));
         }
         if self.packs.is_empty() {
             return Err(format!("profile `{}` 至少要列出一个包", self.name));

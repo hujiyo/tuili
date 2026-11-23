@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std_deduce_lawpack::{build_lock, LOCK_FILE};
+use std_deduce_lawpack::{build_lock, scan, Lockfile, Trust, LOCK_FILE, OFFICIAL_FILE};
 
 const PROVED: i32 = 0;
 const LOAD_FAILED: i32 = 1;
@@ -1033,9 +1033,16 @@ impl TempDir {
         if let Some(namespace) = namespace {
             manifest.push_str(&format!("namespace = \"{namespace}\"\n"));
         }
-        manifest.push_str(&format!(
-            "trust = \"{trust}\"\n\n[[files]]\npath = \"theory.std\"\nkind = \"theory\"\n"
-        ));
+        manifest.push_str(&format!("trust = \"{trust}\"\n"));
+        if trust == "official" {
+            manifest.push_str(
+                "maintainers = [\"测试维护组\"]\n\
+                 audit_status = \"reviewed\"\n\
+                 audited_by = \"测试审核流程\"\n\
+                 audited_at = \"2026-11-23\"\n",
+            );
+        }
+        manifest.push_str("\n[[files]]\npath = \"theory.std\"\nkind = \"theory\"\n");
         fs::write(dir.join("lawpack.toml"), manifest)
             .unwrap_or_else(|error| panic!("write manifest: {error}"));
         fs::write(dir.join("theory.std"), theory)
@@ -1062,6 +1069,35 @@ impl TempDir {
         lockfile
             .write(&root.join(LOCK_FILE))
             .unwrap_or_else(|error| panic!("write lock: {error}"));
+        self.write_whitelist();
+    }
+
+    /// List every locked pack that declares `official` in `official.toml`,
+    /// using the hash the lock recorded.
+    fn write_whitelist(&self) {
+        let root = self.lawpacks();
+        let lockfile = Lockfile::read(&root.join(LOCK_FILE)).expect("the lock exists");
+        let found = scan(&root).expect("the registry scans");
+        let mut text = String::new();
+        for pack in &found.packs {
+            if pack.manifest.pack.trust != Trust::Official {
+                continue;
+            }
+            let name = &pack.manifest.pack.name;
+            let entry = lockfile
+                .pack
+                .iter()
+                .find(|entry| &entry.name == name)
+                .unwrap_or_else(|| panic!("no lock entry for `{name}`"));
+            text.push_str(&format!(
+                "[[pack]]\nname = \"{}\"\nversion = \"{}\"\nhash = \"{}\"\n\n",
+                name, entry.version, entry.hash
+            ));
+        }
+        if !text.is_empty() {
+            fs::write(root.join(OFFICIAL_FILE), text)
+                .unwrap_or_else(|error| panic!("write whitelist: {error}"));
+        }
     }
 }
 

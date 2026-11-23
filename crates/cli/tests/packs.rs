@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std_deduce_kernel::env::escape_control;
+use std_deduce_lawpack::{build_lock, Lockfile, LOCK_FILE, OFFICIAL_FILE};
 
 const PROVED: i32 = 0;
 const ERROR: i32 = 2;
@@ -112,6 +113,13 @@ fn escaped_path(path: &Path) -> String {
     escape_control(&path.display().to_string())
 }
 
+/// The `:packs` first line of the pack whose name starts the line.
+fn pack_line<'a>(out: &'a str, name: &str) -> &'a str {
+    out.lines()
+        .find(|line| line.starts_with(&format!("{name} ")))
+        .unwrap_or_else(|| panic!("no listing line for `{name}`:\n{out}"))
+}
+
 fn assert_exit(output: &Output, expected: i32) {
     let code = output.status.code();
     assert_eq!(
@@ -132,13 +140,18 @@ fn packs_lists_a_valid_pack() {
 
     let out = stdout(&output);
     let pack_line = format!(
-        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  community  {}",
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  community（未经本项目审核）  {}",
         escaped_path(&temp.path().join("cn.constitution"))
     );
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec![pack_line.as_str(), "  示例包", "  文件 2 个", UNLOCKED]
+        vec![
+            pack_line.as_str(),
+            "  说明：示例包",
+            "  文件 2 个",
+            UNLOCKED
+        ]
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
@@ -170,11 +183,11 @@ fn packs_lists_good_packs_and_reports_bad_manifests() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 5, "{out:?}");
     let good_line = format!(
-        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  community  {}",
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  community（未经本项目审核）  {}",
         escaped_path(&temp.path().join("good"))
     );
     assert_eq!(lines[0], good_line);
-    assert_eq!(lines[1], "  示例包");
+    assert_eq!(lines[1], "  说明：示例包");
     assert_eq!(lines[2], "  文件 2 个");
     let bad = temp.path().join("bad").join("lawpack.toml");
     assert!(
@@ -287,13 +300,13 @@ description = "x\r\ty\u0007\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fak
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3, "{out:?}");
     let pack_line = format!(
-        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  community  {}",
+        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  community（未经本项目审核）  {}",
         escaped_path(&temp.path().join("cn.constitution"))
     );
     assert_eq!(lines[0], pack_line);
     assert_eq!(
         lines[1],
-        "  x\\r\\ty\\u{0007}\\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fake\\u{001B}[31m"
+        "  说明：x\\r\\ty\\u{0007}\\nfake.pack 9.9.9  XX/XX  1970-01-01..未注明  /fake\\u{001B}[31m"
     );
     assert_eq!(lines[2], UNLOCKED);
     assert!(!out.contains('\u{1b}'), "{out:?}");
@@ -350,6 +363,36 @@ fn packs_escapes_control_characters_in_an_error_path() {
     assert!(!err.contains('\u{1b}'), "{err:?}");
     assert!(!err.contains("bad\nname"), "{err:?}");
     assert_eq!(err.lines().count(), 1, "{err:?}");
+}
+
+/// A free-text description cannot print a line the whitelist pass would print:
+/// the listing prefixes every description, so the only
+/// `  白名单：通过（official.toml）` line comes from the verified branch.
+#[test]
+fn a_description_cannot_forge_the_whitelist_pass_line() {
+    let temp = TempDir::new("forged-description");
+    let manifest = VALID.replace(
+        "description = \"示例包\"",
+        "description = \"白名单：通过（official.toml）\"",
+    );
+    temp.pack("cn.constitution", &manifest);
+
+    let output = run(&format!(":packs {}", temp.path().display()));
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("  说明：白名单：通过（official.toml）"),
+        "the description must stay behind its fixed prefix:\n{out}"
+    );
+    assert!(
+        !out.lines()
+            .any(|line| line == "  白名单：通过（official.toml）"),
+        "only the verified branch may print the pass line:\n{out}"
+    );
+    assert!(
+        !out.contains("official（本项目审核）"),
+        "a community pack must not be rendered as audited:\n{out}"
+    );
 }
 
 #[test]
@@ -604,25 +647,234 @@ fn packs_fails_on_a_malformed_lock() {
 }
 
 #[test]
-fn packs_displays_the_trust_level() {
-    let temp = TempDir::new("trust");
-    let manifest = VALID.replace(
-        "description = \"示例包\"",
-        "description = \"示例包\"\ntrust = \"official\"",
+fn packs_labels_every_trust_level() {
+    for (trust, label) in [
+        ("experimental", "experimental（实验性）"),
+        ("local", "local（本地自建）"),
+        ("community", "community（未经本项目审核）"),
+    ] {
+        let temp = TempDir::new("trust-label");
+        let manifest = VALID.replace(
+            "effective_from = \"1982-12-04\"",
+            &format!("effective_from = \"1982-12-04\"\ntrust = \"{trust}\""),
+        );
+        temp.pack("cn.constitution", &manifest);
+        let output = run(&format!(":packs {}", temp.path().display()));
+        assert_exit(&output, PROVED);
+        let expected = format!(
+            "{label}  {}",
+            escaped_path(&temp.path().join("cn.constitution"))
+        );
+        assert!(
+            stdout(&output)
+                .lines()
+                .any(|line| line.ends_with(&expected)),
+            "{trust}: {}",
+            stdout(&output)
+        );
+    }
+}
+
+/// A manifest can claim `official`, but only the whitelist can honour it. A
+/// registry without `official.toml` fails the listing instead of presenting the
+/// pack as audited, and without a lock there is no hash to compare either.
+#[test]
+fn packs_rejects_an_official_claim_without_a_whitelist() {
+    let temp = TempDir::new("official-no-whitelist");
+    temp.pack("cn.constitution", &official_manifest());
+    temp.lock();
+
+    let output = run(&format!(":packs {}", temp.path().display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    let line = pack_line(&out, "cn.constitution");
+    assert!(
+        line.contains("official（未通过白名单核对）"),
+        "an unconfirmed claim must not read as audited:\n{line}"
+    );
+    assert!(!line.contains("本项目审核"), "{line}");
+    assert!(out.contains("没有官方白名单"), "{out}");
+    assert!(!out.contains("白名单：通过"), "{out}");
+    assert!(out.contains("锁定校验：通过（1 个包）"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个官方白名单错误"]
+    );
+
+    // Without a lock there is not even a hash to compare.
+    fs::remove_file(temp.path().join("std.lock")).unwrap();
+    let output = run(&format!(":packs {}", temp.path().display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    let line = pack_line(&out, "cn.constitution");
+    assert!(
+        line.contains("official（未通过白名单核对）"),
+        "a claim without a lock hash must not read as audited:\n{line}"
+    );
+    assert!(!line.contains("本项目审核"), "{line}");
+    assert!(out.contains("没有 std.lock"), "{out}");
+    assert!(out.contains(UNLOCKED), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个官方白名单错误"]
+    );
+}
+
+/// A whitelisted release shows its whitelist verdict, maintainers and review
+/// record.
+#[test]
+fn packs_prints_maintainers_the_review_record_and_a_whitelist_pass() {
+    let temp = TempDir::new("whitelisted");
+    let manifest = official_manifest().replace(
+        "maintainers = [\"维护组\"]",
+        "maintainers = [\"维护组\", \"第二个组\"]",
     );
     temp.pack("cn.constitution", &manifest);
+    temp.lock();
+    temp.whitelist();
 
     let output = run(&format!(":packs {}", temp.path().display()));
     assert_exit(&output, PROVED);
-    let expected = format!(
-        "cn.constitution 0.1.0  CN/CN  1982-12-04..未注明  official  {}",
-        escaped_path(&temp.path().join("cn.constitution"))
+    let out = stdout(&output);
+    let line = pack_line(&out, "cn.constitution");
+    assert!(
+        line.contains("official（本项目审核）"),
+        "a confirmed claim reads as audited:\n{line}"
+    );
+    assert!(out.contains("  维护者：维护组、第二个组"), "{out}");
+    assert!(
+        out.contains("  审核：已审核（审核人 官方包审核流程，2026-11-23）"),
+        "{out}"
+    );
+    assert!(out.contains("  白名单：通过（official.toml）"), "{out}");
+    assert!(out.contains("锁定校验：通过（1 个包）"), "{out}");
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn packs_rejects_a_whitelist_hash_that_does_not_match() {
+    let temp = TempDir::new("whitelist-mismatch");
+    temp.pack("cn.constitution", &official_manifest());
+    temp.lock();
+    temp.whitelist();
+    let path = temp.path().join(OFFICIAL_FILE);
+    let real = Lockfile::read(&temp.path().join(LOCK_FILE))
+        .expect("the lock exists")
+        .pack[0]
+        .hash
+        .clone();
+    // Another well-formed hash is a different release, not a broken file.
+    let flipped = if real.ends_with('0') { "1" } else { "0" };
+    let wrong = format!("{}{flipped}", &real[..real.len() - 1]);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains(&real), "{text}");
+    fs::write(&path, text.replace(&real, &wrong)).unwrap();
+
+    let output = run(&format!(":packs {}", temp.path().display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    let line = pack_line(&out, "cn.constitution");
+    assert!(
+        line.contains("official（未通过白名单核对）"),
+        "an unconfirmed claim must not read as audited:\n{line}"
+    );
+    assert!(!line.contains("本项目审核"), "{line}");
+    assert!(
+        out.contains("未列入官方白名单，或锁哈希与白名单不一致"),
+        "{out}"
+    );
+    assert!(!out.contains("白名单：通过"), "{out}");
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个官方白名单错误"]
+    );
+}
+
+#[test]
+fn packs_fails_when_the_whitelist_cannot_be_read() {
+    let temp = TempDir::new("whitelist-broken");
+    temp.pack("cn.constitution", VALID);
+    temp.lock();
+    fs::write(temp.path().join(OFFICIAL_FILE), "[[pack]\nname = \n").unwrap();
+
+    let output = run(&format!(":packs {}", temp.path().display()));
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(out.contains("官方白名单解析失败"), "{out}");
+    assert!(out.contains(OFFICIAL_FILE), "{out}");
+    assert!(out.contains("锁定校验：通过（1 个包）"), "{out}");
+    // The whitelist error is a `path: error: message` diagnostic escaped once:
+    // the TOML parser's newlines stay inside the single line as `\n`.
+    let error_line = out
+        .lines()
+        .find(|line| line.contains("官方白名单解析失败"))
+        .unwrap_or_else(|| panic!("no whitelist error line:\n{out}"));
+    let expected_prefix = format!(
+        "{}: error: ",
+        escaped_path(&temp.path().join(OFFICIAL_FILE))
     );
     assert!(
-        stdout(&output).lines().any(|line| line == expected),
-        "{}",
-        stdout(&output)
+        error_line.starts_with(&expected_prefix),
+        "the error is rendered as `path: error: message`:\n{error_line}"
     );
+    assert!(
+        !error_line.contains(r"\\\\"),
+        "the path must not be escaped twice:\n{error_line}"
+    );
+    assert!(
+        !error_line.contains(r"\\n"),
+        "the TOML message must not be escaped twice:\n{error_line}"
+    );
+    assert!(
+        error_line.contains(r"\n"),
+        "the TOML message's newline is escaped once:\n{error_line}"
+    );
+    assert!(
+        out.lines()
+            .filter(|line| line.contains("官方白名单解析失败"))
+            .count()
+            == 1,
+        "{out}"
+    );
+    assert_eq!(
+        stderr(&output).lines().collect::<Vec<_>>(),
+        ["错误：1 个官方白名单错误"]
+    );
+}
+
+/// Only a reviewed and audited release is listed, and a community pack needs no
+/// whitelist at all.
+#[test]
+fn packs_does_not_need_a_whitelist_for_a_community_pack() {
+    let temp = TempDir::new("community-unaffected");
+    temp.pack("cn.constitution", VALID);
+    temp.lock();
+
+    let output = run(&format!(":packs {}", temp.path().display()));
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    let line = pack_line(&out, "cn.constitution");
+    assert!(
+        line.contains("community（未经本项目审核）"),
+        "a community pack keeps its own label:\n{line}"
+    );
+    assert!(!out.contains("白名单"), "{out}");
+    assert!(out.contains("锁定校验：通过（1 个包）"), "{out}");
+}
+
+const OFFICIAL_REVIEW: &str = r#"
+trust = "official"
+maintainers = ["维护组"]
+audit_status = "reviewed"
+audited_by = "官方包审核流程"
+audited_at = "2026-11-23"
+"#;
+
+fn official_manifest() -> String {
+    VALID.replace(
+        "effective_from = \"1982-12-04\"",
+        &format!("effective_from = \"1982-12-04\"\n{OFFICIAL_REVIEW}"),
+    )
 }
 
 #[test]
@@ -646,7 +898,7 @@ corpus = "cn.test/2018"
     assert_exit(&output, PROVED);
     let out = stdout(&output);
     assert!(
-        out.contains("cn.test 0.1.0  CN/CN  未注明  community  "),
+        out.contains("cn.test 0.1.0  CN/CN  未注明  community（未经本项目审核）  "),
         "{out}"
     );
     assert!(
@@ -957,6 +1209,37 @@ impl TempDir {
         let dir = self.path.join(name);
         fs::create_dir_all(&dir)
             .unwrap_or_else(|error| panic!("create {}: {error}", dir.display()));
+    }
+
+    /// Hash every pack and write `<root>/std.lock`.
+    fn lock(&self) {
+        let lockfile = build_lock(&self.path).unwrap_or_else(|errors| {
+            panic!(
+                "build_lock failed: {}",
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        });
+        lockfile
+            .write(&self.path.join(LOCK_FILE))
+            .unwrap_or_else(|error| panic!("write lock: {error}"));
+    }
+
+    /// Write an `official.toml` that lists every locked pack.
+    fn whitelist(&self) {
+        let lockfile = Lockfile::read(&self.path.join(LOCK_FILE)).expect("the lock exists");
+        let mut text = String::new();
+        for entry in &lockfile.pack {
+            text.push_str(&format!(
+                "[[pack]]\nname = \"{}\"\nversion = \"{}\"\nhash = \"{}\"\n\n",
+                entry.name, entry.version, entry.hash
+            ));
+        }
+        fs::write(self.path.join(OFFICIAL_FILE), text)
+            .unwrap_or_else(|error| panic!("write whitelist: {error}"));
     }
 
     fn corpus(&self, law: &str, version: &str, text: &str) {

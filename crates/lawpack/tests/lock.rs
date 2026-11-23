@@ -297,6 +297,9 @@ fn verify_lock_accepts_an_unchanged_registry() {
 
     let report = verify_lock(temp.path()).expect("the lock matches the registry");
     assert_eq!(report.verified, 2);
+    // The report carries the lock that was just compared with the directory,
+    // so callers never have to re-read a file that may have changed.
+    assert_eq!(report.lockfile, lock);
 }
 
 #[test]
@@ -408,6 +411,15 @@ fn the_repository_lock_matches_the_repository_packs() {
         .join("lawpacks");
     let report = verify_lock(&root).expect("lawpacks/std.lock matches lawpacks");
     assert!(report.verified >= 1, "{report:?}");
+    // The report exposes the verified lock's own entries.
+    assert!(
+        report
+            .lockfile
+            .pack
+            .iter()
+            .any(|pack| pack.name == "cn.constitution" && pack.version == "0.4.0"),
+        "{report:?}"
+    );
 }
 
 struct TempDir {

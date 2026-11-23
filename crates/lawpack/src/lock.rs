@@ -71,10 +71,16 @@ pub struct LockedPack {
 }
 
 /// What a successful [`verify_lock`] established.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockReport {
     /// How many packs the directory and the lock agree on.
     pub verified: usize,
+    /// The lock file that was just compared with the directory.
+    ///
+    /// Verification reads the lock once and hands that same value back, so a
+    /// caller that needs the recorded hashes does not re-read a file that may
+    /// have changed between verification and use.
+    pub lockfile: Lockfile,
 }
 
 impl Lockfile {
@@ -316,7 +322,9 @@ pub fn build_lock(root: &Path) -> Result<Lockfile, Vec<PackError>> {
 /// duplicate pack names, a version mismatch, a hash mismatch, a missing locked
 /// pack and a directory pack that is not locked are all errors, and every one of
 /// them is returned rather than the first. Pack order in the lock does not
-/// matter.
+/// matter. On success the returned [`LockReport`] carries the lock that was
+/// just compared with the directory, so a caller can use its hashes without
+/// re-reading the file.
 pub fn verify_lock(root: &Path) -> Result<LockReport, Vec<PackError>> {
     let lock_path = root.join(LOCK_FILE);
     match fs::symlink_metadata(&lock_path) {
@@ -408,7 +416,7 @@ pub fn verify_lock(root: &Path) -> Result<LockReport, Vec<PackError>> {
     }
 
     if errors.is_empty() {
-        Ok(LockReport { verified })
+        Ok(LockReport { verified, lockfile })
     } else {
         Err(errors)
     }

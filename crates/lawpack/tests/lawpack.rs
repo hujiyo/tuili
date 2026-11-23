@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std_deduce_lawpack::{load, scan, Manifest, Trust};
+use std_deduce_lawpack::{load, scan, AuditStatus, Manifest, Trust};
 
 const VALID: &str = r#"
 [pack]
@@ -33,8 +33,21 @@ jurisdiction = "CN"
 territory = "CN"
 "#;
 
+/// The review record an `official` manifest must carry.
+const REVIEWED: &str = r#"
+trust = "official"
+maintainers = ["维护组"]
+audit_status = "reviewed"
+audited_by = "官方包审核流程"
+audited_at = "2026-11-23"
+"#;
+
 fn manifest_with(extra: &str) -> String {
     format!("[pack]\n{REQUIRED}\n{extra}")
+}
+
+fn reviewed_with(extra: &str) -> String {
+    manifest_with(&format!("{REVIEWED}\n{extra}"))
 }
 
 fn parse_error(text: &str) -> String {
@@ -270,13 +283,198 @@ fn trust_defaults_to_community() {
 
 #[test]
 fn trust_parses_official_and_ranks_from_experimental_up() {
-    let manifest = Manifest::parse(&manifest_with("trust = \"official\"")).expect("trust is valid");
+    let manifest = Manifest::parse(&reviewed_with("")).expect("the review record is complete");
     assert_eq!(manifest.pack.trust, Trust::Official);
     assert!(Trust::Official > Trust::Community);
     assert!(Trust::Community > Trust::Local);
     assert!(Trust::Local > Trust::Experimental);
     assert_eq!(Trust::Official.to_string(), "official");
     assert_eq!(Trust::Community.to_string(), "community");
+}
+
+#[test]
+fn review_fields_default_to_unreviewed() {
+    let manifest = Manifest::parse(&manifest_with("")).expect("review fields are optional");
+    assert!(manifest.pack.maintainers.is_empty());
+    assert_eq!(manifest.pack.audit_status, AuditStatus::Unreviewed);
+    assert_eq!(AuditStatus::default(), AuditStatus::Unreviewed);
+    assert_eq!(manifest.pack.audited_by, None);
+    assert_eq!(manifest.pack.audited_at, None);
+    assert_eq!(AuditStatus::Unreviewed.to_string(), "unreviewed");
+    assert_eq!(AuditStatus::Reviewed.to_string(), "reviewed");
+}
+
+#[test]
+fn review_fields_parse_when_present() {
+    let manifest = Manifest::parse(&reviewed_with("")).expect("the review record is complete");
+    assert_eq!(manifest.pack.maintainers, vec!["维护组".to_owned()]);
+    assert_eq!(manifest.pack.audit_status, AuditStatus::Reviewed);
+    assert_eq!(manifest.pack.audited_by.as_deref(), Some("官方包审核流程"));
+    assert_eq!(manifest.pack.audited_at.as_deref(), Some("2026-11-23"));
+}
+
+#[test]
+fn an_empty_review_field_means_absent() {
+    let manifest = Manifest::parse(&manifest_with("audited_by = \"\"\naudited_at = \"\""))
+        .expect("empty optional fields mean unset");
+    assert_eq!(manifest.pack.audited_by, None);
+    assert_eq!(manifest.pack.audited_at, None);
+}
+
+#[test]
+fn official_requires_maintainers() {
+    let text = manifest_with(
+        "trust = \"official\"\n\
+         audit_status = \"reviewed\"\n\
+         audited_by = \"审核流程\"\n\
+         audited_at = \"2026-11-23\"",
+    );
+    let error = parse_error(&text);
+    assert!(error.contains("pack.maintainers"), "{error}");
+    assert!(error.contains("official"), "{error}");
+}
+
+#[test]
+fn official_requires_the_reviewed_status() {
+    let text = manifest_with(
+        "trust = \"official\"\n\
+         maintainers = [\"维护组\"]\n\
+         audited_by = \"审核流程\"\n\
+         audited_at = \"2026-11-23\"",
+    );
+    let error = parse_error(&text);
+    assert!(error.contains("pack.audit_status"), "{error}");
+    assert!(error.contains("reviewed"), "{error}");
+}
+
+#[test]
+fn official_requires_a_reviewer_and_a_review_date() {
+    let without_reviewer = manifest_with(
+        "trust = \"official\"\n\
+         maintainers = [\"维护组\"]\n\
+         audit_status = \"reviewed\"\n\
+         audited_at = \"2026-11-23\"",
+    );
+    let error = parse_error(&without_reviewer);
+    assert!(error.contains("pack.audited_by"), "{error}");
+
+    let without_date = manifest_with(
+        "trust = \"official\"\n\
+         maintainers = [\"维护组\"]\n\
+         audit_status = \"reviewed\"\n\
+         audited_by = \"审核流程\"",
+    );
+    let error = parse_error(&without_date);
+    assert!(error.contains("pack.audited_at"), "{error}");
+}
+
+#[test]
+fn official_requires_a_real_review_date() {
+    for date in ["2026-02-30", "2026-13-01", "26-11-23", "2026/11/23"] {
+        let text = manifest_with(REVIEWED).replace(
+            "audited_at = \"2026-11-23\"",
+            &format!("audited_at = \"{date}\""),
+        );
+        let error = parse_error(&text);
+        assert!(
+            error.contains("pack.audited_at"),
+            "{date:?} should be rejected: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_non_official_pack_may_not_carry_a_review_record() {
+    let reviewed = manifest_with(
+        "maintainers = [\"维护组\"]\n\
+         audit_status = \"reviewed\"\n\
+         audited_by = \"审核流程\"\n\
+         audited_at = \"2026-11-23\"",
+    );
+    let error = parse_error(&reviewed);
+    assert!(error.contains("只有 trust = \"official\""), "{error}");
+
+    let reviewer_only = manifest_with("audited_by = \"审核流程\"");
+    let error = parse_error(&reviewer_only);
+    assert!(error.contains("只有 trust = \"official\""), "{error}");
+
+    let date_only = manifest_with("trust = \"local\"\naudited_at = \"2026-11-23\"");
+    let error = parse_error(&date_only);
+    assert!(error.contains("只有 trust = \"official\""), "{error}");
+
+    let experimental = manifest_with("trust = \"experimental\"\naudit_status = \"reviewed\"");
+    let error = parse_error(&experimental);
+    assert!(error.contains("只有 trust = \"official\""), "{error}");
+}
+
+#[test]
+fn maintainer_text_rules_are_enforced() {
+    let long = "维".repeat(129);
+    for (entry, expected) in [
+        ("", "不能为空"),
+        (r"维护\n组", "控制字符"),
+        (r"维护\t组", "控制字符"),
+        (" 维护组", "首尾空白"),
+        ("维护组 ", "首尾空白"),
+        (long.as_str(), "长度不能超过 128"),
+    ] {
+        let text = manifest_with(&format!("maintainers = [\"{entry}\"]"));
+        let error = parse_error(&text);
+        assert!(
+            error.contains("pack.maintainers") && error.contains(expected),
+            "{entry:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_maintainers_are_rejected() {
+    let text = manifest_with("maintainers = [\"维护组\", \"另一个组\", \"维护组\"]");
+    let error = parse_error(&text);
+    assert!(error.contains("pack.maintainers"), "{error}");
+    assert!(error.contains("重复"), "{error}");
+    assert!(error.contains("第 3 项"), "{error}");
+}
+
+#[test]
+fn reviewer_text_rules_are_enforced() {
+    for (toml_value, expected) in [
+        (r"审核\n流程", "控制字符"),
+        (r"审核\t流程", "控制字符"),
+        (" 审核流程", "首尾空白"),
+        ("审核流程 ", "首尾空白"),
+    ] {
+        let text = manifest_with(REVIEWED).replace(
+            "audited_by = \"官方包审核流程\"",
+            &format!("audited_by = \"{toml_value}\""),
+        );
+        let error = parse_error(&text);
+        assert!(
+            error.contains("pack.audited_by") && error.contains(expected),
+            "{toml_value:?}: {error}"
+        );
+    }
+
+    let long = "审".repeat(129);
+    let text = manifest_with(REVIEWED).replace(
+        "audited_by = \"官方包审核流程\"",
+        &format!("audited_by = \"{long}\""),
+    );
+    let error = parse_error(&text);
+    assert!(error.contains("pack.audited_by"), "{error}");
+    assert!(error.contains("长度不能超过 128"), "{error}");
+}
+
+#[test]
+fn an_unknown_audit_status_is_rejected() {
+    for value in ["Reviewed", "pending", "reviewed ", "official"] {
+        let text = manifest_with(REVIEWED).replace(
+            "audit_status = \"reviewed\"",
+            &format!("audit_status = \"{value}\""),
+        );
+        let error = parse_error(&text);
+        assert!(error.contains("unknown variant"), "{value}: {error}");
+    }
 }
 
 #[test]

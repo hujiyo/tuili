@@ -269,7 +269,7 @@ impl Corpus {
             date::validate("retrieved_at", value)?;
         }
         if let Some(value) = &self.text_sha256 {
-            if !is_sha256(value) {
+            if !hex::is_sha256(value) {
                 return Err("text_sha256 必须是 sha256: 后接 64 位小写十六进制".to_owned());
             }
         }
@@ -896,7 +896,7 @@ pub fn audit(corpora: &[Corpus], citation: &Citation<'_>) -> AuditResult {
     }
     let mut hash_checked = false;
     if !citation.hash.is_empty() {
-        if !is_sha256(citation.hash) {
+        if !hex::is_sha256(citation.hash) {
             return result(
                 Audit::HashMismatch,
                 id,
@@ -961,15 +961,4 @@ fn strip_whitespace(value: &str) -> String {
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect()
-}
-
-/// Is this `sha256:` followed by exactly 64 lowercase hex digits?
-fn is_sha256(value: &str) -> bool {
-    let Some(digest) = value.strip_prefix("sha256:") else {
-        return false;
-    };
-    digest.len() == 64
-        && digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
