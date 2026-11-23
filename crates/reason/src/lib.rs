@@ -20,18 +20,22 @@
 //! derived facts fall foul of either declaration, that is a conflict, and it
 //! is adjudicated in exactly these ways:
 //!
-//! * a strict assumption (a fact) outranks a defeasible conclusion;
+//! * a strict fact (`verified` or `stipulated`) outranks a defeasible
+//!   conclusion and a claim (`user_asserted` or `assumed`);
 //! * a declared priority between the rules on the two sides decides the
 //!   conflict: `defeated_by` / `prefer` inside one package, or a top-level
 //!   `priority … over …` declaration with its sources. A priority edge that
 //!   lies on a priority cycle cannot decide anything, and priorities are never
-//!   transitive: `A over B` and `B over C` do not make `A over C`;
+//!   transitive: `A over B` and `B over C` do not make `A over C`. Priorities
+//!   order rules only: a claim never automatically beats a rule conclusion,
+//!   and a rule conclusion never refutes a claim;
 //! * otherwise the conflict is unresolved, and **neither** conclusion enters
-//!   the fact base. The recorded reason says whether the sides are conflicting
-//!   assumptions, lack a declared priority, have priorities that do not cover
-//!   the conflict (or lie in a cycle), or whether one side's witnesses can no
-//!   longer be rebuilt. It is not silently dropped: `conflicts()` reports it,
-//!   and the CLI prints both derivations and exits non-zero.
+//!   the fact base. The recorded reason says whether the sides are two strict
+//!   facts, two claims, a claim facing a rule conclusion, lack a declared
+//!   priority, have priorities that do not cover the conflict (or lie in a
+//!   cycle), or whether one side's witnesses can no longer be rebuilt. It is
+//!   not silently dropped: `conflicts()` reports it, and the CLI prints both
+//!   derivations and exits non-zero.
 //!
 //! ## Three commitments
 //!
@@ -57,7 +61,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use std_deduce_cert::CertExpr;
 use std_deduce_kernel::conv::convertible;
-use std_deduce_kernel::env::{Decl, DeclKind, Env, RuleDecl, SourceRef};
+use std_deduce_kernel::env::{Decl, DeclKind, Env, FactIdentity, RuleDecl, SourceRef};
 use std_deduce_kernel::norm::{normalize, spine};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Ctx, Expr, Name};
@@ -68,6 +72,9 @@ use std_deduce_kernel::{check, Ctx, Expr, Name};
 pub enum Node {
     Assumption {
         prop: Expr,
+        /// Who asserts the proposition. A strict fact outranks a defeasible
+        /// conclusion; a claim does not.
+        identity: FactIdentity,
         sources: Vec<SourceRef>,
         label: Option<String>,
     },
@@ -115,6 +122,8 @@ pub enum Side {
 /// conclusion was derived but its witnesses can no longer be rebuilt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Provenance {
+    /// The conclusion is a registered assumption; the identity it was
+    /// registered under decides whether it wins.
     Assumption,
     Rules(Vec<Name>),
 }
@@ -122,8 +131,8 @@ pub enum Provenance {
 /// How a conflict was adjudicated.
 ///
 /// A conflict is never decided by an internal preference: it is either
-/// defeated by a declared priority or by the strictness of an assumption, or
-/// it is reported as unresolved with the reason.
+/// defeated by a declared priority or by the strictness of a fact, or it is
+/// reported as unresolved with the reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
     /// One side wins.
@@ -143,7 +152,8 @@ pub enum Resolution {
 /// Why the winning side of a defeated conflict wins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolutionBasis {
-    /// A strict fact (assumption) outranks a defeasible conclusion.
+    /// A strict fact (an assumption recorded as `verified` or `stipulated`)
+    /// outranks a defeasible conclusion or a claim.
     Assumption,
     /// Declared priority edges decide the conflict.
     Priority {
@@ -232,8 +242,17 @@ pub enum PriorityClause {
 /// Why a conflict has no winner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnresolvedReason {
-    /// Both sides are strict facts; neither outranks the other.
+    /// Both sides are facts; neither outranks the other. Two strict facts have
+    /// no order between them, and two claims are both unproved.
     ConflictingAssumptions,
+    /// A claim met a rule conclusion. The claim is not proof, so it cannot
+    /// automatically beat the rule conclusion; the rule conclusion does not
+    /// refute the claim either. Neither side wins.
+    NonStrictFact {
+        /// The identity the claim is recorded under: `user_asserted` or
+        /// `assumed`.
+        identity: FactIdentity,
+    },
     /// One side was derived but its witnesses can no longer be rebuilt
     /// ([`Provenance::Rules`] with an empty list), so no priority can be
     /// checked for it. Neither side wins.
@@ -287,6 +306,7 @@ pub struct Conflict {
 
 struct Assumption {
     prop: Expr,
+    identity: FactIdentity,
     sources: Vec<SourceRef>,
     label: Option<String>,
 }
@@ -299,6 +319,27 @@ struct Instance {
     unlesses: Vec<Expr>,
     /// The rule's parameters and the values this instantiation bound them to.
     bindings: Vec<(Name, Expr)>,
+}
+
+/// How one side of a conflict is supported.
+///
+/// The identity travels with a fact because it decides the conflict: a strict
+/// fact outranks a rule conclusion and a claim, while a claim stands against a
+/// rule conclusion unresolved. A rule side carries its witnesses; an empty list
+/// means they can no longer be rebuilt.
+enum Support {
+    Fact(FactIdentity),
+    Rules(Vec<Name>),
+}
+
+impl Support {
+    /// The provenance the certificate records for this side.
+    fn provenance(&self) -> Provenance {
+        match self {
+            Support::Fact(_) => Provenance::Assumption,
+            Support::Rules(rules) => Provenance::Rules(rules.clone()),
+        }
+    }
 }
 
 /// The settled result: the set of facts and a derivation for each.
@@ -383,13 +424,25 @@ impl<'a> Reasoner<'a> {
         }
     }
 
-    /// Register an assumption. Its type must be a proposition.
+    /// Register an assumption together with the identity of the fact it
+    /// records. Its type must be a proposition.
+    ///
+    /// A `disputed` proposition records what the other side claims, not what is
+    /// proved, so it cannot be an assumption. One proposition has exactly one
+    /// identity: conflict resolution reads that identity as evidence, so the
+    /// same proposition cannot be registered once as a strict fact and once as
+    /// a mere claim. Registering the same proposition again under the same
+    /// identity is allowed.
     pub fn assume(
         &mut self,
         prop: &Expr,
+        identity: FactIdentity,
         sources: Vec<SourceRef>,
         label: Option<String>,
     ) -> Result<(), String> {
+        if identity == FactIdentity::Disputed {
+            return Err("争议事实不能作为假设：它断言的是对方的主张，不是已证明的命题".into());
+        }
         // A fact with no provenance is not an assumption that can be audited;
         // accepting it would present an unsourced assertion as proved. A
         // whitespace-only source names nothing and is refused for the same
@@ -402,19 +455,63 @@ impl<'a> Reasoner<'a> {
         }
         check::check(self.env, &Ctx::new(), prop, &Expr::Sort(0))
             .map_err(|e| format!("假设不是命题：{e}"))?;
+        // One proposition has one identity. Comparisons use kernel
+        // conversion, not the printed or normalized form: alpha- and
+        // eta-variants are the same proposition, and a string key would let a
+        // second registration smuggle in a different identity.
+        let prop_key = self.key_of(prop);
+        for recorded in &self.assumptions {
+            let same = if self.key_of(&recorded.prop) == prop_key {
+                true
+            } else {
+                convertible(self.env, &Ctx::new(), &recorded.prop, prop)
+                    .map_err(|error| format!("无法判定假设命题是否等价：{error}"))?
+            };
+            if same && recorded.identity != identity {
+                return Err(format!(
+                    "同一命题只能有一种事实身份：`{}` 已登记为{}，不能同时是{}",
+                    print_expr(prop),
+                    recorded.identity.label_zh(),
+                    identity.label_zh()
+                ));
+            }
+        }
         self.assumptions.push(Assumption {
             prop: prop.clone(),
+            identity,
             sources,
             label,
         });
         Ok(())
     }
 
-    /// Register every fact in the ledger as an assumption.
+    /// The identity recorded for the assumption of `prop`, if this reasoner
+    /// holds one.
     ///
-    /// A `Fact` records who asserts it. The five identities are not yet
-    /// treated differently by conflict resolution: every fact whose identity
-    /// seeds a derivation enters the fact base as a strict fact. A `Disputed`
+    /// The identity is evidence: conflict resolution reads it from the same
+    /// assumption table, so a display layer must read it here rather than infer
+    /// it from the printed proposition. A proposition the reasoner only derived
+    /// has no identity.
+    pub fn identity_of(&self, prop: &Expr) -> Option<FactIdentity> {
+        self.assumption_identity(&self.key_of(prop))
+    }
+
+    /// The identity recorded for the assumption whose normalized key is
+    /// `key`, if the reasoner holds such an assumption.
+    fn assumption_identity(&self, key: &str) -> Option<FactIdentity> {
+        self.assumptions
+            .iter()
+            .find(|assumption| self.key_of(&assumption.prop) == key)
+            .map(|assumption| assumption.identity)
+    }
+
+    /// Register every fact in the ledger as an assumption, carrying its
+    /// identity.
+    ///
+    /// A `Fact` records who asserts it. `verified` and `stipulated` facts are
+    /// strict and outrank a defeasible conclusion; `user_asserted` and
+    /// `assumed` facts are claims that may seed a derivation and block an
+    /// `unless`, but never automatically beat a rule conclusion. A `Disputed`
     /// fact is not seeded at all — it asserts what the other side claims, not
     /// what is the case.
     ///
@@ -447,7 +544,15 @@ impl<'a> Reasoner<'a> {
             if !declared_type_is_prop(self.env, &decl.ty) {
                 continue;
             }
-            self.assume(&decl.ty, decl.sources.clone(), Some(decl.name.to_string()))?;
+            let DeclKind::Fact { identity } = &decl.kind else {
+                continue;
+            };
+            self.assume(
+                &decl.ty,
+                *identity,
+                decl.sources.clone(),
+                Some(decl.name.to_string()),
+            )?;
         }
         Ok(())
     }
@@ -612,14 +717,14 @@ impl<'a> Reasoner<'a> {
                 if !self.in_conflict(a, b) {
                     continue;
                 }
-                let lb = self.provenance(ka, facts);
-                let rb = self.provenance(kb, facts);
-                let resolution = self.resolve(&lb, &rb);
+                let left = self.support(ka, facts);
+                let right = self.support(kb, facts);
+                let resolution = self.resolve(&left, &right);
                 out.push(Conflict {
                     left: a.clone(),
                     right: b.clone(),
-                    left_by: lb,
-                    right_by: rb,
+                    left_by: left.provenance(),
+                    right_by: right.provenance(),
                     resolution,
                 });
             }
@@ -627,15 +732,14 @@ impl<'a> Reasoner<'a> {
         out
     }
 
-    fn provenance(&self, target: &str, facts: &BTreeMap<String, Expr>) -> Provenance {
-        if self
-            .assumptions
-            .iter()
-            .any(|a| self.key_of(&a.prop) == target)
-        {
-            return Provenance::Assumption;
+    /// How one side of a conflict is supported: a fact recorded in the
+    /// assumption table, with its identity, or a conclusion with the rules
+    /// that can still be rebuilt as its witnesses.
+    fn support(&self, target: &str, facts: &BTreeMap<String, Expr>) -> Support {
+        match self.assumption_identity(target) {
+            Some(identity) => Support::Fact(identity),
+            None => Support::Rules(self.derivers(target, facts)),
         }
-        Provenance::Rules(self.derivers(target, facts))
     }
 
     /// Every rule that has an unblocked instance concluding `target`, with all
@@ -661,25 +765,65 @@ impl<'a> Reasoner<'a> {
         out.into_iter().collect()
     }
 
-    /// Facts are strict and always win over defeasible conclusions. Between
-    /// rules, a side wins only when every rule on it beats every rule on the
-    /// other side through a declared priority that is not part of a cycle, and
-    /// the other side is not covered in return. Priorities are not transitive
-    /// and are never guessed: anything else is unresolved, with the reason.
-    fn resolve(&self, left: &Provenance, right: &Provenance) -> Resolution {
+    /// Decide a conflict from the support on each side.
+    ///
+    /// A strict fact (`verified` / `stipulated`) wins over a rule conclusion
+    /// and over a claim: being merely asserted is not evidence against a
+    /// proved fact. Two strict facts have no order between them, and two
+    /// claims are both unproved, so those conflicts are unresolved. A claim
+    /// against a rule conclusion is unresolved as well: the claim cannot
+    /// automatically beat the rule conclusion, and the rule conclusion cannot
+    /// prove the claim false. Between rules, a side wins only when every rule
+    /// on it beats every rule on the other side through a declared priority
+    /// that is not part of a cycle, and the other side is not covered in
+    /// return. Priorities are not transitive and are never guessed: anything
+    /// else is unresolved, with the reason.
+    fn resolve(&self, left: &Support, right: &Support) -> Resolution {
         match (left, right) {
-            (Provenance::Assumption, Provenance::Assumption) => Resolution::Unresolved {
-                reason: UnresolvedReason::ConflictingAssumptions,
-            },
-            (Provenance::Assumption, _) => Resolution::Defeated {
-                winner: Side::Left,
-                basis: ResolutionBasis::Assumption,
-            },
-            (_, Provenance::Assumption) => Resolution::Defeated {
-                winner: Side::Right,
-                basis: ResolutionBasis::Assumption,
-            },
-            (Provenance::Rules(l), Provenance::Rules(r)) => {
+            (Support::Fact(left), Support::Fact(right)) => {
+                match (left.is_strict(), right.is_strict()) {
+                    (true, false) => Resolution::Defeated {
+                        winner: Side::Left,
+                        basis: ResolutionBasis::Assumption,
+                    },
+                    (false, true) => Resolution::Defeated {
+                        winner: Side::Right,
+                        basis: ResolutionBasis::Assumption,
+                    },
+                    _ => Resolution::Unresolved {
+                        reason: UnresolvedReason::ConflictingAssumptions,
+                    },
+                }
+            }
+            (Support::Fact(identity), Support::Rules(_)) => {
+                if identity.is_strict() {
+                    Resolution::Defeated {
+                        winner: Side::Left,
+                        basis: ResolutionBasis::Assumption,
+                    }
+                } else {
+                    Resolution::Unresolved {
+                        reason: UnresolvedReason::NonStrictFact {
+                            identity: *identity,
+                        },
+                    }
+                }
+            }
+            (Support::Rules(_), Support::Fact(identity)) => {
+                if identity.is_strict() {
+                    Resolution::Defeated {
+                        winner: Side::Right,
+                        basis: ResolutionBasis::Assumption,
+                    }
+                } else {
+                    Resolution::Unresolved {
+                        reason: UnresolvedReason::NonStrictFact {
+                            identity: *identity,
+                        },
+                    }
+                }
+            }
+            (Support::Rules(l), Support::Rules(r)) => {
                 // An empty witness list means the conclusion was derived but
                 // its witnesses can no longer be rebuilt. It must never let
                 // the other side win: the earlier "every rule on the other
@@ -801,6 +945,7 @@ impl<'a> Reasoner<'a> {
             let id = nodes.len();
             nodes.push(Node::Assumption {
                 prop: a.prop.clone(),
+                identity: a.identity,
                 sources: a.sources.clone(),
                 label: a.label.clone(),
             });
@@ -1645,12 +1790,14 @@ pub fn certificate(
         match node {
             Node::Assumption {
                 prop,
+                identity,
                 sources,
                 label,
             } => {
                 let assumption = assumptions.len();
                 assumptions.push(std_deduce_cert::Assumption {
                     proposition: cert_expr(prop, Some(id), "假设命题")?,
+                    identity: std_deduce_cert::FactIdentity::from(identity),
                     sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
                     label: label.clone(),
                 });
@@ -1760,7 +1907,47 @@ pub fn certificate(
         };
         let explanation = match reason {
             UnresolvedReason::ConflictingAssumptions => {
-                "两侧都是已知事实，严格事实之间没有先后".to_owned()
+                // Both sides are facts recorded as assumption nodes; the
+                // identity each side was registered under decides which
+                // sentence describes the standoff.
+                match (
+                    recorded_identity(d, &conflict.left),
+                    recorded_identity(d, &conflict.right),
+                ) {
+                    (Some(left), Some(right)) if left.is_strict() && right.is_strict() => {
+                        "两侧都是严格事实，事实之间没有先后".to_owned()
+                    }
+                    (Some(left), Some(right)) if !left.is_strict() && !right.is_strict() => {
+                        "两侧都只是主张，未经证明，不能判出一方胜出".to_owned()
+                    }
+                    // One strict fact and one claim is decided, not unresolved,
+                    // so an unmatched or mixed pair means this derivation does
+                    // not describe the conflict. Fall back to the reason-only
+                    // wording rather than invent an identity.
+                    _ => "两侧都是事实，身份无法确定，不能判出一方胜出".to_owned(),
+                }
+            }
+            UnresolvedReason::NonStrictFact { identity } => {
+                // The fact side is the one the conflict records as an
+                // assumption. `resolve` records this reason only for a
+                // fact-versus-rule pair, so a missing fact side is an internal
+                // inconsistency, never a reason to invent one.
+                let fact_side = match (&conflict.left_by, &conflict.right_by) {
+                    (Provenance::Assumption, _) => &conflict.left,
+                    (_, Provenance::Assumption) => &conflict.right,
+                    _ => {
+                        return Err(format!(
+                            "第 {} 个冲突记录为「主张与规则」未决，但两侧都不是事实：\
+                             内部状态不一致",
+                            index + 1
+                        ));
+                    }
+                };
+                format!(
+                    "「{}」只是「{}」，未经证明，不能自动胜过规则结论",
+                    print_expr(fact_side),
+                    identity.label_zh()
+                )
             }
             UnresolvedReason::UnknownWitnesses => {
                 "有一方的规则见证已无法重建，无法核对优先关系".to_owned()
@@ -1817,6 +2004,20 @@ fn cert_expr(expr: &Expr, node: Option<usize>, role: &str) -> Result<CertExpr, S
     })
 }
 
+/// The identity the derivation recorded for an assumption of `expr`.
+///
+/// [`certificate`] converts a derivation without access to the reasoner's
+/// assumption table, so it reads the identity from the derivation's assumption
+/// nodes — the same entries the table produced. A fact that appears as a
+/// conflict side is recorded as an assumption node; no match means the side was
+/// derived, not assumed, and therefore has no identity.
+fn recorded_identity(d: &Derivation, expr: &Expr) -> Option<FactIdentity> {
+    d.nodes.iter().find_map(|node| match node {
+        Node::Assumption { prop, identity, .. } if prop == expr => Some(*identity),
+        _ => None,
+    })
+}
+
 fn cert_provenance(provenance: &Provenance) -> std_deduce_cert::Provenance {
     match provenance {
         Provenance::Assumption => std_deduce_cert::Provenance::Assumption,
@@ -1841,6 +2042,11 @@ fn cert_resolution(resolution: &Resolution) -> std_deduce_cert::Resolution {
             reason: match reason {
                 UnresolvedReason::ConflictingAssumptions => {
                     std_deduce_cert::UnresolvedReason::ConflictingAssumptions
+                }
+                UnresolvedReason::NonStrictFact { identity } => {
+                    std_deduce_cert::UnresolvedReason::NonStrictFact {
+                        identity: std_deduce_cert::FactIdentity::from(identity),
+                    }
                 }
                 UnresolvedReason::UnknownWitnesses => {
                     std_deduce_cert::UnresolvedReason::UnknownWitnesses
@@ -1906,15 +2112,15 @@ mod tests {
         let empty: Vec<Name> = Vec::new();
         assert_eq!(
             reasoner.resolve(
-                &Provenance::Rules(empty.clone()),
-                &Provenance::Rules(present.clone())
+                &Support::Rules(empty.clone()),
+                &Support::Rules(present.clone())
             ),
             Resolution::Unresolved {
                 reason: UnresolvedReason::UnknownWitnesses,
             }
         );
         assert_eq!(
-            reasoner.resolve(&Provenance::Rules(present), &Provenance::Rules(empty)),
+            reasoner.resolve(&Support::Rules(present), &Support::Rules(empty)),
             Resolution::Unresolved {
                 reason: UnresolvedReason::UnknownWitnesses,
             }

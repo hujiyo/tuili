@@ -2,8 +2,8 @@
 //! own tree, including its labels, sources, bindings, gaps and errors.
 
 use std_deduce_cert::{
-    render, Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, FormatVersion,
-    GapCandidate, Node, Source,
+    render, Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, FactIdentity,
+    FormatVersion, GapCandidate, Node, Source,
 };
 use std_deduce_kernel::env::SourceRef;
 
@@ -42,6 +42,7 @@ fn source(text: &str, locator: &str, version: &str, note: &str) -> Source {
 fn assumption(proposition: CertExpr, sources: Vec<Source>, label: Option<&str>) -> Assumption {
     Assumption {
         proposition,
+        identity: FactIdentity::UserAsserted,
         sources,
         label: label.map(str::to_owned),
     }
@@ -125,10 +126,35 @@ fn renders_a_rule_tree_with_labels_sources_and_bindings() {
 ▸ 违法 张三  ⟨规则甲⟩ ← 「宪法第三十九条」（2018）
   注：按通常理解
   实例：p ↦ 张三，q ↦ 李四
-  · 侵占 张三  [事实一]  ← 「民法典第一条」（2020）
-  · 侵占 李四  ← 「申请人材料」（2024）
+  · 侵占 张三  〔用户陈述〕  [事实一]  ← 「民法典第一条」（2020）
+  · 侵占 李四  〔用户陈述〕  ← 「申请人材料」（2024）
 ";
     assert_eq!(render(&certificate).unwrap(), expected);
+}
+
+#[test]
+fn an_assumption_shows_its_fact_identity_before_the_label_and_source() {
+    for (identity, label) in [
+        (FactIdentity::Verified, "法院查明"),
+        (FactIdentity::UserAsserted, "用户陈述"),
+        (FactIdentity::Assumed, "分析假设"),
+        (FactIdentity::Stipulated, "双方无争议"),
+    ] {
+        let certificate = certificate(
+            vec![Assumption {
+                proposition: atom("侵占", "张三"),
+                identity,
+                sources: vec![source("民法典", "第一条", "2020", "")],
+                label: Some("事实一".to_owned()),
+            }],
+            vec![Node::Assumption { assumption: 0 }],
+            Some(0),
+        );
+        assert_eq!(
+            render(&certificate).unwrap(),
+            format!("· 侵占 张三  〔{label}〕  [事实一]  ← 「民法典第一条」（2020）\n")
+        );
+    }
 }
 
 #[test]
@@ -194,11 +220,11 @@ fn without_a_root_prints_unused_nodes_then_gaps_separated_by_blank_lines() {
     );
 
     let expected = "\
-· 侵占 李四
+· 侵占 李四  〔用户陈述〕
 
 ▸ 违法 张三  ⟨规则甲⟩
   实例：p ↦ 张三
-  · 侵占 张三
+  · 侵占 张三  〔用户陈述〕
 
 ? 可复议 甲  【未闭合】
 ";

@@ -143,9 +143,12 @@ pub fn escape_control(value: &str) -> String {
 /// Who asserts a fact.
 ///
 /// The identity is part of the evidence: "the court found it" and "the user
-/// says so" are different claims even when the proposition is the same. The
-/// ledger records the identity so that it can be inspected and audited; it
-/// does not make the fact stronger or weaker than it is recorded as.
+/// says so" are different claims even when the proposition is the same, and the
+/// difference decides conflicts. A strict identity (`verified` / `stipulated`)
+/// outranks a defeasible conclusion; a claim (`user_asserted` / `assumed`) may
+/// seed a derivation and block an `unless`, but it never automatically beats a
+/// rule conclusion. A `disputed` fact asserts what the other side claims and is
+/// not used as a premise at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactIdentity {
     /// Found by a court or stated in an official document.
@@ -197,9 +200,9 @@ impl FactIdentity {
 
     /// Whether this identity is a strict fact.
     ///
-    /// Strictness is not yet consulted by conflict resolution: every fact
-    /// whose identity seeds a derivation still enters the fact base as a
-    /// strict fact. The predicate records the distinction the ledger makes.
+    /// Strictness decides conflicts: a strict fact outranks a defeasible
+    /// conclusion and a claim, while a claim never automatically outranks a
+    /// rule conclusion, and two strict facts have no order between them.
     pub fn is_strict(self) -> bool {
         matches!(self, FactIdentity::Verified | FactIdentity::Stipulated)
     }

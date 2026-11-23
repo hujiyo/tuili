@@ -23,8 +23,10 @@ def 双重否定引入 : ∀ (p : Prop), p → 非 (非 p) :=
 -- 加不加这一行，决定你的理论是经典的还是直觉主义的——这是**理论的选择**，
 -- 不是内核的选择，所以它写在账本里，带着出处。
 axiom 经典双重否定消去 : ∀ (p : Prop), 非 (非 p) → p
+  identity assumed
   source text "方法选择" locator "经典逻辑" note "可删除"
 
 -- 公理：爆炸原理。只有把「假」当作不可满足时才安全。
 axiom 爆炸 : ∀ (A : Prop), 假 → A
+  identity assumed
   source text "方法选择" locator "经典爆炸" note "法律场景慎用"

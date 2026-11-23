@@ -241,7 +241,7 @@ fn qiyuling_reply_uses_out_of_pack_documents_and_the_revocation_blocks_it() {
         GAP_OR_CONFLICT,
         &[
             "无法推出 应承担民事责任 顶替 齐玉苓",
-            "被阻断：「批复已废止」已成立",
+            "被阻断：「批复已废止」〔用户陈述〕已成立",
         ],
     );
 }
@@ -304,6 +304,7 @@ fn sun_zhigang_detention_stays_a_gap_while_the_independent_rule_proves() {
         PROVED,
         &[
             "▸ 不得收容 孙志刚",
+            "· 缺暂住证 孙志刚  〔用户陈述〕",
             "⟨省人大法工委解释⟩",
             "推导已通过独立校验",
         ],
@@ -416,6 +417,7 @@ fn software_copyright_proves_infringement_and_full_damages() {
         &[
             "▸ 侵害复制权 被诉侵权软件 沃某模具公司",
             "▸ 复制 被诉侵权软件 沃某模具公司",
+            "· 特有信息一致 被诉侵权软件 案涉软件  〔法院查明〕",
             "推导已通过独立校验",
         ],
     );
@@ -454,14 +456,24 @@ fn negation_theorems_and_axioms_load_and_inspect() {
     check(
         session("否定-定理与公理.std", &[":inspect"]),
         PROVED,
-        &["假 : Prop", "非 : Prop → Prop", "fact  经典双重否定消去"],
+        &[
+            "假 : Prop",
+            "非 : Prop → Prop",
+            "fact  经典双重否定消去",
+            "〔分析假设〕",
+        ],
     );
     // The classical elimination axiom is assumed as a fact, so the reasoner
     // can use it directly.
     check(
         session("否定-定理与公理.std", &[":why ∀ (p : Prop), 非 (非 p) → p"]),
         PROVED,
-        &["· ∀ (p : Prop)", "[经典双重否定消去]", "推导已通过独立校验"],
+        &[
+            "· ∀ (p : Prop)",
+            "[经典双重否定消去]",
+            "〔分析假设〕",
+            "推导已通过独立校验",
+        ],
     );
     // `axiom 假 : Prop` only declares a constant; it asserts nothing, so the
     // proposition cannot be derived.
@@ -792,11 +804,12 @@ fn inspect_shows_the_fact_identity_label() {
         r#"
 sort 公民
 pred 违法 : 公民 → Prop
+pred 违规 : 公民 → Prop
 obj 张三 : 公民
 axiom 判决事实 : 违法 张三
   identity verified
   source text "判决" locator "第一页"
-axiom 陈述事实 : 违法 张三
+axiom 陈述事实 : 违规 张三
   source text "笔录" locator "第一页"
 "#,
     );
@@ -805,7 +818,7 @@ axiom 陈述事实 : 违法 张三
         PROVED,
         &[
             "fact  判决事实 : 违法 张三  〔法院查明〕",
-            "fact  陈述事实 : 违法 张三  〔用户陈述〕",
+            "fact  陈述事实 : 违规 张三  〔用户陈述〕",
             "推导已通过独立校验",
         ],
     );

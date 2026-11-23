@@ -6,9 +6,9 @@
 
 use std_deduce_cert::{
     check, Assumption, Binding, CertExpr, Certificate, CheckError, CheckReport, Conflict,
-    EnvironmentIdentity, FormatVersion, Node, ObligationKind, OpenObligation, PriorityClause,
-    PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, Source,
-    UnresolvedReason,
+    EnvironmentIdentity, FactIdentity, FormatVersion, Node, ObligationKind, OpenObligation,
+    PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side,
+    Source, UnresolvedReason,
 };
 use std_deduce_kernel::Env;
 use std_deduce_lang::Library;
@@ -861,6 +861,28 @@ fn env() -> Env {
     env_from("cert-check", THEORY)
 }
 
+/// [`THEORY`] plus the given registered facts.
+///
+/// A certificate may record a strict identity only when the environment
+/// registers the same proposition under that identity, so strict-fact tests
+/// declare their facts here instead of asserting a strictness the environment
+/// does not back.
+fn env_with_facts(facts: &[(&str, &str, FactIdentity)]) -> Env {
+    env_from_facts("cert-check-facts", facts)
+}
+
+fn env_from_facts(name: &str, facts: &[(&str, &str, FactIdentity)]) -> Env {
+    let mut source = THEORY.to_owned();
+    for (index, (predicate, object, identity)) in facts.iter().enumerate() {
+        source.push_str(&format!(
+            "\naxiom 登记事实{index} : {predicate} {object}\n  identity {}\n  \
+             source text \"测试\" locator \"夹具\"\n",
+            std_deduce_kernel::FactIdentity::from(identity).keyword()
+        ));
+    }
+    env_from(name, &source)
+}
+
 fn axiom_env() -> Env {
     env_from("cert-check-axiom", AXIOM_THEORY)
 }
@@ -1051,12 +1073,23 @@ fn atom(predicate: &str, object: &str) -> CertExpr {
     app(constant(predicate), constant(object))
 }
 
-fn premise(proposition: CertExpr) -> Assumption {
+fn fact(proposition: CertExpr, identity: FactIdentity) -> Assumption {
     Assumption {
         proposition,
+        identity,
         sources: Vec::new(),
         label: None,
     }
+}
+
+/// A listed assumption with no source: enough for checking the proposition.
+///
+/// The default is a claim (`user_asserted`), not a strict fact: a strict
+/// identity in a certificate must be backed by a fact the environment really
+/// registers, so a test that wants strict semantics adds that declaration to
+/// its own environment fixture.
+fn premise(proposition: CertExpr) -> Assumption {
+    fact(proposition, FactIdentity::UserAsserted)
 }
 
 fn assumption_node(assumption: usize) -> Node {
@@ -1444,7 +1477,7 @@ fn root_in_an_unresolved_conflict_is_rejected() {
     let mut cert = legal_certificate();
     cert.conflicts.push(Conflict {
         left: atom("违法", "张三"),
-        right: atom("侵占", "张三"),
+        right: atom("无辜", "张三"),
         left_by: Provenance::Rules {
             rules: vec!["r".to_owned()],
         },
@@ -1464,7 +1497,8 @@ fn root_on_the_losing_side_of_a_resolved_conflict_is_rejected() {
     // The right side is an assumption; the root's side is a rule. Add the
     // assumed proposition to the certificate's assumption table, as a real
     // certificate would.
-    cert.assumptions.push(premise(atom("侵占", "李四")));
+    cert.assumptions
+        .push(fact(atom("侵占", "李四"), FactIdentity::Verified));
     cert.conflicts.push(Conflict {
         left: atom("违法", "张三"),
         right: atom("侵占", "李四"),
@@ -1477,7 +1511,12 @@ fn root_on_the_losing_side_of_a_resolved_conflict_is_rejected() {
             basis: ResolutionBasis::Assumption,
         },
     });
-    let error = reject_at(&cert, 1);
+    let env = env_with_facts(&[("侵占", "李四", FactIdentity::Verified)]);
+    let error = {
+        let error = check(&env, &cert).expect_err("the root is on the losing side");
+        assert_eq!(error.node, Some(1), "{error}");
+        error
+    };
     assert!(error.message.contains("败方"), "{error}");
 }
 
@@ -1485,8 +1524,10 @@ fn root_on_the_losing_side_of_a_resolved_conflict_is_rejected() {
 fn root_on_the_winning_side_of_a_resolved_conflict_is_reported() {
     let mut cert = legal_certificate();
     // A strict assumption on the left outranks the rule on the right. The
-    // assumed proposition is listed in the certificate's assumption table.
-    cert.assumptions.push(premise(atom("违法", "张三")));
+    // assumed proposition is listed in the certificate's assumption table and
+    // registered with the same identity in the environment.
+    cert.assumptions
+        .push(fact(atom("违法", "张三"), FactIdentity::Verified));
     cert.conflicts.push(conflict(
         atom("违法", "张三"),
         atom("违法", "李四"),
@@ -1496,7 +1537,8 @@ fn root_on_the_winning_side_of_a_resolved_conflict_is_reported() {
         },
     ));
     cert.conflicts[0].left_by = Provenance::Assumption;
-    let report = check(&env(), &cert).expect("a winning root is allowed");
+    let env = env_with_facts(&[("违法", "张三", FactIdentity::Verified)]);
+    let report = check(&env, &cert).expect("a winning root is allowed");
     assert!(report.root_proved);
     assert!(report.conflict_resolved);
     assert!(
@@ -2185,8 +2227,36 @@ fn declaration_env() -> Env {
     )
 }
 
+/// [`declaration_env`] plus a `verified` fact for `p.应适用`. Kept separate so
+/// the rule-witness fixtures still have no fact for the same proposition.
+fn declaration_env_with_fact() -> Env {
+    let rules = format!(
+        "{PRIORITY_RULES}\n\
+         axiom p.应适用事实 : p.应适用\n  identity verified\n  \
+         source text \"测试\" locator \"夹具\"\n"
+    );
+    load_sources(
+        "cert-priority-declaration-fact",
+        &[("p.std", &rules), ("o.std", PRIORITY_ORDER)],
+    )
+}
+
 fn clause_env() -> Env {
     load_sources("cert-priority-clause", &[("q.std", CLAUSE_RULES)])
+}
+
+/// [`CLAUSE_RULES`] plus the two registered facts used by the
+/// conflicting-assumptions fixture. They are kept out of [`clause_env`] so the
+/// rule-witness fixtures still have no fact for the same propositions.
+fn clause_env_with_facts() -> Env {
+    let source = format!(
+        "{CLAUSE_RULES}\n\
+         axiom q.孤立甲事实 : q.孤立甲\n  identity verified\n  \
+         source text \"测试\" locator \"夹具\"\n\
+         axiom q.孤立乙事实 : q.孤立乙\n  identity stipulated\n  \
+         source text \"测试\" locator \"夹具\"\n"
+    );
+    load_sources("cert-priority-clause-facts", &[("q-facts.std", &source)])
 }
 
 fn cycle_env() -> Env {
@@ -2373,8 +2443,12 @@ fn every_resolution_variant_of_a_certificate_passes_priority_validation() {
             reason: UnresolvedReason::ConflictingAssumptions,
         },
     }]);
-    cert.assumptions = vec![premise(constant("q.孤立甲")), premise(constant("q.孤立乙"))];
-    let report = check(&env, &cert).expect("conflicting assumptions check");
+    cert.assumptions = vec![
+        fact(constant("q.孤立甲"), FactIdentity::Verified),
+        fact(constant("q.孤立乙"), FactIdentity::Stipulated),
+    ];
+    let facts_env = clause_env_with_facts();
+    let report = check(&facts_env, &cert).expect("conflicting assumptions check");
     assert_eq!(report.priority_edges_checked, 0);
 
     // A lost witness cannot be ordered: it must not win, but it is not an
@@ -2663,8 +2737,8 @@ fn an_assumption_side_must_be_in_the_assumption_table() {
 
     // The same record passes once the assumption table really lists the
     // proposition, which is what the reasoner produces.
-    cert.assumptions = vec![premise(constant("p.应适用"))];
-    check(&declaration_env(), &cert).expect("a listed assumption side checks");
+    cert.assumptions = vec![fact(constant("p.应适用"), FactIdentity::Verified)];
+    check(&declaration_env_with_fact(), &cert).expect("a listed assumption side checks");
 }
 
 #[test]
@@ -2704,7 +2778,7 @@ fn unknown_witnesses_cannot_mix_with_an_assumption_side() {
     let error =
         check(&declaration_env(), &cert).expect_err("an assumption side cannot lose its witnesses");
     assert!(
-        error.message.contains("一侧是已知事实时，只能是事实胜出"),
+        error.message.contains("一侧是事实时，只能是事实胜出"),
         "{error}"
     );
 }
@@ -2787,6 +2861,378 @@ fn a_tampered_rule_clause_origin_is_rejected() {
     assert!(error.message.contains("逐项一致"), "{error}");
     assert!(
         error.message.contains("第二条") || error.message.contains("出处"),
+        "{error}"
+    );
+}
+
+// ---------------------------------------------------------------- fact identity
+
+/// A conflict between a fact on the left and the `env()` rule `r` on the
+/// right. The fact's identity lives in the assumption table.
+fn fact_rule_conflict(resolution: Resolution) -> Conflict {
+    Conflict {
+        left: atom("侵占", "张三"),
+        right: atom("违法", "张三"),
+        left_by: Provenance::Assumption,
+        right_by: Provenance::Rules {
+            rules: vec!["r".to_owned()],
+        },
+        resolution,
+    }
+}
+
+/// A conflict between two facts. The identity of each side lives in the
+/// assumption table.
+fn fact_fact_conflict(resolution: Resolution) -> Conflict {
+    Conflict {
+        left: atom("侵占", "张三"),
+        right: atom("违法", "张三"),
+        left_by: Provenance::Assumption,
+        right_by: Provenance::Assumption,
+        resolution,
+    }
+}
+
+#[test]
+fn a_strict_fact_may_defeat_a_rule_conclusion() {
+    for identity in [FactIdentity::Verified, FactIdentity::Stipulated] {
+        let mut cert = conflict_certificate(vec![fact_rule_conflict(Resolution::Defeated {
+            winner: Side::Left,
+            basis: ResolutionBasis::Assumption,
+        })]);
+        cert.assumptions = vec![fact(atom("侵占", "张三"), identity)];
+        let env = env_with_facts(&[("侵占", "张三", identity)]);
+        let report = check(&env, &cert).expect("a strict fact outranks a rule conclusion");
+        assert_eq!(report.priority_edges_checked, 0);
+    }
+}
+
+#[test]
+fn a_claim_cannot_defeat_a_rule_conclusion() {
+    for identity in [FactIdentity::UserAsserted, FactIdentity::Assumed] {
+        let mut cert = conflict_certificate(vec![fact_rule_conflict(Resolution::Defeated {
+            winner: Side::Left,
+            basis: ResolutionBasis::Assumption,
+        })]);
+        cert.assumptions = vec![fact(atom("侵占", "张三"), identity)];
+        let error = check(&env(), &cert).expect_err("a claim is not a strict fact");
+        assert!(error.message.contains("不是严格事实"), "{error}");
+        assert!(error.message.contains(identity.label_zh()), "{error}");
+    }
+}
+
+#[test]
+fn a_strict_fact_may_defeat_a_claim() {
+    let mut cert = conflict_certificate(vec![fact_fact_conflict(Resolution::Defeated {
+        winner: Side::Left,
+        basis: ResolutionBasis::Assumption,
+    })]);
+    cert.assumptions = vec![
+        fact(atom("侵占", "张三"), FactIdentity::Verified),
+        fact(atom("违法", "张三"), FactIdentity::UserAsserted),
+    ];
+    let env = env_with_facts(&[("侵占", "张三", FactIdentity::Verified)]);
+    check(&env, &cert).expect("a strict fact outranks a claim");
+
+    // The same record with the sides swapped is still a legal defeat: the
+    // strict fact wins wherever it sits.
+    let mut cert = conflict_certificate(vec![fact_fact_conflict(Resolution::Defeated {
+        winner: Side::Right,
+        basis: ResolutionBasis::Assumption,
+    })]);
+    cert.assumptions = vec![
+        fact(atom("侵占", "张三"), FactIdentity::Assumed),
+        fact(atom("违法", "张三"), FactIdentity::Stipulated),
+    ];
+    let env = env_with_facts(&[("违法", "张三", FactIdentity::Stipulated)]);
+    check(&env, &cert).expect("the strict fact on the right wins as well");
+}
+
+#[test]
+fn a_claim_against_a_rule_is_recorded_as_a_non_strict_fact() {
+    let mut cert = conflict_certificate(vec![fact_rule_conflict(Resolution::Unresolved {
+        reason: UnresolvedReason::NonStrictFact {
+            identity: FactIdentity::UserAsserted,
+        },
+    })]);
+    cert.assumptions = vec![fact(atom("侵占", "张三"), FactIdentity::UserAsserted)];
+    check(&env(), &cert).expect("a claim against a rule conclusion is unresolved");
+
+    // The recorded identity must be the one the assumption table holds.
+    let mut cert = conflict_certificate(vec![fact_rule_conflict(Resolution::Unresolved {
+        reason: UnresolvedReason::NonStrictFact {
+            identity: FactIdentity::Assumed,
+        },
+    })]);
+    cert.assumptions = vec![fact(atom("侵占", "张三"), FactIdentity::UserAsserted)];
+    let error = check(&env(), &cert).expect_err("a mismatched identity is a forged record");
+    assert!(error.message.contains("假设表把该命题登记为"), "{error}");
+
+    // A strict fact cannot be recorded under the claim reason.
+    let mut cert = conflict_certificate(vec![fact_rule_conflict(Resolution::Unresolved {
+        reason: UnresolvedReason::NonStrictFact {
+            identity: FactIdentity::Verified,
+        },
+    })]);
+    cert.assumptions = vec![fact(atom("侵占", "张三"), FactIdentity::Verified)];
+    let env = env_with_facts(&[("侵占", "张三", FactIdentity::Verified)]);
+    let error = check(&env, &cert).expect_err("a strict fact must not be called a claim");
+    assert!(
+        error.message.contains("只记录 user_asserted 或 assumed"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_non_strict_fact_reason_needs_one_fact_side_and_one_rule_side() {
+    let mut cert = conflict_certificate(vec![fact_fact_conflict(Resolution::Unresolved {
+        reason: UnresolvedReason::NonStrictFact {
+            identity: FactIdentity::UserAsserted,
+        },
+    })]);
+    cert.assumptions = vec![
+        fact(atom("侵占", "张三"), FactIdentity::UserAsserted),
+        fact(atom("违法", "张三"), FactIdentity::UserAsserted),
+    ];
+    let error = check(&env(), &cert).expect_err("two facts are not a fact-versus-rule conflict");
+    assert!(
+        error.message.contains("一侧是事实、另一侧是规则"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_conflict_between_facts_must_keep_the_same_strictness() {
+    let unresolved = || {
+        conflict_certificate(vec![fact_fact_conflict(Resolution::Unresolved {
+            reason: UnresolvedReason::ConflictingAssumptions,
+        })])
+    };
+
+    // Two strict facts, and two claims, are both legitimate unresolved pairs.
+    let mut cert = unresolved();
+    cert.assumptions = vec![
+        fact(atom("侵占", "张三"), FactIdentity::Verified),
+        fact(atom("违法", "张三"), FactIdentity::Stipulated),
+    ];
+    let strict_env = env_with_facts(&[
+        ("侵占", "张三", FactIdentity::Verified),
+        ("违法", "张三", FactIdentity::Stipulated),
+    ]);
+    check(&strict_env, &cert).expect("two strict facts have no order between them");
+
+    let mut cert = unresolved();
+    cert.assumptions = vec![
+        fact(atom("侵占", "张三"), FactIdentity::UserAsserted),
+        fact(atom("违法", "张三"), FactIdentity::Assumed),
+    ];
+    check(&env(), &cert).expect("two claims are both unproved");
+
+    // A strict fact against a claim must be defeated, not left unresolved.
+    let mut cert = unresolved();
+    cert.assumptions = vec![
+        fact(atom("侵占", "张三"), FactIdentity::Verified),
+        fact(atom("违法", "张三"), FactIdentity::UserAsserted),
+    ];
+    let env = env_with_facts(&[
+        ("侵占", "张三", FactIdentity::Verified),
+        ("违法", "张三", FactIdentity::UserAsserted),
+    ]);
+    let error = check(&env, &cert).expect_err("the strict fact must win");
+    assert!(error.message.contains("严格事实应当胜出"), "{error}");
+}
+
+#[test]
+fn a_disputed_proposition_cannot_be_an_assumption() {
+    let cert = certificate(
+        vec![fact(atom("侵占", "张三"), FactIdentity::Disputed)],
+        Vec::new(),
+        None,
+    );
+    let error = check(&env(), &cert).expect_err("a disputed fact asserts the other side's claim");
+    assert!(error.message.contains("争议事实不能作为假设"), "{error}");
+    assert!(error.message.contains("第 1 条假设"), "{error}");
+}
+
+#[test]
+fn one_proposition_cannot_be_recorded_under_two_identities() {
+    let cert = certificate(
+        vec![
+            fact(atom("侵占", "张三"), FactIdentity::Verified),
+            fact(atom("侵占", "张三"), FactIdentity::UserAsserted),
+        ],
+        Vec::new(),
+        None,
+    );
+    let error = check(&env(), &cert).expect_err("one proposition has one identity");
+    assert!(
+        error.message.contains("同一命题只能有一种事实身份"),
+        "{error}"
+    );
+    assert!(error.message.contains("法院查明"), "{error}");
+    assert!(error.message.contains("用户陈述"), "{error}");
+
+    // The same proposition listed twice under the same identity is harmless.
+    let cert = certificate(
+        vec![
+            fact(atom("侵占", "张三"), FactIdentity::UserAsserted),
+            fact(atom("侵占", "张三"), FactIdentity::UserAsserted),
+        ],
+        Vec::new(),
+        None,
+    );
+    check(&env(), &cert).expect("a repeated claim with one identity is allowed");
+}
+
+#[test]
+fn a_strict_identity_without_a_loaded_fact_is_rejected() {
+    // The certificate claims the court found `侵占 张三`, but the environment
+    // registers no such fact. Editing this one field must not upgrade a
+    // session claim into a strict fact.
+    let cert = certificate(
+        vec![fact(atom("侵占", "张三"), FactIdentity::Verified)],
+        vec![assumption_node(0)],
+        Some(0),
+    );
+    let error = check(&env(), &cert)
+        .expect_err("a strict identity must come from a loaded fact declaration");
+    assert!(error.message.contains("第 1 条假设"), "{error}");
+    assert!(error.message.contains("没有登记该命题的事实"), "{error}");
+    assert!(error.message.contains("法院查明"), "{error}");
+    assert!(
+        error.message.contains("严格身份必须来自已加载的事实声明"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_certificate_identity_must_match_the_environment_fact() {
+    // The environment says the user asserted it; the certificate says the
+    // court found it.
+    let cert = certificate(
+        vec![fact(atom("侵占", "张三"), FactIdentity::Verified)],
+        Vec::new(),
+        None,
+    );
+    let env = env_with_facts(&[("侵占", "张三", FactIdentity::UserAsserted)]);
+    let error = check(&env, &cert).expect_err("a rewritten identity must be rejected");
+    assert!(error.message.contains("第 1 条假设"), "{error}");
+    assert!(
+        error
+            .message
+            .contains("在环境中登记为「用户陈述」，证书写作「法院查明」"),
+        "{error}"
+    );
+
+    // The conservative direction is rejected too: a certificate may not
+    // downgrade a fact the environment registers as strict.
+    let cert = certificate(
+        vec![fact(atom("侵占", "张三"), FactIdentity::UserAsserted)],
+        Vec::new(),
+        None,
+    );
+    let env = env_with_facts(&[("侵占", "张三", FactIdentity::Verified)]);
+    let error = check(&env, &cert).expect_err("a downgraded identity must be rejected");
+    assert!(
+        error
+            .message
+            .contains("在环境中登记为「法院查明」，证书写作「用户陈述」"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_non_strict_identity_without_a_loaded_fact_is_allowed() {
+    // `:given` and `:fact assumed` register session facts; a certificate that
+    // records them is all the environment has. The checker cannot verify their
+    // truth, so the non-strict identity stands.
+    for identity in [FactIdentity::UserAsserted, FactIdentity::Assumed] {
+        let cert = certificate(
+            vec![fact(atom("侵占", "张三"), identity)],
+            vec![assumption_node(0)],
+            Some(0),
+        );
+        let report = check(&env(), &cert).expect("a session fact needs no loaded declaration");
+        assert!(report.root_proved);
+    }
+}
+
+#[test]
+fn alpha_variants_of_one_proposition_cannot_have_two_identities() {
+    let quantified = |binder: &str| CertExpr::Pi {
+        binder: Some(binder.to_owned()),
+        domain: Box::new(constant("公民")),
+        codomain: Box::new(app(constant("侵占"), CertExpr::Var { index: 0 })),
+    };
+    let cert = certificate(
+        vec![
+            fact(quantified("x"), FactIdentity::UserAsserted),
+            fact(quantified("y"), FactIdentity::Verified),
+        ],
+        Vec::new(),
+        None,
+    );
+    let error =
+        check(&env(), &cert).expect_err("an alpha variant must not bypass the one-identity rule");
+    assert!(
+        error.message.contains("同一命题只能有一种事实身份"),
+        "{error}"
+    );
+    assert!(error.message.contains("用户陈述"), "{error}");
+    assert!(error.message.contains("法院查明"), "{error}");
+}
+
+#[test]
+fn a_rule_side_cannot_also_be_listed_as_a_fact() {
+    // The reasoner would record the left side as an assumption; relabelling it
+    // as a rule derivation must not hide the fact that the assumption table
+    // holds it.
+    let mut cert = conflict_certificate(vec![fact_fact_conflict(Resolution::Unresolved {
+        reason: UnresolvedReason::ConflictingAssumptions,
+    })]);
+    cert.assumptions = vec![
+        fact(atom("侵占", "张三"), FactIdentity::Verified),
+        fact(atom("违法", "张三"), FactIdentity::Stipulated),
+    ];
+    cert.conflicts[0].left_by = Provenance::Rules {
+        rules: vec!["r".to_owned()],
+    };
+    let env = env_with_facts(&[
+        ("侵占", "张三", FactIdentity::Verified),
+        ("违法", "张三", FactIdentity::Stipulated),
+    ]);
+    let error = check(&env, &cert).expect_err("a fact cannot also be a rule derivation");
+    assert!(
+        error
+            .message
+            .contains("已作为事实列在假设表里，不能同时记为规则推导"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_rule_side_cannot_also_be_registered_as_an_environment_fact() {
+    // The environment registers `侵占 张三` as a fact; a certificate that
+    // presents it as a rule conclusion is hiding the environment's evidence.
+    let cert = conflict_certificate(vec![Conflict {
+        left: atom("侵占", "张三"),
+        right: atom("违法", "张三"),
+        left_by: Provenance::Rules {
+            rules: vec!["r".to_owned()],
+        },
+        right_by: Provenance::Rules {
+            rules: vec!["r".to_owned()],
+        },
+        resolution: Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+    }]);
+    let env = env_with_facts(&[("侵占", "张三", FactIdentity::UserAsserted)]);
+    let error = check(&env, &cert).expect_err("a registered fact cannot also be a rule derivation");
+    assert!(
+        error
+            .message
+            .contains("已在环境中登记为事实，不能同时记为规则推导"),
         "{error}"
     );
 }

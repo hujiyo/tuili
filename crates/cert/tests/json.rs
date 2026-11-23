@@ -3,14 +3,15 @@
 use serde_json::Value;
 use std_deduce_cert::{
     Assumption, Binding, CertExpr, Certificate, Conflict, CorpusRecord, EnvironmentIdentity,
-    EnvironmentRecord, ExplicitText, FormatVersion, GapCandidate, Metadata, Node, ObligationKind,
-    OpenObligation, PackRecord, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
-    Resolution, ResolutionBasis, Side, Source, TrustLevel, UnresolvedReason,
+    EnvironmentRecord, ExplicitText, FactIdentity, FormatVersion, GapCandidate, Metadata, Node,
+    ObligationKind, OpenObligation, PackRecord, PriorityClause, PriorityEdge, PriorityOrigin,
+    Provenance, Resolution, ResolutionBasis, Side, Source, TrustLevel, UnresolvedReason,
 };
 use std_deduce_kernel::env::SourceRef;
 use std_deduce_kernel::{name, Expr};
 
-const SNAPSHOT: &str = include_str!("fixtures/certificate_v4.json");
+const SNAPSHOT: &str = include_str!("fixtures/certificate_v5.json");
+const V4_SNAPSHOT: &str = include_str!("fixtures/certificate_v4.json");
 const V3_SNAPSHOT: &str = include_str!("fixtures/certificate_v3.json");
 const V2_SNAPSHOT: &str = include_str!("fixtures/certificate_v2.json");
 
@@ -89,6 +90,7 @@ fn sample_certificate() -> Certificate {
         }),
         assumptions: vec![Assumption {
             proposition: defence.clone(),
+            identity: FactIdentity::UserAsserted,
             sources: vec![source(
                 "为了使国家、公共利益、本人或者他人的人身、财产和其他权利免受正在进行的不法侵害，而采取的制止不法侵害的行为，对不法侵害人造成损害的，属于正当防卫，不负刑事责任。",
                 "中华人民共和国刑法第二十条第一款",
@@ -203,7 +205,7 @@ fn field_names_are_stable() {
         assert!(object.contains_key(field), "missing field `{field}`");
     }
 
-    assert_eq!(value["format_version"], 4);
+    assert_eq!(value["format_version"], 5);
     let environment = value["environment"]
         .as_object()
         .expect("the environment is an inline object");
@@ -226,6 +228,7 @@ fn field_names_are_stable() {
     assert_eq!(value["nodes"][0]["kind"], "assumption");
     assert_eq!(value["nodes"][1]["kind"], "rule_application");
     assert_eq!(value["nodes"][2]["kind"], "gap");
+    assert_eq!(value["assumptions"][0]["identity"], "user_asserted");
     assert_eq!(value["nodes"][1]["bindings"][0]["parameter"], "p");
     assert_eq!(
         value["assumptions"][0]["sources"][0]["locator"],
@@ -274,7 +277,22 @@ fn a_v3_certificate_is_rejected_before_its_missing_resolution_basis() {
         message.contains("unsupported certificate format version 3"),
         "{message}"
     );
-    assert!(message.contains("this build supports 4"), "{message}");
+    assert!(message.contains("this build supports 5"), "{message}");
+    assert!(!message.contains("missing field"), "{message}");
+}
+
+#[test]
+fn a_v4_certificate_is_rejected_before_its_missing_assumption_identity() {
+    // `certificate_v4.json` predates the assumption identity. The version
+    // probe must reject it on the version, not report a missing `identity`
+    // field the old writer never had.
+    let error = Certificate::from_json(V4_SNAPSHOT).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported certificate format version 4"),
+        "{message}"
+    );
+    assert!(message.contains("this build supports 5"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -289,7 +307,7 @@ fn a_true_v1_certificate_is_rejected_with_a_version_error() {
         message.contains("unsupported certificate format version 1"),
         "{message}"
     );
-    assert!(message.contains("supports 4"), "{message}");
+    assert!(message.contains("supports 5"), "{message}");
 }
 
 #[test]
@@ -303,7 +321,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
         message.contains("unsupported certificate format version 2"),
         "{message}"
     );
-    assert!(message.contains("this build supports 4"), "{message}");
+    assert!(message.contains("this build supports 5"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -311,7 +329,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
 fn source_fields_added_in_v2_still_use_defaults() {
     let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
     strip_new_source_fields(&mut value);
-    assert_eq!(value["format_version"], 4);
+    assert_eq!(value["format_version"], 5);
     let certificate = Certificate::from_json(&value.to_string())
         .expect("source fields added with #[serde(default)] may be omitted");
     let source = &certificate.assumptions[0].sources[0];
@@ -478,7 +496,7 @@ fn every_source_field_survives_a_json_round_trip() {
 
 #[test]
 fn unknown_format_version_is_rejected() {
-    let text = SNAPSHOT.replace("\"format_version\": 4", "\"format_version\": 999");
+    let text = SNAPSHOT.replace("\"format_version\": 5", "\"format_version\": 999");
     let error = Certificate::from_json(&text).unwrap_err();
     assert!(
         error
@@ -744,7 +762,111 @@ fn every_resolution_variant_round_trips() {
 }
 
 #[test]
-fn a_v4_defeat_without_a_basis_is_rejected() {
+fn every_fact_identity_round_trips() {
+    let identities = [
+        FactIdentity::Verified,
+        FactIdentity::UserAsserted,
+        FactIdentity::Assumed,
+        FactIdentity::Disputed,
+        FactIdentity::Stipulated,
+    ];
+    let mut certificate = sample_certificate();
+    certificate.assumptions = identities
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| Assumption {
+            proposition: constant(&format!("命题{index}")),
+            identity: *identity,
+            sources: Vec::new(),
+            label: None,
+        })
+        .collect();
+
+    let json = certificate.to_json_pretty().unwrap();
+    let decoded = Certificate::from_json(&json).expect("every identity round-trips");
+    assert_eq!(decoded, certificate);
+    assert_eq!(
+        decoded
+            .assumptions
+            .iter()
+            .map(|assumption| assumption.identity)
+            .collect::<Vec<_>>(),
+        identities.to_vec()
+    );
+
+    let value: Value = serde_json::from_str(&json).unwrap();
+    let encoded: Vec<&str> = value["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|assumption| assumption["identity"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        encoded,
+        [
+            "verified",
+            "user_asserted",
+            "assumed",
+            "disputed",
+            "stipulated"
+        ]
+    );
+}
+
+#[test]
+fn a_missing_assumption_identity_is_rejected() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["assumptions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("identity")
+        .expect("the fixture records an identity");
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("missing field `identity`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_unknown_fact_identity_is_rejected() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["assumptions"][0]["identity"] = Value::from("hearsay");
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown variant `hearsay`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_non_strict_fact_reason_round_trips() {
+    for (identity, encoded) in [
+        (FactIdentity::UserAsserted, "user_asserted"),
+        (FactIdentity::Assumed, "assumed"),
+    ] {
+        let mut certificate = sample_certificate();
+        certificate.conflicts = vec![conflict_with(Resolution::Unresolved {
+            reason: UnresolvedReason::NonStrictFact { identity },
+        })];
+
+        let json = certificate.to_json_pretty().unwrap();
+        let decoded = Certificate::from_json(&json).expect("the reason round-trips");
+        assert_eq!(decoded, certificate);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["conflicts"][0]["resolution"]["reason"]["kind"],
+            "non_strict_fact"
+        );
+        assert_eq!(
+            value["conflicts"][0]["resolution"]["reason"]["identity"],
+            encoded
+        );
+    }
+}
+
+#[test]
+fn a_defeat_without_a_basis_is_rejected() {
     let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
     value["conflicts"][0]["resolution"]
         .as_object_mut()

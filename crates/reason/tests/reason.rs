@@ -2,13 +2,13 @@
 //! crate: no negation as failure, no silent conflict resolution, and no
 //! hidden gaps.
 
-use std_deduce_kernel::env::{Ctx, DeclKind, SourceRef};
+use std_deduce_kernel::env::{Ctx, DeclKind, FactIdentity, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{name, Decl, Env, Expr};
 use std_deduce_lang::Library;
 use std_deduce_reason::{
     verify, Conflict, PriorityClause, PriorityOrigin, Provenance, Reasoner, Resolution,
-    ResolutionBasis, UnresolvedReason,
+    ResolutionBasis, Side, UnresolvedReason,
 };
 
 fn load(src: &str) -> Library {
@@ -43,8 +43,13 @@ fn assemble(lib: &Library, goal: &Expr) -> (std_deduce_reason::Derivation, Resul
     for decl in lib.env.iter() {
         if let DeclKind::Fact { identity } = &decl.kind {
             if identity.seeds_derivation() {
-                r.assume(&decl.ty, decl.sources.clone(), Some(decl.name.to_string()))
-                    .unwrap();
+                r.assume(
+                    &decl.ty,
+                    *identity,
+                    decl.sources.clone(),
+                    Some(decl.name.to_string()),
+                )
+                .unwrap();
             }
         }
     }
@@ -242,6 +247,7 @@ rule r :
     let mut d = Derivation::default();
     d.nodes.push(Node::Assumption {
         prop: Expr::app(p("无关"), p("李四")),
+        identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
     });
@@ -279,6 +285,7 @@ rule r :
     let mut d = Derivation::default();
     d.nodes.push(Node::Assumption {
         prop: Expr::app(p("侵占"), p("张三")),
+        identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
     });
@@ -317,11 +324,13 @@ rule r :
     let mut d = Derivation::default();
     d.nodes.push(Node::Assumption {
         prop: Expr::app(p("侵占"), p("张三")),
+        identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
     });
     d.nodes.push(Node::Assumption {
         prop: Expr::app(p("例外"), p("张三")),
+        identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
     });
@@ -360,6 +369,7 @@ rule r :
     let mut d = Derivation::default();
     d.nodes.push(Node::Assumption {
         prop: Expr::app(p("侵占"), p("张三")),
+        identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
     });
@@ -368,6 +378,7 @@ rule r :
             p("可信"),
             Expr::forall("z", p("公民"), Expr::app(p("侵占"), Expr::Var(0))),
         ),
+        identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
     });
@@ -1020,7 +1031,7 @@ rule 免责 :
     for d in lib.env.iter() {
         if let DeclKind::Fact { identity } = &d.kind {
             if identity.seeds_derivation() {
-                r.assume(&d.ty, d.sources.clone(), None).unwrap();
+                r.assume(&d.ty, *identity, d.sources.clone(), None).unwrap();
             }
         }
     }
@@ -1171,7 +1182,7 @@ rule 免责 :
     for d in lib.env.iter() {
         if let DeclKind::Fact { identity } = &d.kind {
             if identity.seeds_derivation() {
-                r.assume(&d.ty, d.sources.clone(), None).unwrap();
+                r.assume(&d.ty, *identity, d.sources.clone(), None).unwrap();
             }
         }
     }
@@ -1208,7 +1219,7 @@ rule 规则 :
     for d in lib.env.iter() {
         if let DeclKind::Fact { identity } = &d.kind {
             if identity.seeds_derivation() {
-                r.assume(&d.ty, d.sources.clone(), None).unwrap();
+                r.assume(&d.ty, *identity, d.sources.clone(), None).unwrap();
             }
         }
     }
@@ -1234,7 +1245,7 @@ obj 张三 : 公民
 
     let mut r = Reasoner::new(&lib.env);
     let err = r
-        .assume(&prop, vec![], None)
+        .assume(&prop, FactIdentity::Verified, vec![], None)
         .expect_err("an assumption without a source must be refused");
     assert!(err.contains("假设必须有来源"), "got: {err}");
     // `knows` only reports the settled fact base, so settle it before
@@ -1242,8 +1253,13 @@ obj 张三 : 公民
     r.saturate().unwrap();
     assert!(!r.knows(&prop), "a refused assumption enters no fact base");
 
-    r.assume(&prop, vec![SourceRef::new("测试", "夹具")], None)
-        .expect("an assumption with a source is accepted");
+    r.assume(
+        &prop,
+        FactIdentity::Verified,
+        vec![SourceRef::new("测试", "夹具")],
+        None,
+    )
+    .expect("an assumption with a source is accepted");
     r.saturate().unwrap();
     assert!(r.knows(&prop), "the sourced assumption is usable");
 }
@@ -1262,7 +1278,12 @@ obj 张三 : 公民
 
     let mut r = Reasoner::new(&lib.env);
     let err = r
-        .assume(&prop, vec![SourceRef::new(" ", " ")], None)
+        .assume(
+            &prop,
+            FactIdentity::Verified,
+            vec![SourceRef::new(" ", " ")],
+            None,
+        )
         .expect_err("a blank source must be refused");
     assert!(err.contains("假设必须有来源"), "got: {err}");
     assert!(err.contains("空白"), "got: {err}");
@@ -1797,4 +1818,359 @@ fn a_priority_self_loop_is_reported_as_a_cycle() {
     .unwrap();
     let r = Reasoner::new(&env);
     assert_eq!(r.priority_cycles(), vec![vec![name("x.r")]]);
+}
+
+// ---------------------------------------------------------------- fact strictness
+
+/// A case file whose one fact is `批准 甲` under `identity`, and one rule that
+/// concludes the contrary `不批准 甲` from a claim.
+fn strictness_case(identity: &str) -> String {
+    format!(
+        r#"
+sort 人
+pred 条件 : 人 → Prop
+pred 批准 : 人 → Prop
+pred 不批准 : 人 → Prop
+contrary 批准 不批准
+obj 甲 : 人
+axiom 条件事实 : 条件 甲
+  source text "测试" locator "夹具"
+axiom 批准事实 : 批准 甲
+  identity {identity}
+  source text "测试" locator "夹具"
+rule 拒绝 :
+  params x : 人
+  premise 条件 x
+  conclude 不批准 x
+  source text "测试" locator "夹具"
+"#
+    )
+}
+
+fn resolved_conflict(r: &Reasoner<'_>) -> Conflict {
+    let mut conflicts = r.conflicts();
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    conflicts.remove(0)
+}
+
+fn approved() -> Expr {
+    Expr::app(p("批准"), p("甲"))
+}
+
+fn refused() -> Expr {
+    Expr::app(p("不批准"), p("甲"))
+}
+
+/// Matrix row "strict fact vs rule": the strict fact wins, the rule conclusion
+/// leaves the fact base, and the certificate records the strict identity.
+#[test]
+fn a_strict_fact_defeats_a_rule_conclusion() {
+    for identity in ["verified", "stipulated"] {
+        let lib = load(&strictness_case(identity));
+        let r = reasoner(&lib);
+        let conflict = resolved_conflict(&r);
+        assert!(
+            matches!(
+                conflict.resolution,
+                Resolution::Defeated {
+                    winner: Side::Right,
+                    basis: ResolutionBasis::Assumption,
+                }
+            ),
+            "{conflict:?}"
+        );
+        assert!(r.knows(&approved()), "the strict fact is asserted");
+        assert!(!r.knows(&refused()), "the rule conclusion loses");
+
+        let mut d = r.derivation();
+        d.root = r.root_for(&approved());
+        let certificate = std_deduce_reason::certificate(&d, &r.priority_order())
+            .expect("the derivation converts");
+        let strict = certificate
+            .assumptions
+            .iter()
+            .find(|assumption| assumption.label.as_deref() == Some("批准事实"))
+            .expect("the strict fact is recorded");
+        assert_eq!(
+            strict.identity,
+            match identity {
+                "verified" => std_deduce_cert::FactIdentity::Verified,
+                _ => std_deduce_cert::FactIdentity::Stipulated,
+            }
+        );
+        std_deduce_cert::check(&lib.env, &certificate).expect("the strict defeat checks");
+    }
+}
+
+/// Matrix row "claim vs rule": neither side wins. The claim is not proof, and
+/// the rule conclusion does not refute it.
+#[test]
+fn a_claim_never_defeats_a_rule_conclusion() {
+    for identity in ["user_asserted", "assumed"] {
+        let lib = load(&strictness_case(identity));
+        let r = reasoner(&lib);
+        let conflict = resolved_conflict(&r);
+        assert_eq!(
+            conflict.resolution,
+            Resolution::Unresolved {
+                reason: UnresolvedReason::NonStrictFact {
+                    identity: match identity {
+                        "user_asserted" => FactIdentity::UserAsserted,
+                        _ => FactIdentity::Assumed,
+                    },
+                },
+            }
+        );
+        assert!(!r.knows(&approved()), "a claim is not asserted as proved");
+        assert!(!r.knows(&refused()));
+    }
+}
+
+/// Matrix row "strict fact vs claim": the strict fact wins.
+#[test]
+fn a_strict_fact_defeats_a_claim() {
+    let src = r#"
+sort 人
+pred 批准 : 人 → Prop
+pred 不批准 : 人 → Prop
+contrary 批准 不批准
+obj 甲 : 人
+axiom 严格 : 批准 甲
+  identity verified
+  source text "测试" locator "甲"
+axiom 主张 : 不批准 甲
+  identity user_asserted
+  source text "测试" locator "乙"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let conflict = resolved_conflict(&r);
+    assert_eq!(
+        conflict.resolution,
+        Resolution::Defeated {
+            winner: Side::Right,
+            basis: ResolutionBasis::Assumption,
+        }
+    );
+    assert!(r.knows(&approved()));
+    assert!(!r.knows(&refused()));
+}
+
+/// Matrix rows "two strict facts" and "two claims": both stay unresolved, and
+/// neither conclusion enters the fact base.
+#[test]
+fn facts_of_the_same_strictness_stay_unresolved() {
+    for (left, right) in [("verified", "stipulated"), ("user_asserted", "assumed")] {
+        let src = format!(
+            r#"
+sort 人
+pred 批准 : 人 → Prop
+pred 不批准 : 人 → Prop
+contrary 批准 不批准
+obj 甲 : 人
+axiom 事实甲 : 批准 甲
+  identity {left}
+  source text "测试" locator "甲"
+axiom 事实乙 : 不批准 甲
+  identity {right}
+  source text "测试" locator "乙"
+"#
+        );
+        let lib = load(&src);
+        let r = reasoner(&lib);
+        let conflict = resolved_conflict(&r);
+        assert_eq!(
+            conflict.resolution,
+            Resolution::Unresolved {
+                reason: UnresolvedReason::ConflictingAssumptions,
+            },
+            "{left} vs {right}"
+        );
+        assert!(!r.knows(&approved()));
+        assert!(!r.knows(&refused()));
+    }
+}
+
+/// Matrix row "rule vs rule" is unchanged: without a declared priority the
+/// conflict stays unresolved.
+#[test]
+fn rule_against_rule_still_needs_a_declared_priority() {
+    let src = r#"
+sort 人
+pred 条件 : 人 → Prop
+pred 批准 : 人 → Prop
+pred 不批准 : 人 → Prop
+contrary 批准 不批准
+obj 甲 : 人
+axiom 条件事实 : 条件 甲
+  identity verified
+  source text "测试" locator "夹具"
+rule 一般 :
+  params x : 人
+  premise 条件 x
+  conclude 批准 x
+  source text "测试" locator "甲"
+rule 例外 :
+  params x : 人
+  premise 条件 x
+  conclude 不批准 x
+  source text "测试" locator "乙"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let conflict = resolved_conflict(&r);
+    assert_eq!(
+        conflict.resolution,
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        }
+    );
+    assert!(!r.knows(&approved()));
+    assert!(!r.knows(&refused()));
+}
+
+/// A disputed fact asserts what the other side claims: it is neither a premise
+/// nor a blocker.
+#[test]
+fn a_disputed_fact_seeds_nothing_and_blocks_nothing() {
+    let as_premise = r#"
+sort 人
+pred 条件 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 争议 : 条件 甲
+  identity disputed
+  source text "测试" locator "夹具"
+rule 推导 :
+  params x : 人
+  premise 条件 x
+  conclude 结论 x
+  source text "测试" locator "一"
+"#;
+    let lib = load(as_premise);
+    let r = reasoner(&lib);
+    assert!(!r.knows(&Expr::app(p("结论"), p("甲"))));
+
+    let as_blocker = r#"
+sort 人
+pred 条件 : 人 → Prop
+pred 阻断 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 前提事实 : 条件 甲
+  identity verified
+  source text "测试" locator "夹具"
+axiom 争议 : 阻断 甲
+  identity disputed
+  source text "测试" locator "夹具"
+rule 推导 :
+  params x : 人
+  premise 条件 x
+  conclude 结论 x
+  unless 阻断 x
+  source text "测试" locator "一"
+"#;
+    let lib = load(as_blocker);
+    let r = reasoner(&lib);
+    assert!(
+        r.knows(&Expr::app(p("结论"), p("甲"))),
+        "a disputed fact is not a proved blocker"
+    );
+}
+
+/// A claim is usable as a premise and still blocks an `unless`: the new
+/// strictness rule changes who wins a conflict, not what a claim can seed.
+#[test]
+fn a_claim_is_a_premise_and_blocks_an_unless() {
+    let src = r#"
+sort 人
+pred 条件 : 人 → Prop
+pred 阻断 : 人 → Prop
+pred 结论 : 人 → Prop
+pred 另一结论 : 人 → Prop
+obj 甲 : 人
+axiom 前提事实 : 条件 甲
+  identity user_asserted
+  source text "测试" locator "夹具"
+axiom 阻断事实 : 阻断 甲
+  identity assumed
+  source text "测试" locator "夹具"
+rule 推导 :
+  params x : 人
+  premise 条件 x
+  conclude 结论 x
+  unless 阻断 x
+  source text "测试" locator "一"
+rule 纯推导 :
+  params x : 人
+  premise 条件 x
+  conclude 另一结论 x
+  source text "测试" locator "二"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    assert!(
+        !r.knows(&Expr::app(p("结论"), p("甲"))),
+        "the claim 阻断 甲 is proved for the purpose of blocking"
+    );
+    assert!(
+        r.knows(&Expr::app(p("另一结论"), p("甲"))),
+        "the claim 条件 甲 is usable as a premise"
+    );
+}
+
+/// `assume` refuses a disputed proposition and a second identity for the same
+/// proposition. The same identity may be registered twice.
+#[test]
+fn assume_enforces_one_identity_per_proposition() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+obj 张三 : 公民
+"#;
+    let lib = load(src);
+    let prop = Expr::app(p("侵占"), p("张三"));
+    let source = || vec![SourceRef::new("测试", "夹具")];
+
+    let mut r = Reasoner::new(&lib.env);
+    let error = r
+        .assume(&prop, FactIdentity::Disputed, source(), None)
+        .expect_err("a disputed proposition is not an assumption");
+    assert!(error.contains("争议事实不能作为假设"), "got: {error}");
+
+    r.assume(&prop, FactIdentity::Verified, source(), None)
+        .expect("a strict fact can be assumed");
+    r.assume(&prop, FactIdentity::Verified, source(), None)
+        .expect("the same identity may be registered again");
+    let error = r
+        .assume(&prop, FactIdentity::UserAsserted, source(), None)
+        .expect_err("one proposition has one identity");
+    assert!(error.contains("同一命题只能有一种事实身份"), "got: {error}");
+    assert!(error.contains("法院查明"), "got: {error}");
+    assert!(error.contains("用户陈述"), "got: {error}");
+}
+
+/// One proposition has one identity even when the two registrations are alpha
+/// variants: `∀ x, 侵占 x` and `∀ y, 侵占 y` are the same proposition.
+#[test]
+fn alpha_variant_assumptions_cannot_change_identity() {
+    let src = r#"
+sort 公民
+pred 侵占 : 公民 → Prop
+"#;
+    let lib = load(src);
+    let body = Expr::app(p("侵占"), Expr::var(0));
+    let with_x = Expr::forall("x", p("公民"), body.clone());
+    let with_y = Expr::forall("y", p("公民"), body);
+    let source = || vec![SourceRef::new("测试", "夹具")];
+
+    let mut r = Reasoner::new(&lib.env);
+    r.assume(&with_x, FactIdentity::Verified, source(), None)
+        .expect("the first registration is legal");
+    let error = r
+        .assume(&with_y, FactIdentity::UserAsserted, source(), None)
+        .expect_err("an alpha variant is the same proposition");
+    assert!(error.contains("同一命题只能有一种事实身份"), "got: {error}");
+    assert!(error.contains("法院查明"), "got: {error}");
+    assert!(error.contains("用户陈述"), "got: {error}");
 }

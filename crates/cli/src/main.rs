@@ -54,7 +54,7 @@
 //! without affecting explicit imports; `--profile` selects a profile by name or
 //! alias. The preload lines are printed only after the whole load commits, so a
 //! failed file never claims that the environment loaded. The profile and the
-//! packs it loaded are session objects, but a certificate v3 records the
+//! packs it loaded are session objects, but a certificate v5 records the
 //! environment identity it was produced in: the profile, the as-of date, the
 //! jurisdiction code and the loaded packs/corpora. `:cert` stamps it before
 //! writing, and `:verify-cert` compares it with the current environment before
@@ -199,9 +199,12 @@
 //! successful query. A conclusion caught in an unresolved conflict is kept out
 //! of the fact base, but it is never dropped silently: `:why` states the
 //! recorded reason — no declared priority, priorities that do not decide
-//! (listing every declared edge and its source), unresolvable witnesses, or two
-//! strict facts. A defeated conclusion gets the recorded basis as `依据：` lines
-//! naming the declaration (or rule clause) and its source. When the
+//! (listing every declared edge and its source), unresolvable witnesses, two
+//! strict facts, two claims, or a claim facing a rule conclusion
+//! (`non_strict_fact`, naming the claim's identity). A defeated conclusion gets
+//! the recorded basis as `依据：` lines: a strict fact (whose identity the
+//! winning side shows), or the declaration (or rule clause) and its source.
+//! When the
 //! environment's own priority declarations contain a cycle, `:why` and `:gap`
 //! print one warning line before their result: an edge inside a cycle cannot
 //! decide anything, and the warning does not change the exit code.
@@ -814,9 +817,10 @@ impl Session {
                 }
                 "given" => {
                     let e = self.proposition(arg)?;
-                    writeln!(out, "已登记用户陈述：{}", print_expr(&e)).ok();
+                    let line = format!("已登记用户陈述：{}", print_expr(&e));
                     let name = format!("已知{}", self.lib.env.len());
                     self.insert_fact(e, FactIdentity::UserAsserted, name)?;
+                    writeln!(out, "{line}").ok();
                     Ok(Outcome::Proved)
                 }
                 "fact" => self.fact_command(arg, out),
@@ -856,13 +860,38 @@ impl Session {
     /// Insert a fact the session asserts, with the session's own provenance.
     ///
     /// The session is cloned first, so a failed insert (a name collision)
-    /// leaves no partial declaration behind.
+    /// leaves no partial declaration behind. Registration also refuses a
+    /// second identity for the same proposition: the identity is evidence, so
+    /// `:given` (or `:fact add`) cannot relabel a proposition the ledger
+    /// already records under another identity. The comparison uses kernel
+    /// conversion, so an alpha variant cannot bypass it.
     fn insert_fact(
         &mut self,
         prop: Expr,
         identity: FactIdentity,
         name: String,
     ) -> Result<(), String> {
+        for existing in self.lib.env.iter() {
+            let DeclKind::Fact {
+                identity: registered,
+            } = &existing.kind
+            else {
+                continue;
+            };
+            if registered == &identity {
+                continue;
+            }
+            let same = convertible(&self.lib.env, &Ctx::new(), &existing.ty, &prop)
+                .map_err(|error| format!("无法判定命题是否已登记为事实：{error}"))?;
+            if same {
+                return Err(format!(
+                    "同一命题只能有一种事实身份：`{}` 已登记为{}，不能同时是{}",
+                    print_expr(&prop),
+                    registered.label_zh(),
+                    identity.label_zh()
+                ));
+            }
+        }
         let decl = std_deduce_kernel::Decl {
             name: std_deduce_kernel::name(&name),
             kind: DeclKind::Fact { identity },
@@ -920,9 +949,10 @@ impl Session {
                     _ => FactIdentity::Disputed,
                 };
                 let e = self.proposition(rest)?;
-                writeln!(out, "{}", registered_fact_line(identity, &e)).ok();
+                let line = registered_fact_line(identity, &e);
                 let name = self.next_fact_name();
                 self.insert_fact(e, identity, name)?;
+                writeln!(out, "{line}").ok();
                 Ok(Outcome::Proved)
             }
             "verified" | "stipulated" => Err(format!(
@@ -1071,10 +1101,18 @@ impl Session {
                     .ok();
                 }
                 for b in &c.blocked_by {
+                    // The blocker can be a session fact; its identity is part
+                    // of why it blocks, and a reasoner-derived conclusion has
+                    // none. No identity keeps the original wording.
+                    let identity = r
+                        .identity_of(b)
+                        .map(|identity| format!("〔{}〕", identity.label_zh()))
+                        .unwrap_or_default();
                     writeln!(
                         out,
-                        "    被阻断：「{}」已成立，故本规则不触发",
-                        print_expr(b)
+                        "    被阻断：「{}」{}已成立，故本规则不触发",
+                        print_expr(b),
+                        identity
                     )
                     .ok();
                 }
@@ -1173,14 +1211,14 @@ impl Session {
 
         writeln!(out, "推导已通过独立校验。").ok();
         report_conflicts(out, &certificate);
-        if let Some((other, basis)) = won_conflict {
+        if let Some((other, other_by, basis)) = won_conflict {
             writeln!(
                 out,
                 "注：与「{}」存在冲突，已按记录的裁决为本结论胜出。",
                 print_expr(&other)
             )
             .ok();
-            write_certificate_basis(out, &basis);
+            write_certificate_basis(out, &basis, &other_by);
         }
         Ok(Outcome::Proved)
     }
@@ -2803,9 +2841,22 @@ fn root_summary(certificate: &Certificate, report: &CheckReport) -> String {
         Some(root) if matches!(certificate.nodes[root], CertNode::Gap { .. }) => {
             "根未被证明，根为缺口".to_owned()
         }
-        Some(_) if report.root_proved && report.root_is_assumption => {
+        Some(root) if report.root_proved && report.root_is_assumption => {
+            // The root's proposition is an assumption; its identity says who
+            // asserts it, and the assumption table is the only record of it.
+            let identity = match &certificate.nodes[root] {
+                CertNode::Assumption { assumption } => certificate
+                    .assumptions
+                    .get(*assumption)
+                    .map(|assumption| assumption.identity.label_zh()),
+                _ => None,
+            };
+            let identity = match identity {
+                Some(label) => format!("（{label}）"),
+                None => String::new(),
+            };
             format!(
-                "根已证明，根为假设，证书共 {} 条假设",
+                "根已证明，根为假设{identity}，证书共 {} 条假设",
                 report.assumption_count
             )
         }
@@ -2870,19 +2921,19 @@ fn report_unresolved(
         "  该结论没有进入事实库——系统不替你选，但也绝不悄悄丢掉它。"
     )
     .ok();
-    write_unresolved_reason(out, &r.priority_order(), reason);
+    write_unresolved_reason(out, r, c, reason);
     writeln!(
         out,
         "  左：{}  ← {}",
         print_expr(&c.left),
-        describe(&c.left_by)
+        describe(&c.left_by, r.identity_of(&c.left))
     )
     .ok();
     writeln!(
         out,
         "  右：{}  ← {}",
         print_expr(&c.right),
-        describe(&c.right_by)
+        describe(&c.right_by, r.identity_of(&c.right))
     )
     .ok();
     for (label, prop) in [("左", &c.left), ("右", &c.right)] {
@@ -2896,10 +2947,14 @@ fn report_unresolved(
 /// The reason is part of the derivation, not a diagnostic: "no priority was
 /// declared" and "priorities were declared but do not decide" call for
 /// different work. An unusable priority lists every declared edge, because
-/// that list is the audit trail the reader has to inspect.
+/// that list is the audit trail the reader has to inspect. A conflict about a
+/// fact names the fact's proposition and its identity, because "a user
+/// assertion is not proof" and "an analysis assumption is not proof" call for
+/// different work.
 fn write_unresolved_reason(
     out: &mut impl Write,
-    order: &std_deduce_reason::PriorityOrder,
+    r: &Reasoner,
+    c: &Conflict,
     reason: &std_deduce_reason::UnresolvedReason,
 ) {
     use std_deduce_reason::UnresolvedReason;
@@ -2908,6 +2963,7 @@ fn write_unresolved_reason(
             writeln!(out, "  原因：两侧规则之间没有声明任何优先关系").ok();
         }
         UnresolvedReason::PriorityUnusable { declared } => {
+            let order = r.priority_order();
             let in_cycle = declared
                 .iter()
                 .filter(|edge| order.same_cycle(&edge.winner, &edge.loser))
@@ -2932,7 +2988,47 @@ fn write_unresolved_reason(
             writeln!(out, "  原因：某侧的规则见证已无法重建").ok();
         }
         UnresolvedReason::ConflictingAssumptions => {
-            writeln!(out, "  原因：两侧都是已知事实，事实之间没有先后").ok();
+            let left = r.identity_of(&c.left);
+            let right = r.identity_of(&c.right);
+            match (left, right) {
+                (Some(left), Some(right)) if left.is_strict() && right.is_strict() => {
+                    writeln!(out, "  原因：两侧都是严格事实，事实之间没有先后").ok();
+                }
+                (Some(left), Some(right)) if !left.is_strict() && !right.is_strict() => {
+                    writeln!(out, "  原因：两侧都只是主张，未经证明，不能判出一方胜出").ok();
+                }
+                // One strict fact and one claim is defeated, not unresolved, so
+                // an unmatched or mixed pair cannot be described by identity.
+                // Fall back to the reason-only wording instead of guessing one.
+                _ => {
+                    writeln!(out, "  原因：两侧都是事实，身份无法确定，不能判出一方胜出").ok();
+                }
+            }
+        }
+        UnresolvedReason::NonStrictFact { identity } => {
+            // The reason records only the claim's identity; the claim's
+            // proposition comes from the conflict, whose fact side is the one
+            // `resolve` recorded as an assumption.
+            let fact_side = match (&c.left_by, &c.right_by) {
+                (Provenance::Assumption, _) => Some(&c.left),
+                (_, Provenance::Assumption) => Some(&c.right),
+                _ => None,
+            };
+            match fact_side {
+                Some(prop) => writeln!(
+                    out,
+                    "  原因：「{}」只是「{}」，未经证明，不能自动胜过规则结论",
+                    print_expr(prop),
+                    identity.label_zh()
+                )
+                .ok(),
+                None => writeln!(
+                    out,
+                    "  原因：一侧只是「{}」，未经证明，不能自动胜过规则结论",
+                    identity.label_zh()
+                )
+                .ok(),
+            };
         }
     }
 }
@@ -3012,10 +3108,19 @@ fn citation_text(text: &str, locator: &str) -> String {
 }
 
 /// Print the `  依据：...` lines of a defeat the reasoner recorded.
-fn write_reason_basis(out: &mut impl Write, basis: &std_deduce_reason::ResolutionBasis) {
+///
+/// `loser` is the provenance of the side that lost. A strict fact outranks
+/// both a defeasible rule conclusion and a claim, but the two are different
+/// statements about why the loser could not stand, so they are not merged.
+fn write_reason_basis(
+    out: &mut impl Write,
+    basis: &std_deduce_reason::ResolutionBasis,
+    loser: &Provenance,
+) {
     match basis {
         std_deduce_reason::ResolutionBasis::Assumption => {
-            writeln!(out, "  依据：已知事实优先于可废止结论。").ok();
+            let text = strict_fact_basis_text(matches!(loser, Provenance::Rules(_)));
+            writeln!(out, "  依据：{text}").ok();
         }
         std_deduce_reason::ResolutionBasis::Priority { edges } => {
             for edge in edges {
@@ -3025,11 +3130,29 @@ fn write_reason_basis(out: &mut impl Write, basis: &std_deduce_reason::Resolutio
     }
 }
 
+/// The stated basis when a strict fact defeats the other side.
+fn strict_fact_basis_text(loser_is_rule: bool) -> &'static str {
+    if loser_is_rule {
+        "严格事实优先于可废止规则结论。"
+    } else {
+        "严格事实优先于未经证明的主张。"
+    }
+}
+
 /// Print the `  依据：...` lines of a defeat the certificate records.
-fn write_certificate_basis(out: &mut impl Write, basis: &ResolutionBasis) {
+///
+/// `loser` is the provenance the certificate records for the losing side, so
+/// the same split between a defeasible conclusion and a claim applies.
+fn write_certificate_basis(
+    out: &mut impl Write,
+    basis: &ResolutionBasis,
+    loser: &std_deduce_cert::Provenance,
+) {
     match basis {
         ResolutionBasis::Assumption => {
-            writeln!(out, "  依据：已知事实优先于可废止结论。").ok();
+            let text =
+                strict_fact_basis_text(matches!(loser, std_deduce_cert::Provenance::Rules { .. }));
+            writeln!(out, "  依据：{text}").ok();
         }
         ResolutionBasis::Priority { edges } => {
             for edge in edges {
@@ -3091,6 +3214,10 @@ fn report_defeated(
         Side::Left => (&c.left, &c.left_by),
         Side::Right => (&c.right, &c.right_by),
     };
+    let loser_by = match winner {
+        Side::Left => &c.right_by,
+        Side::Right => &c.left_by,
+    };
     writeln!(
         out,
         "冲突已裁决：{} 与 {} 不能并存",
@@ -3103,10 +3230,10 @@ fn report_defeated(
         "  本结论「{}」被否决；胜出的是「{}」（{}）。",
         print_expr(goal),
         print_expr(win),
-        describe(win_by)
+        describe(win_by, r.identity_of(win))
     )
     .ok();
-    write_reason_basis(out, basis);
+    write_reason_basis(out, basis, loser_by);
     writeln!(out, "── 胜出方推导：{} ──", print_expr(win)).ok();
     show_derivation(out, r, win);
     writeln!(out, "── 被否决方推导：{} ──", print_expr(goal)).ok();
@@ -3196,7 +3323,8 @@ fn write_priority_cycle_warning(out: &mut impl Write, cycles: &[Vec<Name>]) {
 }
 
 /// The defeated competitor of a conflict the queried proposition won, together
-/// with the basis the certificate records for that win.
+/// with the recorded provenance of that competitor and the basis the
+/// certificate records for the win.
 ///
 /// The proposition is matched with kernel definitional equality, not by
 /// comparing printed strings.
@@ -3204,7 +3332,7 @@ fn won_conflict_note(
     env: &Env,
     goal: &Expr,
     certificate: &Certificate,
-) -> Result<Option<(Expr, ResolutionBasis)>, String> {
+) -> Result<Option<(Expr, std_deduce_cert::Provenance, ResolutionBasis)>, String> {
     for conflict in &certificate.conflicts {
         let left = Expr::from(&conflict.left);
         let right = Expr::from(&conflict.right);
@@ -3227,18 +3355,27 @@ fn won_conflict_note(
         if side != *winner {
             continue;
         }
-        let other = match winner {
-            std_deduce_cert::Side::Left => &conflict.right,
-            std_deduce_cert::Side::Right => &conflict.left,
+        let (other, other_by) = match winner {
+            std_deduce_cert::Side::Left => (&conflict.right, &conflict.right_by),
+            std_deduce_cert::Side::Right => (&conflict.left, &conflict.left_by),
         };
-        return Ok(Some((Expr::from(other), basis.clone())));
+        return Ok(Some((Expr::from(other), other_by.clone(), basis.clone())));
     }
     Ok(None)
 }
 
-fn describe(p: &Provenance) -> String {
+/// How one side of a conflict is supported, for a `:why` line.
+///
+/// A fact side carries the identity it was registered under, so the reader can
+/// tell a court's finding from a claim. The identity comes from the same
+/// assumption table that decided the conflict; when it cannot be found the line
+/// falls back to the pre-identity wording rather than guessing one.
+fn describe(p: &Provenance, identity: Option<FactIdentity>) -> String {
     match p {
-        Provenance::Assumption => "已知事实".into(),
+        Provenance::Assumption => match identity {
+            Some(identity) => format!("事实〔{}〕", identity.label_zh()),
+            None => "事实（身份未记录）".into(),
+        },
         Provenance::Rules(rs) if rs.is_empty() => "已无可重建的规则实例".into(),
         Provenance::Rules(rs) => format!(
             "规则 {}",

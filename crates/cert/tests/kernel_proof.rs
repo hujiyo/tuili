@@ -6,7 +6,7 @@
 
 use std_deduce_cert::{
     check as cert_check, kernel_proof, Assumption, Binding, CertExpr, Certificate,
-    EnvironmentIdentity, FormatVersion, Node,
+    EnvironmentIdentity, FactIdentity, FormatVersion, Node,
 };
 use std_deduce_kernel::check::check as kernel_check;
 use std_deduce_kernel::norm::spine;
@@ -78,6 +78,7 @@ fn binary(predicate: &str, left: &str, right: &str) -> CertExpr {
 fn premise(proposition: CertExpr) -> Assumption {
     Assumption {
         proposition,
+        identity: FactIdentity::UserAsserted,
         sources: Vec::new(),
         label: None,
     }

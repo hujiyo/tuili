@@ -8,7 +8,18 @@
 //! ## What is checked
 //!
 //! * Every assumption node cites an existing assumption whose proposition is
-//!   a proposition.
+//!   a proposition. Every listed assumption carries the identity of the fact
+//!   it records: a disputed proposition is not an assumption, and one
+//!   proposition cannot appear under two identities, because conflict
+//!   resolution reads that identity as evidence. Those comparisons use kernel
+//!   conversion, so alpha- and eta-variants count as the same proposition. The
+//!   recorded identity must also agree with the loaded environment: when the
+//!   environment registers the same proposition as a fact, the certificate
+//!   must write the same identity, and a strict identity (`verified` /
+//!   `stipulated`) must be backed by such a registration. A non-strict identity
+//!   with no loaded fact is a session fact (`:given`), whose truth the checker
+//!   cannot verify; only its consistency with the certificate's resolution is
+//!   checked.
 //! * Every rule application names a rule, cites exactly as many premises as
 //!   the rule has and cites them in the rule's own order, and cites only
 //!   earlier nodes.
@@ -49,15 +60,19 @@
 //!   uninstantiated would silently miss the condition.
 //! * Every conflict's two propositions must be propositions, and every
 //!   conflict resolution is validated against the declared priorities: the
-//!   basis must be the strictness of an assumption or the environment's
-//!   effective priority edges, an unusable priority must record exactly the
-//!   declared edges between the sides, and an unresolved reason must match the
-//!   provenances and the graph. The provenances themselves are checked first:
-//!   a rule witness must be a rule of the environment that no other witness on
-//!   the same side repeats, its conclusion head must agree with the conflict
-//!   proposition when both heads are concrete, and an assumption side's
-//!   proposition must occur in the certificate's assumption table. See "Root
-//!   and conflicts" below.
+//!   basis must be a strict fact (`verified` or `stipulated`) or the
+//!   environment's effective priority edges, an unusable priority must record
+//!   exactly the declared edges between the sides, and an unresolved reason
+//!   must match the provenances, the recorded identities and the graph. A
+//!   fact-based defeat requires a strict winner and a non-strict loser; an
+//!   unresolved conflict between two facts requires both to be strict or both
+//!   to be claims; the non-strict-fact reason requires one claim side and one
+//!   rule side, with the table recording the stated identity. The provenances
+//!   themselves are checked first: a rule witness must be a rule of the
+//!   environment that no other witness on the same side repeats, its
+//!   conclusion head must agree with the conflict proposition when both heads
+//!   are concrete, and an assumption side's proposition must occur in the
+//!   certificate's assumption table. See "Root and conflicts" below.
 //!
 //! The derivability superset is not a second reasoner and does not claim the
 //! reasoner's exact semantics; it is deliberately larger. It may therefore
@@ -98,10 +113,13 @@
 //! not. An unusable priority must list at least one and exactly the
 //! environment's declared edges between the two sides (both directions, all
 //! sources), and no side may fully cover the other. An assumption-based defeat
-//! must name the assumption side as the winner, and both sides must not be
-//! assumptions. An unresolved reason must match the provenances: both
-//! assumption, a lost witness list with no assumption side, no declared edge at
-//! all, or exactly the declared but unusable edges. The report's
+//! must name a strict fact as the winner; the loser may be a rule conclusion or
+//! a claim, never another strict fact. An unresolved reason must match the
+//! provenances and the recorded identities: two facts that are both strict or
+//! both claims, a lost witness list with no assumption side, no declared edge
+//! at all, or exactly the declared but unusable edges. A claim against a rule
+//! conclusion is recorded as `non_strict_fact` with the claim's identity. The
+//! report's
 //! `priority_sources_checked` says the edges recorded by the certificate
 //! passed; it does not mean every priority in the environment was inspected,
 //! and an order no conflict cites is never compared.
@@ -136,8 +154,8 @@ use crate::closure;
 use crate::expr::CertExpr;
 use crate::key::expression_key;
 use crate::model::{
-    Certificate, Conflict, Node, NodeId, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
-    Resolution, ResolutionBasis, Side, UnresolvedReason,
+    Certificate, Conflict, FactIdentity, Node, NodeId, PriorityClause, PriorityEdge,
+    PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
 };
 use crate::source::Source;
 
@@ -228,6 +246,14 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
             ));
         }
     }
+
+    // The assumption table's identities are evidence: the conflict layer
+    // reads them to decide whether a defeat is legal. They are checked before
+    // any node, so a forged identity is reported on its own terms. The
+    // environment's facts are read once and shared by the identity and
+    // provenance checks.
+    let facts = environment_facts(env)?;
+    validate_assumptions(env, cert, &facts)?;
 
     // Pass 1: every node that proves something must prove a proposition, and
     // its proposition is collected for the `unless` check. Gaps prove
@@ -542,8 +568,8 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
                     message: format!("第 {} 个冲突的{label}侧不是命题：{error}", index + 1),
                 })?;
         }
-        validate_provenance(env, cert, index, conflict)?;
-        priority_edges_checked += validate_resolution(&priority, index, conflict)?;
+        validate_provenance(env, cert, &facts, index, conflict)?;
+        priority_edges_checked += validate_resolution(&priority, cert, index, conflict)?;
     }
 
     let root_proved = cert
@@ -865,6 +891,199 @@ fn components(adjacency: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, u32
     component
 }
 
+/// Validate the identity recorded for every assumption against the
+/// environment.
+///
+/// The identity is evidence, not decoration: conflict resolution reads it to
+/// decide whether a fact may defeat a rule conclusion or another fact. Three
+/// rules follow:
+///
+/// * a `disputed` proposition records what the other side claims, so it is not
+///   an assumption at all and cannot support a derivation;
+/// * one proposition has exactly one identity. The same claim listed twice is
+///   harmless, but the same proposition listed as both `verified` and
+///   `user_asserted` would let the certificate choose the stronger identity
+///   when it reads a conflict. Propositions are compared by kernel conversion,
+///   so alpha- and eta-variants cannot list the same proposition twice under
+///   two identities;
+/// * the certificate's identity must agree with the loaded environment. A
+///   proposition the environment registers as a fact has one recorded
+///   identity, and the certificate cannot rewrite it. A strict identity
+///   (`verified` / `stipulated`) must be backed by a matching loaded fact: a
+///   certificate that merely claims a court found something is not evidence.
+///   A non-strict identity may stand without a loaded fact, because a session
+///   fact (`:given`, `:fact assumed`) is part of the certificate's own
+///   context and the checker cannot verify its truth; the checker only verifies
+///   that the certificate's resolution is consistent with the identity it
+///   records.
+fn validate_assumptions(
+    env: &Env,
+    cert: &Certificate,
+    facts: &[EnvironmentFact],
+) -> Result<(), CheckError> {
+    // Pass 1: disputed identities and one identity per proposition. This
+    // runs before the environment comparison so a certificate that lists the
+    // same proposition twice is reported as such, not as a mismatch with the
+    // environment.
+    let mut recorded: Vec<(&CertExpr, FactIdentity)> = Vec::new();
+    for (index, entry) in cert.assumptions.iter().enumerate() {
+        let fail = |message: String| CheckError {
+            node: None,
+            message: format!("第 {} 条假设：{message}", index + 1),
+        };
+        if entry.identity == FactIdentity::Disputed {
+            return Err(fail(
+                "争议事实不能作为假设：它断言的是对方的主张，不是已证明的命题".to_owned(),
+            ));
+        }
+        let proposition = Expr::from(&entry.proposition);
+        for (previous, previous_identity) in &recorded {
+            let same = if *previous == &entry.proposition {
+                true
+            } else {
+                convertible(env, &Ctx::new(), &Expr::from(*previous), &proposition)
+                    .map_err(|error| fail(format!("无法判定两条假设是否为同一命题：{error}")))?
+            };
+            if same && previous_identity != &entry.identity {
+                return Err(fail(format!(
+                    "同一命题只能有一种事实身份：`{}` 已登记为{}，不能同时是{}",
+                    print_expr(&proposition),
+                    previous_identity.label_zh(),
+                    entry.identity.label_zh()
+                )));
+            }
+        }
+        recorded.push((&entry.proposition, entry.identity));
+    }
+
+    // Pass 2: the identity must match the environment's registration. A
+    // strict identity with no loaded fact is rejected: the certificate would
+    // otherwise upgrade a session claim by editing one field.
+    for (index, entry) in cert.assumptions.iter().enumerate() {
+        let fail = |message: String| CheckError {
+            node: None,
+            message: format!("第 {} 条假设：{message}", index + 1),
+        };
+        let proposition = Expr::from(&entry.proposition);
+        let proposition_key = key(env, &proposition).map_err(fail)?;
+        let certificate_identity = std_deduce_kernel::FactIdentity::from(&entry.identity);
+        let mut found = false;
+        let mut mismatched = None;
+        for fact in facts {
+            let same = fact.key == proposition_key
+                || convertible(env, &Ctx::new(), &fact.proposition, &proposition).map_err(
+                    |error| {
+                        fail(format!(
+                            "无法判定假设命题是否与环境中事实 `{}` 等价：{error}",
+                            fact.name
+                        ))
+                    },
+                )?;
+            if !same {
+                continue;
+            }
+            found = true;
+            if fact.identity != certificate_identity {
+                mismatched = Some(FactIdentity::from(&fact.identity));
+                break;
+            }
+        }
+        if let Some(registered) = mismatched {
+            return Err(fail(format!(
+                "`{}` 在环境中登记为「{}」，证书写作「{}」",
+                print_expr(&proposition),
+                registered.label_zh(),
+                entry.identity.label_zh()
+            )));
+        }
+        if !found && is_strict(entry.identity) {
+            return Err(fail(format!(
+                "证书声称「{}」，但当前环境没有登记该命题的事实；\
+                 严格身份必须来自已加载的事实声明",
+                entry.identity.label_zh()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// One environment fact, with the normalized proposition and its comparison key.
+struct EnvironmentFact {
+    name: String,
+    proposition: Expr,
+    key: String,
+    identity: std_deduce_kernel::FactIdentity,
+}
+
+/// Every environment declaration that registers a proposition as a fact.
+///
+/// `Env::insert` already refuses a `Fact` whose declared type is not a
+/// proposition; the sort is checked again here because a directly built
+/// ledger is part of the checker's input too. A disputed fact is included:
+/// it is a registration of who says what, and the certificate must not write
+/// a different identity for the same proposition.
+fn environment_facts(env: &Env) -> Result<Vec<EnvironmentFact>, CheckError> {
+    let mut facts = Vec::new();
+    for decl in env.iter() {
+        let DeclKind::Fact { identity } = &decl.kind else {
+            continue;
+        };
+        let declared_sort = kernel_check::infer(env, &Ctx::new(), &decl.ty)
+            .and_then(|ty| normalize(env, &Ctx::new(), &ty))
+            .map_err(|error| CheckError {
+                node: None,
+                message: format!("环境事实 `{}` 的类型无法检查：{error}", decl.name),
+            })?;
+        if declared_sort != Expr::Sort(0) {
+            continue;
+        }
+        let proposition = normalize(env, &Ctx::new(), &decl.ty).map_err(|error| CheckError {
+            node: None,
+            message: format!("环境事实 `{}` 无法规范化，无法比较：{error}", decl.name),
+        })?;
+        facts.push(EnvironmentFact {
+            name: decl.name.to_string(),
+            key: expression_key(&proposition),
+            proposition,
+            // `DeclKind::Fact` carries the kernel's identity; the certificate
+            // uses its own wire type. The comparison converts the certificate
+            // side, so the stored value stays the ledger's own.
+            identity: *identity,
+        });
+    }
+    Ok(facts)
+}
+
+/// The identity the certificate's assumption table records for `proposition`.
+///
+/// [`validate_provenance`] has already established that an assumption side's
+/// proposition is listed, so a miss is reported as an error rather than read
+/// as an identity-free fact.
+fn recorded_identity(
+    cert: &Certificate,
+    side: Side,
+    proposition: &CertExpr,
+) -> Result<FactIdentity, String> {
+    cert.assumptions
+        .iter()
+        .find(|entry| &entry.proposition == proposition)
+        .map(|entry| entry.identity)
+        .ok_or_else(|| {
+            format!(
+                "{}侧记录为已知事实，但证书的假设表里没有这个命题",
+                side_label(side)
+            )
+        })
+}
+
+/// Whether a certificate identity is a strict fact.
+///
+/// The kernel owns the distinction; the certificate reads it through the
+/// conversion instead of restating which identities are strict.
+fn is_strict(identity: FactIdentity) -> bool {
+    std_deduce_kernel::FactIdentity::from(&identity).is_strict()
+}
+
 /// Validate what a conflict's provenance claims, independently of how it was
 /// resolved.
 ///
@@ -880,6 +1099,10 @@ fn components(adjacency: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, u32
 /// * the rule's conclusion head must agree with the conflict proposition on
 ///   that side when both heads are concrete. An opaque head (a parameter or a
 ///   quantified formula) is not judged, which keeps the check conservative;
+/// * a rule side's proposition must not also occur in the certificate's
+///   assumption table or be registered as a non-disputed fact in the
+///   environment: a proposition is one thing, and a fact cannot be relabelled
+///   as a rule derivation to hide the evidence;
 /// * an assumption side's proposition must occur in the certificate's
 ///   assumption table, compared as a `CertExpr` and independent of order.
 ///
@@ -888,6 +1111,7 @@ fn components(adjacency: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, u32
 fn validate_provenance(
     env: &Env,
     cert: &Certificate,
+    facts: &[EnvironmentFact],
     index: usize,
     conflict: &Conflict,
 ) -> Result<(), CheckError> {
@@ -901,6 +1125,53 @@ fn validate_provenance(
     ] {
         match provenance {
             Provenance::Rules { rules } => {
+                // A proposition is one thing: a side the certificate lists as
+                // an assumed fact (or the environment registers as one)
+                // cannot also be recorded as a rule derivation. The reasoner
+                // never produces this combination — a fact side is supported by
+                // the fact, not by rules — so it is a hand-edited record trying
+                // to hide the fact that the side is an assumption.
+                let proposition_expr = Expr::from(proposition);
+                for entry in &cert.assumptions {
+                    let same = entry.proposition == *proposition
+                        || convertible(
+                            env,
+                            &Ctx::new(),
+                            &Expr::from(&entry.proposition),
+                            &proposition_expr,
+                        )
+                        .map_err(|error| {
+                            fail(format!(
+                                "无法判定{label}侧命题是否与证书假设表等价：{error}"
+                            ))
+                        })?;
+                    if same {
+                        return Err(fail(format!(
+                            "{label}侧命题「{}」已作为事实列在假设表里，不能同时记为规则推导",
+                            print_expr(&proposition_expr)
+                        )));
+                    }
+                }
+                let proposition_key = key(env, &proposition_expr).map_err(fail)?;
+                for fact in facts {
+                    if !fact.identity.seeds_derivation() {
+                        continue;
+                    }
+                    let same = fact.key == proposition_key
+                        || convertible(env, &Ctx::new(), &fact.proposition, &proposition_expr)
+                            .map_err(|error| {
+                                fail(format!(
+                                    "无法判定{label}侧命题是否与环境中事实 `{}` 等价：{error}",
+                                    fact.name
+                                ))
+                            })?;
+                    if same {
+                        return Err(fail(format!(
+                            "{label}侧命题「{}」已在环境中登记为事实，不能同时记为规则推导",
+                            print_expr(&proposition_expr)
+                        )));
+                    }
+                }
                 let mut seen: BTreeSet<&str> = BTreeSet::new();
                 for rule in rules {
                     if !seen.insert(rule.as_str()) {
@@ -951,10 +1222,17 @@ fn validate_provenance(
     Ok(())
 }
 
-/// Validate one recorded conflict resolution against the environment, and
-/// return how many priority edges it compared.
+/// Validate one recorded conflict resolution against the environment and the
+/// assumptions' identities, and return how many priority edges it compared.
+///
+/// A fact identity decides whether a fact can win: only a strict fact
+/// (`verified` or `stipulated`) defeats a rule conclusion or a claim, while a
+/// claim (`user_asserted` or `assumed`) never does. The records the reasoner
+/// writes follow that matrix; a hand-edited certificate that claims otherwise
+/// is rejected here rather than read as a legal adjudication.
 fn validate_resolution(
     priority: &PriorityGraph,
+    cert: &Certificate,
     index: usize,
     conflict: &Conflict,
 ) -> Result<usize, CheckError> {
@@ -972,10 +1250,31 @@ fn validate_resolution(
                         side_label(*winner)
                     )));
                 }
+                let (winner_prop, loser_prop) = proposition_by_side(conflict, *winner);
+                let winner_identity =
+                    recorded_identity(cert, *winner, winner_prop).map_err(fail)?;
+                if !is_strict(winner_identity) {
+                    return Err(fail(format!(
+                        "以严格事实为裁决依据，但胜方（{}）登记为{}，不是严格事实",
+                        side_label(*winner),
+                        winner_identity.label_zh()
+                    )));
+                }
+                // A fact loser must be a claim: two strict facts have no order
+                // between them, so that conflict stays unresolved. A rule
+                // loser is the ordinary strict-fact-beats-defeasible case.
                 if matches!(loser_by, Provenance::Assumption) {
-                    return Err(fail(
-                        "两侧都是严格事实：假设之间没有先后，不能判出一方胜出".to_owned(),
-                    ));
+                    let loser_side = match winner {
+                        Side::Left => Side::Right,
+                        Side::Right => Side::Left,
+                    };
+                    let loser_identity =
+                        recorded_identity(cert, loser_side, loser_prop).map_err(fail)?;
+                    if is_strict(loser_identity) {
+                        return Err(fail(
+                            "两侧都是严格事实：严格事实之间没有先后，不能判出一方胜出".to_owned(),
+                        ));
+                    }
                 }
                 Ok(0)
             }
@@ -1047,21 +1346,78 @@ fn validate_resolution(
                 if !matches!(conflict.left_by, Provenance::Assumption)
                     || !matches!(conflict.right_by, Provenance::Assumption)
                 {
-                    return Err(fail("记录为严格事实冲突，但至少一侧不是假设".to_owned()));
+                    return Err(fail(
+                        "记录为事实之间的未决冲突，但至少一侧不是假设".to_owned(),
+                    ));
+                }
+                let left = recorded_identity(cert, Side::Left, &conflict.left).map_err(fail)?;
+                let right = recorded_identity(cert, Side::Right, &conflict.right).map_err(fail)?;
+                // Two strict facts have no order between them, and two claims
+                // are both unproved. A strict fact against a claim is decided
+                // by the strict fact and must be recorded as a defeat.
+                if is_strict(left) != is_strict(right) {
+                    return Err(fail(format!(
+                        "记录为事实之间的未决冲突，但左侧登记为{}、右侧登记为{}：\
+                         严格事实应当胜出",
+                        left.label_zh(),
+                        right.label_zh()
+                    )));
+                }
+                Ok(0)
+            }
+            UnresolvedReason::NonStrictFact { identity } => {
+                // The reason is about one claim facing one rule conclusion.
+                let (fact_side, fact_prop) = match (&conflict.left_by, &conflict.right_by) {
+                    (Provenance::Assumption, Provenance::Rules { .. }) => {
+                        (Side::Left, &conflict.left)
+                    }
+                    (Provenance::Rules { .. }, Provenance::Assumption) => {
+                        (Side::Right, &conflict.right)
+                    }
+                    _ => {
+                        return Err(fail(
+                            "记录为未经证明的主张与规则结论之间的未决冲突，\
+                             但两侧必须一侧是事实、另一侧是规则"
+                                .to_owned(),
+                        ));
+                    }
+                };
+                // A claim never defeats a rule conclusion, and a rule
+                // conclusion never proves a claim false. Only a claim may be
+                // recorded under this reason; the identity the reason names
+                // must be the one the assumption table records, so the
+                // certificate cannot label a strict fact as merely asserted.
+                if !matches!(
+                    *identity,
+                    FactIdentity::UserAsserted | FactIdentity::Assumed
+                ) {
+                    return Err(fail(format!(
+                        "记录为未经证明的主张，但记录的身份是{}：\
+                         该原因只记录 user_asserted 或 assumed",
+                        identity.label_zh()
+                    )));
+                }
+                let recorded = recorded_identity(cert, fact_side, fact_prop).map_err(fail)?;
+                if recorded != *identity {
+                    return Err(fail(format!(
+                        "记录的身份是{}，而假设表把该命题登记为{}",
+                        identity.label_zh(),
+                        recorded.label_zh()
+                    )));
                 }
                 Ok(0)
             }
             UnresolvedReason::UnknownWitnesses => {
-                // A strict fact can only win; it never leaves a conflict
-                // unresolved for want of witnesses. The reasoner records
-                // `Defeated { basis: Assumption }` when either side is an
-                // assumption, so a hand-edited record must not relabel that
-                // outcome as a lost witness.
+                // A fact can never leave a conflict unresolved for want of
+                // rule witnesses: a strict fact wins, and a claim facing a
+                // rule conclusion is recorded as `non_strict_fact`. The
+                // reasoner never labels a fact side this way, so a hand-edited
+                // record must not relabel that outcome as a lost witness.
                 if matches!(conflict.left_by, Provenance::Assumption)
                     || matches!(conflict.right_by, Provenance::Assumption)
                 {
                     return Err(fail(
-                        "一侧是已知事实时，只能是事实胜出，不能记录为见证无法重建".to_owned(),
+                        "一侧是事实时，只能是事实胜出或主张未决，不能记录为见证无法重建".to_owned(),
                     ));
                 }
                 let lost = matches!(&conflict.left_by, Provenance::Rules { rules } if rules.is_empty())
@@ -1120,6 +1476,14 @@ fn provenance_by_side(conflict: &Conflict, winner: Side) -> (&Provenance, &Prove
     match winner {
         Side::Left => (&conflict.left_by, &conflict.right_by),
         Side::Right => (&conflict.right_by, &conflict.left_by),
+    }
+}
+
+/// The two sides' propositions, winner first.
+fn proposition_by_side(conflict: &Conflict, winner: Side) -> (&CertExpr, &CertExpr) {
+    match winner {
+        Side::Left => (&conflict.left, &conflict.right),
+        Side::Right => (&conflict.right, &conflict.left),
     }
 }
 
@@ -1197,27 +1561,11 @@ fn canonical_edges(edges: &[PriorityEdge]) -> Result<Vec<String>, String> {
 /// kernel's inference decides the sort; the name is never guessed at.
 fn environment_propositions(env: &Env) -> Result<BTreeMap<String, Expr>, CheckError> {
     let mut facts = BTreeMap::new();
-    for decl in env.iter() {
-        let DeclKind::Fact { identity } = &decl.kind else {
-            continue;
-        };
-        if !identity.seeds_derivation() {
+    for fact in environment_facts(env)? {
+        if !fact.identity.seeds_derivation() {
             continue;
         }
-        let declared_sort = kernel_check::infer(env, &Ctx::new(), &decl.ty)
-            .and_then(|ty| normalize(env, &Ctx::new(), &ty))
-            .map_err(|error| CheckError {
-                node: None,
-                message: format!("环境事实 `{}` 的类型无法检查：{error}", decl.name),
-            })?;
-        if declared_sort != Expr::Sort(0) {
-            continue;
-        }
-        let proposition = normalize(env, &Ctx::new(), &decl.ty).map_err(|error| CheckError {
-            node: None,
-            message: format!("环境事实 `{}` 无法规范化，无法比较：{error}", decl.name),
-        })?;
-        facts.insert(expression_key(&proposition), proposition);
+        facts.insert(fact.key, fact.proposition);
     }
     Ok(facts)
 }

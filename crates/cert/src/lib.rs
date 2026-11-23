@@ -36,16 +36,17 @@
 //!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 4. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 5. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
-//! Version 4 adds the conflict-resolution basis and the unresolved reason;
-//! version 3 certificates predate them, version 2 certificates predate the
-//! environment identity, and version 1 predates the source fields. All older
-//! versions are refused with a version error before any missing-field error is
-//! reported.
+//! Version 5 records the fact identity of every assumption and the reason for
+//! an unresolved claim that met a rule conclusion; version 4 adds the
+//! conflict-resolution basis and the unresolved reason; version 3 makes the
+//! environment identity mandatory; version 2 adds the source fields; version 1
+//! predates them. All older versions are refused with a version error before
+//! any missing-field error is reported.
 //!
 //! ## Checking
 //!
@@ -57,7 +58,9 @@
 //! conservative fixed-point superset that ignores `unless`, conflicts and
 //! priorities. Proved and derivable blockers are compared up to kernel
 //! conversion, so alpha- and eta-variants count. Every listed assumption
-//! counts, whether or not a node cites it, and each must be a proposition.
+//! counts, whether or not a node cites it, and each must be a proposition
+//! carrying a fact identity: a disputed proposition cannot be listed as an
+//! assumption, and one proposition cannot appear under two identities.
 //! The closure is computed only when a rule step has an `unless`. Rules that
 //! depend on a premise binder
 //! are rejected rather than checked with an open `?name`; a rule that cannot
@@ -76,9 +79,13 @@
 //! priority cycle; the checker also recomputes that the winning side covers
 //! every cross pair and the losing side does not. An unusable priority must
 //! list exactly the environment's declared edges between the two sides, and
-//! no full coverage may exist. An assumption-based defeat must name the
-//! assumption side as the winner, and an unresolved reason must match the
-//! provenances. Open obligations are reported through
+//! no full coverage may exist. An assumption-based defeat must name a strict
+//! fact (`verified` or `stipulated`) as the winner; a claim never defeats a
+//! rule conclusion or another fact, and a strict fact may defeat a claim. An
+//! unresolved reason must match the provenances and the recorded identities:
+//! two facts must be either both strict or both claims, and the
+//! non-strict-fact reason may name only `user_asserted` or `assumed`, exactly
+//! as the assumption table records it. Open obligations are reported through
 //! [`CheckReport::requires_human`] without failing the check. The checker does
 //! not re-derive the rule instances named by `left_by` / `right_by`, does not
 //! judge conflicts a certificate omits, and does not judge the legal effect of
@@ -111,7 +118,7 @@ pub use environment::{
 };
 pub use expr::{CertExpr, ExprEncodeError};
 pub use model::{
-    Assumption, Binding, Certificate, Conflict, GapCandidate, Metadata, Node, NodeId,
+    Assumption, Binding, Certificate, Conflict, FactIdentity, GapCandidate, Metadata, Node, NodeId,
     ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
     Resolution, ResolutionBasis, Side, UnresolvedReason,
 };

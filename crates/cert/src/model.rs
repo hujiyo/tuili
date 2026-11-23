@@ -94,12 +94,75 @@ impl Certificate {
     }
 }
 
+/// Who asserts an assumption's proposition.
+///
+/// The identity is part of the evidence: `verified` and `stipulated` are
+/// strict facts, `user_asserted` and `assumed` are claims, and `disputed`
+/// records only what the other side asserts. A strict fact outranks a
+/// defeasible conclusion; a claim never automatically does. The wire form is
+/// the same keyword the fact ledger uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactIdentity {
+    /// Found by a court or stated in an official document.
+    Verified,
+    /// Stated by the user.
+    UserAsserted,
+    /// Assumed for the sake of the analysis.
+    Assumed,
+    /// Disputed by the other side.
+    Disputed,
+    /// Agreed by both sides.
+    Stipulated,
+}
+
+impl FactIdentity {
+    /// The Chinese label shown in a rendered assumption and in an obligation
+    /// description.
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            FactIdentity::Verified => "法院查明",
+            FactIdentity::UserAsserted => "用户陈述",
+            FactIdentity::Assumed => "分析假设",
+            FactIdentity::Disputed => "对方争议",
+            FactIdentity::Stipulated => "双方无争议",
+        }
+    }
+}
+
+impl From<&std_deduce_kernel::FactIdentity> for FactIdentity {
+    fn from(identity: &std_deduce_kernel::FactIdentity) -> Self {
+        match identity {
+            std_deduce_kernel::FactIdentity::Verified => FactIdentity::Verified,
+            std_deduce_kernel::FactIdentity::UserAsserted => FactIdentity::UserAsserted,
+            std_deduce_kernel::FactIdentity::Assumed => FactIdentity::Assumed,
+            std_deduce_kernel::FactIdentity::Disputed => FactIdentity::Disputed,
+            std_deduce_kernel::FactIdentity::Stipulated => FactIdentity::Stipulated,
+        }
+    }
+}
+
+impl From<&FactIdentity> for std_deduce_kernel::FactIdentity {
+    fn from(identity: &FactIdentity) -> Self {
+        match identity {
+            FactIdentity::Verified => std_deduce_kernel::FactIdentity::Verified,
+            FactIdentity::UserAsserted => std_deduce_kernel::FactIdentity::UserAsserted,
+            FactIdentity::Assumed => std_deduce_kernel::FactIdentity::Assumed,
+            FactIdentity::Disputed => std_deduce_kernel::FactIdentity::Disputed,
+            FactIdentity::Stipulated => std_deduce_kernel::FactIdentity::Stipulated,
+        }
+    }
+}
+
 /// An assumption the derivation relies on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Assumption {
     /// The assumed proposition.
     pub proposition: CertExpr,
+    /// Who asserts it. Mandatory: an assumption whose evidence is unknown
+    /// cannot be audited. A disputed proposition is not an assumption.
+    pub identity: FactIdentity,
     /// Where the assumption comes from. An empty list means the certificate
     /// records no source; it does not mean the assumption is self-evident.
     #[serde(default)]
@@ -179,7 +242,8 @@ pub struct GapCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Provenance {
-    /// The conclusion is an assumption.
+    /// The conclusion is an assumption; its identity is recorded in the
+    /// matching [`Assumption`] entry.
     Assumption,
     /// The conclusion was derived by these rules. An empty list means it was
     /// derived but its witnesses can no longer be rebuilt.
@@ -188,9 +252,9 @@ pub enum Provenance {
 
 /// How a conflict was adjudicated.
 ///
-/// A defeated conflict records its basis: an assumption outranking a
-/// defeasible conclusion, or the declared priority edges that decided it. An
-/// unresolved conflict records why nobody won.
+/// A defeated conflict records its basis: a strict fact outranking a
+/// defeasible conclusion or a claim, or the declared priority edges that
+/// decided it. An unresolved conflict records why nobody won.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Resolution {
@@ -212,7 +276,8 @@ pub enum Resolution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResolutionBasis {
-    /// A strict fact (assumption) outranks a defeasible conclusion.
+    /// A strict fact (an assumption recorded as `verified` or `stipulated`)
+    /// outranks a defeasible conclusion or a claim.
     Assumption,
     /// Declared priority edges decide the conflict.
     Priority {
@@ -301,8 +366,17 @@ pub enum PriorityClause {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UnresolvedReason {
-    /// Both sides are strict facts; neither outranks the other.
+    /// Both sides are facts; neither outranks the other. Two strict facts have
+    /// no order between them, and two claims are both unproved.
     ConflictingAssumptions,
+    /// A claim met a rule conclusion. The claim is not proof, so it cannot
+    /// automatically beat the rule conclusion; the rule conclusion does not
+    /// refute the claim either. Neither side wins.
+    NonStrictFact {
+        /// The identity the claim is recorded under: `user_asserted` or
+        /// `assumed`.
+        identity: FactIdentity,
+    },
     /// One side was derived but its witnesses can no longer be rebuilt, so no
     /// priority can be checked for it. Neither side wins.
     UnknownWitnesses,

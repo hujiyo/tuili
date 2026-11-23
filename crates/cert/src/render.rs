@@ -4,8 +4,8 @@
 //! alone. It reads no reasoner state, so the printed tree describes exactly
 //! the proof the certificate records.
 //!
-//! An assumption is printed as `· <proposition>`, followed by its label and
-//! its first source. A rule application is printed as
+//! An assumption is printed as `· <proposition>  〔<identity>〕`, followed by
+//! its label and its first source. A rule application is printed as
 //! `▸ <conclusion>  ⟨<rule>⟩`, followed by its first source, that source's
 //! note and the parameter bindings, then its premises indented by two more
 //! spaces. A gap is printed as `? <proposition>  【未闭合】` with its
@@ -181,8 +181,9 @@ fn render_node(
                 ));
             };
             out.push_str(&format!(
-                "{pad}· {}",
-                print_expr(&Expr::from(&entry.proposition))
+                "{pad}· {}  〔{}〕",
+                print_expr(&Expr::from(&entry.proposition)),
+                entry.identity.label_zh()
             ));
             if let Some(label) = &entry.label {
                 out.push_str(&format!("  [{}]", escape_control(label)));
@@ -264,9 +265,19 @@ fn render_node(
                     ));
                 }
                 for blocked in &candidate.blocked_by {
+                    // The certificate's assumption table is the only identity
+                    // record available here. A blocker derived by a rule has
+                    // none, and then the line keeps its original wording.
+                    let identity = certificate
+                        .assumptions
+                        .iter()
+                        .find(|entry| &entry.proposition == blocked)
+                        .map(|entry| format!("〔{}〕", entry.identity.label_zh()))
+                        .unwrap_or_default();
                     out.push_str(&format!(
-                        "{pad}    被阻断：「{}」已成立\n",
-                        print_expr(&Expr::from(blocked))
+                        "{pad}    被阻断：「{}」{}已成立\n",
+                        print_expr(&Expr::from(blocked)),
+                        identity
                     ));
                 }
             }

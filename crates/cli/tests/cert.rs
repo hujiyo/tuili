@@ -10,8 +10,8 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std_deduce_cert::{
-    check, Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, FormatVersion,
-    Metadata, Node, ObligationKind,
+    check, Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, FactIdentity,
+    FormatVersion, Metadata, Node, ObligationKind,
 };
 use std_deduce_kernel::Expr;
 use std_deduce_lang::Library;
@@ -370,6 +370,7 @@ fn tampered_conclusion_or_binding_is_rejected() {
         environment: EnvironmentIdentity::none(),
         assumptions: vec![Assumption {
             proposition: truth.clone(),
+            identity: FactIdentity::UserAsserted,
             sources: Vec::new(),
             label: None,
         }],
@@ -465,7 +466,7 @@ fn verify_cert_escapes_a_read_failure_path_onto_one_line() {
 #[test]
 fn verify_cert_requires_a_loaded_environment() {
     let certificate = Certificate::from_json(
-        r#"{"format_version": 4, "environment": {"profile": null, "packs": [],
+        r#"{"format_version": 5, "environment": {"profile": null, "packs": [],
             "corpora": [], "as_of": null, "jurisdiction": null},
             "nodes": [], "root": null}"#,
     )
@@ -600,6 +601,7 @@ fn adding_a_satisfied_unless_blocker_is_rejected() {
     // listed assumption in scope, so it must retract the `unless` step.
     certificate.assumptions.push(Assumption {
         proposition: CertExpr::try_from(&blocker).unwrap(),
+        identity: FactIdentity::UserAsserted,
         sources: Vec::new(),
         label: Some("变异：追加已成立的阻断条件".to_owned()),
     });

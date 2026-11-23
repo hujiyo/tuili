@@ -345,6 +345,21 @@ axiom f2 : 不该批准 甲
   source text "乙法" locator "二"
 "#;
 
+/// The same standoff with both facts recorded as found by a court.
+const STRICT_ASSUMPTION_CASE: &str = r#"
+sort 申请
+pred 该批准 : 申请 → Prop
+pred 不该批准 : 申请 → Prop
+contrary 该批准 不该批准
+obj 甲 : 申请
+axiom f1 : 该批准 甲
+  identity verified
+  source text "甲法" locator "一"
+axiom f2 : 不该批准 甲
+  identity verified
+  source text "乙法" locator "二"
+"#;
+
 fn unresolved_obligation(
     certificate: &cert::Certificate,
     conflict: &std_deduce_reason::Conflict,
@@ -426,7 +441,7 @@ fn an_unresolved_conflict_obligation_names_why_it_is_unresolved() {
     assert!(report.priority_sources_checked);
     assert_eq!(report.priority_edges_checked, 3);
 
-    // Two strict facts.
+    // Two claims (the case file's default identity).
     let lib = load_sources("assumption-cert", &[("case.std", ASSUMPTION_CASE)]);
     let goal = Expr::apps(Expr::constant("该批准"), [Expr::constant("甲")]);
     let (d, order) = derive(&lib, &goal);
@@ -446,10 +461,10 @@ fn an_unresolved_conflict_obligation_names_why_it_is_unresolved() {
         .expect("the axioms conflict");
     let description = unresolved_obligation(&document, conflict);
     assert!(
-        description.ends_with("（两侧都是已知事实，严格事实之间没有先后）"),
+        description.ends_with("（两侧都只是主张，未经证明，不能判出一方胜出）"),
         "{description}"
     );
-    // Both strict facts are removed from the fact base by the unresolved
+    // Both claims are removed from the fact base by the unresolved
     // conflict, but the certificate must still record them as assumptions with
     // their sources: the conflict sides name them.
     for side in [&conflict.left, &conflict.right] {
@@ -466,4 +481,110 @@ fn an_unresolved_conflict_obligation_names_why_it_is_unresolved() {
     }
     let report = cert::check(&lib.env, &document).expect("the certificate checks");
     assert_eq!(report.priority_edges_checked, 0);
+
+    // Two strict facts: the same standoff, but neither side is a mere claim.
+    let lib = load_sources(
+        "strict-assumption-cert",
+        &[("case.std", STRICT_ASSUMPTION_CASE)],
+    );
+    let (d, order) = derive(&lib, &goal);
+    let document = certificate(&d, &order).expect("the strict derivation converts");
+    let conflict = d
+        .conflicts
+        .iter()
+        .find(|conflict| {
+            matches!(
+                conflict.resolution,
+                std_deduce_reason::Resolution::Unresolved {
+                    reason: std_deduce_reason::UnresolvedReason::ConflictingAssumptions,
+                    ..
+                }
+            )
+        })
+        .expect("the strict facts conflict");
+    let description = unresolved_obligation(&document, conflict);
+    assert!(
+        description.ends_with("（两侧都是严格事实，事实之间没有先后）"),
+        "{description}"
+    );
+    let report = cert::check(&lib.env, &document).expect("the strict certificate checks");
+    assert_eq!(report.priority_edges_checked, 0);
+}
+
+// -------------------------------------------------------- fact strictness
+
+/// A case file whose fact claims the contrary of what the rule concludes.
+fn non_strict_case(identity: &str) -> String {
+    format!(
+        r#"
+sort 申请
+pred 符合条件 : 申请 → Prop
+pred 该批准 : 申请 → Prop
+pred 不该批准 : 申请 → Prop
+contrary 该批准 不该批准
+obj 甲 : 申请
+axiom 条件 : 符合条件 甲
+  source text "甲法" locator "一"
+axiom 已批准 : 该批准 甲
+  identity {identity}
+  source text "乙法" locator "二"
+rule 拒绝 :
+  params x : 申请
+  premise 符合条件 x
+  conclude 不该批准 x
+  source text "丙法" locator "三"
+"#
+    )
+}
+
+/// A claim facing a rule conclusion is unresolved; the certificate records
+/// the claim's identity and says in the obligation why it cannot win.
+#[test]
+fn a_claim_against_a_rule_carries_its_identity_into_the_certificate() {
+    for (identity, label) in [("user_asserted", "用户陈述"), ("assumed", "分析假设")] {
+        let lib = load_sources(
+            "non-strict-cert",
+            &[("case.std", &non_strict_case(identity))],
+        );
+        let goal = Expr::apps(Expr::constant("该批准"), [Expr::constant("甲")]);
+        let (d, order) = derive(&lib, &goal);
+        let conflict = d
+            .conflicts
+            .iter()
+            .find(|conflict| {
+                matches!(
+                    conflict.resolution,
+                    std_deduce_reason::Resolution::Unresolved {
+                        reason: std_deduce_reason::UnresolvedReason::NonStrictFact { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("the claim and the rule conclusion conflict");
+        let document = certificate(&d, &order).expect("the derivation converts");
+
+        let recorded = document
+            .assumptions
+            .iter()
+            .find(|assumption| assumption.label.as_deref() == Some("已批准"))
+            .expect("the claim is recorded as an assumption");
+        assert_eq!(
+            recorded.identity,
+            match identity {
+                "user_asserted" => cert::FactIdentity::UserAsserted,
+                _ => cert::FactIdentity::Assumed,
+            }
+        );
+
+        let description = unresolved_obligation(&document, conflict);
+        assert!(
+            description.ends_with(&format!(
+                "（「该批准 甲」只是「{label}」，未经证明，不能自动胜过规则结论）"
+            )),
+            "{description}"
+        );
+
+        let report = cert::check(&lib.env, &document).expect("the unresolved claim checks");
+        assert!(!report.root_proved);
+    }
 }

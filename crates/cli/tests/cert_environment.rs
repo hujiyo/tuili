@@ -1,4 +1,4 @@
-//! End-to-end tests for the certificate v3 environment identity.
+//! End-to-end tests for the certificate v5 environment identity.
 //!
 //! Every test builds a temporary root with its own `lawpacks` registry,
 //! profile, corpus files and theory files, then runs the CLI with that root as
@@ -324,7 +324,7 @@ fn reject_certificate(root: &TempRoot, tag: &str, json: &str, stderr_needle: &st
 }
 
 #[test]
-fn a_valid_v3_certificate_records_and_checks_the_same_environment() {
+fn a_valid_v5_certificate_records_and_checks_the_same_environment() {
     let root = TempRoot::new("valid");
     root.install_pack(VERSION);
 
@@ -432,11 +432,11 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
     let certificate = root.generate(&[], CASE, GOAL);
 
     let mut v2 = remove_environment_member(&pretty(&certificate));
-    v2 = v2.replacen("\"format_version\": 4", "\"format_version\": 2", 1);
+    v2 = v2.replacen("\"format_version\": 5", "\"format_version\": 2", 1);
 
     let checked = reject_certificate(&root, "v2", &v2, "unsupported certificate format version 2");
     let err = stderr(&checked);
-    assert!(err.contains("this build supports 4"), "{err}");
+    assert!(err.contains("this build supports 5"), "{err}");
     assert!(
         !err.contains("missing field `environment`"),
         "the version error must win over the missing field:\n{err}"
