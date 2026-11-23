@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use sha2::{Digest, Sha256};
 use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus, CoverageStatus};
 
 const TEXT_39: &str = "中华人民共和国公民的住宅不受侵犯。\n禁止非法搜查或者非法侵入公民的住宅。";
@@ -1195,6 +1196,97 @@ fn scan_of_an_empty_directory_has_no_corpora_and_no_errors() {
     assert!(scan.errors.is_empty());
 }
 
+/// Encode bytes as lowercase hexadecimal, to build an expected digest.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn hash_file_has_the_sha256_shape_and_the_known_digest() {
+    let temp = TempDir::new("hash-shape");
+    let path = temp.write("a.json", "abc");
+
+    let hash = corpus::hash_file(&path).expect("the file is hashable");
+    assert_eq!(hash, ABC_SHA256);
+    let digest = &hash["sha256:".len()..];
+    assert_eq!(digest.len(), 64, "{hash}");
+    assert!(
+        digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{hash}"
+    );
+}
+
+#[test]
+fn hash_file_normalizes_crlf_to_lf() {
+    let temp = TempDir::new("hash-crlf");
+    let lf = temp.write("lf.json", "第一条\n第二条\n");
+    let crlf = temp.write("crlf.json", "第一条\r\n第二条\r\n");
+
+    let lf_hash = corpus::hash_file(&lf).expect("the LF file is hashable");
+    let crlf_hash = corpus::hash_file(&crlf).expect("the CRLF file is hashable");
+    assert_eq!(lf_hash, crlf_hash);
+
+    // The digest covers the normalized bytes, the content stream hash_pack
+    // also feeds its hasher.
+    assert_eq!(
+        lf_hash,
+        format!("sha256:{}", hex(&Sha256::digest("第一条\n第二条\n")))
+    );
+
+    // A lone `\r` is not a line ending and is preserved.
+    let lone_cr = temp.write("lone-cr.json", "第一条\r第二条\r");
+    let lone_cr_hash = corpus::hash_file(&lone_cr).expect("the lone-CR file is hashable");
+    assert_ne!(lone_cr_hash, lf_hash);
+}
+
+#[test]
+fn hash_file_changes_when_one_byte_changes() {
+    let temp = TempDir::new("hash-byte");
+    let path = temp.write("a.json", "abc");
+    let before = corpus::hash_file(&path).expect("the file is hashable");
+
+    temp.write("a.json", "abd");
+    let after = corpus::hash_file(&path).expect("the file is hashable");
+    assert_ne!(before, after);
+}
+
+#[test]
+fn hash_file_reports_a_missing_path() {
+    let temp = TempDir::new("hash-missing");
+    let missing = temp.path().join("does-not-exist.json");
+
+    let error = corpus::hash_file(&missing).expect_err("a missing path is an error");
+    assert_eq!(error.path(), missing.as_path());
+    assert!(error.message().contains("无法读取"), "{error}");
+}
+
+#[test]
+fn hash_file_rejects_a_directory() {
+    let temp = TempDir::new("hash-dir");
+    let dir = temp.dir("cn.a");
+
+    let error = corpus::hash_file(&dir).expect_err("a directory is not a corpus file");
+    assert_eq!(error.path(), dir.as_path());
+    assert!(error.message().contains("普通文件"), "{error}");
+}
+
+#[test]
+fn hash_file_rejects_a_symlink() {
+    let temp = TempDir::new("hash-link");
+    let target = temp.write("target.json", "abc");
+    let link = temp.path().join("link.json");
+    if !create_file_symlink(&target, &link) {
+        eprintln!("skipping: cannot create a symbolic link");
+        return;
+    }
+
+    let error = corpus::hash_file(&link).expect_err("a symlink is not a corpus file");
+    assert_eq!(error.path(), link.as_path());
+    assert!(error.message().contains("符号链接"), "{error}");
+}
+
 #[test]
 fn the_repository_constitution_corpus_parses() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../law/corpus");
@@ -1519,4 +1611,19 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_file_symlink(_target: &Path, _link: &Path) -> bool {
+    false
 }

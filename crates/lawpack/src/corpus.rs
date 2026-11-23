@@ -557,6 +557,38 @@ fn require_unpadded(field: &str, value: &str) -> Result<(), String> {
     }
 }
 
+/// Hash one corpus file's content: `sha256:` plus 64 lowercase hex digits.
+///
+/// The raw bytes are read and `\r\n` is replaced by `\n` with the same
+/// normalization [`hash_pack`](crate::hash_pack) applies to pack content, so a
+/// Windows checkout and a Linux checkout of the same corpus hash the same while
+/// any other byte difference does not. Symbolic links, directories and other
+/// non-regular entries are refused rather than followed or skipped; every error
+/// carries the path.
+pub fn hash_file(path: &Path) -> Result<String, CorpusError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        CorpusError::new(path.to_path_buf(), format!("无法读取语料文件属性：{error}"))
+    })?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CorpusError::new(
+            path.to_path_buf(),
+            "拒绝符号链接：语料文件不能是符号链接",
+        ));
+    }
+    if !file_type.is_file() {
+        return Err(CorpusError::new(
+            path.to_path_buf(),
+            "拒绝非普通文件：语料哈希只接受普通文件",
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        CorpusError::new(path.to_path_buf(), format!("无法读取语料文件：{error}"))
+    })?;
+    let content = crate::lock::normalized(&bytes);
+    Ok(format!("sha256:{}", hex::encode(&Sha256::digest(&content))))
+}
+
 /// Scan `root` for corpora laid out as `<law-id>/<version>.json`.
 ///
 /// The layout is strict: the root may contain only law directories, each law

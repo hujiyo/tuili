@@ -244,7 +244,10 @@ fn slash_path(absolute: &Path, relative: &Path) -> Result<String, PackError> {
 }
 
 /// Replace every `\r\n` with `\n`.
-fn normalized(bytes: &[u8]) -> Vec<u8> {
+///
+/// Shared with [`crate::corpus::hash_file`], so a single corpus file and a pack
+/// containing it are both canonicalized the same way.
+pub(crate) fn normalized(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
