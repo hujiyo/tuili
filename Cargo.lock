@@ -191,6 +191,7 @@ dependencies = [
 name = "std-deduce-cli"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "std-deduce-cert",
  "std-deduce-kernel",
  "std-deduce-lang",

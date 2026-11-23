@@ -15,3 +15,6 @@ std-deduce-lang = { path = "../lang" }
 std-deduce-reason = { path = "../reason" }
 std-deduce-cert = { path = "../cert" }
 std-deduce-lawpack = { path = "../lawpack" }
+
+[dev-dependencies]
+serde_json = "1"

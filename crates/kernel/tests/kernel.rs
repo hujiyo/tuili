@@ -272,6 +272,7 @@ fn rule_constant_env() -> Env {
         exceptions: vec![],
         prefers: vec![],
         sources: vec![],
+        declared_in: None,
     };
     let ty = std_deduce_kernel::env::rule_type(&rdecl);
     add("r", DeclKind::Rule(Box::new(rdecl)), ty);
@@ -354,6 +355,7 @@ fn a_rule_must_be_well_typed() {
         exceptions: vec![],
         prefers: vec![],
         sources: vec![],
+        declared_in: None,
     };
     let decl = Decl {
         name: name("坏规则"),
@@ -405,6 +407,7 @@ fn a_rule_with_duplicate_binder_names_is_refused() {
         exceptions: vec![],
         prefers: vec![],
         sources: vec![],
+        declared_in: None,
     };
     let decl = Decl {
         name: name("重名规则"),
@@ -421,6 +424,44 @@ fn a_rule_with_duplicate_binder_names_is_refused() {
         msg.contains("binder `p`") && msg.contains("?p"),
         "the error should name the duplicated binder, got: {msg}"
     );
+}
+
+/// A top-level priority is a declaration of its own: it keeps the direction of
+/// the relation, the declaring namespace and its provenance, and
+/// `priorities()` lists it in insertion order.
+#[test]
+fn priorities_keep_direction_namespace_and_sources() {
+    let mut env = Env::new();
+    let ctx = Ctx::new();
+    for (winner, loser) in [("a.r1", "a.r2"), ("a.r2", "a.r3")] {
+        env.insert(
+            Decl {
+                name: name(format!("priority:a:{winner}:{loser}")),
+                kind: DeclKind::Priority {
+                    winner: name(winner),
+                    loser: name(loser),
+                    declared_in: name("a"),
+                },
+                ty: Expr::Sort(0),
+                sources: vec![std_deduce_kernel::env::SourceRef::new("上位法", "第一条")],
+                index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+    }
+    let priorities = env.priorities();
+    assert_eq!(priorities.len(), 2);
+    assert_eq!(priorities[0].name.as_ref(), "priority:a:a.r1:a.r2");
+    assert_eq!(priorities[0].winner.as_ref(), "a.r1");
+    assert_eq!(priorities[0].loser.as_ref(), "a.r2");
+    assert_eq!(priorities[0].declared_in.as_ref(), "a");
+    assert_eq!(
+        priorities[0].sources,
+        vec![std_deduce_kernel::env::SourceRef::new("上位法", "第一条")]
+    );
+    assert_eq!(priorities[1].winner.as_ref(), "a.r2");
+    assert_eq!(priorities[1].loser.as_ref(), "a.r3");
 }
 
 #[test]

@@ -166,6 +166,14 @@ pub enum DeclKind {
     /// agree everywhere else are a conflict. `unique 应适用 1` says one case
     /// can have only one applicable norm.
     Unique { pred: Name, index: usize },
+    /// A provenance-carrying priority between two rules: `winner` outranks
+    /// `loser`. `declared_in` is the namespace of the module that asserted
+    /// the relation, because who claims the priority is part of the claim.
+    Priority {
+        winner: Name,
+        loser: Name,
+        declared_in: Name,
+    },
 }
 
 /// A defeasible rule.
@@ -183,6 +191,26 @@ pub struct RuleDecl {
     /// `exceptions`, kept separately so the source of a priority is visible:
     /// `defeated_by` means "I lose to X", `prefer` means "I beat Y".
     pub prefers: Vec<Name>,
+    pub sources: Vec<SourceRef>,
+    /// Namespace of the module that declared the rule; `None` for a rule in a
+    /// case file (a file without a namespace). Rule-internal `defeated_by` /
+    /// `prefer` clauses may only order rules of the same namespace; a
+    /// cross-package order is a [`DeclKind::Priority`] of its own.
+    pub declared_in: Option<Name>,
+}
+
+/// A priority declared by a module: `priority winner over loser source …`.
+///
+/// The declaration's namespace travels with the relation because a priority
+/// is asserted by a package about rules: who claims it is part of the claim.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PriorityDecl {
+    /// The synthetic ledger name of the declaration.
+    pub name: Name,
+    pub winner: Name,
+    pub loser: Name,
+    /// The namespace of the declaring module.
+    pub declared_in: Name,
     pub sources: Vec<SourceRef>,
 }
 
@@ -327,6 +355,28 @@ impl Env {
         self.iter()
             .filter_map(|d| match &d.kind {
                 DeclKind::Unique { pred, index } => Some((pred.clone(), *index)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Declared rule priorities, in insertion order. Each one keeps the
+    /// namespace that declared it; the relation is directed, `winner` outranks
+    /// `loser`.
+    pub fn priorities(&self) -> Vec<PriorityDecl> {
+        self.iter()
+            .filter_map(|d| match &d.kind {
+                DeclKind::Priority {
+                    winner,
+                    loser,
+                    declared_in,
+                } => Some(PriorityDecl {
+                    name: d.name.clone(),
+                    winner: winner.clone(),
+                    loser: loser.clone(),
+                    declared_in: declared_in.clone(),
+                    sources: d.sources.clone(),
+                }),
                 _ => None,
             })
             .collect()

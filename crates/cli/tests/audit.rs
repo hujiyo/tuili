@@ -813,6 +813,54 @@ fn the_report_escapes_invisible_characters_in_a_source_version() {
     assert!(!line.contains('\u{202E}'), "{line:?}");
 }
 
+#[test]
+fn a_priority_declaration_source_takes_part_in_the_audit() {
+    let temp = TempDir::new("priority-source");
+    // The priority is declared with a quoted source; the two rule sources have
+    // no quote. Declarations of every kind contribute their sources to the
+    // audit, so the priority's citation is checked like a rule's.
+    let theory = temp.theory(
+        "theory.std",
+        &format!(
+            r#"namespace cn.test
+pred cn.test.应适用 : Prop
+pred cn.test.不适用 : Prop
+rule cn.test.上位 :
+  conclude cn.test.应适用
+  source text "上位法" locator "第一条"
+rule cn.test.下位 :
+  conclude cn.test.不适用
+  source text "下位法" locator "第二条"
+priority cn.test.上位 over cn.test.下位 source text "宪法" locator "第三十九条" version "2018" quote "{QUOTE_39}"
+"#
+        ),
+    );
+    temp.corpus(
+        "corpus/cn.constitution/2018.json",
+        &corpus_json("2018", ARTICLE_39_JSON),
+    );
+
+    let output = session(&theory, &temp.path().join("corpus"));
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains(
+            "核对 1 条带引文来源：命中 1，不一致 0，未核对 0；另有 2 条来源无引文（不参与核对）。"
+        ),
+        "{out}"
+    );
+    assert_eq!(
+        line_starting_with(&out, '✓'),
+        "✓ 「宪法第三十九条」← cn.constitution@2018"
+    );
+    assert!(
+        out.lines()
+            .filter(|line| line.starts_with('·'))
+            .any(|line| line.contains("「上位法第一条」")),
+        "{out}"
+    );
+}
+
 struct TempDir {
     path: PathBuf,
 }

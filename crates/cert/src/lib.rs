@@ -36,13 +36,16 @@
 //!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 3. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 4. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
-//! Version 2 certificates predate the environment identity and are refused
-//! with a version error before any missing-field error is reported.
+//! Version 4 adds the conflict-resolution basis and the unresolved reason;
+//! version 3 certificates predate them, version 2 certificates predate the
+//! environment identity, and version 1 predates the source fields. All older
+//! versions are refused with a version error before any missing-field error is
+//! reported.
 //!
 //! ## Checking
 //!
@@ -65,10 +68,21 @@
 //! predicate head is rejected as well. [`kernel_proof`] turns the
 //! monotone skeleton into kernel terms and has the kernel check each rule
 //! step; it does not inspect `unless`. The crate depends on the kernel only;
-//! it never depends on the reasoner. Sources and priorities are data this
-//! layer preserves, not conditions it adjudicates; conflicts are only
-//! adjudicated for the root, and open obligations are reported through
-//! [`CheckReport::requires_human`] without failing the check.
+//! it never depends on the reasoner.
+//!
+//! Every recorded conflict resolution is checked too. A priority-based defeat
+//! must cite edges the environment really declares, in the direction of the
+//! win, with the same origin and sources, and no cited edge may lie on a
+//! priority cycle; the checker also recomputes that the winning side covers
+//! every cross pair and the losing side does not. An unusable priority must
+//! list exactly the environment's declared edges between the two sides, and
+//! no full coverage may exist. An assumption-based defeat must name the
+//! assumption side as the winner, and an unresolved reason must match the
+//! provenances. Open obligations are reported through
+//! [`CheckReport::requires_human`] without failing the check. The checker does
+//! not re-derive the rule instances named by `left_by` / `right_by`, does not
+//! judge conflicts a certificate omits, and does not judge the legal effect of
+//! a citation.
 //!
 //! ## Rendering
 //!
@@ -98,7 +112,8 @@ pub use environment::{
 pub use expr::{CertExpr, ExprEncodeError};
 pub use model::{
     Assumption, Binding, Certificate, Conflict, GapCandidate, Metadata, Node, NodeId,
-    ObligationKind, OpenObligation, Provenance, Resolution, Side,
+    ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
+    Resolution, ResolutionBasis, Side, UnresolvedReason,
 };
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
 pub use render::render;

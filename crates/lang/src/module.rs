@@ -102,6 +102,10 @@ impl Library {
             imported,
             ..Default::default()
         };
+        // The `(winner, loser)` of every top-level priority this file declares,
+        // validated against the completed environment after the loop so a
+        // priority may name a rule declared later in the same file.
+        let mut priorities: Vec<(String, String)> = Vec::new();
 
         for item in items {
             match item {
@@ -323,6 +327,70 @@ impl Library {
                     theory.decls.push(format!("unique:{pred}:{index}"));
                     report.declared.push(format!("unique {pred} {index}"));
                 }
+                Item::Priority {
+                    winner,
+                    loser,
+                    sources,
+                } => {
+                    // A priority is a normative claim about two rules, and it
+                    // belongs to a law package: only a module knows which
+                    // provision outranks which. A case file must not assert one
+                    // of its own.
+                    let Some(ns) = namespace.as_deref() else {
+                        return Err(LoadError::new(
+                            "`priority` 只能写在带 namespace 的模块里；案件文件不能声明顶层优先级",
+                        ));
+                    };
+                    // A priority is a decision; a decision without provenance
+                    // is not auditable and must not count as proved. A
+                    // whitespace-only source names nothing either.
+                    if !sources.iter().any(usable_source) {
+                        return Err(LoadError::new(format!(
+                            "`priority {winner} over {loser}`：优先关系必须有出处（法律名称 + 条号），没有出处的裁决不能被当作已证明"
+                        )));
+                    }
+                    if winner == loser {
+                        return Err(LoadError::new(format!(
+                            "`priority {winner} over {loser}`：一条优先关系不能指向自己"
+                        )));
+                    }
+                    let w = std_deduce_kernel::name(&winner);
+                    let l = std_deduce_kernel::name(&loser);
+                    let declared_in = std_deduce_kernel::name(ns);
+                    // The reverse order is not a duplicate: it is a claim of the
+                    // opposite direction by the same package.
+                    for existing in next.env.priorities() {
+                        if existing.declared_in == declared_in
+                            && existing.winner == w
+                            && existing.loser == l
+                        {
+                            return Err(LoadError::new(format!(
+                                "`priority {winner} over {loser}`：这一条已经声明过了"
+                            )));
+                        }
+                    }
+                    let decl = Decl {
+                        name: std_deduce_kernel::name(format!("priority:{ns}:{winner}:{loser}")),
+                        kind: std_deduce_kernel::DeclKind::Priority {
+                            winner: w,
+                            loser: l,
+                            declared_in,
+                        },
+                        ty: Expr::Sort(0),
+                        sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
+                        index: 0,
+                    };
+                    next.env
+                        .insert(decl, &std_deduce_kernel::Ctx::new())
+                        .map_err(|e| {
+                            LoadError::new(format!("`priority {winner} over {loser}`：{e}"))
+                        })?;
+                    theory.decls.push(format!("priority:{ns}:{winner}:{loser}"));
+                    report
+                        .declared
+                        .push(format!("priority {winner} over {loser}"));
+                    priorities.push((winner, loser));
+                }
                 Item::Rule {
                     name: n,
                     params,
@@ -450,6 +518,7 @@ impl Library {
                         exceptions,
                         prefers,
                         sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
+                        declared_in: namespace.as_ref().map(std_deduce_kernel::name),
                     };
                     let ty = std_deduce_kernel::env::rule_type(&rdecl);
                     let decl = Decl {
@@ -528,6 +597,16 @@ impl Library {
         // targets after the whole file is in the environment, which allows a
         // rule to name a rule declared later in the same file.
         check_rule_targets(&next.env, &theory.rules).map_err(LoadError::new)?;
+        // A top-level `priority` may name rules declared later in the same
+        // file as well, so its targets are checked against the completed
+        // environment too.
+        check_priority_targets(
+            &next.env,
+            &priorities,
+            &report.imported,
+            namespace.as_deref(),
+        )
+        .map_err(LoadError::new)?;
 
         // Commit only if everything above succeeded.
         if let Some(existing) = next.theories.iter_mut().find(|t| t.name == theory_name) {
@@ -713,6 +792,14 @@ fn check_case_decl_names(items: &[Item]) -> Result<(), String> {
             Item::Def { name, .. } => ("def", name),
             Item::Rule { name, .. } => ("rule", name),
             Item::Interpretation { name, .. } => ("interpret", name),
+            // A priority is a normative claim, and only a law package may
+            // assert one: a case file must not add its own.
+            Item::Priority { .. } => {
+                return Err(
+                    "`priority` 只能写在带 namespace 的模块里；案件文件不能声明顶层优先级"
+                        .to_string(),
+                )
+            }
             Item::Namespace(_)
             | Item::Import(_)
             | Item::Contrary { .. }
@@ -736,6 +823,12 @@ fn check_case_decl_names(items: &[Item]) -> Result<(), String> {
 /// Validate every `defeated_by` / `prefer` target of the rules just loaded.
 /// The targets are checked against the completed environment, so a forward
 /// reference to a rule later in the same file is legal.
+///
+/// A rule-internal clause only orders rules of the declaring module: a
+/// cross-package order is a normative claim of its own, so it must be declared
+/// as a top-level `priority` with a source. The winner/loser direction depends
+/// on the clause: `defeated_by X` makes `X` the winner, `prefer X` makes the
+/// declaring rule the winner.
 fn check_rule_targets(env: &Env, rules: &[String]) -> Result<(), String> {
     for rule_name in rules {
         let Some(decl) = env.get(rule_name) else {
@@ -746,22 +839,82 @@ fn check_rule_targets(env: &Env, rules: &[String]) -> Result<(), String> {
         };
         for (clause, targets) in [("defeated_by", &rule.exceptions), ("prefer", &rule.prefers)] {
             for target in targets {
-                match env.get(target) {
-                    Some(target_decl)
-                        if matches!(target_decl.kind, std_deduce_kernel::DeclKind::Rule(_)) => {}
-                    Some(_) => {
-                        return Err(format!(
-                            "`rule {rule_name}` 的 {clause} 目标 `{target}` 不是规则；\
-                             defeated_by/prefer 必须指向规则"
-                        ))
-                    }
-                    None => {
-                        return Err(format!(
-                            "`rule {rule_name}` 的 {clause} 目标 `{target}` 不存在；\
-                             defeated_by/prefer 必须指向已加载或同文件后声明的规则"
-                        ))
-                    }
+                let Some(target_decl) = env.get(target) else {
+                    return Err(format!(
+                        "`rule {rule_name}` 的 {clause} 目标 `{target}` 不存在；\
+                         defeated_by/prefer 必须指向已加载或同文件后声明的规则"
+                    ));
+                };
+                let std_deduce_kernel::DeclKind::Rule(target_rule) = &target_decl.kind else {
+                    return Err(format!(
+                        "`rule {rule_name}` 的 {clause} 目标 `{target}` 不是规则；\
+                         defeated_by/prefer 必须指向规则"
+                    ));
+                };
+                // A rule cannot outrank itself, in either clause direction.
+                // This mirrors the top-level `priority r over r` refusal: the
+                // edge would never participate in a resolution.
+                if target.as_ref() == rule_name.as_str() {
+                    return Err(format!(
+                        "`rule {rule_name}` 的 `{clause}` 指向自己；规则不能优先于自身"
+                    ));
                 }
+                if rule.declared_in == target_rule.declared_in {
+                    continue;
+                }
+                let (winner, loser) = match clause {
+                    "defeated_by" => (target.as_ref(), rule_name.as_str()),
+                    _ => (rule_name.as_str(), target.as_ref()),
+                };
+                let target_ns = target_rule
+                    .declared_in
+                    .as_deref()
+                    .unwrap_or("无 namespace（案件/示例文件）");
+                return Err(format!(
+                    "规则 `{rule_name}` 的 `{clause}` 指向了另一个包 `{target_ns}` 的规则 `{target}`；\
+                     跨包优先关系必须用顶层 `priority {winner} over {loser}` 声明并写明 source，\
+                     规则内子句只用于同一包内"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the targets of the top-level `priority` declarations just loaded.
+/// They are looked up in the completed environment, so a priority may name a
+/// rule declared later in the same file.
+///
+/// Both names must be rules. A rule of another package may be ordered only
+/// when that package is imported: a priority asserted from outside the package
+/// is a claim about code the file has not opted into. A case rule is not part
+/// of a package's normative order and cannot be a target at all.
+fn check_priority_targets(
+    env: &Env,
+    priorities: &[(String, String)],
+    imported: &[String],
+    namespace: Option<&str>,
+) -> Result<(), String> {
+    for (winner, loser) in priorities {
+        let what = format!("`priority {winner} over {loser}`");
+        for target in [winner, loser] {
+            let Some(decl) = env.get(target) else {
+                return Err(format!("{what}：未知规则 `{target}`"));
+            };
+            let std_deduce_kernel::DeclKind::Rule(rule) = &decl.kind else {
+                return Err(format!("{what}：`{target}` 不是规则"));
+            };
+            let Some(target_ns) = rule.declared_in.as_deref() else {
+                return Err(format!("{what}：不能对案件文件里的规则声明优先级"));
+            };
+            if Some(target_ns) == namespace {
+                continue;
+            }
+            if !imported.iter().any(|pack| pack == target_ns) {
+                return Err(format!(
+                    "{what}：目标规则在 `{target_ns}` 里，但本文件没有 `import {target_ns}`；\
+                     跨包优先级必须显式 import 目标包"
+                ));
             }
         }
     }
@@ -928,6 +1081,11 @@ fn check_module_names(ns: &str, items: &[Item]) -> Result<(), String> {
             Item::Unique { pred, index, .. } => {
                 let what = format!("`unique {pred} {index}`");
                 require_qualified_ref(ns, &what, pred)?;
+            }
+            Item::Priority { winner, loser, .. } => {
+                let what = format!("`priority {winner} over {loser}`");
+                require_qualified_ref(ns, &what, winner)?;
+                require_qualified_ref(ns, &what, loser)?;
             }
             Item::Check(t) => check_term(ns, "`#check` 的项", &[], t)?,
             Item::Why(t) => check_term(ns, "`#why` 的项", &[], t)?,

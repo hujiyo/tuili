@@ -6,7 +6,7 @@
 //! program  := import* namespace? item*
 //! import   := 'import' PACK                (before namespace and all items)
 //! namespace := 'namespace' NAMESPACE      (first non-import item only)
-//! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | command
+//! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | priority | command
 //! sort     := 'sort' IDENT source?
 //! pred     := 'pred' IDENT ':' term source?
 //! axiom    := 'axiom' IDENT ':' term source?
@@ -19,6 +19,7 @@
 //!           | 'defeated_by' IDENT
 //!           | 'prefer' IDENT
 //!           | 'source' (source_key STRING)+
+//! priority := 'priority' IDENT 'over' IDENT source*
 //! source_key := 'text' | 'locator' | 'version' | 'effective' | 'quote' | 'url'
 //!           | 'jurisdiction' | 'retrieved_at' | 'hash' | 'note'
 //! term     := arrow
@@ -393,6 +394,43 @@ impl Parser {
                     source,
                 })
             }
+            "priority" => {
+                self.bump();
+                let winner = self.ident()?;
+                // `over` is a literal keyword of this declaration, not a
+                // general identifier position. A missing one is reported at
+                // the token that took its place.
+                if !self.keyword("over") {
+                    return self.err(format!(
+                        "`priority {winner}` 缺少 `over`：应写成 `priority <胜者规则> over <败者规则> source …`，实际是 `{:?}`",
+                        self.peek()
+                    ));
+                }
+                self.bump();
+                let loser = self.ident()?;
+                // At least one usable source is required at load time, as for
+                // a rule or an axiom; the parser only collects what is written.
+                // Each `source` may be placed on the line after the `over`
+                // clause, like `optional_source`; this is unambiguous because
+                // `source` never starts a new item. The position is restored
+                // when the next line starts something else, so the newline
+                // before the next declaration is left to `program`.
+                let mut sources = Vec::new();
+                loop {
+                    let save = self.pos;
+                    self.skip_newlines_in_list();
+                    if !self.keyword("source") {
+                        self.pos = save;
+                        break;
+                    }
+                    sources.push(self.source_spec()?);
+                }
+                Ok(Item::Priority {
+                    winner,
+                    loser,
+                    sources,
+                })
+            }
             "interpret" | "interpretation" => {
                 self.bump();
                 let name = self.ident()?;
@@ -513,10 +551,9 @@ impl Parser {
                 // the lexer splits the sigil from the command name, so the
                 // combined spellings never reach this match.
                 "#" | "import" | "namespace" | "rule" | "sort" | "pred" | "axiom" | "def"
-                | "interpret" | "interpretation" | "contrary" | "unique" | "obj" | "object"
-                | "individual" | "check" | "why" | "gap" | "proposition" | "assert" | "show" => {
-                    break
-                }
+                | "interpret" | "interpretation" | "contrary" | "unique" | "priority" | "obj"
+                | "object" | "individual" | "check" | "why" | "gap" | "proposition" | "assert"
+                | "show" => break,
                 other => return self.err(format!("规则 `{name}` 里未知的子句 `{other}`")),
             }
         }

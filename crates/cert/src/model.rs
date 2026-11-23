@@ -187,13 +187,134 @@ pub enum Provenance {
 }
 
 /// How a conflict was adjudicated.
+///
+/// A defeated conflict records its basis: an assumption outranking a
+/// defeasible conclusion, or the declared priority edges that decided it. An
+/// unresolved conflict records why nobody won.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Resolution {
-    /// One side wins on an explicit priority.
-    Defeated { winner: Side },
+    /// One side wins.
+    Defeated {
+        /// The winning side.
+        winner: Side,
+        /// Why that side wins.
+        basis: ResolutionBasis,
+    },
     /// No side wins; neither conclusion is asserted.
-    Unresolved,
+    Unresolved {
+        /// Why the conflict could not be decided.
+        reason: UnresolvedReason,
+    },
+}
+
+/// Why the winning side of a defeated conflict wins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResolutionBasis {
+    /// A strict fact (assumption) outranks a defeasible conclusion.
+    Assumption,
+    /// Declared priority edges decide the conflict.
+    Priority {
+        /// The edges that establish the win, in the reasoner's certificate
+        /// order.
+        edges: Vec<PriorityEdge>,
+    },
+}
+
+/// One declared priority edge: `winner` outranks `loser`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriorityEdge {
+    /// The rule that outranks the other.
+    pub winner: String,
+    /// The rule that is outranked.
+    pub loser: String,
+    /// Where the declaration comes from.
+    pub origin: PriorityOrigin,
+}
+
+impl PriorityEdge {
+    /// A stable sort key: `(winner, loser, origin_kind,
+    /// declared_in_or_rule, clause)`, with a top-level declaration before a
+    /// rule-internal clause and `prefer` before `defeated_by`.
+    pub fn sort_key(&self) -> (String, String, u8, String, u8) {
+        match &self.origin {
+            PriorityOrigin::PriorityDeclaration { declared_in, .. } => (
+                self.winner.clone(),
+                self.loser.clone(),
+                0,
+                declared_in.clone(),
+                0,
+            ),
+            PriorityOrigin::RuleClause {
+                declaring_rule,
+                clause,
+                ..
+            } => (
+                self.winner.clone(),
+                self.loser.clone(),
+                1,
+                declaring_rule.clone(),
+                match clause {
+                    PriorityClause::Prefer => 0,
+                    PriorityClause::DefeatedBy => 1,
+                },
+            ),
+        }
+    }
+}
+
+/// Where a [`PriorityEdge`] comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PriorityOrigin {
+    /// A top-level `priority … over …` declaration of a module.
+    PriorityDeclaration {
+        /// The namespace that asserted the priority.
+        declared_in: String,
+        /// The declaration's sources, in declaration order.
+        sources: Vec<Source>,
+    },
+    /// A rule-internal `defeated_by` / `prefer` clause.
+    RuleClause {
+        /// The rule whose declaration carries the clause.
+        declaring_rule: String,
+        /// Which clause produced the edge.
+        clause: PriorityClause,
+        /// The declaring rule's sources, in declaration order.
+        rule_sources: Vec<Source>,
+    },
+}
+
+/// Which rule-internal clause produced a [`PriorityEdge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PriorityClause {
+    /// `prefer X`: the declaring rule beats `X`.
+    Prefer,
+    /// `defeated_by X`: `X` beats the declaring rule.
+    DefeatedBy,
+}
+
+/// Why a conflict has no winner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UnresolvedReason {
+    /// Both sides are strict facts; neither outranks the other.
+    ConflictingAssumptions,
+    /// One side was derived but its witnesses can no longer be rebuilt, so no
+    /// priority can be checked for it. Neither side wins.
+    UnknownWitnesses,
+    /// The rules of the two sides have no declared priority between them.
+    NoPriority,
+    /// Priorities are declared between the two sides, but they do not decide
+    /// the conflict: coverage is incomplete, both directions are covered, or
+    /// the edges lie on a priority cycle.
+    PriorityUnusable {
+        /// Every declared edge between the two sides, in both directions.
+        declared: Vec<PriorityEdge>,
+    },
 }
 
 /// Which side of a conflict a proposition sits on.

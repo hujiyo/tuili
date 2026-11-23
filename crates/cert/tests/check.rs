@@ -6,8 +6,9 @@
 
 use std_deduce_cert::{
     check, Assumption, Binding, CertExpr, Certificate, CheckError, CheckReport, Conflict,
-    EnvironmentIdentity, FormatVersion, Node, ObligationKind, OpenObligation, Provenance,
-    Resolution, Side,
+    EnvironmentIdentity, FormatVersion, Node, ObligationKind, OpenObligation, PriorityClause,
+    PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, Source,
+    UnresolvedReason,
 };
 use std_deduce_kernel::Env;
 use std_deduce_lang::Library;
@@ -1129,7 +1130,8 @@ fn legal_certificate_passes() {
             assumption_count: 1,
             conflict_resolved: false,
             requires_human: false,
-            priority_sources_checked: false,
+            priority_sources_checked: true,
+            priority_edges_checked: 0,
             nodes_checked: 2,
         }
     );
@@ -1151,7 +1153,8 @@ fn assumption_root_is_a_conditional_proof() {
             assumption_count: 1,
             conflict_resolved: false,
             requires_human: false,
-            priority_sources_checked: false,
+            priority_sources_checked: true,
+            priority_edges_checked: 0,
             nodes_checked: 1,
         }
     );
@@ -1396,7 +1399,8 @@ fn root_may_be_a_gap_and_is_not_proved() {
             assumption_count: 0,
             conflict_resolved: false,
             requires_human: false,
-            priority_sources_checked: false,
+            priority_sources_checked: true,
+            priority_edges_checked: 0,
             nodes_checked: 1,
         }
     );
@@ -1405,11 +1409,17 @@ fn root_may_be_a_gap_and_is_not_proved() {
 #[test]
 fn root_in_an_unresolved_conflict_is_rejected() {
     let mut cert = legal_certificate();
-    cert.conflicts.push(conflict(
-        atom("违法", "张三"),
-        atom("无辜", "张三"),
-        Resolution::Unresolved,
-    ));
+    cert.conflicts.push(Conflict {
+        left: atom("违法", "张三"),
+        right: atom("侵占", "张三"),
+        left_by: Provenance::Rules {
+            rules: vec!["r".to_owned()],
+        },
+        right_by: Provenance::Rules { rules: Vec::new() },
+        resolution: Resolution::Unresolved {
+            reason: UnresolvedReason::UnknownWitnesses,
+        },
+    });
     let error = reject_at(&cert, 1);
     assert!(error.message.contains("未决状态"), "{error}");
     assert!(error.message.contains("冲突"), "{error}");
@@ -1418,13 +1428,22 @@ fn root_in_an_unresolved_conflict_is_rejected() {
 #[test]
 fn root_on_the_losing_side_of_a_resolved_conflict_is_rejected() {
     let mut cert = legal_certificate();
-    cert.conflicts.push(conflict(
-        atom("违法", "张三"),
-        atom("无辜", "张三"),
-        Resolution::Defeated {
-            winner: Side::Right,
+    // The right side is an assumption; the root's side is a rule. Add the
+    // assumed proposition to the certificate's assumption table, as a real
+    // certificate would.
+    cert.assumptions.push(premise(atom("侵占", "李四")));
+    cert.conflicts.push(Conflict {
+        left: atom("违法", "张三"),
+        right: atom("侵占", "李四"),
+        left_by: Provenance::Rules {
+            rules: vec!["r".to_owned()],
         },
-    ));
+        right_by: Provenance::Assumption,
+        resolution: Resolution::Defeated {
+            winner: Side::Right,
+            basis: ResolutionBasis::Assumption,
+        },
+    });
     let error = reject_at(&cert, 1);
     assert!(error.message.contains("败方"), "{error}");
 }
@@ -1432,28 +1451,42 @@ fn root_on_the_losing_side_of_a_resolved_conflict_is_rejected() {
 #[test]
 fn root_on_the_winning_side_of_a_resolved_conflict_is_reported() {
     let mut cert = legal_certificate();
+    // A strict assumption on the left outranks the rule on the right. The
+    // assumed proposition is listed in the certificate's assumption table.
+    cert.assumptions.push(premise(atom("违法", "张三")));
     cert.conflicts.push(conflict(
         atom("违法", "张三"),
-        atom("无辜", "张三"),
-        Resolution::Defeated { winner: Side::Left },
+        atom("违法", "李四"),
+        Resolution::Defeated {
+            winner: Side::Left,
+            basis: ResolutionBasis::Assumption,
+        },
     ));
+    cert.conflicts[0].left_by = Provenance::Assumption;
     let report = check(&env(), &cert).expect("a winning root is allowed");
     assert!(report.root_proved);
     assert!(report.conflict_resolved);
     assert!(
-        !report.priority_sources_checked,
-        "the priority source behind the defeat is not validated"
+        report.priority_sources_checked,
+        "an assumption-based defeat records no priority edge to check"
     );
+    assert_eq!(report.priority_edges_checked, 0);
 }
 
 #[test]
 fn an_unresolved_conflict_about_another_proposition_does_not_reject_the_root() {
     let mut cert = legal_certificate();
-    cert.conflicts.push(conflict(
-        atom("侵占", "李四"),
-        atom("无辜", "李四"),
-        Resolution::Unresolved,
-    ));
+    cert.conflicts.push(Conflict {
+        left: atom("侵占", "李四"),
+        right: atom("违法", "李四"),
+        left_by: Provenance::Rules { rules: Vec::new() },
+        right_by: Provenance::Rules {
+            rules: vec!["r".to_owned()],
+        },
+        resolution: Resolution::Unresolved {
+            reason: UnresolvedReason::UnknownWitnesses,
+        },
+    });
     let report = check(&env(), &cert).expect("only the root's conflicts are adjudicated");
     assert!(!report.conflict_resolved);
 }
@@ -2027,4 +2060,700 @@ rule r :
         "{error}"
     );
     assert!(error.message.contains("P"), "{error}");
+}
+
+// ---------------------------------------------------------------- priorities
+
+/// Two rules in package `p`; package `o` declares that `p.上位` outranks
+/// `p.下位`. Nothing else orders them.
+const PRIORITY_RULES: &str = r#"
+namespace p
+pred p.应适用 : Prop
+pred p.不适用 : Prop
+rule p.上位 :
+  conclude p.应适用
+  source text "上位法" locator "第一条"
+rule p.下位 :
+  conclude p.不适用
+  source text "下位法" locator "第二条"
+"#;
+
+const PRIORITY_ORDER: &str = r#"
+import p
+namespace o
+priority p.上位 over p.下位 source text "上位法" locator "第九十二条" version "2023"
+"#;
+
+/// Same-package rules: `defeated_by` and `prefer` order rules without any
+/// top-level priority, and two further rules have no order at all.
+const CLAUSE_RULES: &str = r#"
+namespace q
+pred q.应适用 : Prop
+pred q.不适用 : Prop
+pred q.偏好甲 : Prop
+pred q.偏好乙 : Prop
+pred q.孤立甲 : Prop
+pred q.孤立乙 : Prop
+rule q.上位 :
+  conclude q.应适用
+  source text "上位法" locator "第一条"
+rule q.下位 :
+  conclude q.不适用
+  defeated_by q.上位
+  source text "下位法" locator "第二条"
+rule q.偏好 :
+  conclude q.偏好甲
+  prefer q.被偏好
+  source text "偏好法" locator "第三条"
+rule q.被偏好 :
+  conclude q.偏好乙
+  source text "被偏好法" locator "第四条"
+rule q.孤立 :
+  conclude q.孤立甲
+  source text "孤立法" locator "第五条"
+rule q.同样孤立 :
+  conclude q.孤立乙
+  source text "同样孤立法" locator "第六条"
+"#;
+
+/// Three rules in one cycle: every declared edge lies inside the same strongly
+/// connected component, so none of them can decide a conflict.
+const CYCLE_RULES: &str = r#"
+namespace c
+pred c.值 : Prop
+rule c.A :
+  conclude c.值
+  source text "甲法" locator "一"
+rule c.B :
+  conclude c.值
+  source text "乙法" locator "二"
+rule c.C :
+  conclude c.值
+  source text "丙法" locator "三"
+priority c.A over c.B source text "甲法" locator "一"
+priority c.B over c.C source text "乙法" locator "二"
+priority c.C over c.A source text "丙法" locator "三"
+"#;
+
+fn load_sources(name: &str, sources: &[(&str, &str)]) -> Env {
+    let mut library = Library::new();
+    for (file, source) in sources {
+        library
+            .load(file, source)
+            .unwrap_or_else(|error| panic!("load {name} ({file}): {error}"));
+    }
+    library.env
+}
+
+fn declaration_env() -> Env {
+    load_sources(
+        "cert-priority-declaration",
+        &[("p.std", PRIORITY_RULES), ("o.std", PRIORITY_ORDER)],
+    )
+}
+
+fn clause_env() -> Env {
+    load_sources("cert-priority-clause", &[("q.std", CLAUSE_RULES)])
+}
+
+fn cycle_env() -> Env {
+    load_sources("cert-priority-cycle", &[("c.std", CYCLE_RULES)])
+}
+
+fn citation(text: &str, locator: &str) -> Source {
+    Source {
+        text: text.to_owned(),
+        locator: locator.to_owned(),
+        version: String::new(),
+        effective: None,
+        note: String::new(),
+        quote: String::new(),
+        url: String::new(),
+        jurisdiction: String::new(),
+        retrieved_at: String::new(),
+        hash: String::new(),
+    }
+}
+
+fn citation_with_version(text: &str, locator: &str, version: &str) -> Source {
+    let mut source = citation(text, locator);
+    source.version = version.to_owned();
+    source
+}
+
+fn declaration_edge() -> PriorityEdge {
+    PriorityEdge {
+        winner: "p.上位".to_owned(),
+        loser: "p.下位".to_owned(),
+        origin: PriorityOrigin::PriorityDeclaration {
+            declared_in: "o".to_owned(),
+            sources: vec![citation_with_version("上位法", "第九十二条", "2023")],
+        },
+    }
+}
+
+fn clause_edge() -> PriorityEdge {
+    PriorityEdge {
+        winner: "q.上位".to_owned(),
+        loser: "q.下位".to_owned(),
+        origin: PriorityOrigin::RuleClause {
+            declaring_rule: "q.下位".to_owned(),
+            clause: PriorityClause::DefeatedBy,
+            rule_sources: vec![citation("下位法", "第二条")],
+        },
+    }
+}
+
+fn prefer_edge() -> PriorityEdge {
+    PriorityEdge {
+        winner: "q.偏好".to_owned(),
+        loser: "q.被偏好".to_owned(),
+        origin: PriorityOrigin::RuleClause {
+            declaring_rule: "q.偏好".to_owned(),
+            clause: PriorityClause::Prefer,
+            rule_sources: vec![citation("偏好法", "第三条")],
+        },
+    }
+}
+
+fn cycle_edge() -> PriorityEdge {
+    PriorityEdge {
+        winner: "c.A".to_owned(),
+        loser: "c.B".to_owned(),
+        origin: PriorityOrigin::PriorityDeclaration {
+            declared_in: "c".to_owned(),
+            sources: vec![citation("甲法", "一")],
+        },
+    }
+}
+
+/// A certificate with no proof nodes: the checker's conflict layer is tested
+/// on its own, and a conflict's propositions need not be proved by a node.
+fn conflict_certificate(conflicts: Vec<Conflict>) -> Certificate {
+    let mut cert = certificate(Vec::new(), Vec::new(), None);
+    cert.conflicts = conflicts;
+    cert
+}
+
+/// The nullary proposition a fixture rule concludes.
+///
+/// The checker verifies that a rule witness's conclusion head agrees with the
+/// conflict proposition, so a test conflict is built from the rule's actual
+/// conclusion instead of an invented predicate.
+fn conclusion_of(rule: &str) -> CertExpr {
+    let predicate = match rule {
+        "p.上位" => "p.应适用",
+        "p.下位" => "p.不适用",
+        "q.上位" => "q.应适用",
+        "q.下位" => "q.不适用",
+        "q.偏好" => "q.偏好甲",
+        "q.被偏好" => "q.偏好乙",
+        "q.孤立" => "q.孤立甲",
+        "q.同样孤立" => "q.孤立乙",
+        "c.A" | "c.B" | "c.C" => "c.值",
+        // An unknown rule is rejected before the head comparison; the
+        // proposition still has to be well-typed.
+        _ => "p.应适用",
+    };
+    constant(predicate)
+}
+
+fn rule_conflict(left: &str, right: &str, resolution: Resolution) -> Conflict {
+    Conflict {
+        left: conclusion_of(left),
+        right: conclusion_of(right),
+        left_by: Provenance::Rules {
+            rules: vec![left.to_owned()],
+        },
+        right_by: Provenance::Rules {
+            rules: vec![right.to_owned()],
+        },
+        resolution,
+    }
+}
+
+fn defeated(left: &str, right: &str, winner: Side, edges: Vec<PriorityEdge>) -> Conflict {
+    rule_conflict(
+        left,
+        right,
+        Resolution::Defeated {
+            winner,
+            basis: ResolutionBasis::Priority { edges },
+        },
+    )
+}
+
+#[test]
+fn every_resolution_variant_of_a_certificate_passes_priority_validation() {
+    // A top-level declaration decides the conflict.
+    let cert = conflict_certificate(vec![defeated(
+        "p.上位",
+        "p.下位",
+        Side::Left,
+        vec![declaration_edge()],
+    )]);
+    let report = check(&declaration_env(), &cert).expect("a declared priority defeat checks");
+    assert!(report.priority_sources_checked);
+    assert_eq!(report.priority_edges_checked, 1);
+
+    // Same-package clauses decide it too, with the clause's own origin.
+    let env = clause_env();
+    let cert = conflict_certificate(vec![defeated(
+        "q.上位",
+        "q.下位",
+        Side::Left,
+        vec![clause_edge()],
+    )]);
+    let report = check(&env, &cert).expect("a defeated_by defeat checks");
+    assert!(report.priority_sources_checked);
+    assert_eq!(report.priority_edges_checked, 1);
+
+    let cert = conflict_certificate(vec![defeated(
+        "q.偏好",
+        "q.被偏好",
+        Side::Left,
+        vec![prefer_edge()],
+    )]);
+    let report = check(&env, &cert).expect("a prefer defeat checks");
+    assert!(report.priority_sources_checked);
+    assert_eq!(report.priority_edges_checked, 1);
+
+    // No order declared: no priority edge is compared.
+    let cert = conflict_certificate(vec![rule_conflict(
+        "q.孤立",
+        "q.同样孤立",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+    )]);
+    let report = check(&env, &cert).expect("an undeclared conflict checks");
+    assert!(report.priority_sources_checked);
+    assert_eq!(report.priority_edges_checked, 0);
+
+    // Two strict facts conflict.
+    let mut cert = conflict_certificate(vec![Conflict {
+        left: constant("q.孤立甲"),
+        right: constant("q.孤立乙"),
+        left_by: Provenance::Assumption,
+        right_by: Provenance::Assumption,
+        resolution: Resolution::Unresolved {
+            reason: UnresolvedReason::ConflictingAssumptions,
+        },
+    }]);
+    cert.assumptions = vec![premise(constant("q.孤立甲")), premise(constant("q.孤立乙"))];
+    let report = check(&env, &cert).expect("conflicting assumptions check");
+    assert_eq!(report.priority_edges_checked, 0);
+
+    // A lost witness cannot be ordered: it must not win, but it is not an
+    // error either.
+    cert = conflict_certificate(vec![Conflict {
+        left: constant("q.不适用"),
+        right: conclusion_of("q.上位"),
+        left_by: Provenance::Rules { rules: Vec::new() },
+        right_by: Provenance::Rules {
+            rules: vec!["q.上位".to_owned()],
+        },
+        resolution: Resolution::Unresolved {
+            reason: UnresolvedReason::UnknownWitnesses,
+        },
+    }]);
+    let report = check(&env, &cert).expect("a lost witness is an unresolved conflict");
+    assert_eq!(report.priority_edges_checked, 0);
+
+    // Declared edges on a cycle are unusable, but recording them is legal.
+    let cert = conflict_certificate(vec![rule_conflict(
+        "c.A",
+        "c.B",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::PriorityUnusable {
+                declared: vec![cycle_edge()],
+            },
+        },
+    )]);
+    let report = check(&cycle_env(), &cert).expect("an unusable cycle checks");
+    assert!(report.priority_sources_checked);
+    assert_eq!(report.priority_edges_checked, 1);
+}
+
+#[test]
+fn a_tampered_priority_origin_is_rejected() {
+    let mut cert = conflict_certificate(vec![defeated(
+        "p.上位",
+        "p.下位",
+        Side::Left,
+        vec![declaration_edge()],
+    )]);
+    // One character in the locator.
+    let Resolution::Defeated {
+        basis: ResolutionBasis::Priority { edges },
+        ..
+    } = &mut cert.conflicts[0].resolution
+    else {
+        unreachable!("the fixture is a priority defeat");
+    };
+    let PriorityOrigin::PriorityDeclaration { sources, .. } = &mut edges[0].origin else {
+        unreachable!("the fixture is a declaration edge");
+    };
+    sources[0].locator = "第九十三条".to_owned();
+    let error = check(&declaration_env(), &cert).expect_err("a tampered locator must be rejected");
+    assert!(error.message.contains("冲突"), "{error}");
+    assert!(
+        error.message.contains("第九十二条") || error.message.contains("出处"),
+        "{error}"
+    );
+
+    // A declared_in the environment never declared.
+    let mut cert = conflict_certificate(vec![defeated(
+        "p.上位",
+        "p.下位",
+        Side::Left,
+        vec![declaration_edge()],
+    )]);
+    let Resolution::Defeated {
+        basis: ResolutionBasis::Priority { edges },
+        ..
+    } = &mut cert.conflicts[0].resolution
+    else {
+        unreachable!("the fixture is a priority defeat");
+    };
+    let PriorityOrigin::PriorityDeclaration { declared_in, .. } = &mut edges[0].origin else {
+        unreachable!("the fixture is a declaration edge");
+    };
+    *declared_in = "p".to_owned();
+    let error =
+        check(&declaration_env(), &cert).expect_err("a wrong declaring package must be rejected");
+    assert!(error.message.contains("冲突"), "{error}");
+}
+
+#[test]
+fn a_cycle_edge_cannot_be_used_as_a_defeat_but_can_be_recorded_as_unusable() {
+    let defeated_on_a_cycle =
+        conflict_certificate(vec![defeated("c.A", "c.B", Side::Left, vec![cycle_edge()])]);
+    let error = check(&cycle_env(), &defeated_on_a_cycle)
+        .expect_err("an edge inside a cycle cannot decide a conflict");
+    assert!(error.message.contains("优先级环"), "{error}");
+
+    let unusable = conflict_certificate(vec![rule_conflict(
+        "c.A",
+        "c.B",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::PriorityUnusable {
+                declared: vec![cycle_edge()],
+            },
+        },
+    )]);
+    check(&cycle_env(), &unusable).expect("the same edge recorded as unusable checks");
+}
+
+#[test]
+fn a_wrong_or_incomplete_unusable_priority_is_rejected() {
+    // The environment declares an edge between the two rules, so claiming
+    // there is no priority is false.
+    let no_priority = conflict_certificate(vec![rule_conflict(
+        "p.上位",
+        "p.下位",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+    )]);
+    let error = check(&declaration_env(), &no_priority)
+        .expect_err("an undeclared conflict must not hide a declared edge");
+    assert!(error.message.contains("声明了 1 条优先边"), "{error}");
+
+    // Omitting the only declared edge is rejected as the `no_priority` case:
+    // an empty list does not record a declared-but-unusable priority.
+    let missing = conflict_certificate(vec![rule_conflict(
+        "p.上位",
+        "p.下位",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::PriorityUnusable {
+                declared: Vec::new(),
+            },
+        },
+    )]);
+    let error =
+        check(&declaration_env(), &missing).expect_err("a missing declared edge must be rejected");
+    assert!(error.message.contains("没有任何已声明边"), "{error}");
+    assert!(error.message.contains("no_priority"), "{error}");
+
+    // Adding an edge the environment never declared.
+    let mut extra = declaration_edge();
+    std::mem::swap(&mut extra.winner, &mut extra.loser);
+    let extras = conflict_certificate(vec![rule_conflict(
+        "p.上位",
+        "p.下位",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::PriorityUnusable {
+                declared: vec![declaration_edge(), extra],
+            },
+        },
+    )]);
+    let error =
+        check(&declaration_env(), &extras).expect_err("an extra declared edge must be rejected");
+    assert!(error.message.contains("不一致"), "{error}");
+
+    // A conflict the environment fully covers must be defeated, not called
+    // unusable.
+    let unusable = conflict_certificate(vec![rule_conflict(
+        "p.上位",
+        "p.下位",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::PriorityUnusable {
+                declared: vec![declaration_edge()],
+            },
+        },
+    )]);
+    let error = check(&declaration_env(), &unusable)
+        .expect_err("a fully covered conflict must not be unresolved");
+    assert!(error.message.contains("已裁决"), "{error}");
+}
+
+#[test]
+fn a_resolution_reason_must_match_the_provenances() {
+    // A priority defeat whose winner is a rule, not an assumption. The right
+    // side is an assumption, so its proposition is in the assumption table.
+    let mut cert = conflict_certificate(vec![rule_conflict(
+        "p.上位",
+        "p.下位",
+        Resolution::Defeated {
+            winner: Side::Left,
+            basis: ResolutionBasis::Assumption,
+        },
+    )]);
+    cert.assumptions = vec![premise(constant("p.不适用"))];
+    cert.conflicts[0].right_by = Provenance::Assumption;
+    let error = check(&declaration_env(), &cert).expect_err("the winner is not an assumption");
+    assert!(error.message.contains("不是假设"), "{error}");
+
+    // One side is an assumption and the other is a rule, so they cannot be
+    // "conflicting assumptions".
+    let mut cert = conflict_certificate(vec![Conflict {
+        left: constant("p.不适用"),
+        right: conclusion_of("p.上位"),
+        left_by: Provenance::Assumption,
+        right_by: Provenance::Rules {
+            rules: vec!["p.上位".to_owned()],
+        },
+        resolution: Resolution::Unresolved {
+            reason: UnresolvedReason::ConflictingAssumptions,
+        },
+    }]);
+    cert.assumptions = vec![premise(constant("p.不适用"))];
+    let error = check(&declaration_env(), &cert).expect_err("one side is not an assumption");
+    assert!(error.message.contains("至少一侧不是假设"), "{error}");
+
+    // Both sides have witnesses, so no witness was lost.
+    let cert = conflict_certificate(vec![rule_conflict(
+        "p.上位",
+        "p.下位",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::UnknownWitnesses,
+        },
+    )]);
+    let error = check(&declaration_env(), &cert).expect_err("both sides have rule witnesses");
+    assert!(error.message.contains("两侧都有规则见证"), "{error}");
+}
+
+#[test]
+fn a_conflict_that_cites_an_unknown_rule_is_rejected() {
+    let cert = conflict_certificate(vec![rule_conflict(
+        "p.幽灵",
+        "p.下位",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+    )]);
+    let error = check(&declaration_env(), &cert).expect_err("an unknown rule cannot be a side");
+    assert!(error.message.contains("不在环境中"), "{error}");
+}
+
+#[test]
+fn an_empty_declared_list_is_not_an_unusable_priority() {
+    // `priority_unusable` says priorities are declared but do not decide. An
+    // empty list is the `no_priority` case and must not be accepted as an
+    // unusable priority.
+    let cert = conflict_certificate(vec![rule_conflict(
+        "q.孤立",
+        "q.同样孤立",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::PriorityUnusable {
+                declared: Vec::new(),
+            },
+        },
+    )]);
+    let error = check(&clause_env(), &cert).expect_err("an empty declared list must be rejected");
+    assert!(error.message.contains("没有任何已声明边"), "{error}");
+    assert!(error.message.contains("no_priority"), "{error}");
+}
+
+#[test]
+fn a_repeated_rule_witness_on_one_side_is_rejected() {
+    let mut conflict = rule_conflict(
+        "q.孤立",
+        "q.同样孤立",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+    );
+    conflict.left_by = Provenance::Rules {
+        rules: vec!["q.孤立".to_owned(), "q.孤立".to_owned()],
+    };
+    let cert = conflict_certificate(vec![conflict]);
+    let error = check(&clause_env(), &cert).expect_err("a repeated witness is not a witness set");
+    assert!(error.message.contains("同一侧的规则见证重复"), "{error}");
+    assert!(error.message.contains("q.孤立"), "{error}");
+}
+
+#[test]
+fn an_assumption_side_must_be_in_the_assumption_table() {
+    // A hand-edited certificate can label a rule side as an assumption. The
+    // assumed proposition is not in the certificate's table, so the label is a
+    // lie.
+    let mut conflict = rule_conflict(
+        "p.上位",
+        "p.下位",
+        Resolution::Defeated {
+            winner: Side::Left,
+            basis: ResolutionBasis::Assumption,
+        },
+    );
+    conflict.left_by = Provenance::Assumption;
+    let mut cert = conflict_certificate(vec![conflict]);
+    let error = check(&declaration_env(), &cert)
+        .expect_err("an assumption not in the table must be rejected");
+    assert!(
+        error
+            .message
+            .contains("记录为已知事实，但证书的假设表里没有这个命题"),
+        "{error}"
+    );
+
+    // The same record passes once the assumption table really lists the
+    // proposition, which is what the reasoner produces.
+    cert.assumptions = vec![premise(constant("p.应适用"))];
+    check(&declaration_env(), &cert).expect("a listed assumption side checks");
+}
+
+#[test]
+fn a_rule_witness_with_a_different_conclusion_head_is_rejected() {
+    // `p.下位` concludes `p.不适用`, but the left proposition is `p.应适用`.
+    let mut conflict = rule_conflict(
+        "p.上位",
+        "p.下位",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+    );
+    conflict.left_by = Provenance::Rules {
+        rules: vec!["p.下位".to_owned()],
+    };
+    let cert = conflict_certificate(vec![conflict]);
+    let error = check(&declaration_env(), &cert)
+        .expect_err("a rule that concludes another predicate cannot witness this side");
+    assert!(error.message.contains("结论头与冲突命题不符"), "{error}");
+    assert!(error.message.contains("p.下位"), "{error}");
+}
+
+#[test]
+fn unknown_witnesses_cannot_mix_with_an_assumption_side() {
+    // A strict fact always wins; it never leaves a conflict unresolved for
+    // want of rule witnesses.
+    let mut cert = conflict_certificate(vec![Conflict {
+        left: constant("p.应适用"),
+        right: constant("p.不适用"),
+        left_by: Provenance::Rules { rules: Vec::new() },
+        right_by: Provenance::Assumption,
+        resolution: Resolution::Unresolved {
+            reason: UnresolvedReason::UnknownWitnesses,
+        },
+    }]);
+    cert.assumptions = vec![premise(constant("p.不适用"))];
+    let error =
+        check(&declaration_env(), &cert).expect_err("an assumption side cannot lose its witnesses");
+    assert!(
+        error.message.contains("一侧是已知事实时，只能是事实胜出"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_conflict_side_that_is_not_a_proposition_is_rejected() {
+    let mut conflict = rule_conflict(
+        "p.上位",
+        "p.下位",
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+    );
+    conflict.left = CertExpr::Sort { level: 0 };
+    let cert = conflict_certificate(vec![conflict]);
+    let error = check(&declaration_env(), &cert).expect_err("a sort is not a proposition");
+    assert!(
+        error.message.contains("第 1 个冲突的左侧不是命题"),
+        "{error}"
+    );
+}
+
+/// Mutate the origin of the certificate's first recorded priority edge and
+/// return the check error.
+fn reject_with_first_origin(
+    env: &Env,
+    cert: Certificate,
+    mutate: impl FnOnce(&mut PriorityOrigin),
+) -> CheckError {
+    let mut cert = cert;
+    let Resolution::Defeated {
+        basis: ResolutionBasis::Priority { edges },
+        ..
+    } = &mut cert.conflicts[0].resolution
+    else {
+        unreachable!("the fixture is a priority defeat");
+    };
+    mutate(&mut edges[0].origin);
+    check(env, &cert).expect_err("the tampered origin must be rejected")
+}
+
+#[test]
+fn a_tampered_rule_clause_origin_is_rejected() {
+    let env = clause_env();
+    let base = || {
+        conflict_certificate(vec![defeated(
+            "q.上位",
+            "q.下位",
+            Side::Left,
+            vec![clause_edge()],
+        )])
+    };
+
+    // The clause names a rule of the same package that does not carry it.
+    let error = reject_with_first_origin(&env, base(), |origin| {
+        let PriorityOrigin::RuleClause { declaring_rule, .. } = origin else {
+            unreachable!("the fixture is a rule clause");
+        };
+        *declaring_rule = "q.孤立".to_owned();
+    });
+    assert!(error.message.contains("第 1 个冲突"), "{error}");
+    assert!(error.message.contains("逐项一致"), "{error}");
+
+    // The same rule carries `defeated_by`, not `prefer`.
+    let error = reject_with_first_origin(&env, base(), |origin| {
+        let PriorityOrigin::RuleClause { clause, .. } = origin else {
+            unreachable!("the fixture is a rule clause");
+        };
+        *clause = PriorityClause::Prefer;
+    });
+    assert!(error.message.contains("逐项一致"), "{error}");
+
+    // One character in the declaring rule's citation.
+    let error = reject_with_first_origin(&env, base(), |origin| {
+        let PriorityOrigin::RuleClause { rule_sources, .. } = origin else {
+            unreachable!("the fixture is a rule clause");
+        };
+        rule_sources[0].locator = "第三条".to_owned();
+    });
+    assert!(error.message.contains("逐项一致"), "{error}");
+    assert!(
+        error.message.contains("第二条") || error.message.contains("出处"),
+        "{error}"
+    );
 }

@@ -4,12 +4,14 @@ use serde_json::Value;
 use std_deduce_cert::{
     Assumption, Binding, CertExpr, Certificate, Conflict, CorpusRecord, EnvironmentIdentity,
     EnvironmentRecord, ExplicitText, FormatVersion, GapCandidate, Metadata, Node, ObligationKind,
-    OpenObligation, PackRecord, Provenance, Resolution, Side, Source, TrustLevel,
+    OpenObligation, PackRecord, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
+    Resolution, ResolutionBasis, Side, Source, TrustLevel, UnresolvedReason,
 };
 use std_deduce_kernel::env::SourceRef;
 use std_deduce_kernel::{name, Expr};
 
-const SNAPSHOT: &str = include_str!("fixtures/certificate_v3.json");
+const SNAPSHOT: &str = include_str!("fixtures/certificate_v4.json");
+const V3_SNAPSHOT: &str = include_str!("fixtures/certificate_v3.json");
 const V2_SNAPSHOT: &str = include_str!("fixtures/certificate_v2.json");
 
 fn constant(text: &str) -> CertExpr {
@@ -129,8 +131,22 @@ fn sample_certificate() -> Certificate {
             left_by: Provenance::Rules {
                 rules: vec!["正当防卫".to_owned()],
             },
-            right_by: Provenance::Assumption,
-            resolution: Resolution::Defeated { winner: Side::Left },
+            right_by: Provenance::Rules {
+                rules: vec!["应负刑事责任规则".to_owned()],
+            },
+            resolution: Resolution::Defeated {
+                winner: Side::Left,
+                basis: ResolutionBasis::Priority {
+                    edges: vec![PriorityEdge {
+                        winner: "正当防卫".to_owned(),
+                        loser: "应负刑事责任规则".to_owned(),
+                        origin: PriorityOrigin::PriorityDeclaration {
+                            declared_in: "cn.constitution".to_owned(),
+                            sources: vec![source("中华人民共和国立法法", "第九十二条")],
+                        },
+                    }],
+                },
+            },
         }],
         open_obligations: vec![OpenObligation {
             id: "obligation-1".to_owned(),
@@ -187,7 +203,7 @@ fn field_names_are_stable() {
         assert!(object.contains_key(field), "missing field `{field}`");
     }
 
-    assert_eq!(value["format_version"], 3);
+    assert_eq!(value["format_version"], 4);
     let environment = value["environment"]
         .as_object()
         .expect("the environment is an inline object");
@@ -230,9 +246,36 @@ fn field_names_are_stable() {
     assert_eq!(value["conflicts"][0]["resolution"]["kind"], "defeated");
     assert_eq!(value["conflicts"][0]["resolution"]["winner"], "left");
     assert_eq!(
+        value["conflicts"][0]["resolution"]["basis"]["kind"],
+        "priority"
+    );
+    let edge = &value["conflicts"][0]["resolution"]["basis"]["edges"][0];
+    assert_eq!(edge["winner"], "正当防卫");
+    assert_eq!(edge["loser"], "应负刑事责任规则");
+    assert_eq!(edge["origin"]["kind"], "priority_declaration");
+    assert_eq!(edge["origin"]["declared_in"], "cn.constitution");
+    assert_eq!(edge["origin"]["sources"][0]["text"], "中华人民共和国立法法");
+    assert_eq!(edge["origin"]["sources"][0]["locator"], "第九十二条");
+    assert_eq!(edge["origin"]["sources"][0]["version"], "2020年修正");
+    assert_eq!(
         value["open_obligations"][0]["kind"],
         "needs_human_determination"
     );
+}
+
+#[test]
+fn a_v3_certificate_is_rejected_before_its_missing_resolution_basis() {
+    // `certificate_v3.json` predates the resolution basis: its defeated
+    // conflict carries only a winner. The version probe must reject it on the
+    // version, not report a missing `basis` field the old writer never had.
+    let error = Certificate::from_json(V3_SNAPSHOT).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported certificate format version 3"),
+        "{message}"
+    );
+    assert!(message.contains("this build supports 4"), "{message}");
+    assert!(!message.contains("missing field"), "{message}");
 }
 
 #[test]
@@ -246,7 +289,7 @@ fn a_true_v1_certificate_is_rejected_with_a_version_error() {
         message.contains("unsupported certificate format version 1"),
         "{message}"
     );
-    assert!(message.contains("supports 3"), "{message}");
+    assert!(message.contains("supports 4"), "{message}");
 }
 
 #[test]
@@ -260,7 +303,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
         message.contains("unsupported certificate format version 2"),
         "{message}"
     );
-    assert!(message.contains("this build supports 3"), "{message}");
+    assert!(message.contains("this build supports 4"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -268,7 +311,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
 fn source_fields_added_in_v2_still_use_defaults() {
     let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
     strip_new_source_fields(&mut value);
-    assert_eq!(value["format_version"], 3);
+    assert_eq!(value["format_version"], 4);
     let certificate = Certificate::from_json(&value.to_string())
         .expect("source fields added with #[serde(default)] may be omitted");
     let source = &certificate.assumptions[0].sources[0];
@@ -435,7 +478,7 @@ fn every_source_field_survives_a_json_round_trip() {
 
 #[test]
 fn unknown_format_version_is_rejected() {
-    let text = SNAPSHOT.replace("\"format_version\": 3", "\"format_version\": 999");
+    let text = SNAPSHOT.replace("\"format_version\": 4", "\"format_version\": 999");
     let error = Certificate::from_json(&text).unwrap_err();
     assert!(
         error
@@ -577,4 +620,254 @@ fn kernel_source_ref_round_trips() {
     let source = source("条文原文", "刑法第二十条");
     let kernel = SourceRef::from(source.clone());
     assert_eq!(Source::from(&kernel), source);
+}
+
+/// A conflict whose resolution round-trips through JSON, with both sides as
+/// rules unless the resolution says otherwise.
+fn conflict_with(resolution: Resolution) -> Conflict {
+    Conflict {
+        left: app(constant("结论甲"), constant("张三")),
+        right: app(constant("结论乙"), constant("张三")),
+        left_by: Provenance::Rules {
+            rules: vec!["规则甲".to_owned()],
+        },
+        right_by: Provenance::Rules {
+            rules: vec!["规则乙".to_owned()],
+        },
+        resolution,
+    }
+}
+
+fn declaration_edge(winner: &str, loser: &str) -> PriorityEdge {
+    PriorityEdge {
+        winner: winner.to_owned(),
+        loser: loser.to_owned(),
+        origin: PriorityOrigin::PriorityDeclaration {
+            declared_in: "cn.order".to_owned(),
+            sources: vec![source("中华人民共和国立法法", "第九十二条")],
+        },
+    }
+}
+
+#[test]
+fn every_resolution_variant_round_trips() {
+    let mut certificate = sample_certificate();
+    certificate.conflicts = vec![
+        conflict_with(Resolution::Defeated {
+            winner: Side::Left,
+            basis: ResolutionBasis::Assumption,
+        }),
+        conflict_with(Resolution::Defeated {
+            winner: Side::Right,
+            basis: ResolutionBasis::Priority {
+                edges: vec![declaration_edge("规则乙", "规则甲")],
+            },
+        }),
+        conflict_with(Resolution::Defeated {
+            winner: Side::Left,
+            basis: ResolutionBasis::Priority {
+                edges: vec![
+                    PriorityEdge {
+                        winner: "规则甲".to_owned(),
+                        loser: "规则乙".to_owned(),
+                        origin: PriorityOrigin::RuleClause {
+                            declaring_rule: "规则甲".to_owned(),
+                            clause: PriorityClause::Prefer,
+                            rule_sources: vec![source("规则甲法", "第一条")],
+                        },
+                    },
+                    PriorityEdge {
+                        winner: "规则甲".to_owned(),
+                        loser: "规则乙".to_owned(),
+                        origin: PriorityOrigin::RuleClause {
+                            declaring_rule: "规则乙".to_owned(),
+                            clause: PriorityClause::DefeatedBy,
+                            rule_sources: vec![source("规则乙法", "第二条")],
+                        },
+                    },
+                ],
+            },
+        }),
+        conflict_with(Resolution::Unresolved {
+            reason: UnresolvedReason::ConflictingAssumptions,
+        }),
+        conflict_with(Resolution::Unresolved {
+            reason: UnresolvedReason::UnknownWitnesses,
+        }),
+        conflict_with(Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        }),
+        conflict_with(Resolution::Unresolved {
+            reason: UnresolvedReason::PriorityUnusable {
+                declared: vec![
+                    declaration_edge("规则甲", "规则乙"),
+                    declaration_edge("规则乙", "规则甲"),
+                ],
+            },
+        }),
+    ];
+
+    let json = certificate.to_json_pretty().unwrap();
+    let decoded = Certificate::from_json(&json).expect("every variant round-trips");
+    assert_eq!(decoded, certificate);
+    assert_eq!(decoded.to_json_pretty().unwrap(), json);
+
+    let value: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        value["conflicts"][0]["resolution"]["basis"]["kind"],
+        "assumption"
+    );
+    assert_eq!(
+        value["conflicts"][2]["resolution"]["basis"]["edges"][0]["origin"]["clause"],
+        "prefer"
+    );
+    assert_eq!(
+        value["conflicts"][2]["resolution"]["basis"]["edges"][1]["origin"]["clause"],
+        "defeated_by"
+    );
+    assert_eq!(
+        value["conflicts"][3]["resolution"]["reason"]["kind"],
+        "conflicting_assumptions"
+    );
+    assert_eq!(
+        value["conflicts"][4]["resolution"]["reason"]["kind"],
+        "unknown_witnesses"
+    );
+    assert_eq!(
+        value["conflicts"][5]["resolution"]["reason"]["kind"],
+        "no_priority"
+    );
+    assert_eq!(
+        value["conflicts"][6]["resolution"]["reason"]["kind"],
+        "priority_unusable"
+    );
+}
+
+#[test]
+fn a_v4_defeat_without_a_basis_is_rejected() {
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["conflicts"][0]["resolution"]
+        .as_object_mut()
+        .unwrap()
+        .remove("basis");
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("missing field `basis`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn unknown_fields_inside_a_resolution_are_rejected() {
+    for path in [
+        &["conflicts", "0", "resolution", "future"][..],
+        &["conflicts", "0", "resolution", "basis", "future"][..],
+        &[
+            "conflicts",
+            "0",
+            "resolution",
+            "basis",
+            "edges",
+            "0",
+            "future",
+        ][..],
+        &[
+            "conflicts",
+            "0",
+            "resolution",
+            "basis",
+            "edges",
+            "0",
+            "origin",
+            "future",
+        ][..],
+    ] {
+        let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+        let mut cursor = &mut value;
+        for (index, part) in path.iter().enumerate() {
+            if index + 1 == path.len() {
+                cursor[part] = Value::Bool(true);
+            } else if let Ok(position) = part.parse::<usize>() {
+                cursor = &mut cursor[position];
+            } else {
+                cursor = &mut cursor[*part];
+            }
+        }
+        let error = Certificate::from_json(&value.to_string()).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field `future`"),
+            "{path:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn unknown_resolution_kinds_are_rejected() {
+    // Resolution, basis, reason and origin are tagged unions; a tag this build
+    // does not know is an error, not the closest variant.
+    for (selector, replacement) in [
+        (
+            &["conflicts", "0", "resolution"][..],
+            serde_json::json!({"kind": "settled"}),
+        ),
+        (
+            &["conflicts", "0", "resolution", "basis"][..],
+            serde_json::json!({"kind": "tradition", "edges": []}),
+        ),
+        (
+            &[
+                "conflicts",
+                "0",
+                "resolution",
+                "basis",
+                "edges",
+                "0",
+                "origin",
+            ][..],
+            serde_json::json!({"kind": "custom"}),
+        ),
+    ] {
+        let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+        let mut cursor = &mut value;
+        for (index, part) in selector.iter().enumerate() {
+            if index + 1 == selector.len() {
+                cursor[part] = replacement.clone();
+            } else if let Ok(position) = part.parse::<usize>() {
+                cursor = &mut cursor[position];
+            } else {
+                cursor = &mut cursor[*part];
+            }
+        }
+        let error = Certificate::from_json(&value.to_string()).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown variant"),
+            "{selector:?}: {error}"
+        );
+    }
+
+    // An unresolved reason is a tagged union as well.
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["conflicts"][0]["resolution"] = serde_json::json!({
+        "kind": "unresolved",
+        "reason": {"kind": "because"},
+    });
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown variant `because`"),
+        "{error}"
+    );
+
+    // And a rule-internal clause is a plain enum value.
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["conflicts"][0]["resolution"]["basis"]["edges"][0]["origin"] = serde_json::json!({
+        "kind": "rule_clause",
+        "declaring_rule": "正当防卫",
+        "clause": "overruled",
+        "rule_sources": [],
+    });
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown variant `overruled`"),
+        "{error}"
+    );
 }

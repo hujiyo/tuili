@@ -465,7 +465,7 @@ fn verify_cert_escapes_a_read_failure_path_onto_one_line() {
 #[test]
 fn verify_cert_requires_a_loaded_environment() {
     let certificate = Certificate::from_json(
-        r#"{"format_version": 3, "environment": {"profile": null, "packs": [],
+        r#"{"format_version": 4, "environment": {"profile": null, "packs": [],
             "corpora": [], "as_of": null, "jurisdiction": null},
             "nodes": [], "root": null}"#,
     )
@@ -555,11 +555,29 @@ fn changing_a_rule_conclusion_is_rejected() {
 #[test]
 fn reusing_a_wrong_premise_node_is_rejected() {
     let mut certificate = defense_certificate();
+    // The unrelated fact node is found by its proposition: node order is
+    // deterministic but the assumptions are ordered by declaration name.
+    let unrelated = certificate
+        .nodes
+        .iter()
+        .position(|node| {
+            matches!(
+                node,
+                Node::Assumption { assumption }
+                    if certificate.assumptions[*assumption].proposition
+                        == CertExpr::try_from(&Expr::apps(
+                            Expr::constant("不法"),
+                            [Expr::constant("甲侵害")]
+                        ))
+                        .unwrap()
+            )
+        })
+        .expect("the certificate contains the 不法 fact");
     let (node, rule) = rule_node_mut(&mut certificate, "正当防卫不负刑责");
     let Node::RuleApplication { premises, .. } = rule else {
         unreachable!("rule_node_mut returns a rule application");
     };
-    premises[0] = 0;
+    premises[0] = unrelated;
 
     let checked = verify_cert_file("刑法第二十条-基本.std", "wrong-premise-node", &certificate);
     assert_exit(&checked, ERROR);
@@ -568,7 +586,7 @@ fn reusing_a_wrong_premise_node_is_rejected() {
     let err = stderr(&checked);
     assert!(err.contains(&format!("节点 {node}")), "{err}");
     assert!(err.contains("正当防卫不负刑责"), "{err}");
-    assert!(err.contains("引用的节点 0"), "{err}");
+    assert!(err.contains(&format!("引用的节点 {unrelated}")), "{err}");
     assert!(err.contains("正当防卫 乙行为"), "{err}");
     assert!(err.contains("不法 甲侵害"), "{err}");
 }
@@ -633,7 +651,8 @@ fn swapped_root_stays_valid_but_fails_the_goal_binding() {
     assert!(!out.contains("目标绑定：通过"), "{out}");
     let err = stderr(&checked);
     assert!(err.contains("目标绑定失败"), "{err}");
-    assert!(err.contains("不法 甲侵害"), "{err}");
+    // Node 0 is the first assumption in declaration-name order.
+    assert!(err.contains("制止 乙行为 甲侵害"), "{err}");
     assert!(err.contains("不负刑事责任 乙行为"), "{err}");
     assert!(err.contains("不等价"), "{err}");
 }

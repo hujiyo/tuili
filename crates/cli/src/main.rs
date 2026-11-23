@@ -183,11 +183,21 @@
 //!   the certificate leaves nothing open;
 //! * a gap — the certificate is valid but its root is a gap, so the conclusion
 //!   is not proved;
-//! * a conflict — both derivations are printed and the process exits non-zero.
+//! * a conflict — an unresolved conclusion, or one on the losing side of a
+//!   defeated conflict, prints both derivations and exits non-zero; the
+//!   winning side of a defeated conflict is a proved conclusion, and its
+//!   recorded basis is printed as `依据：` notes.
 //!
 //! A certificate that fails either layer is an error (exit `2`), never a
 //! successful query. A conclusion caught in an unresolved conflict is kept out
-//! of the fact base, but it is never dropped silently.
+//! of the fact base, but it is never dropped silently: `:why` states the
+//! recorded reason — no declared priority, priorities that do not decide
+//! (listing every declared edge and its source), unresolvable witnesses, or two
+//! strict facts. A defeated conclusion gets the recorded basis as `依据：` lines
+//! naming the declaration (or rule clause) and its source. When the
+//! environment's own priority declarations contain a cycle, `:why` and `:gap`
+//! print one warning line before their result: an edge inside a cycle cannot
+//! decide anything, and the warning does not change the exit code.
 //!
 //! `:cert` requires a loaded theory and writes only the certificate JSON to
 //! stdout; a gap becomes a `MissingPremise` obligation and an unresolved
@@ -217,7 +227,13 @@
 //!    kernel terms and has the kernel check every step.
 //!
 //! The two layers are printed separately, together with the side conditions
-//! and whether a human must decide something. A certificate that records a
+//! and whether a human must decide something. The side-condition line reports
+//! how many recorded priority edges the logical layer compared with the
+//! environment (`优先关系已核验（n 条边）`) or that the certificate records
+//! none (`没有记录优先关系`), so a defeat is never presented without the
+//! evidence that its declaration was checked. A priority cycle in the current
+//! environment adds one warning line after it; the warning changes no exit
+//! code. A certificate that records a
 //! `local-extension` obligation (its proof applied a rule the case file
 //! declared) gets one `  本地扩展：...` line after the four report lines and
 //! before any goal binding, and counts as an open obligation. The process exits
@@ -255,12 +271,13 @@ use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
     render, Certificate, CheckReport, EnvironmentDifference, EnvironmentIdentity,
-    EnvironmentRecord, Node as CertNode, ObligationKind, OpenObligation, TrustLevel,
+    EnvironmentRecord, Node as CertNode, ObligationKind, OpenObligation, PriorityClause,
+    PriorityEdge, PriorityOrigin, ResolutionBasis, Source, TrustLevel,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
-use std_deduce_kernel::{check, Expr};
+use std_deduce_kernel::{check, Expr, Name};
 use std_deduce_lang::module::escape_path;
 use std_deduce_lang::{elab, Library, LoadReport};
 use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus, CoverageStatus};
@@ -738,6 +755,16 @@ impl Session {
                             DeclKind::Interpretation(_) => "interp",
                             DeclKind::Contrary { .. } => "contr ",
                             DeclKind::Unique { .. } => "uniq  ",
+                            DeclKind::Priority { .. } => "prior ",
+                        };
+                        // A priority has no user-written name: its ledger name
+                        // is a synthetic key. Print the surface declaration the
+                        // module wrote, the same way the load report does.
+                        let name = match &decl.kind {
+                            DeclKind::Priority { winner, loser, .. } => {
+                                format!("priority {winner} over {loser}")
+                            }
+                            _ => decl.name.to_string(),
                         };
                         let namespace = match pack_by_decl.get(decl.name.as_ref()) {
                             Some(pack) => format!(" [{}@{}]", pack.name, pack.version),
@@ -753,13 +780,7 @@ impl Session {
                                 .map(|ns| format!(" [{ns}]"))
                                 .unwrap_or_default(),
                         };
-                        writeln!(
-                            out,
-                            "  {kind} {} : {}{namespace}",
-                            decl.name,
-                            print_expr(&decl.ty)
-                        )
-                        .ok();
+                        writeln!(out, "  {kind} {name} : {}{namespace}", print_expr(&decl.ty)).ok();
                         for s in &decl.sources {
                             writeln!(out, "       ← {}", s.one_line()).ok();
                             for line in s.full().lines() {
@@ -825,18 +846,23 @@ impl Session {
         r.assume_ledger_axioms()?;
         r.saturate()?;
 
+        // A cycle disables every edge inside it. Say so before the query
+        // prints anything: a result that fell back to "no usable priority"
+        // must not be read as "nothing was declared".
+        write_priority_cycle_warning(out, &r.priority_cycles());
+
         // A conclusion can be in a recorded conflict without being asserted:
         // that is a third outcome, distinct from both success and a gap.
         if let Some(c) = r.conflict_for(&goal) {
             match &c.resolution {
-                Resolution::Unresolved => {
-                    report_unresolved(out, &r, &goal, &c);
+                Resolution::Unresolved { reason } => {
+                    report_unresolved(out, &r, &goal, &c, reason);
                     return Ok(Outcome::Unresolved);
                 }
-                Resolution::Defeated { winner } => {
+                Resolution::Defeated { winner, basis } => {
                     let side = r.conflict_side(&c, &goal);
                     if side != Some(*winner) {
-                        report_defeated(out, &r, &goal, &c, *winner);
+                        report_defeated(out, &r, &goal, &c, *winner, basis);
                         return Ok(Outcome::Gap);
                     }
                     // The winner is asserted; fall through and show it as
@@ -909,7 +935,7 @@ impl Session {
             d.root = Some(id);
         }
 
-        let mut certificate = reason_certificate(&d)?;
+        let mut certificate = reason_certificate(&d, &r.priority_order())?;
         self.mark_case_extensions(&mut certificate);
         // The tree is printed from the certificate, then that same certificate
         // is checked by both layers: the tree the user sees and the object
@@ -923,10 +949,12 @@ impl Session {
             (checked, kernel) => {
                 let mut failures = Vec::new();
                 if let Err(error) = checked {
+                    let error = escape_control(&error.to_string());
                     writeln!(out, "逻辑校验失败：{error}").ok();
                     failures.push(format!("逻辑层：{error}"));
                 }
                 if let Err(error) = kernel {
+                    let error = escape_control(&error.to_string());
                     writeln!(out, "内核证明失败：{error}").ok();
                     failures.push(format!("内核层：{error}"));
                 }
@@ -952,7 +980,10 @@ impl Session {
             .conflicts
             .iter()
             .filter(|conflict| {
-                matches!(conflict.resolution, std_deduce_cert::Resolution::Unresolved)
+                matches!(
+                    conflict.resolution,
+                    std_deduce_cert::Resolution::Unresolved { .. }
+                )
             })
             .count();
         if !certificate.open_obligations.is_empty() || unresolved > 0 {
@@ -981,13 +1012,14 @@ impl Session {
 
         writeln!(out, "推导已通过独立校验。").ok();
         report_conflicts(out, &certificate);
-        if let Some(other) = won_conflict {
+        if let Some((other, basis)) = won_conflict {
             writeln!(
                 out,
-                "注：与「{}」存在冲突，已按记录的裁决为本结论胜出（裁决依据与优先级来源未核验）。",
+                "注：与「{}」存在冲突，已按记录的裁决为本结论胜出。",
                 print_expr(&other)
             )
             .ok();
+            write_certificate_basis(out, &basis);
         }
         Ok(Outcome::Proved)
     }
@@ -1042,7 +1074,8 @@ impl Session {
             d.root = Some(id);
         }
 
-        let mut certificate = reason_certificate(&d)?.with_environment(self.identity()?);
+        let mut certificate =
+            reason_certificate(&d, &r.priority_order())?.with_environment(self.identity()?);
         self.mark_case_extensions(&mut certificate);
         let json = certificate
             .to_json_pretty()
@@ -1152,11 +1185,12 @@ impl Session {
         let report = match std_deduce_cert::check(&self.lib.env, &certificate) {
             Ok(report) => report,
             Err(e) => {
-                writeln!(out, "逻辑校验：失败（{e}）").ok();
+                let error = escape_control(&e.to_string());
+                writeln!(out, "逻辑校验：失败（{error}）").ok();
                 writeln!(out, "内核证明：未运行（逻辑校验失败）").ok();
                 writeln!(out, "侧条件：未评估（逻辑校验失败）").ok();
                 writeln!(out, "需人判断：未评估（逻辑校验失败）").ok();
-                return Err(format!("证书校验失败（逻辑层）：{e}"));
+                return Err(format!("证书校验失败（逻辑层）：{error}"));
             }
         };
         writeln!(
@@ -1172,10 +1206,11 @@ impl Session {
         let kernel = match std_deduce_cert::kernel_proof(&self.lib.env, &certificate) {
             Ok(kernel) => kernel,
             Err(e) => {
-                writeln!(out, "内核证明：失败（{e}）").ok();
+                let error = escape_control(&e.to_string());
+                writeln!(out, "内核证明：失败（{error}）").ok();
                 writeln!(out, "侧条件：未评估（内核证明失败）").ok();
                 writeln!(out, "需人判断：未评估（内核证明失败）").ok();
-                return Err(format!("证书校验失败（内核层）：{e}"));
+                return Err(format!("证书校验失败（内核层）：{error}"));
             }
         };
         writeln!(
@@ -1194,15 +1229,25 @@ impl Session {
             .conflicts
             .iter()
             .filter(|conflict| {
-                matches!(conflict.resolution, std_deduce_cert::Resolution::Unresolved)
+                matches!(
+                    conflict.resolution,
+                    std_deduce_cert::Resolution::Unresolved { .. }
+                )
             })
             .count();
         let requires_human = report.requires_human || unresolved > 0;
 
+        // The certificate records the priority edge behind every defeat it
+        // adjudicated; `check` compared each one with the environment. Report
+        // what was compared instead of leaving the reader to assume it.
+        let priority_text = if report.priority_edges_checked > 0 {
+            format!("优先关系已核验（{} 条边）", report.priority_edges_checked)
+        } else {
+            "没有记录优先关系".to_owned()
+        };
         writeln!(
             out,
-            "侧条件：unless 未发现已成立的阻断条件；未决冲突 {} 项；{}优先级来源未核验",
-            unresolved,
+            "侧条件：unless 未发现已成立的阻断条件；未决冲突 {unresolved} 项；{}{priority_text}",
             if report.conflict_resolved {
                 "根冲突已按记录裁决；"
             } else {
@@ -1210,6 +1255,10 @@ impl Session {
             }
         )
         .ok();
+        // A cycle in the environment disables the edges inside it. It is a
+        // property of the environment, not of this certificate, so it is a
+        // warning and never changes the exit code.
+        write_priority_cycle_warning(out, &Reasoner::new(&self.lib.env).priority_cycles());
         writeln!(
             out,
             "需人判断：{}",
@@ -1938,7 +1987,10 @@ fn record_case_extensions(
             DeclKind::Rule(_) => "rule",
             DeclKind::Contrary { .. } => "contrary",
             DeclKind::Unique { .. } => "unique",
-            DeclKind::Obj | DeclKind::Axiom | DeclKind::Interpretation(_) => continue,
+            DeclKind::Obj
+            | DeclKind::Axiom
+            | DeclKind::Interpretation(_)
+            | DeclKind::Priority { .. } => continue,
         };
         extensions.insert(name, label);
     }
@@ -2641,13 +2693,20 @@ fn obligation_kind_label(kind: ObligationKind) -> &'static str {
     }
 }
 
-fn report_unresolved(out: &mut impl Write, r: &Reasoner, goal: &Expr, c: &Conflict) {
+fn report_unresolved(
+    out: &mut impl Write,
+    r: &Reasoner,
+    goal: &Expr,
+    c: &Conflict,
+    reason: &std_deduce_reason::UnresolvedReason,
+) {
     writeln!(out, "冲突未决：{}", print_expr(goal)).ok();
     writeln!(
         out,
         "  该结论没有进入事实库——系统不替你选，但也绝不悄悄丢掉它。"
     )
     .ok();
+    write_unresolved_reason(out, &r.priority_order(), reason);
     writeln!(
         out,
         "  左：{}  ← {}",
@@ -2668,7 +2727,202 @@ fn report_unresolved(out: &mut impl Write, r: &Reasoner, goal: &Expr, c: &Confli
     }
 }
 
-fn report_defeated(out: &mut impl Write, r: &Reasoner, goal: &Expr, c: &Conflict, winner: Side) {
+/// Print why a conflict has no winner.
+///
+/// The reason is part of the derivation, not a diagnostic: "no priority was
+/// declared" and "priorities were declared but do not decide" call for
+/// different work. An unusable priority lists every declared edge, because
+/// that list is the audit trail the reader has to inspect.
+fn write_unresolved_reason(
+    out: &mut impl Write,
+    order: &std_deduce_reason::PriorityOrder,
+    reason: &std_deduce_reason::UnresolvedReason,
+) {
+    use std_deduce_reason::UnresolvedReason;
+    match reason {
+        UnresolvedReason::NoPriority => {
+            writeln!(out, "  原因：两侧规则之间没有声明任何优先关系").ok();
+        }
+        UnresolvedReason::PriorityUnusable { declared } => {
+            let in_cycle = declared
+                .iter()
+                .filter(|edge| order.same_cycle(&edge.winner, &edge.loser))
+                .count();
+            let cycle_note = if in_cycle > 0 {
+                format!("（其中 {in_cycle} 条落在优先级环内）")
+            } else {
+                String::new()
+            };
+            writeln!(
+                out,
+                "  原因：已声明 {} 条优先关系，但不足以裁决{cycle_note}",
+                declared.len()
+            )
+            .ok();
+            writeln!(out, "    已声明：").ok();
+            for edge in declared {
+                writeln!(out, "      {}", declared_edge_line(edge)).ok();
+            }
+        }
+        UnresolvedReason::UnknownWitnesses => {
+            writeln!(out, "  原因：某侧的规则见证已无法重建").ok();
+        }
+        UnresolvedReason::ConflictingAssumptions => {
+            writeln!(out, "  原因：两侧都是已知事实，事实之间没有先后").ok();
+        }
+    }
+}
+
+/// One declared priority edge as `:why` lists it under `已声明：`.
+///
+/// A top-level `priority` is claimed by a namespace; a rule-internal clause is
+/// claimed by the rule that carries it.
+fn declared_edge_line(edge: &std_deduce_reason::PriorityEdge) -> String {
+    match &edge.origin {
+        std_deduce_reason::PriorityOrigin::Declaration {
+            declared_in,
+            sources,
+        } => format!(
+            "{declared_in}：priority {} over {}（出处：{}）",
+            edge.winner,
+            edge.loser,
+            reason_sources_text(sources)
+        ),
+        std_deduce_reason::PriorityOrigin::RuleClause {
+            rule,
+            clause,
+            sources,
+        } => reason_clause_line(rule, *clause, sources),
+    }
+}
+
+/// One priority edge as the stated basis of a defeat.
+fn reason_basis_edge_line(edge: &std_deduce_reason::PriorityEdge) -> String {
+    match &edge.origin {
+        std_deduce_reason::PriorityOrigin::Declaration {
+            declared_in,
+            sources,
+        } => format!(
+            "{declared_in} 的 priority {} over {}（出处：{}）",
+            edge.winner,
+            edge.loser,
+            reason_sources_text(sources)
+        ),
+        std_deduce_reason::PriorityOrigin::RuleClause {
+            rule,
+            clause,
+            sources,
+        } => reason_clause_line(rule, *clause, sources),
+    }
+}
+
+/// A rule-internal `defeated_by` / `prefer` clause as one line.
+fn reason_clause_line(
+    rule: &Name,
+    clause: std_deduce_reason::PriorityClause,
+    sources: &[SourceRef],
+) -> String {
+    let clause = match clause {
+        std_deduce_reason::PriorityClause::Prefer => "prefer",
+        std_deduce_reason::PriorityClause::DefeatedBy => "defeated_by",
+    };
+    format!(
+        "规则 {rule} 的 {clause} 子句（出处：{}）",
+        reason_sources_text(sources)
+    )
+}
+
+/// The provenance of a reasoner-side priority edge as `text locator`, joining
+/// several sources with `、`. Every field is escaped: source text is data.
+fn reason_sources_text(sources: &[SourceRef]) -> String {
+    sources
+        .iter()
+        .map(|source| citation_text(&source.text, &source.locator))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+/// `text locator`, with both fields escaped.
+fn citation_text(text: &str, locator: &str) -> String {
+    format!("{} {}", escape_control(text), escape_control(locator))
+}
+
+/// Print the `  依据：...` lines of a defeat the reasoner recorded.
+fn write_reason_basis(out: &mut impl Write, basis: &std_deduce_reason::ResolutionBasis) {
+    match basis {
+        std_deduce_reason::ResolutionBasis::Assumption => {
+            writeln!(out, "  依据：已知事实优先于可废止结论。").ok();
+        }
+        std_deduce_reason::ResolutionBasis::Priority { edges } => {
+            for edge in edges {
+                writeln!(out, "  依据：{}", reason_basis_edge_line(edge)).ok();
+            }
+        }
+    }
+}
+
+/// Print the `  依据：...` lines of a defeat the certificate records.
+fn write_certificate_basis(out: &mut impl Write, basis: &ResolutionBasis) {
+    match basis {
+        ResolutionBasis::Assumption => {
+            writeln!(out, "  依据：已知事实优先于可废止结论。").ok();
+        }
+        ResolutionBasis::Priority { edges } => {
+            for edge in edges {
+                writeln!(out, "  依据：{}", certificate_edge_line(edge)).ok();
+            }
+        }
+    }
+}
+
+/// One certificate-side priority edge as the stated basis of a defeat.
+fn certificate_edge_line(edge: &PriorityEdge) -> String {
+    match &edge.origin {
+        PriorityOrigin::PriorityDeclaration {
+            declared_in,
+            sources,
+        } => format!(
+            "{declared_in} 的 priority {} over {}（出处：{}）",
+            edge.winner,
+            edge.loser,
+            certificate_sources_text(sources)
+        ),
+        PriorityOrigin::RuleClause {
+            declaring_rule,
+            clause,
+            rule_sources,
+        } => {
+            let clause = match clause {
+                PriorityClause::Prefer => "prefer",
+                PriorityClause::DefeatedBy => "defeated_by",
+            };
+            format!(
+                "规则 {declaring_rule} 的 {clause} 子句（出处：{}）",
+                certificate_sources_text(rule_sources)
+            )
+        }
+    }
+}
+
+/// The provenance of a certificate-side priority edge as `text locator`,
+/// joining several sources with `、`. Every field is escaped: a hand-edited
+/// certificate is untrusted input.
+fn certificate_sources_text(sources: &[Source]) -> String {
+    sources
+        .iter()
+        .map(|source| citation_text(&source.text, &source.locator))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+fn report_defeated(
+    out: &mut impl Write,
+    r: &Reasoner,
+    goal: &Expr,
+    c: &Conflict,
+    winner: Side,
+    basis: &std_deduce_reason::ResolutionBasis,
+) {
     let (win, win_by) = match winner {
         Side::Left => (&c.left, &c.left_by),
         Side::Right => (&c.right, &c.right_by),
@@ -2688,6 +2942,7 @@ fn report_defeated(out: &mut impl Write, r: &Reasoner, goal: &Expr, c: &Conflict
         describe(win_by)
     )
     .ok();
+    write_reason_basis(out, basis);
     writeln!(out, "── 胜出方推导：{} ──", print_expr(win)).ok();
     show_derivation(out, r, win);
     writeln!(out, "── 被否决方推导：{} ──", print_expr(goal)).ok();
@@ -2699,7 +2954,7 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
         writeln!(out, "  （推导无法重建：它的前提本身已不在事实库）").ok();
         return;
     };
-    let certificate = match reason_certificate(&d) {
+    let certificate = match reason_certificate(&d, &r.priority_order()) {
         Ok(certificate) => certificate,
         Err(error) => {
             writeln!(out, "  （该推导未能生成证书：{error}）").ok();
@@ -2721,7 +2976,12 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
             writeln!(out, "  （该推导未通过证书逻辑校验：根未被证明）").ok();
         }
         Err(error) => {
-            writeln!(out, "  （该推导未通过证书逻辑校验：{error}）").ok();
+            writeln!(
+                out,
+                "  （该推导未通过证书逻辑校验：{}）",
+                escape_control(&error.to_string())
+            )
+            .ok();
         }
     }
 }
@@ -2730,7 +2990,7 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
 fn report_conflicts(out: &mut impl Write, certificate: &Certificate) {
     for conflict in &certificate.conflicts {
         let how = match conflict.resolution {
-            std_deduce_cert::Resolution::Unresolved => "未决",
+            std_deduce_cert::Resolution::Unresolved { .. } => "未决",
             std_deduce_cert::Resolution::Defeated { .. } => "已裁决",
         };
         writeln!(
@@ -2743,7 +3003,36 @@ fn report_conflicts(out: &mut impl Write, certificate: &Certificate) {
     }
 }
 
-/// The defeated competitor of a conflict the queried proposition won.
+/// Warn once when the environment's declared priorities contain a cycle.
+///
+/// An edge inside a strongly connected component can never decide a conflict,
+/// so a result that says "no usable priority" must not look like "nothing was
+/// declared". The warning never changes the exit code: the cycle is a property
+/// of the environment, not of the query or of one certificate.
+fn write_priority_cycle_warning(out: &mut impl Write, cycles: &[Vec<Name>]) {
+    if cycles.is_empty() {
+        return;
+    }
+    let rendered = cycles
+        .iter()
+        .map(|cycle| {
+            cycle
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("、")
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    writeln!(
+        out,
+        "注意：当前环境的优先级声明存在环：{rendered}；环内的优先关系不生效。"
+    )
+    .ok();
+}
+
+/// The defeated competitor of a conflict the queried proposition won, together
+/// with the basis the certificate records for that win.
 ///
 /// The proposition is matched with kernel definitional equality, not by
 /// comparing printed strings.
@@ -2751,7 +3040,7 @@ fn won_conflict_note(
     env: &Env,
     goal: &Expr,
     certificate: &Certificate,
-) -> Result<Option<Expr>, String> {
+) -> Result<Option<(Expr, ResolutionBasis)>, String> {
     for conflict in &certificate.conflicts {
         let left = Expr::from(&conflict.left);
         let right = Expr::from(&conflict.right);
@@ -2766,7 +3055,7 @@ fn won_conflict_note(
         } else {
             None
         };
-        let (Some(side), std_deduce_cert::Resolution::Defeated { winner }) =
+        let (Some(side), std_deduce_cert::Resolution::Defeated { winner, basis }) =
             (side, &conflict.resolution)
         else {
             continue;
@@ -2778,7 +3067,7 @@ fn won_conflict_note(
             std_deduce_cert::Side::Left => &conflict.right,
             std_deduce_cert::Side::Right => &conflict.left,
         };
-        return Ok(Some(Expr::from(other)));
+        return Ok(Some((Expr::from(other), basis.clone())));
     }
     Ok(None)
 }

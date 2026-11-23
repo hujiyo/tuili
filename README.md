@@ -20,7 +20,8 @@
 1. **没有否定即失败。** 规则只在**前提被推出**时触发，绝不在"推不出相反结论"时触发。
    `unless P` 只在 `P` **被推出**时阻断规则。这一点若搞错，"因未查证而驳回"就会变成一条定理。
 2. **冲突不许被悄悄吞掉。** 两条规则得出相反结论时，系统报"冲突 / 未决"，而不是随便挑一条。
-   矛盾由 `contrary` / `unique` 显式声明，裁决只认 `defeated_by` / `prefer`；没有优先级时两条结论都不进事实库，
+   矛盾由 `contrary` / `unique` 显式声明，裁决只认规则内 `defeated_by` / `prefer` 或带出处的顶层
+   `priority … over …`；没有可用优先级时两条结论都不进事实库，
    但两条推导都会打印出来，查询以非零退出码结束。
 3. **没有 `sorry`。** 推不出的目标生成一个**缺口节点**，列出候选规则和缺哪些前提。洞是显示的，不是关掉的。
 4. **出处是第一等公民。** 每条规则、每个事实都带着 `source` 字段（文本 / 条号 / 版本 / 引文 / 链接 / 管辖 / 抓取时间 / 哈希 / 备注），推导树的每个节点都打印它来自哪一条。
@@ -54,14 +55,18 @@ unique 应适用 1           -- 一个谓词的第 1 个参数单值：同一案
 | 情形 | 裁决 |
 |---|---|
 | 一侧是已知事实（`axiom` / `:given`） | 事实胜出，规则结论不进事实库 |
-| 两侧都是规则，且一侧被另一侧 `defeated_by` / `prefer` | 胜出方进事实库，被否决方不进 |
-| 两侧都是规则，没有优先级 | **未决**，两条结论都不进事实库 |
+| 两侧都是规则，且一条带出处的优先声明让一侧覆盖另一侧 | 胜出方进事实库，被否决方不进 |
+| 两侧都是规则，声明的优先关系不足以裁决（没有、覆盖不全、双向覆盖或落在环内） | **未决**，两条结论都不进事实库，并报告原因 |
 
-三种结局都不静默：`:why` 在未决时打印两条推导，在已裁决时打印胜出方与被否决方；
-两种情况都以非零退出码结束。缺口是第四种结局，跟冲突分开报告。
+三种结局都不静默：`:why` 在未决时打印原因（没有声明、声明了但不足以裁决时逐条列出这些声明与出处），
+在已裁决时打印胜出方、被否决方以及裁决依据（哪条边、谁声明、出处是什么）；未决、或查询落在败方时
+以非零退出码结束；查询落在胜方时正常成功，并打印“依据”行。缺口是第四种结局，跟冲突分开报告。
 
-优先级是局部的：`defeated_by X` 表示 X 胜过本规则，`prefer X` 表示本规则胜过 X；
-它只在两条规则确实冲突时起作用，不改变无关规则的推导。
+优先级有两种写法，方向都由声明本身给出：规则内的 `defeated_by X` 表示 X 胜过本规则，
+`prefer X` 表示本规则胜过 X；它们只能用于同一包内的规则。跨包时用顶层
+`priority <胜者> over <败者> source …` 声明，声明者（`declared_in`）与出处一起进入证书。
+优先级只在两条规则确实冲突时起作用，不改变无关规则的推导；它不传递：`A over B` 与 `B over C`
+推不出 `A over C`。细节见「跨包冲突与优先级出处」。
 
 ## 快速开始
 
@@ -109,10 +114,10 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 | `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则 |
 | `:inspect` | 打印声明台账（含出处与全部来源字段）；`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`、类型不是包内 `sort` 的 `obj`、类型不是命题（`Prop`/`Type`/函数类型）或引用案件扩展的 `axiom` 标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
 | `:given <命题>` | 手工登记一条已知事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示 |
-| `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导。证书若应用了案件本地规则，会在未决义务汇总前打印 `  本地扩展：…`，按未决义务退出 `1`，不打印 `推导已通过独立校验。` |
-| `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告 |
+| `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导，并说明原因（没有声明、声明了但不足以裁决时逐条列出声明与出处、见证无法重建、两侧都是已知事实）；已裁决时打印胜出方、被否决方与裁决依据（哪条边、谁声明、出处）。当前环境有优先级环时先打印一行环警告。证书若应用了案件本地规则，会在未决义务汇总前打印 `  本地扩展：…`，按未决义务退出 `1`，不打印 `推导已通过独立校验。` |
+| `:gap <命题>` | 说明为什么推不出，列出缺口；冲突与缺口分开报告；有优先级环时同样先打印环警告 |
 | `:cert <命题>` | 先跑推理，再用当前环境身份（规范 profile 名、`--as-of`/`--jurisdiction` 记录的法律基准日与管辖代码、包名/版本/锁哈希/信任级别、链接语料文件的哈希；未给两个选项时为显式 `null`）盖章，最后把证书 JSON（缩进）写到 stdout。这两个字段只记录、不参与推理。必须先 `:load`。推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations`；身份构建或序列化失败时不写任何 JSON：非交互入口（命令行参数）把错误写到 stderr，交互 REPL 沿用命令错误写 stdout 的既有约定。封闭环境里应用了案件本地规则时，`open_obligations` 追加 `local-extension` 项；退出码仍只按根是否可达决定（根可达时为 `0`） |
-| `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 v3 JSON：先把证书环境身份与当前环境逐项比较（profile、`as_of`、管辖精确相等，包按名字集合、语料按 `(law, version)` 集合比较；差异逐条打印并转义），不一致或身份缺失时退出 `2`，两层证明检查都不运行。生成证书时用了 `--as-of`/`--jurisdiction`，校验时必须带同一组值；不带就等于记 `null`，会按差异拒绝。环境校验通过后，若证书记录了低于 `official` 的包，再追加一行 `  注意：证书记录了非官方包：…；结论依赖这些包的定义`（只提示，不改退出码与后面的四行结果）。一致后才跑 `cert::check` 与 `kernel_proof`，两段分开报告。必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标。证书带 `local-extension` 时，在四行检查后打印 `  本地扩展：…`，按未决义务退出 `1` |
+| `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 v4 JSON：先把证书环境身份与当前环境逐项比较（profile、`as_of`、管辖精确相等，包按名字集合、语料按 `(law, version)` 集合比较；差异逐条打印并转义），不一致或身份缺失时退出 `2`，两层证明检查都不运行。生成证书时用了 `--as-of`/`--jurisdiction`，校验时必须带同一组值；不带就等于记 `null`，会按差异拒绝。环境校验通过后，若证书记录了低于 `official` 的包，再追加一行 `  注意：证书记录了非官方包：…；结论依赖这些包的定义`（只提示，不改退出码与后面的四行结果）。一致后才跑 `cert::check` 与 `kernel_proof`，两段分开报告；`cert::check` 同时逐字段复核每条冲突裁决的优先边与出处，侧条件行据此报告 `优先关系已核验（n 条边）` 或 `没有记录优先关系`。当前环境的优先级声明有环时，侧条件行后追加一行环警告（不改退出码）。必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标。证书带 `local-extension` 时，在四行检查后打印 `  本地扩展：…`，按未决义务退出 `1` |
 | `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、信任标签、带 `  说明：` 前缀的描述与文件数；`maintainers` 非空时打印维护者，`audit_status = "reviewed"` 时打印审核人与日期；`official` 声明必须先用目录里的 `official.toml` 与 `std.lock` 核对名称、版本和锁哈希，通过才显示 `official（本项目审核）` 与 `  白名单：通过（official.toml）`，否则显示 `official（未通过白名单核对）`、打印 `路径: error: ...` 并退出 `2`（锁校验失败时只打印锁的错误行、不打印逐包白名单错误行，细节见「信任标签与官方白名单」）；清单声明 `corpus` 时再读取链接的条级语料并打印覆盖计数与本体缺口；若目录里有 `std.lock`，再重新哈希并校验；不导入规则，不要求 `:load`。校验清单、链接语料、锁与官方白名单，不检查 namespace 唯一性，也不保证包可导入——这些由 `:load` 检查 |
 | `:lock [目录]` | 对目录（默认 `lawpacks`）里的所有包计算内容哈希，写入 `<目录>/std.lock`；坏包/坏文件/重复包名时打印错误并退出 `2`，不写部分锁 |
 | `:audit [目录]` | 只核对已加载理论里 `quote` 非空的 `source`：法名匹配语料标题/别名，版本、条号、引文（删除全部空白后逐字比较）、条文哈希（条文原文含换行的 SHA-256）与管辖逐项检查；`quote` 为空的来源不参与核对，单独计数且不影响退出码。默认语料目录 `law/corpus`，按 `<law>/<version>.json` 严格布局。至少一条带引文来源且全部命中才退出 `0`；一条带引文来源都没有时报“没有可核对的引文”并退出 `1`；坏语料退出 `2` |
@@ -126,7 +131,7 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
 cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load examples/constitution-39.std' ':verify-cert cert.json'
 ```
 
-证书 v3 的顶层字段顺序固定为 `format_version`、`environment`、`assumptions`、
+证书 v4 的顶层字段顺序固定为 `format_version`、`environment`、`assumptions`、
 `nodes`、`root`、`conflicts`、`open_obligations`、`metadata`，其中 `environment`
 必填，序列化为内联对象。下面是字段布局的**节选**：`assumptions`/`nodes`/`conflicts`/
 `open_obligations` 按空数组示意，`hash`/`file_sha256` 的省略号处是 64 位小写十六进制；
@@ -134,7 +139,7 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
 
 ```json
 {
-  "format_version": 3,
+  "format_version": 4,
   "environment": {
     "profile": "cn.default",
     "packs": [
@@ -178,7 +183,9 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
 `official.toml` 白名单与锁哈希核对，非官方包按清单记录。`hash` 是锁里的包内容哈希，
 `file_sha256` 是语料文件原始字节（CRLF 归一化为 LF）的 SHA-256，和语料里的
 `text_sha256`（整本官方文本的抓取出处元数据，不重算、不校验）不是一回事。
-版本 2 与版本 1 证书都被拒绝（`unsupported certificate format version 2` 等），
+`conflicts` 非空时每条记录都带 `resolution`：已裁决记录写胜方与裁决依据（已知事实或优先边
+及其声明者、出处），未决记录写原因；形状与检查范围见「跨包冲突与优先级出处」。
+版本 3、2、1 证书都被拒绝（`unsupported certificate format version 3` 等），
 必须按当前理论重新生成；推理器内部生成的 `Unrecorded` 证书没有环境身份，不能导出。
 
 非交互模式（命令行参数）的退出码如下：
@@ -397,7 +404,7 @@ cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
 失败时批处理入口退出 `1`，显式 `:load` 退出 `2`；诊断仍以 `path: error: ...`（或带行列号的
 `path:line:col: error: ...`）开头，包解析错误含包名与相关路径。默认环境的 profile、锁、版本、
 信任或包错误同样让本次加载失败；`std-deduce env` 的环境错误单独以 `2` 退出。`:packs` / `:lock`
-不参与这条加载路径；`--packs`、远程 registry、`std build/update` 仍未实现。证书 v3 记录
+不参与这条加载路径；`--packs`、远程 registry、`std build/update` 仍未实现。证书 v4 记录
 profile、包版本/锁哈希/信任级别与链接语料文件的哈希；这些是导出时点的身份，不是持续校验。
 
 ### 信任标签与官方白名单
@@ -576,6 +583,101 @@ cargo run -q -p std-deduce-cli -- --closed-env --allow-case-rules examples/宪�
 cargo run -q -p std-deduce-cli -- --closed-env examples/宪法案例-齐玉苓.std ':why cn.constitution.受教育权 齐玉苓'
 ```
 
+### 跨包冲突与优先级出处
+
+两条规则分属不同的法律包时，优先关系是一条**规范判断**，不能由任何一方私自附加：
+规则内的 `defeated_by` / `prefer` 只用于同一包内，跨包必须写成模块里的顶层声明。
+
+```text
+import pkg.general
+import pkg.special
+
+namespace pkg.order
+
+priority pkg.special.适用特别法 over pkg.general.适用一般法
+  source text "中华人民共和国立法法" locator "第九十二条" version "2023"
+```
+
+加载期检查：
+
+- 只能写在带 `namespace` 的法律包里；案件文件不能声明顶层优先级。要裁决跨包冲突，
+  写一个只负责“适用规则”的包，由案件 `import` 它。
+- 声明必须至少有一条非空白出处（`text` 与 `locator`）；没有出处的裁决不能被当作已证明。
+- 声明目标所在包必须被本文件 `import`，否则加载失败并提示先 `import` 目标包；
+  目标不是规则、指向自己、同一包同一方向重复声明都在加载期报错。
+- 规则内子句若指向另一个包的规则，加载期报错并提示“跨包优先关系必须用顶层
+  `priority … over …` 声明并写明 source”。
+
+裁决语义（`crates/reason`）：
+
+- 只按**直接声明且不在优先级环内**的边裁决；每个胜方规则都必须覆盖每个败方规则，
+  反向覆盖则不判为胜出。不做传递闭包，也不按名字、位阶或加载顺序猜测。
+- 没有声明、覆盖不足、双方互斥（互相覆盖）、或边落在优先级环内 → 未决，并记录原因：
+  `no_priority`、`priority_unusable`（附全部已声明边）、`unknown_witnesses`、
+  `conflicting_assumptions`。`:why` 打印这些原因；`priority_unusable` 时逐条列出已声明边及其出处。
+- 环用强连通分量（SCC）判定，环内的优先关系不生效。当前环境存在环时，`:why` / `:gap`
+  在结果前打印一行 `注意：当前环境的优先级声明存在环：…；环内的优先关系不生效。`，
+  `:verify-cert` 在侧条件行后打印同一行；警告不改变退出码。
+
+证书 v4 与校验：
+
+- `conflicts[]` 的每条记录都带 `resolution`，形状如下：
+
+| `resolution` | 字段 |
+|---|---|
+| `kind = "defeated"` + `basis.kind = "assumption"` | `winner`：`left` / `right` |
+| `kind = "defeated"` + `basis.kind = "priority"` | `winner`；`basis.edges[]`，每条边有 `winner`、`loser`、`origin`。`origin.kind = "priority_declaration"` 带 `declared_in` 与 `sources`；`origin.kind = "rule_clause"` 带 `declaring_rule`、`clause`（`prefer` / `defeated_by`）与 `rule_sources` |
+| `kind = "unresolved"` | `reason.kind`：`no_priority`、`priority_unusable`（带 `declared[]`，边形状同上）、`unknown_witnesses`、`conflicting_assumptions` |
+
+一条带出处裁决的实际记录（节选自 `conflicts[]` 的 `resolution`）：
+
+```json
+{
+  "kind": "defeated",
+  "winner": "right",
+  "basis": {
+    "kind": "priority",
+    "edges": [
+      {
+        "winner": "pkg.special.适用特别法",
+        "loser": "pkg.general.适用一般法",
+        "origin": {
+          "kind": "priority_declaration",
+          "declared_in": "pkg.order",
+          "sources": [
+            {
+              "text": "中华人民共和国立法法",
+              "locator": "第九十二条",
+              "version": "2023",
+              "effective": null,
+              "note": "",
+              "quote": "",
+              "url": "",
+              "jurisdiction": "",
+              "retrieved_at": "",
+              "hash": ""
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+- `:verify-cert` 逐字段复核每条已裁决记录：边必须在环境里存在、方向正确、声明者/子句与出处
+  逐字段一致，且不能落在环内；胜方对败方的覆盖按环境重算。未决记录声明的边集合也必须与环境
+  一致。成功时侧条件行报告 `优先关系已核验（n 条边）`；证书没有记录任何优先关系时打印
+  `没有记录优先关系`。
+- 不检查的部分：不重跑推理器（不重新搜索推导或裁决），不检查证书没有记录的其他冲突，
+  不判断引文在真实法上的效力——出处是否足以支持这条优先关系仍要人判断。证书里的 `left_by` /
+  `right_by` 与 `Assumption` 标记由生成证书的一方记录；校验器核对规则存在、同侧不重复、
+  结论头与冲突命题相容、假设命题确在假设表，但不重推规则实例。优先关系的出处和规则出处一样
+  进入 `:audit`；只有带 `quote` 的来源才逐字比对。
+
+边界：`contrary` / `unique` 的来源仍未强制（它们不是事实断言，来源核验留给审计层）；
+规则的 `territory` / `effective` 仍只是元数据，不参与优先级裁决（时空守卫留给 M2-20）。
+
 ## 条级语料与 `:audit`
 
 语料是仓库内的静态 JSON，按 `law/corpus/<law-id>/<version>.json` 存放（整本 txt 仍保留在 `law/`）：
@@ -674,7 +776,7 @@ cargo run -q -p std-deduce-cli -- --closed-env examples/宪法案例-齐玉苓.s
 
 核对边界：`:audit` 只证明"引文与仓库语料中的条文一致"，不证明规则忠实于条文、不判断条文是否适用于
 具体案件、也不判断法律结论正确。语料是仓库内的静态文件，没有爬取或版本历史；`:audit` 不读取
-`lawpacks/` 或锁。`:audit` 的条文正文哈希不进入证书；证书 v3 的环境身份记录的是语料**文件**
+`lawpacks/` 或锁。`:audit` 的条文正文哈希不进入证书；证书 v4 的环境身份记录的是语料**文件**
 （原始字节，CRLF→LF）的 SHA-256。仓库里多数 `examples/` 的 `source` 仍没有 `quote`，
 对它们运行 `:audit` 会逐条显示无引文，并因“没有可核对的引文”退出 `1`；
 `examples/宪法第三十九条-导入包.std` 通过官方包引入带引文的规则，可以直接审计。
@@ -875,13 +977,13 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   无法编码成证书表达式的项会报错，不会丢弃。
 - **`crates/cert`**：证书的数据模型、JSON 序列化、从证书渲染推导树的 `render`、逻辑检查器 `check`
   与内核证明项构造 `kernel_proof`（版本化格式，反序列化拒绝未知版本与未知字段）。
-  当前格式版本为 3，`format_version` 之后是必填的 `environment` 内联对象：规范 profile 名、
+  当前格式版本为 4，`format_version` 之后是必填的 `environment` 内联对象：规范 profile 名、
   按名字排序的包（版本、锁哈希、信任级别）、按 `(law, version)` 排序的语料文件哈希，以及
   显式的 `as_of` / 管辖（来自 CLI 的 `--as-of` / `--jurisdiction`，未给时为 `null`）。
   `profile`/`as_of`/`jurisdiction` 的键存在但值可为
   `null`，缺键报 `missing field`；证书记录的环境身份在反序列化时校验（重复包名/语料键、空名、
-  非法哈希或信任级别、坏日期或管辖都拒绝）。v2 与 v1 证书都按版本拒绝
-  （`unsupported certificate format version 2`、`... version 1`），不按缺字段猜测，
+  非法哈希或信任级别、坏日期或管辖都拒绝）。v3、v2 与 v1 证书都按版本拒绝
+  （`unsupported certificate format version 3`、`... version 2`、`... version 1`），不按缺字段猜测，
   需要按当前理论重新生成。推理器生成的证书环境为 `Unrecorded`，序列化直接报错；
   只有 CLI 在 `:cert` 导出前盖章。
   `render` 只读证书：从根递归打印；没有根时打印没有被其他规则步骤当作前提的节点和全部缺口，
@@ -894,8 +996,11 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   把打开的结论作为**结论模式**加入闭包；模式可以带规则参数变量，并沿可静态求值规则的前提（整体或
   嵌套子项）传播到不动点。blocker 与事实用内核 `convertible` 比较，与模式先做一阶合一、再把实例交给
   `convertible`；alpha/eta 和“绑定变量与同名常量”都不会因打印形式相同而混淆。
-  它只依赖 `crates/kernel`，**不依赖 `crates/reason`**；已记录的冲突与裁决会被读取，但
-  `defeated_by` / `prefer` 的优先级来源不在这里核验（`priority_sources_checked = false`）。
+  它只依赖 `crates/kernel`，**不依赖 `crates/reason`**；已记录的冲突与裁决会被读取，且每条记录
+  都按环境复核：已裁决的优先边必须真实存在、方向正确、声明者/子句与出处逐字段一致、不在优先级环内，
+  胜方覆盖按环境重算；未决记录声明的边集合与环境一致，原因与两侧见证相符。任一记录不符即整份证书失败。
+  `CheckReport.priority_sources_checked` 在这轮复核通过时为 `true`（没有优先裁决记录时也是 `true`），
+  `priority_edges_checked` 给出实际比较过的边数。
 - **`crates/lawpack`**：法律包清单、官方发行白名单、目录扫描、`std.lock`、内容哈希、默认环境 profile 与条级语料。清单记录
   `name`、`version`、`jurisdiction`、`territory`、`namespace`、`trust`、`maintainers`、`audit_status`、
   `audited_by`、`audited_at`、生效范围、描述、可选 `corpus` 链接和文件列表；只校验 **格式**
@@ -985,10 +1090,19 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   含 `:` 等问题只在 `:load` / 包加载器里报错。链接语料在包外，**不进入 `std.lock` 的包哈希**；
   “锁定校验：通过”只覆盖包目录，覆盖计数是语料里的声明。锁校验是**校验时点**的语义，不是已解决的
   TOCTOU：校验返回后文件再变化，不会被本次加载重新发现；需要更强保证时重新 `:lock` 并重启会话。
-- `cert::check` 只检查根命题是否处于未决冲突或败方；非根冲突不在这里裁决，
-  `defeated_by` / `prefer` 的优先级来源也未核验（`priority_sources_checked = false`）。
+- `cert::check` 复核每条冲突记录的裁决：冲突两侧须是命题；规则见证必须存在于环境、同一侧不重复、
+  结论头与冲突命题相容；`Assumption` 侧的命题必须在证书的假设表中。已裁决的优先边必须与环境中的
+  声明逐字段一致、方向正确、不在环内，且胜方完整覆盖败方；未决记录声明的边集合必须与环境一致，
+  原因必须与两侧见证相符，空 `declared` 的 `priority_unusable` 被拒（应记 `no_priority`），
+  一侧是已知事实时不能记 `unknown_witnesses`。
+  非根冲突同样复核，伪造的记录会让整份证书失败。它不做裁决，只回答“这条记录与环境一致吗”；
+  裁决与原因由推理器产生。侧条件行报告比较过的边数：`优先关系已核验（n 条边）`，
+  没有记录优先关系时打印 `没有记录优先关系`。
   `:cert` 把缺口写成 `MissingPremise`、把未决冲突写成 `UnresolvedConflict` 的
   `open_obligations`；它们只设置 `requires_human`，不会让逻辑校验失败。
+- 当前环境的优先级声明有环时，`:why` / `:gap` 在结果前、`:verify-cert` 在侧条件行后打印
+  `注意：当前环境的优先级声明存在环：…；环内的优先关系不生效。`。环用强连通分量判定，
+  多个环用 `；` 连接；这只是一条警告，不改变任何退出码，也不改变证书本身。
 - `cert::check` 的 blocker 检查是**保守过近似**：闭包忽略 `unless`、冲突和优先级，可能比 reasoner
   推出更多，因此可能拒绝一份合法证书；它不会放行省略的 blocker。结论模式减少了“同谓词名就误杀”
   的问题，但仍不精确：不可静态求值的规则按最一般结论模式处理，不利用其前提约束；高阶应用或绑定
@@ -1007,7 +1121,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 - `:verify-cert` 的环境校验通过后，若证书记录了低于 `official` 的包，会打印一行
   `注意：证书记录了非官方包：a@1.0.0（community）、…；结论依赖这些包的定义`。这一行只说明
   结论依赖了未经本项目审计的定义，不改变退出码，也不改变逻辑、内核、侧条件、需人判断四行结果。
-- 证书 v3 的环境身份是**导出时点**的快照：profile、包版本/锁哈希/信任级别、链接语料的文件哈希与
+- 证书 v4 的环境身份是**导出时点**的快照：profile、包版本/锁哈希/信任级别、链接语料的文件哈希与
   可选的 `as_of` / 管辖。`:verify-cert` 在两层证明检查之前逐项比较这份身份与当前环境，任一差异都
   退出 `2`。语料不在 `std.lock` 里，所以改一个语料文件不会让锁失效，但会让证书的环境校验失败。
   `--as-of` 与 `--jurisdiction` 只把值记录进身份：它们不参与推理，也不影响环境加载；生成证书时
@@ -1028,7 +1142,10 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 
 - **否定没有作为连接词。** `¬P` 仍由"另立一个互补谓词 + `contrary` 声明"表达。要给系统一个真正的否定算子，需要先决定：它是经典的、直觉主义的，还是"有理由的否定"（如缺省逻辑）。对法律而言最后一种更合理。
 - **规则匹配是链前的**：前提按书写顺序依次匹配已推出的事实。这够用，但对多前提交叉约束的规则（例如"同一行为在两个条款下"）需要更强的合一。
-- **优先级只有 `defeated_by` / `prefer`，且作用在规则名上。** 它们只在冲突时参与裁决。真实法体系里还有"特别法优于一般法""上位法优于下位法"：可以写成带出处的规则间优先级，但尚未区分到规则实例级，也没有处理优先级环。
+- **优先级作用在规则名上，不区分规则实例。** 规则内 `defeated_by` / `prefer` 只用于同包；
+  跨包用带出处的顶层 `priority … over …`，环用强连通分量排除，但优先级仍不传递，也不表达
+  “特别法优于一般法”“上位法优于下位法”这类位阶规则的实例级例外（例如同一部法律在不同地域
+  或不同时间的不同版本谁优先）。
 - **时间和地域不是一等公民。** `source` 里有 `effective` / `jurisdiction` / `retrieved_at` 字段，
   证书环境身份也能记录 `--as-of` / `--jurisdiction`，但它们都只是记录：查询还没有"在 T 时刻""在 X 地"
   这样的参数，推理器也不按基准日或管辖筛选规则，不检查案件发生地或时间。事实本身没有发生时间、发生地点。
@@ -1057,9 +1174,10 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 已成立。除「参数未被任何前提约束」外，其余四条各有用例。它不构造证明项、不读取证书，
 也不处理环境的 blocker 闭包与根冲突状态；这些属于 `crates/cert` 的校验路径。
 
-非根冲突的裁决与优先级来源不在 `verify`（也不在 `cert::check`）的范围内：
-校验器只回答“这一步是不是该规则的合法实例”，它不判断两条结论谁优先。
-冲突的裁决与报告由推理器负责，且冲突分支展示的两条推导各自从证书渲染并用 `cert::check` 复核。
+`reason::verify` 不判断两条结论谁优先：它只回答“这一步是不是该规则的合法实例”，
+非根冲突与优先级来源不在它的范围内。`cert::check` 会复核每个冲突**记录下来的**裁决
+（见「证书链的当前边界」），但裁决本身由推理器产生；冲突分支展示的两条推导各自从证书渲染
+并用 `cert::check` 复核。
 
 ### 其余已确认缺陷
 
@@ -1084,7 +1202,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   孙志刚的宪法权利来自官方包；批复、收容与位阶内容属于包外或案件级法源，不冒充官方包内容。
   `law/corpus/cn.constitution/2018.json` 已收宪法 143 条并维护完整覆盖台账（6 formalized /
   15 partial / 17 indexed / 105 needs_ontology），`:audit` 显示它、`:packs` 通过清单的 `corpus`
-  链接显示计数与本体缺口；`:load` 不读取语料。证书 v3 记录导出时的包身份/哈希、profile 与
+  链接显示计数与本体缺口；`:load` 不读取语料。证书 v4 记录导出时的包身份/哈希、profile 与
   链接语料的文件哈希，但多个文件加载后仍合并成一个扁平环境。
 - **同一结论多路径只留一条。** `build_nodes` 用 `or_insert`，另一条推导及其出处丢失。
 
@@ -1110,9 +1228,9 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 693 个：kernel 19、lang 76、reason 41、cert 122、cli 271、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 750 个：kernel 20、lang 94、reason 52、cert 140、cli 280、lawpack 164（含 1 个 doc test）。
 
-- `crates/kernel/tests/kernel.rs`（19）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
+- `crates/kernel/tests/kernel.rs`（20）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
   `types_stay_predicative`（Type 层不许自包含），以及规则常量的两条：
   类型是 `∀ 参数, 前提 → 结论`，应用到全部参数与前提后正好得到结论；
@@ -1138,19 +1256,27 @@ cargo test --workspace
   体/`obj`/`axiom`/`#check`/`#show` 的拒绝、局部 binder 豁免；两模块同名后缀与加载顺序无关；
   案件文件不能声明带点名字但仍可引用限定名；同名 theory 的 namespace 冲突；`defeated_by`/`prefer`
   目标必须存在且是规则并允许同文件前向引用；`interpret` 可解析但加载期拒绝；`LoadReport` 不含 namespace。
+- `crates/lang/tests/priority.rs`（18）：顶层 `priority` 与跨包边界——模块声明加载后记录
+  winner/loser/`declared_in` 与全部出处，加载报告写表面声明；解析器接受一条声明带多条出处，
+  也接受暂时没有出处的声明（加载期才拒绝），缺 `over` 与未限定名报解析错误；
+  缺 namespace（案件文件）、缺可用出处、自环、目标不是规则、同一包同方向重复声明都拒绝，
+  反向声明（`a over b` 之后再 `b over a`）合法并保留；同文件后声明的规则可以作为目标；
+  跨包目标必须 `import` 目标包，规则内子句指向别的包时拒绝并提示用顶层声明。
 - `crates/lang/tests/import.rs`（16）：`import` 语法与加载校验——import 块可跨空行且位于 namespace 与
   所有声明之前，空 import 报在 import 行、行尾多 token 被拒、`import x@2018` 被词法拒绝、重复 import
   由解析层保留；案件与模块文件都可 import 已加载 namespace，报告按首次出现去重，未加载时报“尚未加载”
   且不改变库，同名但非 namespace 的 theory 不满足 import，模块可 import 已加载模块（含带点包名），
   失败加载不记录 import，重载同一 theory 时 `requires` 合并去重，import 不豁免声明名检查。
-- `crates/cert/tests/json.rs`（25）：证书 v3 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
-  v3 快照比对、顶层与 `environment` 字段名/顺序固定（`profile`、`packs`、`corpora`、`as_of`、
-  `jurisdiction`）、未知版本或未知字段被拒；v2 证书先报版本错误而不是缺 `environment`，v1 同理；
+- `crates/cert/tests/json.rs`（30）：证书 v4 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
+  v4 快照比对、顶层与 `environment` 字段名/顺序固定（`profile`、`packs`、`corpora`、`as_of`、
+  `jurisdiction`）、未知版本或未知字段被拒；v3 证书先报版本错误而不是缺 `resolution` 依据，
+  v2 证书先报版本错误而不是缺 `environment`，v1 同理；
   `environment` 缺失或其 `profile`/`packs`/`corpora`/`as_of`/`jurisdiction` 任一缺键都报
   `missing field`，三个可选字段的显式 `null` 接受；
   环境哈希/重复包名/未知 trust/坏日期/坏管辖被拒；`Unrecorded` 序列化报错、反序列化只接受对象；
   来源字段的 `#[serde(default)]` 仍生效；全部来源字段（含引文、链接、管辖、抓取时间、哈希）的 JSON
-  往返，以及内核表达式与 `CertExpr` 的双向转换。
+  往返，以及内核表达式与 `CertExpr` 的双向转换；四种 `resolution` 变体各自往返、
+  已裁决记录缺 `basis`、`resolution` 内未知字段与未知 `kind` 都拒绝。
 - `crates/cert/tests/environment.rs`（12）：环境身份的校验与比较——空身份序列化为五个显式字段；
   `validate` 拒绝重复包名/语料键、空名、非法 `sha256`、空 profile、非真实日期与非法管辖；
   相同环境与数组顺序无关；profile/`as_of`/管辖的 `null` 与非 `null` 差异；包缺失/多余/版本/哈希/
@@ -1161,9 +1287,14 @@ cargo test --workspace
   以及越界根/越界假设/越界前提和可达、不可达的节点环都返回带节点编号的错误；来源备注、假设标签、
   规则名、绑定参数、缺口备注、候选规则名与表达式常量/binder 名中的换行及控制/格式字符会被转义，
   不能伪造 `▸` 推导行。
-- `crates/cert/tests/check.rs`（60）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
+- `crates/cert/tests/check.rs`（73）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
   缺失/重复/未闭合绑定、结论或前提漂移、已成立的 `unless`、缺口当前提、越界索引和
   非命题假设等伪造都会被拒绝；根是缺口时 `root_proved = false`。
+  冲突记录按环境复核：`defeated/assumption`、`defeated/priority` 与四种未决原因都能通过合法记录；
+  冲突两侧须是命题，规则见证必须存在且同侧不重复、结论头与冲突命题相容，`Assumption` 侧命题
+  必须在假设表中；篡改边的声明者、子句、条号、方向或覆盖会被拒绝；落在环内的边不能作为裁决依据，
+  但可以作为 `priority_unusable` 的已声明边记录；未决记录漏列/多列声明边、空 `declared`、
+  原因与见证不符（含已知事实侧记 `unknown_witnesses`）、引用未知规则都拒绝。
   环境规则推出的 blocker 不能被“删掉推导节点”绕过：直接、多跳、ground/变量结论模式、链式传播、
   嵌套前提、参数头、未使用的 blocker assumption 都拒绝；alpha/eta 变体按内核 `convertible` 命中；
   高阶应用、绑定变量下的应用和超出项大小上限的传播失败关闭；
@@ -1173,10 +1304,14 @@ cargo test --workspace
 - `crates/cert/tests/kernel_proof.rs`（8）：证书的单调骨架到内核证明项——合法证书的根逐步通过内核；
   绑定漂移、结论不是命题、缺绑定、缺口当前提等错误带节点位置；已成立的 `unless` 仍能通过
   `kernel_proof`（阻断条件不在内核类型里），但会被 `cert::check` 拒绝。
-- `crates/reason/tests/certificate.rs`（4）：推导到证书的转换——宪法第三十九条的证书经空环境身份
+- `crates/reason/src/lib.rs`（1 个单元测试）：一侧见证列表为空时两向都判 `unknown_witnesses`，
+  空的见证列表本身不会让另一侧胜出。
+- `crates/reason/tests/certificate.rs`（6）：推导到证书的转换——宪法第三十九条的证书经空环境身份
   盖章后往返并通过 `cert::check`（根已证明）；缺口目标导出后 `root_proved = false`；冲突的左右命题、
-  provenance 和裁决保留；无法编码的 de Bruijn 索引给出带节点位置的错误。
-- `crates/reason/tests/reason.rs`（37）：各条承诺的回归测试，含三条关键的：
+  provenance 和裁决保留；独立包换加载顺序后证书逐字节相同；未决冲突的 `open_obligations`
+  描述写明原因（没有声明、声明了但不足以裁决并给出落在环内的条数）；无法编码的 de Bruijn 索引
+  给出带节点位置的错误。
+- `crates/reason/tests/reason.rs`（45）：各条承诺的回归测试，含三条关键的：
   "阻断条件撤回早先结论"、"阻断条件未被证明时不阻断"、"伪造推导被校验器拒绝"；
   另有三条 alpha/eta 用例：两种变体的 blocker 都阻断规则，`verify` 也拒绝 alpha 变体的伪造步骤。
   伪造一类另有四条独立用例钉住：跳过前提、引用无关前提、绑定漂移（结论与前提不一致）、
@@ -1191,6 +1326,12 @@ cargo test --workspace
   `unique_declaration_makes_same_predicate_instances_conflict`（同一谓词不同参数互斥）、
   `unique_does_not_conflict_when_the_other_arguments_differ`（其余参数不同则相容），
   以及五条加载期拒绝（未知谓词、参数个数不同、重复 contrary、越界 unique、重复 unique）。
+- 跨包优先级一组：`cross_package_conflict_without_a_declared_priority_is_unresolved`（未声明即未决，
+  原因 `no_priority`）、`a_third_packages_top_level_priority_defeats_the_conflict`（第三个包的顶层声明
+  裁决两个包之间的冲突）、`rule_internal_clauses_carry_their_rule_and_sources`（同包子句记录规则与出处）、
+  `a_three_way_priority_cycle_makes_every_pair_unusable`（三元环里任何一对都不能裁决）、
+  `an_unrelated_cycle_does_not_disturb_another_pair`（无关的环不影响另一对规则）与
+  `priorities_are_not_transitive`（`a over b`、`b over c` 推不出 `a over c`）。
 - `crates/cli/tests/examples.rs`（21）：`examples/` 下除默认环境示例外的每个 `.std` 一条端到端用例
   （默认环境示例由 `environment.rs` 覆盖）——
   加载文件、执行查询，断言退出码（证成 0，缺口 / 冲突 1）和关键输出；
@@ -1237,7 +1378,7 @@ cargo test --workspace
   回滚声明与包信息；向自己 import 的包 namespace 声明同样被拒绝；`:inspect` 显示 `[a@0.1.0]`，
   直接按文件加载的 namespaced 模块仍是 `[a]`；已由文件加载的 namespace 被 import 时跳过注册表，
   混合 import 只解析包；批处理失败退出 `1`、显式 `:load` 退出 `2`。
-- `crates/cli/tests/cert.rs`（21）：`:cert` / `:verify-cert` 端到端——导出的 v3 JSON 记录环境身份，
+- `crates/cli/tests/cert.rs`（21）：`:cert` / `:verify-cert` 端到端——导出的 v4 JSON 记录环境身份，
   往返并通过检查器；`:verify-cert` 先打印环境校验行，再分行报告逻辑与内核两段；缺口证书退出 `1`
   且产生 `MissingPremise`；未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在环境校验通过后于
   逻辑层失败；逻辑层接受、内核因绑定类型不符拒绝时退出 `2` 并给出节点；证书不存在、不是 JSON、
@@ -1247,7 +1388,7 @@ cargo test --workspace
   以及含空格路径（不加引号只当路径、加引号可带目标）、缺根、目标无法解析；
   读证书失败的路径把换行/ESC/U+202E 转义成一行诊断；
   旧 `:check` 不再作为别名，报改名错误并退出 `2`。
-- `crates/cli/tests/cert_environment.rs`（21）：证书 v3 环境门禁端到端——合法 v3 生成/校验在同一
+- `crates/cli/tests/cert_environment.rs`（21）：证书 v4 环境门禁端到端——合法 v4 生成/校验在同一
   环境通过并记录 profile、包版本/锁哈希/信任级别与语料文件哈希；没有默认环境时显式
   `profile:null`、空 `packs`/`corpora`、`as_of:null`、`jurisdiction:null` 且校验通过；v2 证书、
   缺 `environment`/`profile` 的证书被拒；同一注册表里改语料文件后校验失败（语料不在锁内）；
@@ -1256,7 +1397,7 @@ cargo test --workspace
   `--no-default-packs` 加显式 import 时证书无 profile，同一包集合在默认 profile 下因 profile 漂移失败；
   `--profile` 用别名时记录规范 profile 名；手改 trust 失败；`:cert` 未 `:load` 时退出 `2` 且 stdout 为空；
   语料不可读时 `:cert` 退出 `2` 且不输出半个 JSON；手改证书 profile/包名中的换行、ESC 在差异行
-  里被转义，一条差异一行；`--as-of 2026-11-23` + `--jurisdiction CN` 生成 v3 后 JSON 两字段有值、
+  里被转义，一条差异一行；`--as-of 2026-11-23` + `--jurisdiction CN` 生成 v4 后 JSON 两字段有值、
   同值校验通过；换值、不带值、证书记 `null` 而当前给了值都按差异拒绝；带值不改变
   profile/packs/corpora，也不改变 `:packs`/`env`/`:why` 的输出。
 - `crates/cli/tests/entry.rs`（25）：二进制入口端到端——批处理加载成功退出 `0` 并打印加载报告；
@@ -1282,14 +1423,27 @@ cargo test --workspace
   `local-extension`（`nodes` 去重升序）；`:why`/`:verify-cert` 打印 `  本地扩展：` 并按未决义务
   退出 `1`，默认模式不标记；`:given` 未知名称提示有无 allow 两种文案；默认模式验证带义务证书、
   `:cert`/`:why` 义务描述一致、封闭环境可导入社区包。
-- `crates/cli/tests/audit.rs`（29）：`:audit` 端到端——带引文来源命中与正确哈希退出 `0`；规则带正确 `quote`
+- `crates/cli/tests/priority.rs`（8）：跨包冲突与优先级端到端——两个包各出一条冲突规则，
+  第三个包用带出处的顶层 `priority` 裁决：未声明时 `:why` 退出 `1` 并打印“没有声明任何优先关系”，
+  证书 `conflicts[0].resolution` 为 `unresolved/no_priority`、`open_obligations` 含
+  `unresolved_conflict`，`:verify-cert` 退出 `1` 且侧条件行写“没有记录优先关系”；
+  声明后 `:why` 退出 `0` 并打印立法法出处与 `依据：` 行，证书记录 `defeated/priority` 的边、
+  声明者与出处，`:verify-cert` 退出 `0` 并报告“优先关系已核验（1 条边）”；
+  交换两个案件的 `import` 顺序后 `:cert` JSON 逐字节相同且两次校验都通过；
+  三元环使任何一对都不能裁决（打印环警告与“不足以裁决”，证书记录 `priority_unusable` 与已声明边）；
+  篡改裁决边出处中的条号后 `:verify-cert` 退出 `2` 且错误指出出处必须逐项一致；
+  把裁决边的规则名改成带换行与伪造结果行的文本后，`:verify-cert` 退出 `2`，错误引用的名字被转义，
+  伪造内容不会被拆成独立输出行；
+  `:inspect` 打印表面声明而不是合成账本名；规则内跨包子句在加载期失败并提示用顶层声明。
+- `crates/cli/tests/audit.rs`（30）：`:audit` 端到端——带引文来源命中与正确哈希退出 `0`；规则带正确 `quote`
   加事实 `axiom` 无 `quote` 时仍退出 `0`（1 命中、1 无引文）；只有无引文来源时退出 `1` 并报“没有可核对的引文”，
   但仍打印覆盖声明；改一个字、哈希不符或格式非法、版本不符、无条号、多版本歧义、无对应语料、管辖不符退出 `1`；
   语料目录缺失或为空逐条报未核对并退出 `1`；坏 JSON、未知字段、布局错误（文件主干不符/嵌套目录）退出 `2`；
   未 `:load` 拒绝运行；来源字段含换行，或含 U+2028/U+202E/ESC/字面反斜杠时报告仍是正确的单行转义；
   多条来源分别计数；带 `text_sha256` 的语料会注明它只是未校验的出处元数据；非法 hash 不计入“已固定”；
   `coverage` 存在时按语料逐条打印形式化/部分/仅索引/待本体计数、形式化与部分条号、本体缺口计数与
-  开放概念列表（多项、空列表、无 `notes`、多语料顺序），没有时打印“未声明”，覆盖率文本同样转义。
+  开放概念列表（多项、空列表、无 `notes`、多语料顺序），没有时打印“未声明”，覆盖率文本同样转义；
+  `priority` 声明的出处和规则出处一样进入核对，带 `quote` 时逐字命中。
 - `crates/cli/tests/packs.rs`（39）：`:packs` / `:lock` 端到端——合法清单逐行输出、四种信任标签、
   维护者与审核记录、`official` 白名单通过/未列入/缺白名单/无锁/白名单文件坏（错误只转义一次）、
   含空格目录、好包+坏清单、根不存在/空目录、默认 `lawpacks`、悬空清单符号链接、description/错误/

@@ -47,6 +47,17 @@
 //!   premise binder (`premise h : ...` referenced as `?h`) is rejected:
 //!   dependent premises are not supported, and a checker that left `?h`
 //!   uninstantiated would silently miss the condition.
+//! * Every conflict's two propositions must be propositions, and every
+//!   conflict resolution is validated against the declared priorities: the
+//!   basis must be the strictness of an assumption or the environment's
+//!   effective priority edges, an unusable priority must record exactly the
+//!   declared edges between the sides, and an unresolved reason must match the
+//!   provenances and the graph. The provenances themselves are checked first:
+//!   a rule witness must be a rule of the environment that no other witness on
+//!   the same side repeats, its conclusion head must agree with the conflict
+//!   proposition when both heads are concrete, and an assumption side's
+//!   proposition must occur in the certificate's assumption table. See "Root
+//!   and conflicts" below.
 //!
 //! The derivability superset is not a second reasoner and does not claim the
 //! reasoner's exact semantics; it is deliberately larger. It may therefore
@@ -66,17 +77,50 @@
 //!
 //! If the root proposition occurs in a recorded conflict, the check rejects an
 //! unresolved conflict and a root on the losing side. A root on the winning
-//! side is accepted and the report sets `conflict_resolved`. The priorities
-//! behind `defeated_by` / `prefer` are *not* validated against the
-//! environment: `priority_sources_checked` is always false in this layer, so a
-//! resolved conflict must not be read as a checked priority source.
+//! side is accepted and the report sets `conflict_resolved`.
+//!
+//! Every recorded conflict resolution is validated against the environment's
+//! declared priorities, not just the root's. Both conflict propositions must be
+//! propositions, checked the same way as node propositions. Before the
+//! resolution is read, each side's provenance is checked: a rule witness must
+//! be an environment rule that no other witness on the same side repeats and
+//! whose conclusion head agrees with the conflict proposition when both heads
+//! are concrete; an assumption side's proposition must occur in the
+//! certificate's assumption table. The checker rebuilds the priority graph from
+//! the kernel declarations (top-level `priority` declarations plus rule-internal
+//! `defeated_by` / `prefer` clauses of one package) and computes its strongly
+//! connected components, so an edge on a cycle is known to be unusable. A
+//! priority-based defeat must cite, for every winning-side x losing-side rule
+//! pair, at least one edge that the environment really declares, with the same
+//! direction, declaring module or rule, clause and sources in the same order;
+//! every cited edge must be effective (not on a cycle); and the checker
+//! recomputes that the winning side covers every pair and the losing side does
+//! not. An unusable priority must list at least one and exactly the
+//! environment's declared edges between the two sides (both directions, all
+//! sources), and no side may fully cover the other. An assumption-based defeat
+//! must name the assumption side as the winner, and both sides must not be
+//! assumptions. An unresolved reason must match the provenances: both
+//! assumption, a lost witness list with no assumption side, no declared edge at
+//! all, or exactly the declared but unusable edges. The report's
+//! `priority_sources_checked` says the edges recorded by the certificate
+//! passed; it does not mean every priority in the environment was inspected,
+//! and an order no conflict cites is never compared.
 //!
 //! ## What is not checked here
 //!
-//! Sources and priorities are recorded by the certificate but are not
-//! compared with the environment. Open obligations do not fail the check; they
-//! set `requires_human`. Conflicts that do not involve the root are preserved
-//! but not adjudicated here. Those are side conditions of a later layer.
+//! The rule instances named by a conflict's `left_by` / `right_by` are not
+//! re-derived: the certificate lists rule names, not instances, so the checker
+//! verifies that each name is an environment rule, that no side repeats one,
+//! that the rule's conclusion head agrees with the conflict proposition when
+//! both are concrete, and that an assumption side's proposition is in the
+//! certificate's assumption table, but a rule that can conclude that predicate
+//! is trusted to be the actual instance. Conflicts the certificate omits are
+//! not reconstructed, so a truncated certificate can hide a conflict; the
+//! derivation layer is what records them. Citations are compared as data, and
+//! their legal effect is not judged. Open obligations do not fail the check;
+//! they set `requires_human`. Whether the root is proved depends only on the
+//! conflicts the root takes part in; a conflict elsewhere is validated but does
+//! not change `root_proved`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -91,7 +135,11 @@ use std_deduce_kernel::{check as kernel_check, Ctx, Env, Expr};
 use crate::closure;
 use crate::expr::CertExpr;
 use crate::key::expression_key;
-use crate::model::{Certificate, Node, NodeId, Resolution, Side};
+use crate::model::{
+    Certificate, Conflict, Node, NodeId, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
+    Resolution, ResolutionBasis, Side, UnresolvedReason,
+};
+use crate::source::Source;
 
 /// The result of a successful certificate check.
 ///
@@ -114,16 +162,26 @@ pub struct CheckReport {
     /// scope whether or not a node cites it.
     pub assumption_count: usize,
     /// Whether the root proposition takes part in a recorded conflict and is
-    /// on the winning side. The priority behind that resolution is not
-    /// validated here; see `priority_sources_checked`.
+    /// on the winning side. The recorded resolution, including its priority
+    /// edges, has been validated against the environment.
     pub conflict_resolved: bool,
     /// Whether the certificate records open obligations, which need a human
     /// decision. They do not make the check fail.
     pub requires_human: bool,
-    /// Whether the priority sources recorded with defeated conflicts were
-    /// validated against the environment. Always false in this layer: a
-    /// resolution is reported, not its priority provenance.
+    /// Whether every priority edge recorded by a `Defeated` conflict with a
+    /// priority basis was validated against the environment: each one must be
+    /// a declaration the environment really makes, in the recorded direction
+    /// and with the recorded origin and sources, and must not lie on a
+    /// priority cycle. True when the certificate records no such conflict.
+    ///
+    /// This reports the *recorded* defeats, not every priority of the
+    /// environment: an order that no conflict cites is not compared, so a
+    /// true value does not mean the whole priority ledger was audited.
     pub priority_sources_checked: bool,
+    /// How many priority edges were compared with the environment: every edge
+    /// recorded by a priority-based defeat plus every edge recorded by an
+    /// unusable priority.
+    pub priority_edges_checked: usize,
     /// How many nodes were validated. Every node is checked, not only those
     /// reachable from the root.
     pub nodes_checked: usize,
@@ -467,6 +525,27 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
         }
     }
 
+    // Every recorded conflict resolution is validated independently of the
+    // reasoner, against the priority graph rebuilt from the kernel ledger.
+    // This happens before the root is judged so a forged resolution is
+    // reported even when the root does not take part in it.
+    let priority = PriorityGraph::from_env(env)?;
+    let mut priority_edges_checked = 0;
+    for (index, conflict) in cert.conflicts.iter().enumerate() {
+        // A conflict records two propositions. Check them with the same
+        // criterion as node propositions before reading what the record claims
+        // about their provenances or resolution.
+        for (label, proposition) in [("左", &conflict.left), ("右", &conflict.right)] {
+            kernel_check::check(env, &Ctx::new(), &Expr::from(proposition), &Expr::Sort(0))
+                .map_err(|error| CheckError {
+                    node: None,
+                    message: format!("第 {} 个冲突的{label}侧不是命题：{error}", index + 1),
+                })?;
+        }
+        validate_provenance(env, cert, index, conflict)?;
+        priority_edges_checked += validate_resolution(&priority, index, conflict)?;
+    }
+
     let root_proved = cert
         .root
         .is_some_and(|root| node_prop(cert, &cert.nodes[root]).is_some());
@@ -486,7 +565,10 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
         assumption_count: cert.assumptions.len(),
         conflict_resolved,
         requires_human: !cert.open_obligations.is_empty(),
-        priority_sources_checked: false,
+        // Every recorded priority edge has just been validated; a failure
+        // returned above. This is true even when there is no such edge.
+        priority_sources_checked: true,
+        priority_edges_checked,
         nodes_checked: cert.nodes.len(),
     })
 }
@@ -495,8 +577,9 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
 ///
 /// An unresolved conflict, or one where the root is on the losing side, makes
 /// the certificate invalid. A root on the winning side is allowed and returns
-/// `true`. This does not validate the priority behind a defeat; the caller
-/// reports that through `priority_sources_checked = false`.
+/// `true`. The resolution itself was already validated by
+/// [`validate_resolution`], so a root that reaches this point is not relying on
+/// a forged priority.
 fn root_conflict_resolved(
     env: &Env,
     cert: &Certificate,
@@ -516,7 +599,7 @@ fn root_conflict_resolved(
             continue;
         };
         match &conflict.resolution {
-            Resolution::Unresolved => {
+            Resolution::Unresolved { .. } => {
                 return Err(CheckError::at(
                     root,
                     format!(
@@ -526,7 +609,7 @@ fn root_conflict_resolved(
                     ),
                 ));
             }
-            Resolution::Defeated { winner } if winner != &side => {
+            Resolution::Defeated { winner, .. } if winner != &side => {
                 return Err(CheckError::at(
                     root,
                     format!(
@@ -540,6 +623,567 @@ fn root_conflict_resolved(
         }
     }
     Ok(resolved)
+}
+
+/// The environment's declared priority order, rebuilt from the kernel ledger.
+///
+/// This is the checker's own graph; it shares no code with the reasoner. Nodes
+/// are the environment's rules, edges are top-level `priority` declarations
+/// and rule-internal `defeated_by` / `prefer` clauses of one package.
+struct PriorityGraph {
+    /// Every rule name of the environment.
+    rules: BTreeSet<String>,
+    /// Declared edges, keyed by `(winner, loser)`.
+    declared: BTreeMap<(String, String), Vec<PriorityEdge>>,
+    /// Edges between different components, i.e. the ones that can decide a
+    /// conflict. An edge inside a cycle can never decide anything.
+    effective: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl PriorityGraph {
+    fn from_env(env: &Env) -> Result<Self, CheckError> {
+        let rules: BTreeSet<String> = env
+            .rules()
+            .iter()
+            .map(|decl| decl.name.to_string())
+            .collect();
+        let mut declared: BTreeMap<(String, String), Vec<PriorityEdge>> = BTreeMap::new();
+        for priority in env.priorities() {
+            // An order whose endpoint is not a declared rule cannot order a
+            // derivation, so it is never one of the edges between two rules.
+            if !rules.contains(priority.winner.as_ref()) || !rules.contains(priority.loser.as_ref())
+            {
+                continue;
+            }
+            insert_priority(
+                &mut declared,
+                PriorityEdge {
+                    winner: priority.winner.to_string(),
+                    loser: priority.loser.to_string(),
+                    origin: PriorityOrigin::PriorityDeclaration {
+                        declared_in: priority.declared_in.to_string(),
+                        sources: priority.sources.iter().map(Source::from).collect(),
+                    },
+                },
+            );
+        }
+        for decl in env.rules() {
+            let DeclKind::Rule(rule) = &decl.kind else {
+                continue;
+            };
+            for (clause, targets) in [
+                (PriorityClause::DefeatedBy, &rule.exceptions),
+                (PriorityClause::Prefer, &rule.prefers),
+            ] {
+                for target in targets {
+                    let Some(target_decl) = env.get(target) else {
+                        continue;
+                    };
+                    let DeclKind::Rule(target_rule) = &target_decl.kind else {
+                        continue;
+                    };
+                    // The loader refuses a cross-package clause; a directly
+                    // built environment must not hide one from this checker.
+                    if target_rule.declared_in != rule.declared_in {
+                        return Err(CheckError {
+                            node: None,
+                            message: format!(
+                                "环境中的规则 `{}` 用 `{}` 指向另一个包 `{}` 的规则 `{}`；\
+                                 跨包优先关系必须用顶层 priority 声明，规则内子句只用于同一包内",
+                                decl.name,
+                                clause_label(clause),
+                                package_label(target_rule.declared_in.as_deref()),
+                                target
+                            ),
+                        });
+                    }
+                    let (winner, loser) = match clause {
+                        PriorityClause::DefeatedBy => (target.to_string(), decl.name.to_string()),
+                        PriorityClause::Prefer => (decl.name.to_string(), target.to_string()),
+                    };
+                    insert_priority(
+                        &mut declared,
+                        PriorityEdge {
+                            winner,
+                            loser,
+                            origin: PriorityOrigin::RuleClause {
+                                declaring_rule: decl.name.to_string(),
+                                clause,
+                                rule_sources: decl.sources.iter().map(Source::from).collect(),
+                            },
+                        },
+                    );
+                }
+            }
+        }
+        let mut adjacency: BTreeMap<String, Vec<String>> = rules
+            .iter()
+            .map(|name| (name.clone(), Vec::new()))
+            .collect();
+        for (winner, loser) in declared.keys() {
+            if let Some(neighbors) = adjacency.get_mut(winner) {
+                neighbors.push(loser.clone());
+            }
+        }
+        for neighbors in adjacency.values_mut() {
+            neighbors.sort();
+            neighbors.dedup();
+        }
+        let scc = components(&adjacency);
+        let mut effective: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (winner, losers) in &adjacency {
+            for loser in losers {
+                if scc.get(winner) != scc.get(loser) {
+                    effective
+                        .entry(winner.clone())
+                        .or_default()
+                        .insert(loser.clone());
+                }
+            }
+        }
+        Ok(PriorityGraph {
+            rules,
+            declared,
+            effective,
+        })
+    }
+
+    fn is_effective(&self, winner: &str, loser: &str) -> bool {
+        self.effective
+            .get(winner)
+            .is_some_and(|beaten| beaten.contains(loser))
+    }
+
+    fn beats(&self, winners: &[String], losers: &[String]) -> bool {
+        !winners.is_empty()
+            && !losers.is_empty()
+            && winners
+                .iter()
+                .all(|winner| losers.iter().all(|loser| self.is_effective(winner, loser)))
+    }
+
+    /// Every declared edge between the two sides in either direction.
+    fn declared_between(&self, left: &[String], right: &[String]) -> Vec<PriorityEdge> {
+        let mut edges = Vec::new();
+        for (winners, losers) in [(left, right), (right, left)] {
+            for winner in winners {
+                for loser in losers {
+                    if let Some(declared) = self.declared.get(&(winner.clone(), loser.clone())) {
+                        edges.extend(declared.iter().cloned());
+                    }
+                }
+            }
+        }
+        edges.sort_by_key(PriorityEdge::sort_key);
+        edges
+    }
+}
+
+fn insert_priority(
+    declared: &mut BTreeMap<(String, String), Vec<PriorityEdge>>,
+    edge: PriorityEdge,
+) {
+    declared
+        .entry((edge.winner.clone(), edge.loser.clone()))
+        .or_default()
+        .push(edge);
+}
+
+fn clause_label(clause: PriorityClause) -> &'static str {
+    match clause {
+        PriorityClause::Prefer => "prefer",
+        PriorityClause::DefeatedBy => "defeated_by",
+    }
+}
+
+fn package_label(declared_in: Option<&str>) -> &str {
+    declared_in.unwrap_or("无 namespace（案件/示例文件）")
+}
+
+/// Iterative Kosaraju over the priority graph. Nodes and neighbours are
+/// ordered by name, so the component ids are reproducible.
+fn components(adjacency: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, u32> {
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut finished: Vec<String> = Vec::new();
+    for start in adjacency.keys() {
+        if visited.contains(start) {
+            continue;
+        }
+        visited.insert(start.clone());
+        let mut stack: Vec<(String, usize)> = vec![(start.clone(), 0)];
+        while let Some(top) = stack.last_mut() {
+            let neighbors = adjacency.get(&top.0).map(Vec::as_slice).unwrap_or(&[]);
+            if top.1 < neighbors.len() {
+                let next = neighbors[top.1].clone();
+                top.1 += 1;
+                if visited.insert(next.clone()) {
+                    stack.push((next, 0));
+                }
+            } else {
+                let (node, _) = stack.pop().expect("the DFS stack is not empty");
+                finished.push(node);
+            }
+        }
+    }
+
+    let mut reverse: BTreeMap<String, Vec<String>> = adjacency
+        .keys()
+        .map(|name| (name.clone(), Vec::new()))
+        .collect();
+    for (winner, losers) in adjacency {
+        for loser in losers {
+            if let Some(predecessors) = reverse.get_mut(loser) {
+                predecessors.push(winner.clone());
+            }
+        }
+    }
+    for predecessors in reverse.values_mut() {
+        predecessors.sort();
+        predecessors.dedup();
+    }
+
+    let mut component: BTreeMap<String, u32> = BTreeMap::new();
+    let mut next_component = 0u32;
+    for start in finished.iter().rev() {
+        if component.contains_key(start) {
+            continue;
+        }
+        let id = next_component;
+        next_component += 1;
+        component.insert(start.clone(), id);
+        let mut stack = vec![start.clone()];
+        while let Some(node) = stack.pop() {
+            let predecessors = reverse.get(&node).map(Vec::as_slice).unwrap_or(&[]);
+            for predecessor in predecessors {
+                if !component.contains_key(predecessor) {
+                    component.insert(predecessor.clone(), id);
+                    stack.push(predecessor.clone());
+                }
+            }
+        }
+    }
+    component
+}
+
+/// Validate what a conflict's provenance claims, independently of how it was
+/// resolved.
+///
+/// A hand-edited certificate can repeat a rule name on one side, name a rule
+/// whose conclusion is a different predicate, or label a side as an assumption
+/// that the certificate's assumption table does not list. The reasoner cannot:
+/// it builds each side from a `BTreeSet` of real rule instances, records only
+/// rules that really concluded the proposition, and lists every assumption it
+/// used. This function checks those claims before any resolution is read:
+///
+/// * every rule witness must name a rule of the environment, and the same side
+///   must not name it twice;
+/// * the rule's conclusion head must agree with the conflict proposition on
+///   that side when both heads are concrete. An opaque head (a parameter or a
+///   quantified formula) is not judged, which keeps the check conservative;
+/// * an assumption side's proposition must occur in the certificate's
+///   assumption table, compared as a `CertExpr` and independent of order.
+///
+/// The rule instances themselves are still not re-derived: the certificate
+/// lists names, not instances.
+fn validate_provenance(
+    env: &Env,
+    cert: &Certificate,
+    index: usize,
+    conflict: &Conflict,
+) -> Result<(), CheckError> {
+    let fail = |message: String| CheckError {
+        node: None,
+        message: format!("第 {} 个冲突：{message}", index + 1),
+    };
+    for (label, proposition, provenance) in [
+        ("左", &conflict.left, &conflict.left_by),
+        ("右", &conflict.right, &conflict.right_by),
+    ] {
+        match provenance {
+            Provenance::Rules { rules } => {
+                let mut seen: BTreeSet<&str> = BTreeSet::new();
+                for rule in rules {
+                    if !seen.insert(rule.as_str()) {
+                        return Err(fail(format!(
+                            "同一侧的规则见证重复：`{rule}` 在{label}侧出现了不止一次"
+                        )));
+                    }
+                    let Some(declaration) = env.get(rule) else {
+                        return Err(fail(format!("{label}侧引用的规则 `{rule}` 不在环境中")));
+                    };
+                    let DeclKind::Rule(declared) = &declaration.kind else {
+                        return Err(fail(format!("{label}侧引用的 `{rule}` 不是规则")));
+                    };
+                    let Some(rule_head) =
+                        closure::concrete_head(env, &declared.open_conclusion()).map_err(fail)?
+                    else {
+                        // The rule's conclusion head is not concrete (it is a
+                        // parameter or a quantified form), so head agreement
+                        // cannot be judged. Stay conservative.
+                        continue;
+                    };
+                    let Some(proposition_head) =
+                        closure::concrete_head(env, &Expr::from(proposition)).map_err(fail)?
+                    else {
+                        continue;
+                    };
+                    if rule_head != proposition_head {
+                        return Err(fail(format!(
+                            "规则 `{rule}` 的结论头与冲突命题不符：规则结论是 `{rule_head}`，\
+                             冲突命题的头是 `{proposition_head}`"
+                        )));
+                    }
+                }
+            }
+            Provenance::Assumption => {
+                if !cert
+                    .assumptions
+                    .iter()
+                    .any(|entry| &entry.proposition == proposition)
+                {
+                    return Err(fail(format!(
+                        "{label}侧记录为已知事实，但证书的假设表里没有这个命题"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate one recorded conflict resolution against the environment, and
+/// return how many priority edges it compared.
+fn validate_resolution(
+    priority: &PriorityGraph,
+    index: usize,
+    conflict: &Conflict,
+) -> Result<usize, CheckError> {
+    let fail = |message: String| CheckError {
+        node: None,
+        message: format!("第 {} 个冲突：{message}", index + 1),
+    };
+    match &conflict.resolution {
+        Resolution::Defeated { winner, basis } => match basis {
+            ResolutionBasis::Assumption => {
+                let (winner_by, loser_by) = provenance_by_side(conflict, *winner);
+                if !matches!(winner_by, Provenance::Assumption) {
+                    return Err(fail(format!(
+                        "以严格事实为裁决依据，但胜方（{}）不是假设",
+                        side_label(*winner)
+                    )));
+                }
+                if matches!(loser_by, Provenance::Assumption) {
+                    return Err(fail(
+                        "两侧都是严格事实：假设之间没有先后，不能判出一方胜出".to_owned(),
+                    ));
+                }
+                Ok(0)
+            }
+            ResolutionBasis::Priority { edges } => {
+                let left = rule_side(priority, conflict, Side::Left).map_err(fail)?;
+                let right = rule_side(priority, conflict, Side::Right).map_err(fail)?;
+                let (winners, losers) = match winner {
+                    Side::Left => (&left, &right),
+                    Side::Right => (&right, &left),
+                };
+                if edges.is_empty() {
+                    return Err(fail("以优先关系裁决，但没有记录任何优先边".to_owned()));
+                }
+                for edge in edges {
+                    if !winners.iter().any(|rule| rule == &edge.winner)
+                        || !losers.iter().any(|rule| rule == &edge.loser)
+                    {
+                        return Err(fail(format!(
+                            "优先边「{} over {}」的方向与裁决不符：胜方必须指向败方",
+                            edge.winner, edge.loser
+                        )));
+                    }
+                    let declared = priority
+                        .declared
+                        .get(&(edge.winner.clone(), edge.loser.clone()))
+                        .is_some_and(|declared| declared.contains(edge));
+                    if !declared {
+                        return Err(fail(format!(
+                            "环境中没有与记录完全相同的优先声明「{} over {}」：\
+                             方向、声明者、子句和出处必须逐项一致",
+                            edge.winner, edge.loser
+                        )));
+                    }
+                    if !priority.is_effective(&edge.winner, &edge.loser) {
+                        return Err(fail(format!(
+                            "优先边「{} over {}」落在优先级环内，不能用于裁决",
+                            edge.winner, edge.loser
+                        )));
+                    }
+                }
+                for winner_rule in winners {
+                    for loser_rule in losers {
+                        if !edges
+                            .iter()
+                            .any(|edge| &edge.winner == winner_rule && &edge.loser == loser_rule)
+                        {
+                            return Err(fail(format!(
+                                "胜方规则 `{winner_rule}` 与败方规则 `{loser_rule}` 之间没有记录优先边"
+                            )));
+                        }
+                    }
+                }
+                if !priority.beats(winners, losers) {
+                    return Err(fail(
+                        "按环境的优先关系重算，胜方没有完整覆盖败方，不能判为已裁决".to_owned(),
+                    ));
+                }
+                if priority.beats(losers, winners) {
+                    return Err(fail(
+                        "按环境的优先关系重算，败方也完整覆盖了胜方：双方互斥，不能判出一方胜出"
+                            .to_owned(),
+                    ));
+                }
+                Ok(edges.len())
+            }
+        },
+        Resolution::Unresolved { reason } => match reason {
+            UnresolvedReason::ConflictingAssumptions => {
+                if !matches!(conflict.left_by, Provenance::Assumption)
+                    || !matches!(conflict.right_by, Provenance::Assumption)
+                {
+                    return Err(fail("记录为严格事实冲突，但至少一侧不是假设".to_owned()));
+                }
+                Ok(0)
+            }
+            UnresolvedReason::UnknownWitnesses => {
+                // A strict fact can only win; it never leaves a conflict
+                // unresolved for want of witnesses. The reasoner records
+                // `Defeated { basis: Assumption }` when either side is an
+                // assumption, so a hand-edited record must not relabel that
+                // outcome as a lost witness.
+                if matches!(conflict.left_by, Provenance::Assumption)
+                    || matches!(conflict.right_by, Provenance::Assumption)
+                {
+                    return Err(fail(
+                        "一侧是已知事实时，只能是事实胜出，不能记录为见证无法重建".to_owned(),
+                    ));
+                }
+                let lost = matches!(&conflict.left_by, Provenance::Rules { rules } if rules.is_empty())
+                    || matches!(&conflict.right_by, Provenance::Rules { rules } if rules.is_empty());
+                if !lost {
+                    return Err(fail("记录为见证无法重建，但两侧都有规则见证".to_owned()));
+                }
+                Ok(0)
+            }
+            UnresolvedReason::NoPriority => {
+                let left = rule_side(priority, conflict, Side::Left).map_err(fail)?;
+                let right = rule_side(priority, conflict, Side::Right).map_err(fail)?;
+                let declared = priority.declared_between(&left, &right);
+                if !declared.is_empty() {
+                    return Err(fail(format!(
+                        "环境在两侧规则之间声明了 {} 条优先边，不能记录为没有优先关系",
+                        declared.len()
+                    )));
+                }
+                Ok(0)
+            }
+            UnresolvedReason::PriorityUnusable { declared } => {
+                // An empty list is not "declared but unusable": the reasoner
+                // only records this reason when at least one priority is
+                // declared between the sides. With no edge at all, the honest
+                // record is `NoPriority`.
+                if declared.is_empty() {
+                    return Err(fail(
+                        "记录为已有优先声明但不足以裁决，却没有任何已声明边；\
+                         这种情况应记录为没有优先关系（no_priority）"
+                            .to_owned(),
+                    ));
+                }
+                let left = rule_side(priority, conflict, Side::Left).map_err(fail)?;
+                let right = rule_side(priority, conflict, Side::Right).map_err(fail)?;
+                let expected = priority.declared_between(&left, &right);
+                if !same_edge_multiset(&expected, declared).map_err(fail)? {
+                    return Err(fail(
+                        "记录的优先边与环境中两侧之间的全部声明不一致：漏列、多列或出处不符"
+                            .to_owned(),
+                    ));
+                }
+                if priority.beats(&left, &right) || priority.beats(&right, &left) {
+                    return Err(fail(
+                        "按环境重算，一侧已能完整覆盖另一侧，应判为已裁决".to_owned(),
+                    ));
+                }
+                Ok(declared.len())
+            }
+        },
+    }
+}
+
+/// The two sides' provenances, winner first.
+fn provenance_by_side(conflict: &Conflict, winner: Side) -> (&Provenance, &Provenance) {
+    match winner {
+        Side::Left => (&conflict.left_by, &conflict.right_by),
+        Side::Right => (&conflict.right_by, &conflict.left_by),
+    }
+}
+
+fn side_label(side: Side) -> &'static str {
+    match side {
+        Side::Left => "左",
+        Side::Right => "右",
+    }
+}
+
+/// The rules of one side of a conflict, checked to be a non-empty list of
+/// rules that exist in the environment.
+///
+/// The checker does not re-derive the instances (the certificate's node graph
+/// is checked separately and the provenance lists no bindings), but a rule
+/// that is not in the environment cannot carry a priority either.
+fn rule_side(
+    priority: &PriorityGraph,
+    conflict: &Conflict,
+    side: Side,
+) -> Result<Vec<String>, String> {
+    let (label, provenance) = match side {
+        Side::Left => ("左", &conflict.left_by),
+        Side::Right => ("右", &conflict.right_by),
+    };
+    let Provenance::Rules { rules } = provenance else {
+        return Err(format!("{label}侧不是规则推出的结论，不能按优先关系判断"));
+    };
+    if rules.is_empty() {
+        return Err(format!(
+            "{label}侧的规则见证为空：无法核对优先关系，这种情况应记录为见证无法重建"
+        ));
+    }
+    for rule in rules {
+        if !priority.rules.contains(rule) {
+            return Err(format!("{label}侧引用的规则 `{rule}` 不在环境中"));
+        }
+    }
+    Ok(rules.clone())
+}
+
+/// Compare two lists of priority edges as multisets, independent of order.
+///
+/// The full serialized edge is the comparison key, so the declaring module or
+/// rule, the clause and every source field (in order) must match.
+fn same_edge_multiset(expected: &[PriorityEdge], actual: &[PriorityEdge]) -> Result<bool, String> {
+    if expected.len() != actual.len() {
+        return Ok(false);
+    }
+    let mut expected = canonical_edges(expected)?;
+    let mut actual = canonical_edges(actual)?;
+    expected.sort();
+    actual.sort();
+    Ok(expected == actual)
+}
+
+fn canonical_edges(edges: &[PriorityEdge]) -> Result<Vec<String>, String> {
+    edges
+        .iter()
+        .map(|edge| {
+            serde_json::to_string(edge)
+                .map_err(|error| format!("优先边无法序列化，不能比较：{error}"))
+        })
+        .collect()
 }
 
 /// Every environment axiom whose declared type is a proposition, keyed by its

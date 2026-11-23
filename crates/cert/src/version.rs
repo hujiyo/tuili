@@ -6,11 +6,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The certificate format version this build reads and writes.
 ///
-/// Version 3 adds the mandatory `environment` identity after
-/// `format_version`. Version 2 certificates are refused rather than read with
-/// a guessed, empty environment: a proof whose packs and corpora are unknown
-/// cannot be checked against the current environment.
-pub const FORMAT_VERSION: u32 = 3;
+/// Version 3 made the `environment` identity mandatory after
+/// `format_version`. Version 4 records how a conflict was adjudicated: a
+/// defeated conflict carries its basis (a strict assumption, or the declared
+/// priority edges with their origins and sources), and an unresolved conflict
+/// carries the reason. Older certificates are refused rather than read with a
+/// guessed resolution: a proof whose priority provenance is unknown cannot be
+/// checked.
+pub const FORMAT_VERSION: u32 = 4;
 
 /// A certificate format version.
 ///

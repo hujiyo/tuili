@@ -6,13 +6,32 @@ use std_deduce_kernel::env::{Ctx, DeclKind, SourceRef};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{name, Decl, Env, Expr};
 use std_deduce_lang::Library;
-use std_deduce_reason::{verify, Provenance, Reasoner, Resolution};
+use std_deduce_reason::{
+    verify, Conflict, PriorityClause, PriorityOrigin, Provenance, Reasoner, Resolution,
+    ResolutionBasis, UnresolvedReason,
+};
 
 fn load(src: &str) -> Library {
     let mut lib = Library::new();
     lib.load("test", src)
         .unwrap_or_else(|e| panic!("load: {e}"));
     lib
+}
+
+fn load_all(sources: &[(&str, &str)]) -> Library {
+    let mut lib = Library::new();
+    for (name, src) in sources {
+        lib.load(name, src)
+            .unwrap_or_else(|e| panic!("load {name}: {e}"));
+    }
+    lib
+}
+
+fn reasoner(lib: &Library) -> Reasoner<'_> {
+    let mut r = Reasoner::new(&lib.env);
+    r.assume_ledger_axioms().unwrap();
+    r.saturate().unwrap();
+    r
 }
 
 fn p(name: &str) -> Expr {
@@ -535,6 +554,7 @@ fn kernel_rejects_a_malformed_telescope() {
         exceptions: vec![],
         prefers: vec![],
         sources: vec![],
+        declared_in: None,
     };
     let _ = rule;
     // A rule whose conclusion is a bare predicate symbol is not a proposition.
@@ -547,6 +567,7 @@ fn kernel_rejects_a_malformed_telescope() {
         exceptions: vec![],
         prefers: vec![],
         sources: vec![],
+        declared_in: None,
     };
     let decl = Decl {
         name: name("r2"),
@@ -606,7 +627,12 @@ axiom f2 : 不该批准 甲申请
     let right = Expr::app(p("不该批准"), p("甲申请"));
     let cs = r.conflicts();
     assert_eq!(cs.len(), 1);
-    assert_eq!(cs[0].resolution, Resolution::Unresolved);
+    assert_eq!(
+        cs[0].resolution,
+        Resolution::Unresolved {
+            reason: std_deduce_reason::UnresolvedReason::ConflictingAssumptions,
+        }
+    );
     assert_eq!(cs[0].left_by, Provenance::Assumption);
     assert_eq!(cs[0].right_by, Provenance::Assumption);
     assert!(!r.knows(&left), "an unresolved conclusion is not asserted");
@@ -660,13 +686,18 @@ rule 下游 :
     );
     let cs = r.conflicts();
     assert_eq!(cs.len(), 1);
-    assert!(matches!(cs[0].resolution, Resolution::Defeated { .. }));
-    let side = r.conflict_side(&cs[0], &approved).unwrap();
-    assert_eq!(
+    assert!(matches!(
         cs[0].resolution,
-        Resolution::Defeated { winner: side },
-        "the winner is the asserted side"
-    );
+        Resolution::Defeated {
+            basis: std_deduce_reason::ResolutionBasis::Priority { .. },
+            ..
+        }
+    ));
+    let side = r.conflict_side(&cs[0], &approved).unwrap();
+    assert!(matches!(
+        &cs[0].resolution,
+        Resolution::Defeated { winner, .. } if *winner == side
+    ));
     // A defeated conclusion is still inspectable, for audit.
     assert!(r.derivation_for(&refused).is_some());
 }
@@ -761,7 +792,12 @@ axiom b : 应适用 法B 甲
     r.assume_ledger_axioms().unwrap();
     r.saturate().unwrap();
     assert_eq!(r.conflicts().len(), 1);
-    assert_eq!(r.conflicts()[0].resolution, Resolution::Unresolved);
+    assert_eq!(
+        r.conflicts()[0].resolution,
+        Resolution::Unresolved {
+            reason: std_deduce_reason::UnresolvedReason::ConflictingAssumptions,
+        }
+    );
     assert!(!r.knows(&Expr::apps(p("应适用"), [p("法A"), p("甲")])));
     assert!(!r.knows(&Expr::apps(p("应适用"), [p("法B"), p("甲")])));
 }
@@ -1200,4 +1236,533 @@ obj 张三 : 公民
     assert!(err.contains("空白"), "got: {err}");
     r.saturate().unwrap();
     assert!(!r.knows(&prop), "a refused assumption enters no fact base");
+}
+
+// ---------------------------------------------------------------- priorities
+
+/// Two packages whose rules conclude contrary propositions. Nothing orders
+/// them: the certificate and the reasoner must say so.
+const PACKAGE_P: &str = r#"
+namespace p
+sort p.申请
+pred p.批准 : p.申请 → Prop
+obj p.甲 : p.申请
+rule p.应批准 :
+  conclude p.批准 p.甲
+  source text "甲法" locator "第一条" version "2021"
+"#;
+
+const PACKAGE_Q: &str = r#"
+import p
+namespace q
+pred q.不批准 : p.申请 → Prop
+rule q.不应批准 :
+  conclude q.不批准 p.甲
+  source text "乙法" locator "第二条" version "2020"
+"#;
+
+const CONTRARY_CASE: &str = r#"
+contrary p.批准 q.不批准
+"#;
+
+const ORDER_PACKAGE: &str = r#"
+import p
+import q
+namespace o
+priority p.应批准 over q.不应批准 source text "上位法" locator "第九十二条" version "2023"
+"#;
+
+/// Two rules concluding `p.批准 p.甲`; only the rule-internal clause orders
+/// the conflicting pair. A second pair uses `prefer` for the other direction.
+const CLAUSE_CASE: &str = r#"
+sort 申请
+pred 批准 : 申请 → Prop
+pred 不批准 : 申请 → Prop
+pred 可复议 : 申请 → Prop
+pred 不可复议 : 申请 → Prop
+contrary 批准 不批准
+contrary 可复议 不可复议
+obj 甲 : 申请
+rule 一般 :
+  conclude 批准 甲
+  source text "甲法" locator "第一条" version "2021"
+rule 例外 :
+  conclude 不批准 甲
+  defeated_by 一般
+  source text "乙法" locator "第二条" version "2020"
+rule 复议 :
+  conclude 可复议 甲
+  prefer 不可复议规则
+  source text "丙法" locator "第三条" version "2022"
+rule 不可复议规则 :
+  conclude 不可复议 甲
+  source text "丁法" locator "第四条" version "2019"
+"#;
+
+/// Three rules on one predicate with a three-way cycle A > B > C > A.
+const CYCLE_PACKAGE: &str = r#"
+namespace c
+sort c.对象
+sort c.选项
+pred c.值 : c.对象 → c.选项 → Prop
+unique c.值 2
+obj c.甲 : c.对象
+obj c.选A : c.选项
+obj c.选B : c.选项
+obj c.选C : c.选项
+rule c.A :
+  conclude c.值 c.甲 c.选A
+  source text "甲法" locator "一"
+rule c.B :
+  conclude c.值 c.甲 c.选B
+  source text "乙法" locator "二"
+rule c.C :
+  conclude c.值 c.甲 c.选C
+  source text "丙法" locator "三"
+priority c.A over c.B source text "甲法" locator "一"
+priority c.B over c.C source text "乙法" locator "二"
+priority c.C over c.A source text "丙法" locator "三"
+"#;
+
+/// The same cycle plus an unrelated pair with a working priority.
+const CYCLE_PLUS_PAIR_PACKAGE: &str = r#"
+namespace d
+sort d.对象
+sort d.选项
+pred d.值 : d.对象 → d.选项 → Prop
+unique d.值 2
+obj d.甲 : d.对象
+obj d.乙 : d.对象
+obj d.选A : d.选项
+obj d.选B : d.选项
+obj d.选C : d.选项
+obj d.选优 : d.选项
+obj d.选劣 : d.选项
+rule d.A :
+  conclude d.值 d.甲 d.选A
+  source text "甲法" locator "一"
+rule d.B :
+  conclude d.值 d.甲 d.选B
+  source text "乙法" locator "二"
+rule d.C :
+  conclude d.值 d.甲 d.选C
+  source text "丙法" locator "三"
+rule d.优 :
+  conclude d.值 d.乙 d.选优
+  source text "优法" locator "四"
+rule d.劣 :
+  conclude d.值 d.乙 d.选劣
+  source text "劣法" locator "五"
+priority d.A over d.B source text "甲法" locator "一"
+priority d.B over d.C source text "乙法" locator "二"
+priority d.C over d.A source text "丙法" locator "三"
+priority d.优 over d.劣 source text "优法" locator "四"
+"#;
+
+/// A > B and B > C, but A and C are never ordered: priorities are not
+/// transitive.
+const CHAIN_PACKAGE: &str = r#"
+namespace e
+sort e.对象
+sort e.选项
+pred e.值 : e.对象 → e.选项 → Prop
+unique e.值 2
+obj e.甲 : e.对象
+obj e.选A : e.选项
+obj e.选B : e.选项
+obj e.选C : e.选项
+rule e.A :
+  conclude e.值 e.甲 e.选A
+  source text "甲法" locator "一"
+rule e.B :
+  conclude e.值 e.甲 e.选B
+  source text "乙法" locator "二"
+rule e.C :
+  conclude e.值 e.甲 e.选C
+  source text "丙法" locator "三"
+priority e.A over e.B source text "甲法" locator "一"
+priority e.B over e.C source text "乙法" locator "二"
+"#;
+
+/// Two rules that both conclude either side of a `unique` conflict: the same
+/// pair of rules stands on both sides, so an edge between them is enumerated
+/// twice unless the reasoner deduplicates it.
+const SHARED_SIDES_PACKAGE: &str = r#"
+namespace g
+sort g.选项
+pred g.候选 : g.选项 → Prop
+pred g.值 : g.选项 → Prop
+unique g.值 1
+obj g.选A : g.选项
+obj g.选B : g.选项
+axiom g.备选A : g.候选 g.选A
+  source text "测试" locator "备选A"
+axiom g.备选B : g.候选 g.选B
+  source text "测试" locator "备选B"
+rule g.甲 :
+  params x : g.选项
+  premise g.候选 x
+  conclude g.值 x
+  source text "甲法" locator "一"
+rule g.乙 :
+  params x : g.选项
+  premise g.候选 x
+  conclude g.值 x
+  source text "乙法" locator "二"
+priority g.甲 over g.乙 source text "丙法" locator "三"
+"#;
+
+fn choice(predicate: &str, object: &str, option: &str) -> Expr {
+    Expr::apps(
+        Expr::constant(predicate),
+        [Expr::constant(object), Expr::constant(option)],
+    )
+}
+
+fn conflict_between(r: &Reasoner<'_>, a: &Expr, b: &Expr) -> Conflict {
+    r.conflicts()
+        .into_iter()
+        .find(|conflict| {
+            (conflict.left == *a && conflict.right == *b)
+                || (conflict.left == *b && conflict.right == *a)
+        })
+        .unwrap_or_else(|| panic!("没有记录「{}」与「{}」的冲突", print_expr(a), print_expr(b)))
+}
+
+#[test]
+fn cross_package_conflict_without_a_declared_priority_is_unresolved() {
+    let lib = load_all(&[
+        ("p.std", PACKAGE_P),
+        ("q.std", PACKAGE_Q),
+        ("case.std", CONTRARY_CASE),
+    ]);
+    let r = reasoner(&lib);
+    let approved = Expr::apps(p("p.批准"), [p("p.甲")]);
+    let refused = Expr::apps(p("q.不批准"), [p("p.甲")]);
+    assert!(!r.knows(&approved));
+    assert!(!r.knows(&refused));
+    let conflict = r.conflict_for(&approved).expect("the two rules conflict");
+    assert_eq!(
+        conflict.resolution,
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        }
+    );
+    assert!(!r.knows(&refused), "an unresolved side is not asserted");
+}
+
+#[test]
+fn a_third_packages_top_level_priority_defeats_the_conflict() {
+    let lib = load_all(&[
+        ("p.std", PACKAGE_P),
+        ("q.std", PACKAGE_Q),
+        ("order.std", ORDER_PACKAGE),
+        ("case.std", CONTRARY_CASE),
+    ]);
+    let r = reasoner(&lib);
+    let approved = Expr::apps(p("p.批准"), [p("p.甲")]);
+    let refused = Expr::apps(p("q.不批准"), [p("p.甲")]);
+    assert!(r.knows(&approved), "the declared winner is asserted");
+    assert!(!r.knows(&refused), "the loser is not asserted");
+
+    let side = r.conflict_side(
+        &r.conflict_for(&approved).expect("the conflict is recorded"),
+        &approved,
+    );
+    let conflict = r.conflict_for(&approved).unwrap();
+    let Resolution::Defeated {
+        winner,
+        basis: ResolutionBasis::Priority { edges },
+    } = &conflict.resolution
+    else {
+        panic!(
+            "the declared priority must defeat the conflict: {:?}",
+            conflict.resolution
+        );
+    };
+    assert_eq!(Some(*winner), side);
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    let edge = &edges[0];
+    assert_eq!(edge.winner.as_ref(), "p.应批准");
+    assert_eq!(edge.loser.as_ref(), "q.不应批准");
+    match &edge.origin {
+        PriorityOrigin::Declaration {
+            declared_in,
+            sources,
+        } => {
+            assert_eq!(declared_in.as_ref(), "o");
+            assert_eq!(sources.len(), 1);
+            assert_eq!(sources[0].text, "上位法");
+            assert_eq!(sources[0].locator, "第九十二条");
+            assert_eq!(sources[0].version, "2023");
+        }
+        other => panic!("expected a top-level declaration origin, got {other:?}"),
+    }
+}
+
+#[test]
+fn rule_internal_clauses_carry_their_rule_and_sources() {
+    let lib = load(CLAUSE_CASE);
+    let r = reasoner(&lib);
+    let approved = Expr::app(p("批准"), p("甲"));
+    let refused = Expr::app(p("不批准"), p("甲"));
+    assert!(r.knows(&approved));
+
+    let conflict = r
+        .conflict_for(&refused)
+        .expect("the clause decides the conflict");
+    let Resolution::Defeated {
+        basis: ResolutionBasis::Priority { edges },
+        ..
+    } = &conflict.resolution
+    else {
+        panic!(
+            "the defeated_by clause must defeat the conflict: {:?}",
+            conflict.resolution
+        );
+    };
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    let edge = &edges[0];
+    assert_eq!(edge.winner.as_ref(), "一般");
+    assert_eq!(edge.loser.as_ref(), "例外");
+    let rule = lib.env.get("例外").expect("the declaring rule exists");
+    match &edge.origin {
+        PriorityOrigin::RuleClause {
+            rule: declaring_rule,
+            clause,
+            sources,
+        } => {
+            assert_eq!(declaring_rule.as_ref(), "例外");
+            assert_eq!(*clause, PriorityClause::DefeatedBy);
+            assert_eq!(sources, &rule.sources);
+            assert_eq!(sources[0].text, "乙法");
+            assert_eq!(sources[0].locator, "第二条");
+            assert_eq!(sources[0].version, "2020");
+        }
+        other => panic!("expected a rule-clause origin, got {other:?}"),
+    }
+
+    // `prefer` points from the declaring rule to the target.
+    let reopenable = Expr::app(p("可复议"), p("甲"));
+    let conflict = r
+        .conflict_for(&reopenable)
+        .expect("prefer decides the conflict");
+    let Resolution::Defeated {
+        winner,
+        basis: ResolutionBasis::Priority { edges },
+    } = &conflict.resolution
+    else {
+        panic!("prefer must defeat the conflict: {:?}", conflict.resolution);
+    };
+    assert_eq!(
+        r.conflict_side(&conflict, &reopenable),
+        Some(*winner),
+        "the declaring rule's side wins"
+    );
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0].winner.as_ref(), "复议");
+    assert_eq!(edges[0].loser.as_ref(), "不可复议规则");
+    assert!(matches!(
+        &edges[0].origin,
+        PriorityOrigin::RuleClause {
+            rule,
+            clause: PriorityClause::Prefer,
+            ..
+        } if rule.as_ref() == "复议"
+    ));
+}
+
+#[test]
+fn a_three_way_priority_cycle_makes_every_pair_unusable() {
+    let lib = load_all(&[("c.std", CYCLE_PACKAGE)]);
+    let r = reasoner(&lib);
+    assert_eq!(
+        r.priority_cycles(),
+        vec![vec![name("c.A"), name("c.B"), name("c.C")]]
+    );
+    for (left, right) in [("选A", "选B"), ("选A", "选C"), ("选B", "选C")] {
+        let first = choice("c.值", "c.甲", &format!("c.{left}"));
+        let second = choice("c.值", "c.甲", &format!("c.{right}"));
+        let conflict = conflict_between(&r, &first, &second);
+        let Resolution::Unresolved {
+            reason: UnresolvedReason::PriorityUnusable { declared },
+        } = &conflict.resolution
+        else {
+            panic!(
+                "{left}/{right}: a cyclic priority cannot decide: {:?}",
+                conflict.resolution
+            );
+        };
+        assert_eq!(declared.len(), 1, "{left}/{right}: {declared:?}");
+    }
+    // A direct A over B edge is not enough: both rules are on the cycle.
+    let direct = conflict_between(
+        &r,
+        &choice("c.值", "c.甲", "c.选A"),
+        &choice("c.值", "c.甲", "c.选B"),
+    );
+    let Resolution::Unresolved {
+        reason: UnresolvedReason::PriorityUnusable { declared },
+    } = &direct.resolution
+    else {
+        panic!("A vs B must stay unresolved even with a direct edge");
+    };
+    assert_eq!(declared[0].winner.as_ref(), "c.A");
+    assert_eq!(declared[0].loser.as_ref(), "c.B");
+}
+
+#[test]
+fn an_unrelated_cycle_does_not_disturb_another_pair() {
+    let lib = load_all(&[("d.std", CYCLE_PLUS_PAIR_PACKAGE)]);
+    let r = reasoner(&lib);
+    assert_eq!(
+        r.priority_cycles(),
+        vec![vec![name("d.A"), name("d.B"), name("d.C")]]
+    );
+
+    let cyclic = choice("d.值", "d.甲", "d.选A");
+    let sibling = choice("d.值", "d.甲", "d.选B");
+    assert!(matches!(
+        conflict_between(&r, &cyclic, &sibling).resolution,
+        Resolution::Unresolved {
+            reason: UnresolvedReason::PriorityUnusable { .. }
+        }
+    ));
+
+    let better = choice("d.值", "d.乙", "d.选优");
+    let conflict = r
+        .conflict_for(&better)
+        .expect("the unrelated pair conflicts");
+    let Resolution::Defeated {
+        winner,
+        basis: ResolutionBasis::Priority { edges },
+    } = &conflict.resolution
+    else {
+        panic!(
+            "the off-cycle priority must still decide: {:?}",
+            conflict.resolution
+        );
+    };
+    assert_eq!(r.conflict_side(&conflict, &better), Some(*winner));
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0].winner.as_ref(), "d.优");
+    assert_eq!(edges[0].loser.as_ref(), "d.劣");
+}
+
+#[test]
+fn priorities_are_not_transitive() {
+    let lib = load_all(&[("e.std", CHAIN_PACKAGE)]);
+    let r = reasoner(&lib);
+    let a = choice("e.值", "e.甲", "e.选A");
+    let b = choice("e.值", "e.甲", "e.选B");
+    let c = choice("e.值", "e.甲", "e.选C");
+
+    assert!(matches!(
+        conflict_between(&r, &a, &b).resolution,
+        Resolution::Defeated {
+            basis: ResolutionBasis::Priority { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        conflict_between(&r, &b, &c).resolution,
+        Resolution::Defeated {
+            basis: ResolutionBasis::Priority { .. },
+            ..
+        }
+    ));
+    assert_eq!(
+        conflict_between(&r, &a, &c).resolution,
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+        "A > B and B > C do not order A over C"
+    );
+    assert!(r.priority_cycles().is_empty());
+}
+
+#[test]
+fn an_edge_between_two_shared_rules_is_listed_once() {
+    let lib = load_all(&[("g.std", SHARED_SIDES_PACKAGE)]);
+    let r = reasoner(&lib);
+    let a = Expr::app(p("g.值"), p("g.选A"));
+    let b = Expr::app(p("g.值"), p("g.选B"));
+    let conflict = conflict_between(&r, &a, &b);
+    let Resolution::Unresolved {
+        reason: UnresolvedReason::PriorityUnusable { declared },
+    } = &conflict.resolution
+    else {
+        panic!(
+            "both sides are the same two rules, so no pair can beat every rule of the other side: {:?}",
+            conflict.resolution
+        );
+    };
+    assert_eq!(
+        declared.len(),
+        1,
+        "the same edge must not be listed twice: {declared:?}"
+    );
+    assert_eq!(declared[0].winner.as_ref(), "g.甲");
+    assert_eq!(declared[0].loser.as_ref(), "g.乙");
+}
+
+/// The language refuses `priority r over r` and the rule-internal spelling,
+/// but a directly built environment can still carry the edge. It can never
+/// decide a conflict, so it must be reported as a cycle like any other.
+#[test]
+fn a_priority_self_loop_is_reported_as_a_cycle() {
+    let mut env = Env::new();
+    let ctx = Ctx::new();
+    env.insert(
+        Decl {
+            name: name("p"),
+            kind: DeclKind::Pred,
+            ty: Expr::Sort(0),
+            sources: vec![],
+            index: 0,
+        },
+        &ctx,
+    )
+    .unwrap();
+    for rule_name in ["x.r", "x.s"] {
+        let rule = std_deduce_kernel::RuleDecl {
+            params: vec![],
+            premises: vec![],
+            conclusion: Expr::constant("p"),
+            unlesses: vec![],
+            exceptions: vec![],
+            prefers: vec![],
+            sources: vec![],
+            declared_in: Some(name("x")),
+        };
+        let ty = std_deduce_kernel::env::rule_type(&rule);
+        env.insert(
+            Decl {
+                name: name(rule_name),
+                kind: DeclKind::Rule(Box::new(rule)),
+                ty,
+                sources: vec![],
+                index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+    }
+    env.insert(
+        Decl {
+            name: name("priority:x:x.r:x.r"),
+            kind: DeclKind::Priority {
+                winner: name("x.r"),
+                loser: name("x.r"),
+                declared_in: name("x"),
+            },
+            ty: Expr::Sort(0),
+            sources: vec![],
+            index: 0,
+        },
+        &ctx,
+    )
+    .unwrap();
+    let r = Reasoner::new(&env);
+    assert_eq!(r.priority_cycles(), vec![vec![name("x.r")]]);
 }
