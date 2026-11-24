@@ -75,6 +75,8 @@
 //! :load <file>            load a theory file (imports resolve loaded namespaces first)
 //! :inspect                dump the ledger
 //! :why <term>             derive, print the certificate's tree, and check it
+//! :explain <term>         derive, print a Chinese because-so explanation, and
+//!                         check the same certificate
 //! :gap <term>             explain what is missing for a goal
 //! :cert <term>            derive and print the goal's certificate JSON
 //! :verify-cert <file> [goal]
@@ -209,6 +211,17 @@
 //! print one warning line before their result: an edge inside a cycle cannot
 //! decide anything, and the warning does not change the exit code.
 //!
+//! `:explain` uses exactly the same derivation and prints
+//! [`std_deduce_cert::render_narrative`] instead of the formal tree; the same
+//! certificate is then checked by both layers, and the `0`/`1`/`2` outcomes
+//! match `:why`. A fact always carries its recorded identity (`据用户陈述`,
+//! `根据法院查明`, `作为分析假设`, `双方无争议`), a step keeps its source and
+//! parameter bindings, a conflict is reported as decided or as `此处未决` with
+//! its recorded reason, and a gap lists its candidates, missing premises and
+//! `unless` blockers. A source the certificate does not record is printed as
+//! `证书未记录来源`, never omitted or filled in. `:why` still prints the formal
+//! tree, so the certificate remains expandable; `:cert` JSON is unchanged.
+//!
 //! `:cert` requires a loaded theory and writes only the certificate JSON to
 //! stdout; a gap becomes a `MissingPremise` obligation and an unresolved
 //! conflict becomes an `UnresolvedConflict` obligation in that JSON. Before
@@ -280,7 +293,7 @@ use std::path::{Path, PathBuf};
 use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
-    render, Certificate, CheckReport, EnvironmentDifference, EnvironmentIdentity,
+    render, render_narrative, Certificate, CheckReport, EnvironmentDifference, EnvironmentIdentity,
     EnvironmentRecord, Node as CertNode, ObligationKind, OpenObligation, PriorityClause,
     PriorityEdge, PriorityOrigin, ResolutionBasis, Source, TrustLevel,
 };
@@ -824,7 +837,7 @@ impl Session {
                     Ok(Outcome::Proved)
                 }
                 "fact" => self.fact_command(arg, out),
-                "why" | "gap" => self.query(cmd, arg, out),
+                "why" | "gap" | "explain" => self.query(cmd, arg, out),
                 "cert" => self.export_certificate(arg, out),
                 "verify-cert" => self.verify_certificate(arg, out),
                 "check" => Err(
@@ -1044,22 +1057,27 @@ impl Session {
 
         // A conclusion can be in a recorded conflict without being asserted:
         // that is a third outcome, distinct from both success and a gap.
-        if let Some(c) = r.conflict_for(&goal) {
-            match &c.resolution {
-                Resolution::Unresolved { reason } => {
-                    report_unresolved(out, &r, &goal, &c, reason);
-                    return Ok(Outcome::Unresolved);
-                }
-                Resolution::Defeated { winner, basis } => {
-                    let side = r.conflict_side(&c, &goal);
-                    if side != Some(*winner) {
-                        report_defeated(out, &r, &goal, &c, *winner, basis);
-                        return Ok(Outcome::Gap);
+        // `:explain` deliberately skips these early reports: it builds the
+        // certificate and narrates the conflict together with the proof (or
+        // the gap), so the reader gets one coherent explanation.
+        if cmd != "explain" {
+            if let Some(c) = r.conflict_for(&goal) {
+                match &c.resolution {
+                    Resolution::Unresolved { reason } => {
+                        report_unresolved(out, &r, &goal, &c, reason);
+                        return Ok(Outcome::Unresolved);
                     }
-                    // The winner is asserted; fall through and show it as
-                    // proved, with a note about the defeated competitor.
-                    let reachable = r.knows(&goal);
-                    debug_assert!(reachable);
+                    Resolution::Defeated { winner, basis } => {
+                        let side = r.conflict_side(&c, &goal);
+                        if side != Some(*winner) {
+                            report_defeated(out, &r, &goal, &c, *winner, basis);
+                            return Ok(Outcome::Gap);
+                        }
+                        // The winner is asserted; fall through and show it as
+                        // proved, with a note about the defeated competitor.
+                        let reachable = r.knows(&goal);
+                        debug_assert!(reachable);
+                    }
                 }
             }
         }
@@ -1136,10 +1154,16 @@ impl Session {
 
         let mut certificate = reason_certificate(&d, &r.priority_order())?;
         self.mark_case_extensions(&mut certificate);
-        // The tree is printed from the certificate, then that same certificate
-        // is checked by both layers: the tree the user sees and the object
-        // being checked cannot diverge.
-        writeln!(out, "{}", render(&certificate)?).ok();
+        // The tree or the narrative is printed from the certificate, then that
+        // same certificate is checked by both layers: what the user sees and
+        // the object being checked cannot diverge. `:why` keeps the formal
+        // tree; `:explain` prints the Chinese because-so rendering of it.
+        let rendered = if cmd == "explain" {
+            render_narrative(&certificate)?
+        } else {
+            render(&certificate)?
+        };
+        writeln!(out, "{rendered}").ok();
 
         let checked = std_deduce_cert::check(&self.lib.env, &certificate);
         let kernel = std_deduce_cert::kernel_proof(&self.lib.env, &certificate);
@@ -3497,6 +3521,11 @@ fn print_help(out: &mut impl Write) {
         "--as-of / --jurisdiction 只写进证书环境身份，:verify-cert 比对同值；不参与推理。"
     )
     .ok();
+    writeln!(
+        out,
+        "形式推导：:why <命题>；中文「因为……所以……」说明：:explain <命题>。"
+    )
+    .ok();
 }
 
 fn print_version(out: &mut impl Write) {
@@ -3556,7 +3585,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
             writeln!(
                 out,
                 ":load <文件>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
-                 :why <命题>  :gap <命题>  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
+                 :why <命题>  :explain <命题>  :gap <命题>  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )
             .ok();
