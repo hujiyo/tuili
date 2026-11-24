@@ -2058,7 +2058,8 @@ sort 人
 obj 甲 : 人
 pred Q : 人 → Prop
 pred P : 人 → Prop
-pred F : 人 → 人 → 人
+axiom F : 人 → 人 → 人
+  source text "测试" locator "夹具"
 pred 佐证 : Q 甲 → Prop
 
 rule 依赖 :

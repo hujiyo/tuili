@@ -390,12 +390,13 @@ impl Env {
     /// Add a declaration. The type is checked to live in a sort, so a typo
     /// in a predicate signature cannot enter the ledger.
     ///
-    /// The declared type also decides which kind is admissible: a `Fact`
-    /// asserts a proposition, so its declared type must be one (`Sort 0`);
-    /// an `Axiom` only names a constant, so its declared type must not be a
-    /// proposition. Accepting either mismatch would put a claim into the
-    /// ledger without an identity, or record an identity on something that is
-    /// not a claim.
+    /// The declared type also decides which kind is admissible: a `Pred` is an
+    /// atomic proposition once applied, so its declared type must be a
+    /// telescope ending in `Prop`; a `Fact` asserts a proposition, so its
+    /// declared type must be one (`Sort 0`); an `Axiom` only names a constant,
+    /// so its declared type must not be a proposition. Accepting any of these
+    /// mismatches would put a function or a claim into the ledger under the
+    /// wrong kind.
     pub fn insert(&mut self, mut decl: Decl, ctx: &Ctx) -> Result<Name> {
         if self.decls.contains_key(&decl.name) {
             return Err(Error::DuplicateName(decl.name.to_string()));
@@ -410,6 +411,7 @@ impl Env {
         // loader, which checks the same property definitionally.
         let is_proposition = crate::conv::convertible(self, ctx, &ty_ty, &Expr::Sort(0))?;
         match &decl.kind {
+            DeclKind::Pred => self.check_pred_shape(ctx, &decl.name, &decl.ty)?,
             DeclKind::Fact { .. } if !is_proposition => {
                 return Err(Error::other(format!(
                     "`{}` 被声明为事实，但它的类型不是命题：事实的类型必须是命题",
@@ -436,6 +438,43 @@ impl Env {
         let name = decl.name.clone();
         self.decls.insert(name.clone(), decl);
         Ok(name)
+    }
+
+    /// A predicate's declared type must be a telescope ending in `Prop`, i.e.
+    /// `Π Δ, Prop`. The telescope may be empty (a nullary predicate is a
+    /// proposition constant), domains may be any types, and the codomain is
+    /// compared up to definitional equality, so a `def` alias of a predicate
+    /// type is accepted.
+    ///
+    /// A function type such as `人 → 人` is a `Def`, not a `Pred`: the
+    /// reasoner treats a predicate constant as an atomic proposition, so a
+    /// function type would make every such occurrence claim a false thing.
+    fn check_pred_shape(&self, ctx: &Ctx, name: &Name, ty: &Expr) -> Result<()> {
+        let mut inner = ctx.clone();
+        let mut head = ty.clone();
+        loop {
+            head = crate::norm::whnf(self, &head)?;
+            match head {
+                Expr::Pi {
+                    name: binder,
+                    domain,
+                    codomain,
+                } => {
+                    inner.push(binder, *domain);
+                    head = *codomain;
+                }
+                other => {
+                    if crate::conv::convertible(self, &inner, &other, &Expr::Sort(0))? {
+                        return Ok(());
+                    }
+                    return Err(Error::other(format!(
+                        "`{name}` 被声明为谓词，但它的类型 `{}` 不以 Prop 结尾：\
+                         谓词必须形如 Π Δ, Prop（例如 `人 → Prop`）；返回 sort 的函数请用 `def` 声明",
+                        crate::pretty::print_normalized(self, ctx, ty)
+                    )));
+                }
+            }
+        }
     }
 
     pub fn rules(&self) -> Vec<&Decl> {

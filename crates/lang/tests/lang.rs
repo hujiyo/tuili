@@ -317,6 +317,84 @@ unique 侵占 1
         .expect("exempt declarations must load without a source");
 }
 
+/// A predicate's declared type must be a telescope ending in `Prop`. A
+/// function into a sort is a `def`, not a `pred`; the load error names the
+/// declaration and shows the offending type. The restriction belongs to
+/// `pred` alone: function definitions and type aliases still load.
+#[test]
+fn a_predicate_must_return_a_proposition_at_load() {
+    let bad = "sort 人\npred 坏人 : 人 → 人\n";
+    let err = Library::new()
+        .load("t", bad)
+        .expect_err("a predicate whose codomain is a sort must be refused")
+        .to_string();
+    assert!(
+        err.starts_with("`pred 坏人`："),
+        "the load error must name the declaration in the `pred` style: {err}"
+    );
+    assert!(
+        err.contains("Prop"),
+        "the error must say the codomain must be Prop: {err}"
+    );
+    assert!(
+        err.contains("人 → 人"),
+        "the error must show the offending type: {err}"
+    );
+
+    let good = r#"
+sort 人
+pred 天下雨 : Prop
+pred 好人 : 人 → Prop
+pred 关系 : 人 → 人 → Prop
+def 身份 : 人 → 人 := λ (x : 人) := x
+def 类型别名 : Type := 人
+"#;
+    let mut lib = Library::new();
+    lib.load("t", good)
+        .expect("nullary, first-order and function definitions are unaffected");
+    for n in ["天下雨", "好人", "关系"] {
+        assert!(
+            matches!(lib.env.get(n).expect("decl").kind, DeclKind::Pred),
+            "`{n}` must be a pred"
+        );
+    }
+    for n in ["身份", "类型别名"] {
+        assert!(
+            matches!(lib.env.get(n).expect("decl").kind, DeclKind::Def { .. }),
+            "`{n}` must remain a def"
+        );
+    }
+}
+
+/// The M2-4a boundary is unchanged by the shape check: a proposition-typed
+/// `axiom` is a `Fact`, while a function-typed constant is an `Axiom` that
+/// asserts nothing.
+#[test]
+fn axiom_shapes_still_distinguish_facts_from_constants() {
+    let src = r#"
+sort 人
+pred 侵占 : 人 → Prop
+obj 张三 : 人
+axiom 事实 : 侵占 张三
+  source text "测试" locator "夹具"
+axiom 恶意 : 人 → Prop
+  source text "测试" locator "夹具"
+"#;
+    let mut lib = Library::new();
+    lib.load("t", src).expect("both axiom shapes load");
+    assert!(
+        matches!(
+            lib.env.get("事实").expect("decl").kind,
+            DeclKind::Fact { .. }
+        ),
+        "a proposition-typed axiom is a fact"
+    );
+    assert!(
+        matches!(lib.env.get("恶意").expect("decl").kind, DeclKind::Axiom),
+        "a function-typed axiom only names a constant"
+    );
+}
+
 /// A parameter used nowhere is never bound by the reasoner, while the
 /// certificate checker demands a binding for every parameter. Loading must
 /// refuse such a rule instead of letting the two disagree.

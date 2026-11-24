@@ -1275,7 +1275,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   加载时即被拒绝——否则实例化后结论会是 `?x`，那是一个不闭合的洞。
   代价是完全没有前提的规则暂时写不了；「凡公民皆有 X」现在可以写成
   `premise 公民 x → conclude X x`，不需要量词公理的实例化支持。
-- **命题断言与非命题声明由账本区分。** 类型是命题的 `axiom` 以 `Fact` 进入账本并带身份；类型不是命题的（`axiom 假 : Prop`、`axiom 恶意 : 人 → Prop`）以 `Axiom` 进入账本，只声明常量，推理时跳过。`Env::insert` 拒绝错配：事实的类型必须是命题，`Axiom` 的类型不能是命题。`pred` / `def` 的共域仍不强制必须是 `Prop`；封闭环境另有 `obj`/`axiom` 的类型边界（见「封闭环境与案件扩展」）。
+- **命题断言与非命题声明由账本区分。** 类型是命题的 `axiom` 以 `Fact` 进入账本并带身份；类型不是命题的（`axiom 假 : Prop`、`axiom 恶意 : 人 → Prop`）以 `Axiom` 进入账本，只声明常量，推理时跳过。`Env::insert` 拒绝错配：事实的类型必须是命题，`Axiom` 的类型不能是命题；`pred` 的类型必须是 `Π Δ, Prop`（Δ 可为空，如 `pred 天下雨 : Prop`），`人 → 人` 这种返回 sort 的函数在加载时被拒并指出声明名，函数请用 `def`。`def` 只定义、不陈述，因此不额外限制形状：函数、个体、sort 或裸 `Prop`/`Type` 的别名都可以；`def` 别名会先按定义展开再检查 `pred` 的形状。封闭环境另有 `obj`/`axiom` 的类型边界（见「封闭环境与案件扩展」）。
 - **法律包导入已接通；官方宪法包 v0.4.0 形式化第三十三至五十六条中的选定句子。** `:load` 遇到
   `import` 时先看已加载的 namespace，未加载的才扫描 `lawpacks`、校验 `std.lock`，并递归加载
   `kind = "theory"` 的包文件，`:inspect` 显示 `[包名@版本]`；默认环境还会在第一次加载时按 profile
@@ -1312,18 +1312,21 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 808 个：kernel 23、lang 102、reason 63、cert 161、cli 295、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 811 个：kernel 24、lang 104、reason 63、cert 161、cli 295、lawpack 164（含 1 个 doc test）。
 
-- `crates/kernel/tests/kernel.rs`（23）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
+- `crates/kernel/tests/kernel.rs`（24）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
   `types_stay_predicative`（Type 层不许自包含），以及规则常量的两条：
   类型是 `∀ 参数, 前提 → 结论`，应用到全部参数与前提后正好得到结论；
   少给一个前提时剩下的是函数类型而不是结论，证明本身也不能当命题用。
-  另有一条固定的加载期拒绝：参数与前提 binder 重名；事实与常量声明的类型边界：
+  另有一条固定的加载期拒绝：参数与前提 binder 重名；`pred` 的共域必须是 `Prop`
+  （`人 → 人` 被拒，`def` 别名先展开再判形状）；事实与常量声明的类型边界：
   `Fact` 的类型必须是命题、`Axiom` 不能断言命题；`FactIdentity` 五个关键字/中文标签/
   `is_strict`/`seeds_derivation` 的表驱动用例；以及来源渲染的几条：
   `one_line` 保持旧格式并转义控制字符、字面反斜杠与不可见格式字符，`full` 逐行列出全部非空字段并转义。
-- `crates/lang/tests/lang.rs`（27）：最小规则和 `contrary` 声明能加载；参数/前提 binder 重名、
+- `crates/lang/tests/lang.rs`（29）：最小规则和 `contrary` 声明能加载；`pred` 共域不是 `Prop` 时
+  加载失败并指出声明名与类型，空/一阶/高阶谓词以及函数、类型别名的 `def` 不受影响；
+  命题类型的 `axiom` 仍是 `Fact`、函数类型的 `axiom` 仍是常量；参数/前提 binder 重名、
   未命名前提生成的 `_p{i}` 重名、参数只出现在 `unless` 里、以及完全未使用的参数都拒绝加载；
   规则与断言事实缺 `source` 或来源只有空白时加载失败且错误指出声明名，补上后加载成功；
   缺来源先于类型错误报告，失败的加载不改变库内容；

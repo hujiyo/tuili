@@ -642,6 +642,84 @@ fn an_axiom_must_not_assert_a_proposition() {
     );
 }
 
+/// A `pred` is an atomic proposition once applied, so its declared type must
+/// be a telescope ending in `Prop`. `人 → 人` is a function into a sort: it may
+/// be a `def`, but it must not enter the ledger as a predicate.
+#[test]
+fn a_predicate_must_return_a_proposition() {
+    let mut env = Env::new();
+    let ctx = Ctx::new();
+    let add = |env: &mut Env, n: &str, kind: DeclKind, ty: Expr| {
+        env.insert(
+            Decl {
+                name: name(n),
+                kind,
+                ty,
+                sources: vec![],
+                index: 0,
+            },
+            &ctx,
+        )
+    };
+    add(&mut env, "人", DeclKind::Sort, Expr::Sort(1)).unwrap();
+    // A nullary predicate is a proposition; predicates over individuals and
+    // higher-order predicates end in `Prop` as well.
+    for (n, ty) in [
+        ("天下雨", Expr::Sort(0)),
+        ("好人", Expr::pi(c("人"), Expr::Sort(0))),
+        ("关系", Expr::pi(c("人"), Expr::pi(c("人"), Expr::Sort(0)))),
+    ] {
+        add(&mut env, n, DeclKind::Pred, ty)
+            .unwrap_or_else(|e| panic!("`{n}` must be accepted as a predicate: {e}"));
+    }
+    let err = add(&mut env, "坏人", DeclKind::Pred, Expr::pi(c("人"), c("人")))
+        .expect_err("a predicate whose codomain is a sort must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("坏人"),
+        "the error must name the declaration: {msg}"
+    );
+    assert!(
+        msg.contains("Prop"),
+        "the error must say the codomain must be Prop: {msg}"
+    );
+    assert!(
+        msg.contains("人 → 人"),
+        "the error must show the offending type: {msg}"
+    );
+    assert!(
+        env.get("坏人").is_none(),
+        "the refused declaration must not enter the ledger"
+    );
+
+    // A `def` alias is unfolded before the shape is checked: an alias of a
+    // function into a sort is refused, an alias of a function into `Prop` is
+    // accepted.
+    add(
+        &mut env,
+        "函数类型",
+        DeclKind::Def {
+            body: Expr::pi(c("人"), c("人")),
+        },
+        Expr::Sort(1),
+    )
+    .unwrap();
+    let err = add(&mut env, "别名坏事", DeclKind::Pred, c("函数类型"))
+        .expect_err("an alias of `人 → 人` is still not a predicate");
+    assert!(err.to_string().contains("别名坏事"), "{err}");
+    add(
+        &mut env,
+        "谓词类型",
+        DeclKind::Def {
+            body: Expr::pi(c("人"), Expr::Sort(0)),
+        },
+        Expr::Sort(1),
+    )
+    .unwrap();
+    add(&mut env, "别名好事", DeclKind::Pred, c("谓词类型"))
+        .expect("an alias of `人 → Prop` is a predicate");
+}
+
 /// The five identities round-trip through their keyword and carry the
 /// labels, strictness and derivation roles the fact ledger reports.
 #[test]
