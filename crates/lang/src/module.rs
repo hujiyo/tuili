@@ -171,7 +171,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError::new(format!("`pred {n}`：{e}")))?;
+                        .map_err(|e| LoadError::new(format!("`pred`：{e}")))?;
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }

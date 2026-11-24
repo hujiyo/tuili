@@ -692,6 +692,26 @@ fn a_predicate_must_return_a_proposition() {
         "the refused declaration must not enter the ledger"
     );
 
+    // A telescope whose final codomain is a proposition *term* is refused too:
+    // `Π (x : 人), 天下雨` is the type of a proof of a universal proposition, not
+    // a family of propositions, so it is not a predicate.
+    let err = add(
+        &mut env,
+        "坏谓词",
+        DeclKind::Pred,
+        Expr::pi(c("人"), c("天下雨")),
+    )
+    .expect_err("a predicate whose codomain is a proposition term must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("坏谓词") && msg.contains("Prop"),
+        "the error must name the declaration and the expected codomain: {msg}"
+    );
+    assert!(
+        env.get("坏谓词").is_none(),
+        "the refused declaration must not enter the ledger"
+    );
+
     // A `def` alias is unfolded before the shape is checked: an alias of a
     // function into a sort is refused, an alias of a function into `Prop` is
     // accepted.

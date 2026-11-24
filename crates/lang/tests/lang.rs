@@ -329,8 +329,12 @@ fn a_predicate_must_return_a_proposition_at_load() {
         .expect_err("a predicate whose codomain is a sort must be refused")
         .to_string();
     assert!(
-        err.starts_with("`pred 坏人`："),
-        "the load error must name the declaration in the `pred` style: {err}"
+        err.starts_with("`pred`："),
+        "the load error must say which declaration shape failed: {err}"
+    );
+    assert!(
+        err.contains("`坏人`"),
+        "the load error must name the declaration exactly once: {err}"
     );
     assert!(
         err.contains("Prop"),

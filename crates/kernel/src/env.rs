@@ -468,8 +468,10 @@ impl Env {
                         return Ok(());
                     }
                     return Err(Error::other(format!(
-                        "`{name}` 被声明为谓词，但它的类型 `{}` 不以 Prop 结尾：\
-                         谓词必须形如 Π Δ, Prop（例如 `人 → Prop`）；返回 sort 的函数请用 `def` 声明",
+                        "`{}` 被声明为谓词，但它的类型 `{}` 不以 Prop 结尾：\
+                         谓词必须形如 Π Δ, Prop（例如 `人 → Prop`）；返回 sort 的函数请用 `def` \
+                         声明，不可展开的函数常量请用 `axiom` 声明",
+                        escape_control(name),
                         crate::pretty::print_normalized(self, ctx, ty)
                     )));
                 }
