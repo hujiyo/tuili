@@ -1126,30 +1126,310 @@ impl<'a> Reasoner<'a> {
 
     /// Why is `goal` unreachable? List candidate rules with what each is
     /// missing and what is blocking it.
+    ///
+    /// This is the one-level explanation used where a recursive tree would not
+    /// fit (the gap node of a certificate). `:gap` uses
+    /// [`Reasoner::gap_tree`], which expands the same candidates recursively.
     pub fn explain(&self, goal: &Expr) -> GapExplanation {
-        let mut candidates = Vec::new();
-        let note = if check::check(self.env, &Ctx::new(), goal, &Expr::Sort(0)).is_err() {
-            Some("目标不是命题".to_string())
-        } else if self.conflict_for(goal).is_some() {
-            Some("目标处于冲突中：未决的结论不进入事实库，需要人工裁决".to_string())
-        } else if self.knows(goal) {
-            Some("目标已可推出".to_string())
+        let status = self.gap_status(goal);
+        let note = self.gap_note(status).map(str::to_owned);
+        let candidates = if note.is_some() {
+            Vec::new()
         } else {
-            None
+            self.gap_candidates(goal)
         };
-        if note.is_some() {
-            return GapExplanation {
-                goal: goal.clone(),
-                candidates,
-                note,
-            };
+        GapExplanation {
+            goal: goal.clone(),
+            candidates,
+            note,
         }
+    }
+
+    /// Why is `goal` unreachable, expanded into a recursive gap tree?
+    ///
+    /// Each candidate rule names what it is missing, which blocking conditions
+    /// already hold and where the rule comes from. Every missing premise
+    /// becomes its own gap node, expanded until it reaches a fact leaf (no
+    /// rule concludes it), a proposition in a recorded conflict, or a
+    /// proposition that is already being expanded on this path (a rule cycle).
+    ///
+    /// The expansion is bounded by [`GapLimits`]. A limit that stops a branch
+    /// is recorded on the node or candidate that stopped it; nothing is
+    /// silently cut off, and the recursion cannot run away: the depth cap is
+    /// checked before a child is built and the node cap before it is created.
+    pub fn gap_tree(&self, goal: &Expr) -> GapTree {
+        self.gap_tree_with(goal, &GapLimits::default())
+    }
+
+    /// [`Reasoner::gap_tree`] with explicit limits.
+    pub fn gap_tree_with(&self, goal: &Expr, limits: &GapLimits) -> GapTree {
+        let mut budget = GapBudget::new(limits);
+        let mut path = Vec::new();
+        self.expand_gap(goal, 0, &mut path, &mut budget)
+    }
+
+    /// Every conclusion the current fact set can still contest, each with its
+    /// recursive gap tree.
+    ///
+    /// A conclusion is contestable when a rule can be instantiated to it for
+    /// the declared constants (one object per parameter, in parameter order)
+    /// and it is not already in the fact base, or when it is a side of a
+    /// recorded conflict. The scan reports what it could not enumerate — rules
+    /// whose parameter types have no declared constant — instead of pretending
+    /// the list is complete. The list and every tree are bounded by
+    /// [`GapLimits`].
+    pub fn issues(&self) -> IssueScan {
+        self.issues_with(&GapLimits::default())
+    }
+
+    /// [`Reasoner::issues`] with explicit limits.
+    pub fn issues_with(&self, limits: &GapLimits) -> IssueScan {
+        let mut scan = IssueScan {
+            issues: Vec::new(),
+            limits: Vec::new(),
+            uninstantiable: Vec::new(),
+        };
+        let values = constant_values(self.env);
+        // Keyed by structural identity: two rules that conclude the same
+        // proposition are one issue with two candidate rules, and an alpha
+        // variant does not create a second entry.
+        let mut goals: BTreeMap<String, (Option<Name>, Expr)> = BTreeMap::new();
+
+        for decl in self.ordered_rules() {
+            let DeclKind::Rule(rule) = &decl.kind else {
+                continue;
+            };
+            let mut instances = Vec::new();
+            let mut truncated = false;
+            collect_param_bindings(
+                self.env,
+                rule,
+                &values,
+                limits.max_rule_attempts,
+                &mut instances,
+                &mut truncated,
+            );
+            if truncated {
+                scan.limits.push(GapLimit::RuleAttempts {
+                    rule: decl.name.clone(),
+                    limit: limits.max_rule_attempts,
+                });
+            }
+            let mut stated = false;
+            for binding in instances {
+                let conclusion = close_pattern(&rule.open_conclusion(), &binding);
+                // A conclusion that still mentions a premise binder is not a
+                // proposition that can be stated from facts: it depends on a
+                // particular proof term. Such a rule cannot produce an issue.
+                if has_open_pattern(&conclusion) {
+                    continue;
+                }
+                if check::check(self.env, &Ctx::new(), &conclusion, &Expr::Sort(0)).is_err() {
+                    continue;
+                }
+                stated = true;
+                let key = structural_key(self.env, &conclusion);
+                goals
+                    .entry(key)
+                    .or_insert_with(|| (Some(decl.name.clone()), conclusion));
+            }
+            if !stated {
+                scan.uninstantiable.push(decl.name.clone());
+            }
+        }
+
+        // A conclusion that took part in a conflict is contestable even when
+        // no rule enumerates it (two facts, or a claim against a rule). Sides
+        // already produced by a rule keep their rule as the primary order key.
+        for conflict in self.conflicts() {
+            for side in [&conflict.left, &conflict.right] {
+                if self.knows(side) {
+                    continue;
+                }
+                let key = structural_key(self.env, side);
+                goals.entry(key).or_insert_with(|| (None, side.clone()));
+            }
+        }
+
+        let mut entries: Vec<(Option<Name>, String, Expr)> = goals
+            .into_iter()
+            .map(|(key, (rule, goal))| (rule, key, goal))
+            .collect();
+        // A proved conclusion is not contestable. This is the same `knows`
+        // predicate the gap tree reads, so the filter cannot disagree with the
+        // status each tree reports.
+        entries.retain(|(_, _, goal)| !self.knows(goal));
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        if entries.len() > limits.max_issues {
+            scan.limits.push(GapLimit::Issues {
+                limit: limits.max_issues,
+            });
+            entries.truncate(limits.max_issues);
+        }
+        for (_, _, goal) in entries {
+            let tree = self.gap_tree_with(&goal, limits);
+            scan.issues.push(tree);
+        }
+        scan.limits.sort();
+        scan.limits.dedup();
+        scan.uninstantiable.sort();
+        scan.uninstantiable.dedup();
+        scan
+    }
+
+    /// Expand one gap node.
+    ///
+    /// The caller guarantees this node may be created. `depth` is the number of
+    /// candidate links above this node, so the depth cap is a hard bound on the
+    /// call stack as well as on the output.
+    fn expand_gap(
+        &self,
+        goal: &Expr,
+        depth: usize,
+        path: &mut Vec<GapPathEntry>,
+        budget: &mut GapBudget,
+    ) -> GapTree {
+        budget.nodes += 1;
+        let status = self.gap_status(goal);
+        let mut tree = GapTree {
+            goal: goal.clone(),
+            status,
+            candidates: Vec::new(),
+            limit: None,
+        };
+        if status != GapStatus::Unreachable {
+            return tree;
+        }
+        let candidates = self.gap_candidates(goal);
+        if candidates.is_empty() {
+            return tree;
+        }
+        if depth >= budget.limits.max_depth {
+            for candidate in candidates {
+                tree.candidates.push(GapRule::unexpanded(candidate, None));
+            }
+            tree.limit = Some(GapLimit::Depth {
+                limit: budget.limits.max_depth,
+            });
+            return tree;
+        }
+
+        path.push(GapPathEntry {
+            key: structural_key(self.env, goal),
+            goal: goal.clone(),
+        });
+        for candidate in candidates {
+            // The node cap was reached by an earlier branch: the remaining
+            // candidates and their premises are still listed (what and which
+            // rule), but nothing below them is expanded.
+            if tree.limit.is_some() {
+                tree.candidates.push(GapRule::unexpanded(candidate, None));
+                continue;
+            }
+            let attempts = budget.attempts.entry(candidate.rule.clone()).or_default();
+            if *attempts >= budget.limits.max_rule_attempts {
+                let rule = candidate.rule.clone();
+                tree.candidates.push(GapRule::unexpanded(
+                    candidate,
+                    Some(GapLimit::RuleAttempts {
+                        rule,
+                        limit: budget.limits.max_rule_attempts,
+                    }),
+                ));
+                continue;
+            }
+            *attempts += 1;
+            let mut rule = GapRule {
+                rule: candidate.rule,
+                missing: Vec::new(),
+                blocked_by: candidate.blocked_by,
+                sources: candidate.sources,
+                limit: None,
+            };
+            for premise in candidate.missing {
+                let Some(child) = self.expand_premise(&premise, depth, path, budget) else {
+                    tree.limit = Some(GapLimit::Nodes {
+                        limit: budget.limits.max_nodes,
+                    });
+                    rule.missing.push(GapPremise { premise, gap: None });
+                    continue;
+                };
+                rule.missing.push(GapPremise {
+                    premise,
+                    gap: Some(Box::new(child)),
+                });
+            }
+            tree.candidates.push(rule);
+        }
+        path.pop();
+        tree
+    }
+
+    /// Build the gap node for one missing premise, or `None` when the node
+    /// budget is spent or the premise is already on the expansion path.
+    fn expand_premise(
+        &self,
+        premise: &Expr,
+        depth: usize,
+        path: &mut Vec<GapPathEntry>,
+        budget: &mut GapBudget,
+    ) -> Option<GapTree> {
+        if budget.nodes >= budget.limits.max_nodes {
+            return None;
+        }
+        if self.gap_on_path(premise, path) {
+            // A cycle marker is a node of the output too, so it counts.
+            budget.nodes += 1;
+            return Some(GapTree {
+                goal: premise.clone(),
+                status: GapStatus::Cycle,
+                candidates: Vec::new(),
+                limit: None,
+            });
+        }
+        Some(self.expand_gap(premise, depth + 1, path, budget))
+    }
+
+    /// The status of a proposition as a gap node.
+    fn gap_status(&self, goal: &Expr) -> GapStatus {
+        if has_open_pattern(goal) {
+            // The goal does not determine every parameter of the candidate
+            // that produced it; there is no closed proposition to explain.
+            GapStatus::OpenPattern
+        } else if check::check(self.env, &Ctx::new(), goal, &Expr::Sort(0)).is_err() {
+            GapStatus::NotAProposition
+        } else if self.conflict_for(goal).is_some() {
+            GapStatus::Conflicted
+        } else if self.knows(goal) {
+            GapStatus::Proved
+        } else {
+            GapStatus::Unreachable
+        }
+    }
+
+    /// The one-level note `explain` records for a goal that is not a plain gap.
+    fn gap_note(&self, status: GapStatus) -> Option<&'static str> {
+        match status {
+            GapStatus::Proved => Some("目标已可推出"),
+            GapStatus::Conflicted => Some("目标处于冲突中：未决的结论不进入事实库，需要人工裁决"),
+            GapStatus::NotAProposition => Some("目标不是命题"),
+            GapStatus::Unreachable | GapStatus::OpenPattern | GapStatus::Cycle => None,
+        }
+    }
+
+    /// Every rule whose head matches `goal`, in rule-name order, with the
+    /// premises still missing and the blocking conditions that already hold.
+    ///
+    /// This is the single-level candidate search shared by `explain` and the
+    /// recursive gap tree; the tree wraps each entry in a child node instead of
+    /// reimplementing the match.
+    fn gap_candidates(&self, goal: &Expr) -> Vec<GapCandidate> {
         let facts: BTreeMap<String, Expr> = self
             .fixed
             .as_ref()
             .map(|f| f.facts.clone())
             .unwrap_or_default();
-
+        let mut candidates = Vec::new();
         for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
@@ -1177,11 +1457,21 @@ impl<'a> Reasoner<'a> {
                 sources: decl.sources.clone(),
             });
         }
-        GapExplanation {
-            goal: goal.clone(),
-            candidates,
-            note,
-        }
+        candidates
+    }
+
+    /// Is `goal` already being expanded on this path?
+    ///
+    /// The structural key decides the normal case. A key miss compares with
+    /// kernel conversion as well, so an eta variant of an ancestor is caught.
+    /// A comparison that fails is not treated as equality: it only means this
+    /// path is not cut here, and the depth cap still bounds the expansion.
+    fn gap_on_path(&self, goal: &Expr, path: &[GapPathEntry]) -> bool {
+        let key = structural_key(self.env, goal);
+        path.iter().any(|entry| {
+            entry.key == key
+                || convertible(self.env, &Ctx::new(), &entry.goal, goal).unwrap_or(false)
+        })
     }
 }
 
@@ -1606,6 +1896,316 @@ pub struct GapExplanation {
     pub goal: Expr,
     pub candidates: Vec<GapCandidate>,
     pub note: Option<String>,
+}
+
+/// What a gap node's proposition is, as far as the settled state is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapStatus {
+    /// Nothing in the fact base proves it; `GapTree::candidates` says what
+    /// each rule still needs.
+    Unreachable,
+    /// It is in the settled fact base.
+    Proved,
+    /// It is a side of a recorded conflict, so it is not asserted.
+    Conflicted,
+    /// The term is not a proposition and cannot be a goal.
+    NotAProposition,
+    /// The term still contains a rule-telescope binder (`?name`): the goal does
+    /// not determine every parameter of the candidate, so this premise cannot
+    /// be stated — let alone expanded — as it stands.
+    OpenPattern,
+    /// The same proposition is already being expanded on this path; the rule
+    /// cycle is cut here instead of recursing forever.
+    Cycle,
+}
+
+/// An explicit limit that stopped a gap expansion or an issue scan.
+///
+/// A limit is always reported where it applies: `GapTree::limit` for a node
+/// whose premises are not expanded, `GapRule::limit` for a rule whose repeated
+/// attempts are refused, `IssueScan::limits` for the scan itself.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GapLimit {
+    /// The expansion reached the maximum depth.
+    Depth { limit: usize },
+    /// The expansion reached the maximum number of nodes (the root counts).
+    Nodes { limit: usize },
+    /// One rule was already expanded the maximum number of times.
+    RuleAttempts { rule: Name, limit: usize },
+    /// The issue scan reached its maximum number of conclusions.
+    Issues { limit: usize },
+}
+
+/// The bounds of a gap tree or an issue scan.
+///
+/// The defaults are deliberately small: a legal chain is short, and an
+/// explanation that would need more than a few hundred nodes is a sign that
+/// the theory, not the printer, should be fixed. Reaching a limit is reported,
+/// never silently applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GapLimits {
+    /// Maximum depth of the gap tree (the root is depth 0).
+    pub max_depth: usize,
+    /// Maximum number of gap nodes in one tree (the root counts).
+    pub max_nodes: usize,
+    /// Maximum number of times one rule may be expanded inside one tree, and
+    /// the maximum number of parameter tuples the issue scan tries per rule.
+    pub max_rule_attempts: usize,
+    /// Maximum number of contestable conclusions the issue scan lists.
+    pub max_issues: usize,
+}
+
+impl Default for GapLimits {
+    fn default() -> Self {
+        GapLimits {
+            max_depth: 6,
+            max_nodes: 128,
+            max_rule_attempts: 8,
+            max_issues: 32,
+        }
+    }
+}
+
+/// Why a proposition is still open, expanded recursively.
+#[derive(Debug, Clone)]
+pub struct GapTree {
+    /// The proposition this node explains.
+    pub goal: Expr,
+    pub status: GapStatus,
+    /// Rules whose head matches `goal`, in rule-name order.
+    pub candidates: Vec<GapRule>,
+    /// Set when this node's candidates are listed but their missing premises
+    /// were not expanded, because a node limit was reached.
+    pub limit: Option<GapLimit>,
+}
+
+/// One rule that could conclude a gap, with what it still needs.
+#[derive(Debug, Clone)]
+pub struct GapRule {
+    pub rule: Name,
+    /// Missing premises in the rule's own premise order, each with the gap
+    /// that explains why it is missing.
+    pub missing: Vec<GapPremise>,
+    /// `unless` conditions that already hold; each one stops this rule.
+    pub blocked_by: Vec<Expr>,
+    pub sources: Vec<SourceRef>,
+    /// Set when this rule was not expanded because it already used up its
+    /// attempts.
+    pub limit: Option<GapLimit>,
+}
+
+/// One missing premise and its recursive gap.
+#[derive(Debug, Clone)]
+pub struct GapPremise {
+    pub premise: Expr,
+    /// `None` when a node limit stopped the expansion; the enclosing
+    /// `GapTree::limit` or `GapRule::limit` says which.
+    pub gap: Option<Box<GapTree>>,
+}
+
+/// Every contestable conclusion under the current fact set.
+#[derive(Debug, Clone)]
+pub struct IssueScan {
+    /// One gap tree per contestable conclusion, sorted by the rule that first
+    /// produced it and then by structural goal key.
+    pub issues: Vec<GapTree>,
+    /// Limits that stopped the scan itself (an issue cap or a per-rule
+    /// enumeration cap), sorted and deduplicated.
+    pub limits: Vec<GapLimit>,
+    /// Rules that produced no contestable conclusion because their parameter
+    /// types have no declared constant, or because their conclusion depends on
+    /// a premise proof and cannot be stated from facts.
+    pub uninstantiable: Vec<Name>,
+}
+
+impl GapRule {
+    /// A candidate whose missing premises are listed but not expanded.
+    fn unexpanded(candidate: GapCandidate, limit: Option<GapLimit>) -> Self {
+        GapRule {
+            rule: candidate.rule,
+            missing: candidate
+                .missing
+                .into_iter()
+                .map(|premise| GapPremise { premise, gap: None })
+                .collect(),
+            blocked_by: candidate.blocked_by,
+            sources: candidate.sources,
+            limit,
+        }
+    }
+}
+
+/// The budget shared by every node of one gap tree.
+struct GapBudget<'a> {
+    limits: &'a GapLimits,
+    nodes: usize,
+    /// Rule name -> number of expansions attempted in this tree.
+    attempts: BTreeMap<Name, usize>,
+}
+
+impl<'a> GapBudget<'a> {
+    fn new(limits: &'a GapLimits) -> Self {
+        GapBudget {
+            limits,
+            nodes: 0,
+            attempts: BTreeMap::new(),
+        }
+    }
+}
+
+/// One proposition already being expanded on the current path.
+struct GapPathEntry {
+    key: String,
+    goal: Expr,
+}
+
+/// A collision-free structural identity for the gap tree's maps.
+///
+/// It is the certificate's own [`std_deduce_cert::expression_key`] applied to
+/// the normal form: binder names do not matter, `def`/beta/zeta are unfolded,
+/// and a bound variable can never collide with a same-named constant. Printed
+/// text is not used for identity anywhere in the gap tree.
+fn structural_key(env: &Env, expression: &Expr) -> String {
+    // `normalize` has no failure path for the closed terms built from
+    // declarations. If it ever returned an error, the structural encoding of
+    // the term itself is still a structural key: deduplication would get
+    // coarser, but no gap result is decided by printed text.
+    let normalized = normalize(env, &Ctx::new(), expression).unwrap_or_else(|_| expression.clone());
+    std_deduce_cert::expression_key(&normalized)
+}
+
+/// Does the expression still mention a rule-telescope binder (`?name`)?
+///
+/// Such a conclusion depends on a particular premise proof; it is not a
+/// proposition that can be stated from facts, so the issue scan does not list
+/// it. The check is structural, not textual: `?name` is the reasoner's own
+/// encoding, never a constant the language can declare.
+fn has_open_pattern(expression: &Expr) -> bool {
+    match expression {
+        Expr::Const(name) => name.starts_with('?'),
+        Expr::App { func, arg } => has_open_pattern(func) || has_open_pattern(arg),
+        Expr::Pi {
+            domain, codomain, ..
+        } => has_open_pattern(domain) || has_open_pattern(codomain),
+        Expr::Lam { domain, body, .. } => has_open_pattern(domain) || has_open_pattern(body),
+        Expr::Let { value, body, .. } => has_open_pattern(value) || has_open_pattern(body),
+        Expr::Sort(_) | Expr::Var(_) => false,
+    }
+}
+
+/// Every constant of the environment, grouped by its declared type's
+/// structural key, sorted by name.
+///
+/// Rules are constants too (their type is the rule telescope), so a
+/// higher-order parameter can be instantiated with one. Meta declarations
+/// (`contrary`, `unique`, `priority`, `interpret`) name no term and are
+/// skipped.
+fn constant_values(env: &Env) -> BTreeMap<String, Vec<Expr>> {
+    let mut by_type: BTreeMap<String, Vec<Expr>> = BTreeMap::new();
+    for decl in env.iter() {
+        if matches!(
+            &decl.kind,
+            DeclKind::Contrary { .. }
+                | DeclKind::Unique { .. }
+                | DeclKind::Priority { .. }
+                | DeclKind::Interpretation(_)
+        ) {
+            continue;
+        }
+        by_type
+            .entry(structural_key(env, &decl.ty))
+            .or_default()
+            .push(Expr::Const(decl.name.clone()));
+    }
+    for candidates in by_type.values_mut() {
+        candidates.sort_by(|a, b| const_name(a).cmp(const_name(b)));
+        candidates.dedup_by(|a, b| structural_key(env, a) == structural_key(env, b));
+    }
+    by_type
+}
+
+fn const_name(expression: &Expr) -> &str {
+    match expression {
+        Expr::Const(name) => name,
+        _ => "",
+    }
+}
+
+/// Collect the typed parameter tuples of `rule`, at most `limit` of them.
+///
+/// A parameter's type is opened with `?<earlier parameter>` constants and
+/// closed with the values chosen so far, so a dependent parameter (such as
+/// `y : 亲属 x`) only accepts values of the instantiated type. The traversal is
+/// iterative: a rule with many parameters cannot overflow the call stack.
+///
+/// `truncated` is set only when a tuple was actually left out because `out`
+/// already holds `limit` values; a rule with exactly `limit` tuples does not
+/// report a truncation.
+fn collect_param_bindings(
+    env: &Env,
+    rule: &RuleDecl,
+    values: &BTreeMap<String, Vec<Expr>>,
+    limit: usize,
+    out: &mut Vec<Vec<(Name, Expr)>>,
+    truncated: &mut bool,
+) {
+    // One frame per parameter level: the values of that level's type and how
+    // many of them have been tried.
+    let mut stack: Vec<(Vec<Expr>, usize)> = Vec::new();
+    let mut binding: Vec<(Name, Expr)> = Vec::new();
+    loop {
+        if stack.len() == rule.params.len() {
+            if out.len() == limit {
+                *truncated = true;
+                return;
+            }
+            out.push(binding.clone());
+            if !advance_param_frame(&mut stack, &mut binding, rule) {
+                return;
+            }
+            continue;
+        }
+        let level = stack.len();
+        let parameter_type = close_pattern(&rule.open_param_type(level), &binding);
+        let candidates = values
+            .get(&structural_key(env, &parameter_type))
+            .cloned()
+            .unwrap_or_default();
+        if candidates.is_empty() {
+            if !advance_param_frame(&mut stack, &mut binding, rule) {
+                return;
+            }
+            continue;
+        }
+        stack.push((candidates, 0));
+        if !advance_param_frame(&mut stack, &mut binding, rule) {
+            return;
+        }
+    }
+}
+
+/// Pick the next value for the deepest parameter frame, dropping exhausted
+/// frames. Returns `false` when every tuple has been visited.
+fn advance_param_frame(
+    stack: &mut Vec<(Vec<Expr>, usize)>,
+    binding: &mut Vec<(Name, Expr)>,
+    rule: &RuleDecl,
+) -> bool {
+    loop {
+        let Some((candidates, next)) = stack.last_mut() else {
+            return false;
+        };
+        if *next < candidates.len() {
+            let value = candidates[*next].clone();
+            *next += 1;
+            let level = stack.len() - 1;
+            binding.truncate(level);
+            binding.push((rule.params[level].0.clone(), value));
+            return true;
+        }
+        stack.pop();
+        binding.truncate(stack.len());
+    }
 }
 
 // ---------------------------------------------------------------- verify
