@@ -16,6 +16,32 @@ use crate::version::FormatVersion;
 /// A zero-based index into [`Certificate::nodes`].
 pub type NodeId = usize;
 
+/// The largest certificate JSON document accepted from, or written to, disk.
+///
+/// Serialization and deserialization both enforce this bound. A certificate is
+/// a per-query proof, not a corpus: several megabytes is already far more than
+/// any real derivation. The bound is checked before parsing, so an oversized
+/// file is rejected without allocating its JSON value first.
+pub const MAX_CERT_JSON_BYTES: usize = 8 * 1024 * 1024;
+
+/// The largest number of proof nodes in one certificate.
+///
+/// This mirrors the environment closure's fact bound: a proof that needs more
+/// than this many steps is not useful to a human checker. Exceeding it is an
+/// error with a named bound, not a silent truncation.
+pub const MAX_CERT_NODES: usize = 10_000;
+
+/// The largest number of assumptions in one certificate.
+pub const MAX_CERT_ASSUMPTIONS: usize = 10_000;
+
+/// The largest number of expression nodes in one certificate term.
+///
+/// One proposition, binding value, gap candidate or conflict side may not
+/// exceed this. It matches the environment closure's single-term bound
+/// (`MAX_TERM_NODES` there), so a certificate cannot smuggle in a term the
+/// checker's own closure would refuse to normalize.
+pub const MAX_CERT_EXPR_NODES: usize = 10_000;
+
 /// A proof certificate.
 ///
 /// The JSON object has exactly the fields below, in this order:
@@ -51,13 +77,27 @@ pub struct Certificate {
 
 impl Certificate {
     /// Serialize as compact JSON.
+    ///
+    /// The certificate's own resource bounds are checked first, so this
+    /// function never produces JSON that [`Certificate::from_json`] would
+    /// refuse.
     pub fn to_json(&self) -> serde_json::Result<String> {
-        serde_json::to_string(self)
+        self.check_limits().map_err(serde_json::Error::custom)?;
+        let json = serde_json::to_string(self)?;
+        check_json_size(json.len())?;
+        Ok(json)
     }
 
     /// Serialize as indented JSON.
+    ///
+    /// The same bounds as [`Certificate::to_json`] apply; the pretty-printed
+    /// form is slightly larger, which is why the size check runs on the actual
+    /// output.
     pub fn to_json_pretty(&self) -> serde_json::Result<String> {
-        serde_json::to_string_pretty(self)
+        self.check_limits().map_err(serde_json::Error::custom)?;
+        let json = serde_json::to_string_pretty(self)?;
+        check_json_size(json.len())?;
+        Ok(json)
     }
 
     /// Stamp the environment identity, replacing whatever the reasoner left.
@@ -78,6 +118,8 @@ impl Certificate {
     /// certificate's environment record is then validated, so an exporter
     /// cannot hand out duplicate pack names or a malformed corpus hash.
     pub fn from_json(text: &str) -> serde_json::Result<Self> {
+        check_json_size(text.len())?;
+
         #[derive(Deserialize)]
         struct FormatProbe {
             #[serde(rename = "format_version")]
@@ -90,7 +132,87 @@ impl Certificate {
             .environment
             .validate()
             .map_err(serde_json::Error::custom)?;
+        certificate
+            .check_limits()
+            .map_err(serde_json::Error::custom)?;
         Ok(certificate)
+    }
+
+    /// Check the certificate's own node, assumption and expression bounds.
+    ///
+    /// The error names the bound and the offending entry. The traversal is
+    /// iterative, so it cannot recurse to death on an expression that was
+    /// built in memory rather than parsed from JSON.
+    fn check_limits(&self) -> Result<(), String> {
+        if self.nodes.len() > MAX_CERT_NODES {
+            return Err(format!(
+                "证书节点数量超过上限 {MAX_CERT_NODES}：实际 {} 个",
+                self.nodes.len()
+            ));
+        }
+        if self.assumptions.len() > MAX_CERT_ASSUMPTIONS {
+            return Err(format!(
+                "证书假设数量超过上限 {MAX_CERT_ASSUMPTIONS}：实际 {} 条",
+                self.assumptions.len()
+            ));
+        }
+        for (index, assumption) in self.assumptions.iter().enumerate() {
+            check_expression(
+                &assumption.proposition,
+                &format!("第 {} 条假设的命题", index + 1),
+            )?;
+        }
+        for (index, node) in self.nodes.iter().enumerate() {
+            let place = format!("第 {} 个证书节点", index + 1);
+            match node {
+                Node::Assumption { .. } => {}
+                Node::RuleApplication {
+                    conclusion,
+                    bindings,
+                    ..
+                } => {
+                    check_expression(conclusion, &format!("{place}的结论"))?;
+                    for binding in bindings {
+                        check_expression(
+                            &binding.value,
+                            &format!("{place}的参数 `{}` 绑定", binding.parameter),
+                        )?;
+                    }
+                }
+                Node::Gap {
+                    proposition,
+                    candidates,
+                    ..
+                } => {
+                    check_expression(proposition, &format!("{place}的缺口命题"))?;
+                    for candidate in candidates {
+                        for expression in &candidate.missing {
+                            check_expression(
+                                expression,
+                                &format!("{place}的缺口候选 `{}` 缺失前提", candidate.rule),
+                            )?;
+                        }
+                        for expression in &candidate.blocked_by {
+                            check_expression(
+                                expression,
+                                &format!("{place}的缺口候选 `{}` 阻断条件", candidate.rule),
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        for (index, conflict) in self.conflicts.iter().enumerate() {
+            check_expression(
+                &conflict.left,
+                &format!("第 {} 条冲突的左侧命题", index + 1),
+            )?;
+            check_expression(
+                &conflict.right,
+                &format!("第 {} 条冲突的右侧命题", index + 1),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -455,4 +577,52 @@ pub struct Metadata {
     /// Version of the generating tool.
     #[serde(default)]
     pub tool_version: Option<String>,
+}
+
+fn check_json_size(bytes: usize) -> serde_json::Result<()> {
+    if bytes > MAX_CERT_JSON_BYTES {
+        return Err(serde_json::Error::custom(format!(
+            "证书 JSON 超过 {MAX_CERT_JSON_BYTES} 字节上限：实际 {bytes} 字节"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject an expression with more than [`MAX_CERT_EXPR_NODES`] nodes.
+///
+/// The explicit stack keeps this check itself off the call stack, so an
+/// in-memory expression that was never parsed from JSON cannot overflow it.
+fn check_expression(expression: &CertExpr, place: &str) -> Result<(), String> {
+    let mut nodes = 0usize;
+    let mut pending: Vec<&CertExpr> = vec![expression];
+    while let Some(expression) = pending.pop() {
+        nodes += 1;
+        if nodes > MAX_CERT_EXPR_NODES {
+            return Err(format!(
+                "{place}的表达式超过 {MAX_CERT_EXPR_NODES} 个节点上限"
+            ));
+        }
+        match expression {
+            CertExpr::Sort { .. } | CertExpr::Var { .. } | CertExpr::Const { .. } => {}
+            CertExpr::Pi {
+                domain, codomain, ..
+            } => {
+                pending.push(domain);
+                pending.push(codomain);
+            }
+            CertExpr::Lam { domain, body, .. } => {
+                pending.push(domain);
+                pending.push(body);
+            }
+            CertExpr::App { func, arg } => {
+                pending.push(func);
+                pending.push(arg);
+            }
+            CertExpr::Let { value, body, .. } => {
+                pending.push(value);
+                pending.push(body);
+            }
+        }
+    }
+    Ok(())
 }

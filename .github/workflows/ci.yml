@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt / clippy / test / examples / audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads the pinned channel and components from rust-toolchain.toml, so the
+      # CI toolchain cannot drift from the local one.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      # A proof through the bundled official pack, and one through the default
+      # legal environment, as a user would run them.
+      - name: examples smoke test
+        run: |
+          cargo run -q -p std-deduce-cli -- examples/constitution-39.std ':why 不受侵犯 张三 甲宅'
+          cargo run -q -p std-deduce-cli -- examples/宪法第三十九条-默认环境.std ':why cn.constitution.住宅受侵犯 张三 甲宅'
+
+      # Every non-empty quotation in the official constitution pack must match
+      # law/corpus/cn.constitution/2018.json character for character.
+      - name: audit the constitution corpus
+        run: cargo run -q -p std-deduce-cli -- --no-default-packs lawpacks/cn.constitution/constitution.std ':audit'

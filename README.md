@@ -296,6 +296,28 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std ':why 不受侵�
 推导已通过独立校验。
 ```
 
+## 输入上限与畸形输入
+
+解析器和证书读取把文件当作不可信输入，并给出明确上限。超限是普通错误，不是 panic、
+栈溢出或静默截断：源文件错误带行列号，证书错误说明是哪一类条目、实际上限是多少。
+
+| 输入 | 上限 | 超限时 |
+|---|---|---|
+| 标识符长度 | 1024 个字符 | 词法错误，带行列 |
+| 一项的嵌套深度（括号、`→`、`∀`、`λ`） | 64 层 | 解析错误，带行列 |
+| 一次应用的参数个数 | 64 | 解析错误，带行列 |
+| 单条规则的参数与前提合计（binder） | 64 | 解析错误，带行列 |
+| 证书 JSON 文件大小 | 8 MiB（写入与读取都检查） | 拒绝，报字节上限 |
+| 证书节点数 / 假设数 | 各 10000 | 拒绝，报实际数量与上限 |
+| 证书中单个表达式节点数 | 10000 | 拒绝，报条目与上限 |
+
+证书表达式的 JSON 嵌套还受 `serde_json` 默认的 128 层递归限制约束，更深的结构在
+反序列化阶段即被拒绝。环境规则闭包（证书 `unless` 侧条件检查用的保守求值）另有限定：
+最多 1000 轮、10000 条事实、10000 个结论模式、单条表达式 10000 个节点、1000000 次匹配
+尝试；超限同样返回错误，见 `crates/cert/src/closure.rs`。普通的法条规则和公式在这些
+上限之内。以上限制由 `crates/lang/tests/hardening.rs`、`crates/cert/tests/limits.rs`、
+`crates/reason/tests/matching.rs` 和 `crates/cli/tests/hardening.rs` 覆盖。
+
 ## 法律包与 `import`
 
 案件或模块文件可以在开头写 `import <包名>`：
@@ -1310,9 +1332,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外跑两条 `examples/`
+冒烟查询与官方宪法包的 `:audit`；工具链由 `rust-toolchain.toml` 固定，不依赖 Windows。
+
 ## 测试
 
-`cargo test --workspace` 共 808 个：kernel 23、lang 102、reason 63、cert 161、cli 295、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 845 个：kernel 23、lang 117、reason 65、cert 174、cli 302、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（23）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -1609,3 +1634,18 @@ cargo test --workspace
   NUL 拼接歧义回归、包内 `std.lock` 参与哈希、包内 symlink/非普通文件拒绝、缺锁/缺包/多包/
   版本与哈希不符、锁符号链接、坏锁版本与坏 TOML、示例锁校验；`verify_lock` 的报告携带刚与目录
   比对过的那份锁（调用方不再重读文件）。
+- `crates/lang/tests/hardening.rs`（15）：畸形输入与上限——空文件/只有注释的文件解析为空程序；
+  深层括号与长箭头链报嵌套深度上限（含上限边界）；超长应用链报参数数量上限（含边界）；
+  超长标识符报长度上限（含边界）；未闭合字符串与尾随反斜杠报在开引号位置；裸控制字符在源码里
+  和字符串里分别被拒并转义；无换行的行注释是完整注释；规则参数与前提合计超限报错（含混合边界）；
+  普通嵌套、应用与规则仍解析。
+- `crates/cert/tests/limits.rs`（13）：证书 JSON 边界——v5 夹具仍能解析；缺字段/错类型报错并指出字段；
+  `NaN` 与 5000 层嵌套表达式在反序列化阶段被拒（不栈溢出）；超过 8 MiB 的文档在解析前被拒；
+  节点/假设数量与单表达式节点数在恰好上限时接受、超一个即拒绝并报上限；超限证书不能序列化；
+  根索引越界由检查器报错。
+- `crates/reason/tests/matching.rs`（2）：规则匹配的有界对抗形状——32 个变量、每个前提只命中一条
+  事实的规则能推导并通过独立校验；40 层嵌套的 ground 项整体绑定到变量、结论保留完整结构并通过
+  独立校验。
+- `crates/cli/tests/hardening.rs`（7）：畸形文件端到端——空文件加载成功；非法 UTF-8 报读取失败并
+  指出文件；控制字符报出行列；极深括号、超长标识符、超限规则都退出 `2` 且错误可定位；
+  5000 层嵌套的证书 JSON 在 `:verify-cert` 中报“不是有效的证书 JSON”，不 panic。

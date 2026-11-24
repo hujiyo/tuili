@@ -52,6 +52,14 @@ pub struct Token {
     pub col: usize,
 }
 
+/// The longest identifier (in characters) the lexer will produce.
+///
+/// Identifiers are copied into every token, every declaration and every
+/// diagnostic. A file is untrusted input, so a multi-megabyte "name" must fail
+/// with a locatable error instead of being carried through the whole pipeline.
+/// The bound is far above any real legal term or namespace.
+pub const MAX_IDENTIFIER_CHARS: usize = 1024;
+
 /// Lex a whole program into tokens, discarding whitespace and comments
 /// but keeping newlines (the grammar is line-oriented at the command level).
 pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
@@ -296,10 +304,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             }
             c if c.is_alphanumeric() || c == '_' || is_cjk(c) || c == '\u{0027}' => {
                 let start = i;
+                let start_line = line;
                 let start_col = col;
                 while i < bytes.len() {
                     let d = bytes[i];
-                    if d.is_alphanumeric()
+                    let continues = d.is_alphanumeric()
                         || d == '_'
                         || is_cjk(d)
                         || d == '\u{0027}'
@@ -309,13 +318,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                         // A `-` belongs to an identifier only when it is not
                         // the start of a comment (`--`) or an arrow (`->`);
                         // those two keep precedence.
-                        || (d == '-' && !matches!(bytes.get(i + 1), Some(&'-') | Some(&'>')))
-                    {
-                        i += 1;
-                        col += 1;
-                    } else {
+                        || (d == '-' && !matches!(bytes.get(i + 1), Some(&'-') | Some(&'>')));
+                    if !continues {
                         break;
                     }
+                    if i - start >= MAX_IDENTIFIER_CHARS {
+                        return Err(LexError {
+                            msg: format!("标识符长度超过上限 {MAX_IDENTIFIER_CHARS} 个字符"),
+                            line: start_line,
+                            col: start_col,
+                        });
+                    }
+                    i += 1;
+                    col += 1;
                 }
                 let s: String = bytes[start..i].iter().collect();
                 let tok = match s.as_str() {

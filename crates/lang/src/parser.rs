@@ -43,9 +43,36 @@ use crate::lexer::{Tok, Token};
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// Current recursive `term()` depth, used to reject adversarially nested
+    /// input before the stack overflows.
+    depth: usize,
 }
 
 pub type PResult<T> = Result<T, ParseError>;
+
+/// The maximum recursive nesting depth of one term.
+///
+/// Each parenthesis, arrow, `∀` or `λ` calls `term()` again; without a bound a
+/// file of a few thousand `(` characters overflows the stack. 64 levels are
+/// far more than any readable legal formula needs. Exceeding the bound is a
+/// parse error at the offending token, never a panic.
+pub const MAX_TERM_DEPTH: usize = 64;
+
+/// The maximum number of arguments in one application spine (`f a b c`).
+///
+/// A long spine builds a left-nested term; the bound keeps elaboration and
+/// kernel checking away from pathologically deep trees. It does not limit
+/// useful arity: no declaration has more than a handful of arguments.
+pub const MAX_APPLICATION_ARITY: usize = 64;
+
+/// The maximum number of binders (parameters plus premises) in one rule.
+///
+/// The kernel turns the rule telescope into a nested function type and checks
+/// it recursively; proof search also backtracks over one stack frame per
+/// premise. A bound on the *total* telescope protects both. It is deliberately
+/// small: a legal rule has a handful of binders, while a few hundred already
+/// overflow the CLI's main-thread stack on Windows.
+pub const MAX_RULE_BINDERS: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct ParseError {
@@ -119,7 +146,11 @@ fn namespace_format_error(ns: &str) -> Option<String> {
 
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Self {
-        Parser { toks, pos: 0 }
+        Parser {
+            toks,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     fn peek(&self) -> &Tok {
@@ -524,6 +555,11 @@ impl Parser {
                         self.expect(&Tok::Colon, "`:`")?;
                         let t = self.term()?;
                         params.push((n, t));
+                        if params.len() + premises.len() > MAX_RULE_BINDERS {
+                            return self.err(format!(
+                                "规则 `{name}` 的参数与前提合计超过上限 {MAX_RULE_BINDERS}"
+                            ));
+                        }
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
@@ -547,6 +583,11 @@ impl Parser {
                     };
                     let t = self.term()?;
                     premises.push(Premise { name: nm, ty: t });
+                    if params.len() + premises.len() > MAX_RULE_BINDERS {
+                        return self.err(format!(
+                            "规则 `{name}` 的参数与前提合计超过上限 {MAX_RULE_BINDERS}"
+                        ));
+                    }
                 }
                 "conclude" | "conclusion" => {
                     self.bump();
@@ -763,6 +804,20 @@ impl Parser {
     // ---------------- terms ----------------
 
     pub fn term(&mut self) -> PResult<Term> {
+        if self.depth >= MAX_TERM_DEPTH {
+            return Err(ParseError {
+                msg: format!("项嵌套深度超过上限 {MAX_TERM_DEPTH}（括号、→、∀ 或 λ 套得太深）"),
+                line: self.here().line,
+                col: self.here().col,
+            });
+        }
+        self.depth += 1;
+        let result = self.term_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn term_inner(&mut self) -> PResult<Term> {
         // A leading `#` is a command sigil, tolerated here so that a bare
         // term can be handed to the parser in either form.
         if self.peek() == &Tok::Ident("#".into()) {
@@ -792,7 +847,12 @@ impl Parser {
 
     fn application(&mut self) -> PResult<Term> {
         let mut t = self.atom()?;
+        let mut arguments = 0usize;
         while let Tok::Ident(_) | Tok::LParen = self.peek() {
+            arguments += 1;
+            if arguments > MAX_APPLICATION_ARITY {
+                return self.err(format!("应用的参数数量超过上限 {MAX_APPLICATION_ARITY}"));
+            }
             let a = self.atom()?;
             t = Term::App(Box::new(t), Box::new(a));
         }
