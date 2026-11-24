@@ -120,7 +120,8 @@ pub use expr::{CertExpr, ExprEncodeError};
 pub use model::{
     Assumption, Binding, Certificate, Conflict, FactIdentity, GapCandidate, Metadata, Node, NodeId,
     ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
-    Resolution, ResolutionBasis, Side, UnresolvedReason,
+    Resolution, ResolutionBasis, Side, UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES,
+    MAX_CERT_JSON_BYTES, MAX_CERT_NODES,
 };
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
 pub use render::render;
