@@ -20,7 +20,7 @@ pub mod norm;
 pub mod pretty;
 pub mod term;
 
-pub use env::{Ctx, Decl, DeclKind, Env, FactIdentity, RuleDecl};
+pub use env::{Burden, Ctx, Decl, DeclKind, Env, FactIdentity, RuleDecl, Standard};
 pub use error::{Error, Result};
 pub use term::{name, Expr, Level, Name};
 

@@ -279,6 +279,10 @@ fn rule_constant_env() -> Env {
         prefers: vec![],
         sources: vec![],
         declared_in: None,
+        burden: None,
+        standard: None,
+        exception_burden: None,
+        exception_standard: None,
     };
     let ty = std_deduce_kernel::env::rule_type(&rdecl);
     add("r", DeclKind::Rule(Box::new(rdecl)), ty);
@@ -362,6 +366,10 @@ fn a_rule_must_be_well_typed() {
         prefers: vec![],
         sources: vec![],
         declared_in: None,
+        burden: None,
+        standard: None,
+        exception_burden: None,
+        exception_standard: None,
     };
     let decl = Decl {
         name: name("坏规则"),
@@ -414,6 +422,10 @@ fn a_rule_with_duplicate_binder_names_is_refused() {
         prefers: vec![],
         sources: vec![],
         declared_in: None,
+        burden: None,
+        standard: None,
+        exception_burden: None,
+        exception_standard: None,
     };
     let decl = Decl {
         name: name("重名规则"),
@@ -772,4 +784,43 @@ fn fact_identities_round_trip_keywords_labels_and_roles() {
     }
     assert_eq!(FactIdentity::from_keyword("verifiedd"), None);
     assert_eq!(FactIdentity::from_keyword(""), None);
+}
+
+/// The burden and standard declarations round-trip through their written
+/// labels, and the allowed set is exactly the three roles/standards. There is
+/// deliberately no default: parsing an unknown label fails rather than falling
+/// back to `claimant` or `preponderance`.
+#[test]
+fn burden_and_standard_round_trip_their_labels() {
+    for (burden, label) in [
+        (Burden::Claimant, "claimant"),
+        (Burden::Respondent, "respondent"),
+        (Burden::Court, "court"),
+    ] {
+        assert_eq!(burden.label(), label);
+        assert_eq!(Burden::parse(label), Some(burden));
+        assert!(
+            Burden::labels().contains(&label),
+            "the allowed set must list {label}"
+        );
+    }
+    assert_eq!(Burden::labels().len(), 3);
+    assert_eq!(Burden::parse("plaintiff"), None);
+    assert_eq!(Burden::parse(""), None);
+
+    for (standard, label) in [
+        (Standard::Preponderance, "preponderance"),
+        (Standard::ClearAndConvincing, "clear_and_convincing"),
+        (Standard::BeyondReasonableDoubt, "beyond_reasonable_doubt"),
+    ] {
+        assert_eq!(standard.label(), label);
+        assert_eq!(Standard::parse(label), Some(standard));
+        assert!(
+            Standard::labels().contains(&label),
+            "the allowed set must list {label}"
+        );
+    }
+    assert_eq!(Standard::labels().len(), 3);
+    assert_eq!(Standard::parse("probable"), None);
+    assert_eq!(Standard::parse(""), None);
 }

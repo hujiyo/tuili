@@ -428,6 +428,10 @@ impl Library {
                     conclusion,
                     defeaters,
                     sources,
+                    burden,
+                    standard,
+                    exception_burden,
+                    exception_standard,
                 } => {
                     // A rule is the bridge from a legal provision to a
                     // conclusion; without a source the bridge cannot be
@@ -549,6 +553,13 @@ impl Library {
                         prefers,
                         sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
                         declared_in: namespace.as_ref().map(std_deduce_kernel::name),
+                        // The pleading clauses are declaration metadata: they
+                        // are stored as written (or left undeclared) and are
+                        // not read by the reasoner or the certificate.
+                        burden,
+                        standard,
+                        exception_burden,
+                        exception_standard,
                     };
                     let ty = std_deduce_kernel::env::rule_type(&rdecl);
                     let decl = Decl {

@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use std_deduce_kernel::FactIdentity;
+use std_deduce_kernel::{Burden, FactIdentity, Standard};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
@@ -90,6 +90,16 @@ pub enum Item {
         conclusion: Term,
         defeaters: Vec<Defeater>,
         sources: Vec<SourceSpec>,
+        /// `burden claimant|respondent|court`: who must prove the positive
+        /// requirements. `None` means the file declared nothing; the parser
+        /// never substitutes a default.
+        burden: Option<Burden>,
+        /// `standard preponderance|clear_and_convincing|beyond_reasonable_doubt`.
+        standard: Option<Standard>,
+        /// `exception_burden …`: who must prove every `unless` of this rule.
+        exception_burden: Option<Burden>,
+        /// `exception_standard …`: the standard for every `unless` of this rule.
+        exception_standard: Option<Standard>,
     },
     /// `interpret 解释A : 概念 -> 概念`
     Interpretation {

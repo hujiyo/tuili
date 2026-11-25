@@ -217,6 +217,94 @@ impl FactIdentity {
     }
 }
 
+/// Who must prove a rule's positive requirements, or its exceptions.
+///
+/// The three values are relative roles, not party names: a file never invents
+/// a name like "张三" to say who bears the burden. `court` covers a burden the
+/// court discharges on its own authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Burden {
+    /// The party asserting the claim (`主张方`).
+    Claimant,
+    /// The opposing party (`相对方`).
+    Respondent,
+    /// The court, of its own motion (`法院职权`).
+    Court,
+}
+
+impl Burden {
+    /// The keyword written after `burden` / `exception_burden`, which is also
+    /// what `:inspect` prints.
+    pub fn label(self) -> &'static str {
+        match self {
+            Burden::Claimant => "claimant",
+            Burden::Respondent => "respondent",
+            Burden::Court => "court",
+        }
+    }
+
+    /// The values the clause accepts, in a stable order. Error messages list
+    /// the same set, so a near miss can be corrected from the diagnostic.
+    pub fn labels() -> &'static [&'static str] {
+        &["claimant", "respondent", "court"]
+    }
+
+    /// The burden named by a keyword, or `None` when the keyword is unknown.
+    /// There is no default: an unknown value is an error, never a fallback.
+    pub fn parse(keyword: &str) -> Option<Self> {
+        match keyword {
+            "claimant" => Some(Burden::Claimant),
+            "respondent" => Some(Burden::Respondent),
+            "court" => Some(Burden::Court),
+            _ => None,
+        }
+    }
+}
+
+/// The standard of proof required for a rule's positive requirements, or for
+/// its exceptions. The values are labels, not probabilities: the system does
+/// not assign numbers to them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Standard {
+    /// `preponderance` — the balance of probabilities.
+    Preponderance,
+    /// `clear_and_convincing`.
+    ClearAndConvincing,
+    /// `beyond_reasonable_doubt`.
+    BeyondReasonableDoubt,
+}
+
+impl Standard {
+    /// The keyword written after `standard` / `exception_standard`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Standard::Preponderance => "preponderance",
+            Standard::ClearAndConvincing => "clear_and_convincing",
+            Standard::BeyondReasonableDoubt => "beyond_reasonable_doubt",
+        }
+    }
+
+    /// The values the clause accepts, in a stable order.
+    pub fn labels() -> &'static [&'static str] {
+        &[
+            "preponderance",
+            "clear_and_convincing",
+            "beyond_reasonable_doubt",
+        ]
+    }
+
+    /// The standard named by a keyword, or `None` when the keyword is unknown.
+    /// There is no default: an unknown value is an error, never a fallback.
+    pub fn parse(keyword: &str) -> Option<Self> {
+        match keyword {
+            "preponderance" => Some(Standard::Preponderance),
+            "clear_and_convincing" => Some(Standard::ClearAndConvincing),
+            "beyond_reasonable_doubt" => Some(Standard::BeyondReasonableDoubt),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclKind {
     /// A new sort: `sort 公民`.
@@ -269,6 +357,20 @@ pub struct RuleDecl {
     /// Conditions whose truth *blocks* the rule (the `unless` clauses).
     /// These are part of the telescope, so they may mention any parameter.
     pub unlesses: Vec<Expr>,
+    /// Who must prove the rule's positive requirements (`burden …`), or
+    /// `None` when the file declared no burden. An undeclared burden is not
+    /// defaulted to the claimant and is not used by reasoning: the field is
+    /// recorded for a later report, not read by the calculus.
+    pub burden: Option<Burden>,
+    /// The standard for those requirements (`standard …`), or `None` when
+    /// undeclared. Not defaulted to `preponderance`.
+    pub standard: Option<Standard>,
+    /// Who must prove the rule's exceptions (`exception_burden …`), i.e.
+    /// every `unless` of this rule, or `None` when undeclared.
+    pub exception_burden: Option<Burden>,
+    /// The standard for those exceptions (`exception_standard …`), or `None`
+    /// when undeclared.
+    pub exception_standard: Option<Standard>,
     /// Rules that defeat this one.
     pub exceptions: Vec<Name>,
     /// Rules this one outranks, declared with `prefer R`. The reverse of
