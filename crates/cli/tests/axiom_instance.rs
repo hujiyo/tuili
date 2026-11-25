@@ -12,6 +12,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std_deduce_cert::{Binding, Certificate, Node};
+use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::is_closed;
 use std_deduce_kernel::Expr;
 
@@ -667,4 +668,51 @@ fn an_axiom_instance_loses_to_a_strict_fact_and_the_conflict_is_checked() {
         out.contains("冲突未决 0 项") || out.contains("未决冲突 0 项"),
         "{out}"
     );
+}
+
+/// The vulnerability an independent audit reproduced: delete the recorded
+/// conflict and re-root at the defeated universal instance. The certificate
+/// would otherwise report the defeated conclusion as proved. Every
+/// root-reachable conclusion must record its conflict with an environment
+/// fact, so `:verify-cert` must fail with exit `2`, naming the node, the
+/// opposing proposition and its identity.
+#[test]
+fn deleting_the_conflict_and_rerooting_at_the_defeated_instance_is_rejected() {
+    let theory = TempFile::new("conflict-completeness", "std", CONFLICT);
+    let certificate_output = session(&theory.path, &[":cert 有罪 张三".to_owned()]);
+    assert_exit(&certificate_output, GAP);
+    let mut certificate = certificate(&certificate_output);
+    assert_eq!(
+        certificate.conflicts.len(),
+        1,
+        "the produced certificate records the defeat"
+    );
+    let defeated = certificate
+        .nodes
+        .iter()
+        .position(|node| match node {
+            Node::AxiomInstance { conclusion, .. } => {
+                print_expr(&Expr::from(conclusion)) == "有罪 张三"
+            }
+            _ => false,
+        })
+        .expect("the defeated universal instance has a node");
+    certificate.conflicts.clear();
+    certificate.root = Some(defeated);
+
+    let json = certificate
+        .to_json_pretty()
+        .expect("the forged certificate serializes");
+    let file = TempFile::new("conflict-completeness", "json", &json);
+    let verified = session(
+        &theory.path,
+        &[format!(":verify-cert \"{}\"", file.path.display())],
+    );
+    assert_exit(&verified, ERROR);
+    let out = stdout(&verified);
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    assert!(out.contains("证书没有记录该冲突"), "{out}");
+    assert!(out.contains("有罪 张三"), "{out}");
+    assert!(out.contains("无罪 张三"), "{out}");
+    assert!(out.contains("法院查明"), "{out}");
 }

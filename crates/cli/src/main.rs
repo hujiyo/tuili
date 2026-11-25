@@ -4521,6 +4521,29 @@ fn root_summary(certificate: &Certificate, report: &CheckReport) -> String {
         Some(root) if matches!(certificate.nodes[root], CertNode::Gap { .. }) => {
             "根未被证明，根为缺口".to_owned()
         }
+        // The root is one side of an accepted unresolved factual standoff.
+        // The check passed because the certificate is honest about not
+        // deciding it, not because the root is settled: never say "已证明"
+        // here, whatever the node kind or fact identity.
+        Some(root) if report.root_conflict_unresolved => {
+            let identity = match &certificate.nodes[root] {
+                CertNode::Assumption { assumption } => certificate
+                    .assumptions
+                    .get(*assumption)
+                    .map(|assumption| assumption.identity),
+                _ => None,
+            };
+            match identity {
+                Some(identity) if std_deduce_kernel::FactIdentity::from(&identity).is_strict() => {
+                    "根为已登记的严格事实，但与另一严格事实的冲突未决".to_owned()
+                }
+                Some(identity) => format!(
+                    "根为已登记的事实（{}），但与另一事实的冲突未决",
+                    identity.label_zh()
+                ),
+                None => "根命题与另一事实的冲突未决，根不是已证明的结论".to_owned(),
+            }
+        }
         Some(root) if report.root_proved && report.root_is_assumption => {
             // The root's proposition is an assumption; its identity says who
             // asserts it, and the assumption table is the only record of it.
@@ -5062,7 +5085,7 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
             return;
         }
     };
-    match std_deduce_cert::check(r.env(), &certificate) {
+    match std_deduce_cert::check_projection(r.env(), &certificate) {
         Ok(report) if report.root_proved => {
             writeln!(out, "  （该推导通过证书逻辑校验）").ok();
         }

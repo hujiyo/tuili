@@ -46,7 +46,10 @@
 //! report a satisfied premise the fixed point could not consume. For the same
 //! reason a `contrary`/`unique` declaration sees the predicate head after the
 //! same normalization: a fact or conclusion written through a `def` alias
-//! takes part in the conflict its underlying predicate declares.
+//! takes part in the conflict its underlying predicate declares. The conflict
+//! judgement itself lives in [`std_deduce_cert::conflict::in_conflict`], which
+//! both this producer and the certificate checker call: the two never read a
+//! conflict under different rules.
 //!
 //! ## Three commitments
 //!
@@ -166,12 +169,15 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use std_deduce_cert::conflict::{
+    in_conflict, view as conflict_view, within_term_limit, ConflictView, Declarations,
+};
 use std_deduce_cert::CertExpr;
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{
     named_binders, Decl, DeclKind, Env, FactIdentity, RuleDecl, RulePleading, SourceRef,
 };
-use std_deduce_kernel::norm::{normalize, spine};
+use std_deduce_kernel::norm::normalize;
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::{instantiate_telescope, is_closed};
 use std_deduce_kernel::{check, Ctx, Expr, Name};
@@ -869,10 +875,10 @@ pub struct Reasoner<'a> {
     /// rule, or a single rule that outranks itself), members sorted by name,
     /// components sorted by their first member.
     cycles: Vec<Vec<Name>>,
-    /// symmetric contradiction relation, closed from `contrary` declarations
-    contraries: BTreeMap<Name, BTreeSet<Name>>,
-    /// predicate -> argument positions declared single-valued (`unique`)
-    uniques: BTreeMap<Name, BTreeSet<usize>>,
+    /// The environment's declared `contrary` and `unique` relation. The
+    /// judgement over it is [`std_deduce_cert::conflict::in_conflict`], shared
+    /// with the certificate checker so both read a conflict the same way.
+    declarations: Declarations,
     /// Interpretations this query enabled, sorted by id. Empty means the
     /// default: every interpretation stays inert, and output is unchanged.
     enabled: BTreeSet<Name>,
@@ -904,15 +910,7 @@ impl<'a> Reasoner<'a> {
     pub fn new(env: &'a Env) -> Self {
         let declared = declared_priorities(env);
         let graph = priority_graph(env, &declared);
-        let mut contraries: BTreeMap<Name, BTreeSet<Name>> = BTreeMap::new();
-        for (a, b) in env.contrary_pairs() {
-            contraries.entry(a.clone()).or_default().insert(b.clone());
-            contraries.entry(b).or_default().insert(a);
-        }
-        let mut uniques: BTreeMap<Name, BTreeSet<usize>> = BTreeMap::new();
-        for (pred, index) in env.unique_positions() {
-            uniques.entry(pred).or_default().insert(index);
-        }
+        let declarations = Declarations::from_env(env);
         let (axioms, axiom_error) = match axiom_declarations(env) {
             Ok(axioms) => (axioms, None),
             Err(error) => (BTreeMap::new(), Some(error)),
@@ -924,8 +922,7 @@ impl<'a> Reasoner<'a> {
             scc: graph.scc,
             effective: graph.effective,
             cycles: graph.cycles,
-            contraries,
-            uniques,
+            declarations,
             enabled: BTreeSet::new(),
             as_of: None,
             jurisdiction: None,
@@ -1896,40 +1893,6 @@ impl<'a> Reasoner<'a> {
         rules
     }
 
-    /// Are two propositions in conflict? Either their heads are declared
-    /// contrary and their arguments are kernel-equal, or they share a head and
-    /// differ exactly at a position declared `unique`.
-    ///
-    /// Both sides are compared after kernel normalization (beta, `def` delta,
-    /// zeta), so a fact or conclusion written through a `def` alias reaches the
-    /// predicate its declaration names: `夫妻 张三 李四` and `非配偶 张三 李四`
-    /// conflict when `配偶` and `非配偶` are declared contrary and
-    /// `夫妻` is defined as `配偶`. A proposition without a constant head (a
-    /// quantified or opaque statement) has no declared contrary/unique
-    /// relation and cannot conflict this way.
-    fn in_conflict(&self, a: &ConflictView, b: &ConflictView) -> bool {
-        if a.args.len() != b.args.len() {
-            return false;
-        }
-        if a.head != b.head {
-            return self
-                .contraries
-                .get(&a.head)
-                .is_some_and(|set| set.contains(&b.head))
-                && a.args
-                    .iter()
-                    .zip(b.args.iter())
-                    .all(|(x, y)| self.key_of(x) == self.key_of(y));
-        }
-        let Some(positions) = self.uniques.get(&a.head) else {
-            return false;
-        };
-        let differing: Vec<usize> = (0..a.args.len())
-            .filter(|i| self.key_of(&a.args[*i]) != self.key_of(&b.args[*i]))
-            .collect();
-        differing.len() == 1 && positions.contains(&differing[0])
-    }
-
     fn detect_conflicts(
         &self,
         facts: &BTreeMap<String, Expr>,
@@ -1950,7 +1913,7 @@ impl<'a> Reasoner<'a> {
                 let (Some(left_view), Some(right_view)) = (&views[i], &views[j]) else {
                     continue;
                 };
-                if !self.in_conflict(left_view, right_view) {
+                if !in_conflict(&self.declarations, left_view, right_view) {
                     continue;
                 }
                 let (ka, a) = items[i];
@@ -3353,53 +3316,6 @@ fn kosaraju(adjacency: &BTreeMap<Name, Vec<Name>>) -> BTreeMap<Name, u32> {
     component
 }
 
-// ---------------------------------------------------------------- conflicts
-
-/// A proposition as the conflict relation reads it: the predicate head and its
-/// arguments after kernel normalization.
-struct ConflictView {
-    head: Name,
-    args: Vec<Expr>,
-}
-
-/// The kernel's view of one proposition for the conflict relation.
-///
-/// `None` means the proposition has no constant head (a quantified or opaque
-/// statement): `contrary`/`unique` are declared over predicates, so such a
-/// proposition cannot take part in one. A term beyond the certificate's
-/// expression bound, or a normalization that fails, is an error rather than a
-/// silent `None`: either would hide a conflict the writer declared.
-fn conflict_view(env: &Env, expression: &Expr) -> Result<Option<ConflictView>, String> {
-    if !within_term_limit(expression) {
-        return Err(format!(
-            "无法判定冲突：命题超过 {} 个节点上限：{}",
-            std_deduce_cert::MAX_CERT_EXPR_NODES,
-            print_expr(expression)
-        ));
-    }
-    let normalized = normalize(env, &Ctx::new(), expression).map_err(|error| {
-        format!(
-            "无法归约命题「{}」以判定冲突：{error}",
-            print_expr(expression)
-        )
-    })?;
-    if !within_term_limit(&normalized) {
-        return Err(format!(
-            "无法判定冲突：归约后的命题超过 {} 个节点上限：{}",
-            std_deduce_cert::MAX_CERT_EXPR_NODES,
-            print_expr(&normalized)
-        ));
-    }
-    let (head, args) = spine(&normalized);
-    let Expr::Const(head) = head else {
-        return Ok(None);
-    };
-    Ok(Some(ConflictView {
-        head: head.clone(),
-        args: args.into_iter().cloned().collect(),
-    }))
-}
-
 // ---------------------------------------------------------------- matching
 
 /// The fixed inputs of one rule enumeration. Bundling them keeps the recursive
@@ -3655,31 +3571,6 @@ fn premise_satisfied(env: &Env, facts: &BTreeMap<String, Expr>, premise: &Expr) 
     facts
         .values()
         .any(|fact| match_premise(env, premise, fact, &mut Vec::new()))
-}
-
-/// Can this term be walked by the normalization fallback?
-///
-/// The bound is the certificate's expression node limit: a term larger than
-/// that can never be checked as part of a derivation, and the same limit keeps
-/// the fallback from turning into an unbounded walk over a pathological term.
-fn within_term_limit(expression: &Expr) -> bool {
-    fn count(expression: &Expr, nodes: &mut usize) -> bool {
-        *nodes += 1;
-        if *nodes > std_deduce_cert::MAX_CERT_EXPR_NODES {
-            return false;
-        }
-        match expression {
-            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) => true,
-            Expr::Pi {
-                domain, codomain, ..
-            } => count(domain, nodes) && count(codomain, nodes),
-            Expr::Lam { domain, body, .. } => count(domain, nodes) && count(body, nodes),
-            Expr::App { func, arg } => count(func, nodes) && count(arg, nodes),
-            Expr::Let { value, body, .. } => count(value, nodes) && count(body, nodes),
-        }
-    }
-    let mut nodes = 0;
-    count(expression, &mut nodes)
 }
 
 /// Every rule binder (`?name` constant) a pattern mentions.

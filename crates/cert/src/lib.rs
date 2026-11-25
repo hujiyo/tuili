@@ -131,16 +131,40 @@
 //! unresolved reason must match the provenances and the recorded identities:
 //! two facts must be either both strict or both claims, and the
 //! non-strict-fact reason may name only `user_asserted` or `assumed`, exactly
-//! as the assumption table records it. Open obligations are reported through
+//! as the assumption table records it.
+//!
+//! ## Conflicts the certificate omits
+//!
+//! A certificate is user-supplied, so the checker cannot assume the producer
+//! recorded every conflict. Every conclusion on the root's proof graph — a
+//! rule application, an interpretation application, a universal instance, and
+//! an assumption when the root is one — is compared, through the same
+//! [`conflict::in_conflict`] judgement the reasoner uses, with every
+//! environment fact that seeds a derivation (`verified`, `stipulated`,
+//! `user_asserted`, `assumed`; a `disputed` fact takes part in no
+//! derivation). A conflict found this way must already be recorded with the
+//! resolution the conflict model gives it: a strict fact wins against a rule
+//! conclusion, an interpretation conclusion, a universal instance and a
+//! claim; two strict facts have no order, so a conclusion that is itself a
+//! strict fact cannot stand; a claim never wins, so a claim facing a
+//! conclusion must be recorded as `non_strict_fact` and two claims as
+//! `conflicting_assumptions`. A missing record, or a record whose resolution
+//! contradicts that matrix, fails the check with the node, the opposing
+//! proposition and its identity named. A fact a recorded conflict already
+//! removed from the fact base does not take part, mirroring the reasoner's
+//! accumulate-only removals. The scan compares every pair and is bounded by
+//! `MAX_CONFLICT_COMPARISONS`; exceeding the bound is an error, never a
+//! partial check. Conflicts between two conclusions with no environment fact
+//! involved are not reconstructed: only a recorded one is validated. Open
+//! obligations are reported through
 //! [`CheckReport::requires_human`] without failing the check, with one
 //! exception: the `open_concept` obligation is recomputed from the environment's
 //! `open` markers and the proof graph, and a certificate that dropped, invented
 //! or edited it is rejected. A root derivation that turns an open concept
 //! (`重大`, `情节严重`) into a proved proposition is never presented as
 //! unconditional. The checker does
-//! not re-derive the rule instances named by `left_by` / `right_by`, does not
-//! judge conflicts a certificate omits, and does not judge the legal effect of
-//! a citation.
+//! not re-derive the rule instances named by `left_by` / `right_by` and does
+//! not judge the legal effect of a citation.
 //!
 //! ## Rendering
 //!
@@ -195,6 +219,7 @@ mod key;
 
 pub mod applicability;
 pub mod check;
+pub mod conflict;
 pub mod environment;
 pub mod expr;
 pub mod model;
@@ -212,7 +237,7 @@ pub use applicability::{
     ApplicabilityReasonKind, ApplicabilityVerdict, CodeDimension, DateField, DatedEvidence,
     PlaceEvidence, RuleApplicability, ScopeEvidence, ScopeOriginRecord, SessionEvidence,
 };
-pub use check::{check, CheckError, CheckReport};
+pub use check::{check, check_projection, CheckError, CheckReport};
 pub use environment::{
     CorpusRecord, EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, ExplicitText,
     PackRecord, TrustLevel, UnrecordedEnvironment,

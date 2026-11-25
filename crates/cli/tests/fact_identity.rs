@@ -11,7 +11,13 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std_deduce_cert::{Certificate, FactIdentity};
+use std_deduce_cert::{
+    ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind, ApplicabilityVerdict,
+    Binding, CertExpr, Certificate, Explicit, FactIdentity, Node, Resolution, ResolutionBasis,
+    RuleApplicability, Side, UnresolvedReason,
+};
+use std_deduce_kernel::pretty::print_expr;
+use std_deduce_kernel::Expr;
 
 const PROVED: i32 = 0;
 const GAP_OR_CONFLICT: i32 = 1;
@@ -590,4 +596,271 @@ obj 李四 : 公民
         "both inspect lines and both assumption lines must show the identity:\n{}",
         stdout(&output)
     );
+}
+
+/// The same audit as the universal-instance case, with a rule conclusion as
+/// the forged root: delete the recorded defeat and re-root at the rule step
+/// that lost to a strict fact. `:verify-cert` must fail with exit `2`, naming
+/// the node, the opposing proposition and its identity.
+#[test]
+fn deleting_the_conflict_and_rerooting_at_a_defeated_rule_is_rejected() {
+    let theory = TempFile::new(
+        "rule-conflict-completeness",
+        "std",
+        &contradiction_theory(
+            r#"axiom 已批准 : 批准 甲
+  identity verified
+  source text "判决" locator "第一页""#,
+        ),
+    );
+    let generated = check(session(&theory, &[":cert 批准 甲"]), PROVED, &[]);
+    let mut certificate = certificate_json(&generated);
+    assert_eq!(
+        certificate.conflicts.len(),
+        1,
+        "the produced certificate records the defeat"
+    );
+
+    // The certificate keeps the premise fact as a node; the defeated rule
+    // conclusion itself has no node, so it is rebuilt here from the rule's
+    // declaration and the premise node.
+    let premise = certificate
+        .nodes
+        .iter()
+        .position(|node| match node {
+            Node::Assumption { assumption } => {
+                print_expr(&Expr::from(
+                    &certificate.assumptions[*assumption].proposition,
+                )) == "符合条件 甲"
+            }
+            _ => false,
+        })
+        .expect("the premise fact has a node");
+    let conclusion = CertExpr::try_from(&Expr::apps(
+        Expr::constant("不批准"),
+        [Expr::constant("甲")],
+    ))
+    .expect("the conclusion is a certificate expression");
+    let value = CertExpr::try_from(&Expr::constant("甲"))
+        .expect("the binding value is a certificate expression");
+    let root = certificate.nodes.len();
+    certificate.nodes.push(Node::RuleApplication {
+        rule: "拒绝".to_owned(),
+        conclusion,
+        premises: vec![premise],
+        bindings: vec![Binding {
+            parameter: "x".to_owned(),
+            value,
+        }],
+        sources: Vec::new(),
+        applicability: Box::new(RuleApplicability {
+            verdict: ApplicabilityVerdict::Unchecked,
+            basis: ApplicabilityBasis::default(),
+            reason: Explicit::some(ApplicabilityReason::new(
+                ApplicabilityReasonKind::RuleHasNoScope,
+            )),
+        }),
+    });
+    certificate.conflicts.clear();
+    certificate.root = Some(root);
+
+    let verified = verify_cert(&theory, "rule-conflict-completeness", &certificate);
+    let out = stdout(&verified);
+    assert_eq!(verified.status.code(), Some(ERROR), "{out}");
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    assert!(
+        out.contains(&format!("节点 {root}")),
+        "the error must name the forged root:\n{out}"
+    );
+    assert!(out.contains("证书没有记录该冲突"), "{out}");
+    assert!(out.contains("不批准 甲"), "{out}");
+    assert!(out.contains("批准 甲"), "{out}");
+    assert!(out.contains("法院查明"), "{out}");
+}
+
+/// A conflict on an unrelated branch does not touch the root: a certificate
+/// whose root chain is clean still verifies even when the certificate does not
+/// record a conflict between an unreachable conclusion and a strict fact.
+#[test]
+fn an_unrecorded_conflict_on_an_unreachable_branch_still_verifies() {
+    let theory = TempFile::new(
+        "unreachable-conflict-completeness",
+        "std",
+        r#"
+sort 人
+pred 有罪 : 人 → Prop
+pred 无罪 : 人 → Prop
+pred 可疑 : 人 → Prop
+contrary 有罪 无罪
+obj 张三 : 人
+obj 李四 : 人
+axiom 张三可疑 : 可疑 张三
+  source text "材料" locator "第一页"
+axiom 李四可疑 : 可疑 李四
+  source text "材料" locator "第二页"
+axiom 李四无罪 : 无罪 李四
+  identity verified
+  source text "判决" locator "查明事实"
+rule 推定有罪 :
+  params p : 人
+  premise 可疑 p
+  conclude 有罪 p
+  source text "示例法" locator "第一条"
+"#,
+    );
+    let generated = check(session(&theory, &[":cert 有罪 张三"]), PROVED, &[]);
+    let mut certificate = certificate_json(&generated);
+    assert_eq!(
+        certificate.conflicts.len(),
+        1,
+        "the produced certificate records the 李四 defeat"
+    );
+
+    let premise = certificate
+        .nodes
+        .iter()
+        .position(|node| match node {
+            Node::Assumption { assumption } => {
+                print_expr(&Expr::from(
+                    &certificate.assumptions[*assumption].proposition,
+                )) == "可疑 李四"
+            }
+            _ => false,
+        })
+        .expect("the 李四 premise fact has a node");
+    let conclusion = CertExpr::try_from(&Expr::apps(
+        Expr::constant("有罪"),
+        [Expr::constant("李四")],
+    ))
+    .expect("the conclusion is a certificate expression");
+    let value = CertExpr::try_from(&Expr::constant("李四"))
+        .expect("the binding value is a certificate expression");
+    let branch = certificate.nodes.len();
+    certificate.nodes.push(Node::RuleApplication {
+        rule: "推定有罪".to_owned(),
+        conclusion,
+        premises: vec![premise],
+        bindings: vec![Binding {
+            parameter: "p".to_owned(),
+            value,
+        }],
+        sources: Vec::new(),
+        applicability: Box::new(RuleApplicability {
+            verdict: ApplicabilityVerdict::Unchecked,
+            basis: ApplicabilityBasis::default(),
+            reason: Explicit::some(ApplicabilityReason::new(
+                ApplicabilityReasonKind::RuleHasNoScope,
+            )),
+        }),
+    });
+    certificate.conflicts.clear();
+    assert!(
+        certificate.root != Some(branch),
+        "the appended branch must stay off the root chain"
+    );
+
+    let verified = verify_cert(&theory, "unreachable-conflict-completeness", &certificate);
+    let out = stdout(&verified);
+    assert_eq!(
+        verified.status.code(),
+        Some(PROVED),
+        "an unreachable conflict must not reject the root:\n{out}"
+    );
+    assert!(out.contains("逻辑校验：通过"), "{out}");
+    assert!(out.contains("根已证明"), "{out}");
+}
+
+/// Two strict facts contradict each other: the certificate records the
+/// standoff as unresolved. `:verify-cert` passes the four result lines and the
+/// CLI exits `1` (unresolved obligation), not `2`; recording one side as the
+/// winner is a forged adjudication and exits `2`.
+#[test]
+fn two_strict_facts_are_a_recorded_standoff_not_a_verification_error() {
+    let theory = TempFile::new(
+        "two-strict-standoff",
+        "std",
+        r#"
+sort 申请
+pred 批准 : 申请 → Prop
+pred 不批准 : 申请 → Prop
+contrary 批准 不批准
+obj 甲 : 申请
+axiom 已批准 : 批准 甲
+  identity verified
+  source text "判决" locator "第一页"
+axiom 未批准 : 不批准 甲
+  identity verified
+  source text "判决" locator "第二页"
+"#,
+    );
+
+    // The goal is one side of the standoff, so the produced certificate roots
+    // at a gap; re-root it at the assumption node the certificate already
+    // records. The conflict record stays as the reasoner wrote it.
+    let generated = session(&theory, &[":cert 批准 甲"]);
+    let mut certificate = certificate_json(&generated);
+    assert_eq!(
+        certificate.conflicts.len(),
+        1,
+        "the produced certificate records the standoff"
+    );
+    let Resolution::Unresolved { reason } = &certificate.conflicts[0].resolution else {
+        panic!("two strict facts must be unresolved");
+    };
+    assert!(
+        matches!(reason, UnresolvedReason::ConflictingAssumptions),
+        "{reason:?}"
+    );
+    let root = certificate
+        .nodes
+        .iter()
+        .position(|node| match node {
+            Node::Assumption { assumption } => {
+                print_expr(&Expr::from(
+                    &certificate.assumptions[*assumption].proposition,
+                )) == "批准 甲"
+            }
+            _ => false,
+        })
+        .expect("the strict fact has an assumption node");
+    certificate.root = Some(root);
+    certificate.open_obligations.clear();
+
+    let verified = verify_cert(&theory, "two-strict-standoff", &certificate);
+    let out = stdout(&verified);
+    assert_eq!(
+        verified.status.code(),
+        Some(GAP_OR_CONFLICT),
+        "an unresolved factual standoff is a gap, not a certificate error:\n{out}"
+    );
+    assert!(out.contains("逻辑校验：通过"), "{out}");
+    assert!(out.contains("内核证明：通过"), "{out}");
+    assert!(out.contains("未决冲突 1 项"), "{out}");
+    assert!(out.contains("需人判断：是"), "{out}");
+    assert!(
+        out.contains("根为已登记的严格事实，但与另一严格事实的冲突未决"),
+        "the root must be described as an undecided standoff:\n{out}"
+    );
+    assert!(
+        !out.contains("根已证明"),
+        "an undecided root must never be described as proved:\n{out}"
+    );
+    assert!(!out.contains("逻辑校验：失败"), "{out}");
+
+    // The same standoff recorded as a defeat is forged: two strict facts have
+    // no order.
+    let winner = if print_expr(&Expr::from(&certificate.conflicts[0].left)) == "批准 甲" {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    certificate.conflicts[0].resolution = Resolution::Defeated {
+        winner,
+        basis: ResolutionBasis::Assumption,
+    };
+    let forged = verify_cert(&theory, "two-strict-defeat", &certificate);
+    let out = stdout(&forged);
+    assert_eq!(forged.status.code(), Some(ERROR), "{out}");
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    assert!(out.contains("两侧都是严格事实"), "{out}");
 }
