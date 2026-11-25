@@ -45,6 +45,29 @@
 //! keeps its trust label (a proof under strict facts is still `已验证`), and the
 //! risk theme is reported next to it rather than folded into
 //! [`crate::TrustLabel::NeedsLawyerJudgment`].
+//!
+//! ## The non-judgment hint
+//!
+//! A declared `risk` is the only input that may grade a case. A theory without
+//! markers would stay completely silent about a plainly safety-related case, and
+//! most theories have none (the bundled pack is the constitution only).
+//! [`derive_risk`] therefore adds one **hint** sentence when — and only when — no
+//! `risk` declaration matched:
+//!
+//! * it looks for [`HINT_TERMS`], a small word list documented here and in the
+//!   README, inside the *printed* propositions of the root's proof graph;
+//! * the sentence names the matched terms and the theme each most plausibly
+//!   belongs to, and says `可能属于 … 题材`, never `高风险题材`;
+//! * it says the case declared no `risk` (or that none covered this derivation),
+//!   and that it changes no label, no exit code and no certificate;
+//! * it is suppressed the moment a declaration matches, so a graded case never
+//!   shows both;
+//! * the list is not a classifier: an ambiguous term keeps the hint wording
+//!   instead of being promoted into a verdict (拘留 can be administrative, 报警
+//!   says nothing about who did what).
+//!
+//! The hint belongs to the same derived view: it changes no label, no exit code
+//! and no certificate field, and `:labels` does not print it at all.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -64,11 +87,80 @@ use crate::source::Source;
 /// the advice cannot drift apart between the commands that print it.
 const HIGH_RISK_ADVICE: &str = "建议尽快咨询执业律师";
 
-/// One theme that applies, with the evidence lines that produced it.
+/// The small, documented word list behind the non-judgment hint.
+///
+/// A declared `risk` is the *only* thing that may grade a case, and most
+/// theories do not declare one; without this list a case whose propositions
+/// plainly talk about an offence or bodily harm would get no sentence at all.
+/// The list is deliberately tiny, written down here and in the README, and it is
+/// matched against the printed propositions of the root's proof graph only.
+///
+/// It is **not** a classifier: the theme next to each term is the one a reader
+/// would most plausibly expect, and an ambiguous term keeps the hint wording
+/// instead of being promoted into a verdict. `拘留` can also be an
+/// administrative detention; `报警` says nothing about who did what. The hint
+/// therefore says `可能属于 … 题材` and never `高风险题材`.
+pub const HINT_TERMS: &[(&str, RiskTheme)] = &[
+    ("犯罪", RiskTheme::Criminal),
+    ("有期徒刑", RiskTheme::Criminal),
+    ("拘役", RiskTheme::Criminal),
+    ("拘留", RiskTheme::Criminal),
+    ("重伤", RiskTheme::PersonalSafety),
+    ("死亡", RiskTheme::PersonalSafety),
+    ("自杀", RiskTheme::PersonalSafety),
+    ("报警", RiskTheme::PersonalSafety),
+];
+
+/// The hint line for a case whose root graph mentions a listed term but whose
+/// propositions are not covered by any `risk` declaration.
+///
+/// `declares_risk` distinguishes "the theory declares no marker at all" from
+/// "it declares markers, none of which covers this derivation": the sentence
+/// must not claim the case declared nothing when it did.
+fn hint_line(propositions: &BTreeSet<String>, declares_risk: bool) -> Option<String> {
+    let terms: Vec<&str> = HINT_TERMS
+        .iter()
+        .filter(|(term, _)| propositions.iter().any(|text| text.contains(*term)))
+        .map(|(term, _)| *term)
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+    let mut themes: Vec<RiskTheme> = HINT_TERMS
+        .iter()
+        .filter(|(term, _)| terms.contains(term))
+        .map(|(_, theme)| *theme)
+        .collect();
+    themes.sort();
+    themes.dedup();
+    let terms = terms
+        .iter()
+        .map(|term| format!("「{term}」"))
+        .collect::<Vec<_>>()
+        .join("");
+    let themes = themes
+        .iter()
+        .map(|theme| theme.label_zh())
+        .collect::<Vec<_>>()
+        .join("、");
+    let absence = if declares_risk {
+        "但没有命中的 risk 声明"
+    } else {
+        "但本案没有声明 risk"
+    };
+    Some(format!(
+        "提示：案情中出现{terms}相关用语，可能属于{themes}题材，{absence}；\
+         这只是提示，不改变标签、不改退出码。"
+    ))
+}
+
+/// One theme that applies, with the evidence lines that produced it, and the
+/// non-judgment hint a case without any matching declaration can get.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskReport {
     themes: Vec<RiskTheme>,
     evidence: Vec<(RiskTheme, Vec<String>)>,
+    hint: Option<String>,
 }
 
 impl RiskReport {
@@ -110,6 +202,18 @@ impl RiskReport {
             .join("、");
         Some(format!("高风险题材：涉及{themes}；{HIGH_RISK_ADVICE}。"))
     }
+
+    /// The non-judgment hint, or `None` when it does not apply.
+    ///
+    /// This is **not** a grading: it exists only because a declared `risk` is
+    /// the only thing that may mark a case high-risk, and a theory that declares
+    /// none would otherwise stay silent about a plainly safety-related case.
+    /// It is produced only when no `risk` declaration matched, it is worded so a
+    /// reader cannot mistake it for a verdict, and it changes no label, no exit
+    /// code and no certificate field.
+    pub fn hint_line(&self) -> Option<&str> {
+        self.hint.as_deref()
+    }
 }
 
 /// Derive the risk themes of a certificate from its root proof graph and the
@@ -134,23 +238,23 @@ pub fn derive_risk(env: &Env, certificate: &Certificate) -> Result<RiskReport, S
             ));
         }
     }
-    if markers.is_empty() {
-        return Ok(RiskReport {
-            themes: Vec::new(),
-            evidence: Vec::new(),
-        });
-    }
+    let declares_risk = !markers.is_empty();
 
     let Some(root) = certificate.root else {
         return Ok(RiskReport {
             themes: Vec::new(),
             evidence: Vec::new(),
+            hint: None,
         });
     };
 
     let mut visited = vec![false; certificate.nodes.len()];
     let mut pending: Vec<NodeId> = vec![root];
     let mut lines: BTreeMap<RiskTheme, BTreeSet<String>> = BTreeMap::new();
+    // The printed propositions of the root graph, for the non-judgment hint.
+    // They are collected even when a theme matched: the hint is only printed
+    // when no declaration did, and the caller decides from this report.
+    let mut propositions: BTreeSet<String> = BTreeSet::new();
     while let Some(id) = pending.pop() {
         if id >= certificate.nodes.len() {
             return Err(format!(
@@ -253,12 +357,27 @@ pub fn derive_risk(env: &Env, certificate: &Certificate) -> Result<RiskReport, S
                 },
             ),
         };
+        propositions.insert(print_expr(&Expr::from(proposition)));
+        if markers.is_empty() {
+            continue;
+        }
         let Some(head) = themed_head(env, proposition, &markers)? else {
             continue;
         };
         let (pred, theme) = head;
         let line = evidence_line(proposition, &pred, theme, &step);
         lines.entry(theme).or_default().insert(line);
+    }
+
+    if lines.is_empty() {
+        // No declaration covers this derivation, so there is no theme and no
+        // evidence. A listed term in the propositions may still earn one
+        // sentence, explicitly marked as a hint.
+        return Ok(RiskReport {
+            themes: Vec::new(),
+            evidence: Vec::new(),
+            hint: hint_line(&propositions, declares_risk),
+        });
     }
 
     let themes: Vec<RiskTheme> = lines.keys().copied().collect();
@@ -272,7 +391,11 @@ pub fn derive_risk(env: &Env, certificate: &Certificate) -> Result<RiskReport, S
             (*theme, lines)
         })
         .collect();
-    Ok(RiskReport { themes, evidence })
+    Ok(RiskReport {
+        themes,
+        evidence,
+        hint: None,
+    })
 }
 
 /// How a themed proposition entered the proof graph.

@@ -181,6 +181,14 @@
 //! decide, the risk theme says what the case is about, and both can hold at
 //! once. The report is never written into the certificate either, so `:cert`
 //! JSON, certificate v8 and `:verify-cert` are unchanged.
+//!
+//! Because a declared `risk` is the only grading input, a case whose theory
+//! declares none would stay silent even when it plainly talks about an offence
+//! or bodily harm. [`risk`](mod@risk) therefore adds one non-judgment hint when
+//! no declaration matched: it names a term from a small documented word list in
+//! the root's printed propositions, says the case declares no `risk`, and says
+//! it changes no label and no exit code. The hint is not a grading, `:labels`
+//! does not print it, and it is suppressed whenever a declaration matches.
 
 mod closure;
 mod key;

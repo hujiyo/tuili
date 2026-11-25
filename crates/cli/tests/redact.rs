@@ -305,6 +305,55 @@ fn the_redaction_notice_is_printed_with_every_redacted_output() {
 }
 
 #[test]
+fn repeated_redacted_output_is_byte_identical_in_the_same_environment() {
+    let dir = TempDir::new("repeat");
+    let file = case_file(&dir);
+    for command in ["why", "explain", "labels"] {
+        let first = session(
+            &file,
+            &["--redact"],
+            &[&format!(":{command} 人身受到伤害 李四")],
+        );
+        let second = session(
+            &file,
+            &["--redact"],
+            &[&format!(":{command} 人身受到伤害 李四")],
+        );
+        assert_exit(&first, PROVED);
+        assert_eq!(
+            stdout(&first),
+            stdout(&second),
+            "the same environment must reproduce `:{command}` byte for byte"
+        );
+    }
+    // The certificate is reproducible too: `:cert` is not redacted, so two
+    // redacted runs must still produce the same JSON.
+    let first = session(&file, &["--redact"], &[":cert 人身受到伤害 李四"]);
+    let second = session(&file, &["--redact"], &[":cert 人身受到伤害 李四"]);
+    assert_eq!(stdout(&first), stdout(&second));
+}
+
+#[test]
+fn a_word_list_hint_is_redacted_like_the_rest_of_the_output() {
+    let dir = TempDir::new("hint");
+    let file = dir.write(
+        "hint.std",
+        "sort 人\npred 犯罪 : 人 → Prop\nobj 张三 : 人\n\
+         axiom 张三犯罪 : 犯罪 张三\n  source text \"案情记录：张三犯罪\" locator \"一\"\n",
+    );
+    let output = session(&file, &["--redact"], &[":why 犯罪 张三"]);
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(!out.contains("张三"), "the original name leaked\n{out}");
+    assert!(
+        out.contains("提示：案情中出现「犯罪」相关用语，可能属于刑事题材"),
+        "the hint is display text and must survive redaction\n{out}"
+    );
+    assert!(out.contains("但本案没有声明 risk"), "{out}");
+    assert!(out.contains(REDACT_NOTICE), "{out}");
+}
+
+#[test]
 fn an_unknown_redact_argument_is_a_command_error() {
     let dir = TempDir::new("arg");
     let file = case_file(&dir);

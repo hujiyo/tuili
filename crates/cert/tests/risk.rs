@@ -138,6 +138,129 @@ fn all_five_themes_are_declared_and_print_their_own_warning() {
 }
 
 #[test]
+fn a_hint_appears_only_when_no_declaration_matched() {
+    // No marker at all: the case still names a listed term, so one hint line is
+    // produced instead of silence — but it is not a theme.
+    let env = env_with(&[]);
+    let certificate = certificate(
+        vec![assumption(atom("犯罪", "甲"), FactIdentity::UserAsserted)],
+        vec![Node::Assumption { assumption: 0 }],
+        Some(0),
+    );
+    let report = derive_risk(&env, &certificate).unwrap();
+    assert!(!report.is_high_risk());
+    assert_eq!(report.warning_line(), None);
+    assert_eq!(
+        report.hint_line(),
+        Some(
+            "提示：案情中出现「犯罪」相关用语，可能属于刑事题材，但本案没有声明 risk；\
+             这只是提示，不改变标签、不改退出码。"
+        )
+    );
+
+    // A marker exists but does not cover this derivation: the sentence must not
+    // claim the case declared nothing.
+    let env = env_with(&[("违法", RiskTheme::Criminal)]);
+    let report = derive_risk(&env, &certificate).unwrap();
+    assert!(!report.is_high_risk());
+    assert_eq!(
+        report.hint_line(),
+        Some(
+            "提示：案情中出现「犯罪」相关用语，可能属于刑事题材，但没有命中的 risk 声明；\
+             这只是提示，不改变标签、不改退出码。"
+        )
+    );
+}
+
+#[test]
+fn a_matched_declaration_suppresses_the_hint() {
+    let env = env_with(&[("违法", RiskTheme::Criminal)]);
+    let certificate = certificate(
+        vec![assumption(atom("违法", "甲"), FactIdentity::UserAsserted)],
+        vec![Node::Assumption { assumption: 0 }],
+        Some(0),
+    );
+    let report = derive_risk(&env, &certificate).unwrap();
+    assert!(report.is_high_risk());
+    assert_eq!(report.hint_line(), None);
+}
+
+#[test]
+fn the_hint_names_every_matched_term_and_theme_in_the_fixed_order() {
+    let env = env_with(&[]);
+    // 「犯罪 甲」 is the premise; 「重伤 甲」 is concluded by the rule. Both are
+    // on the root graph, so both terms and both themes are reported.
+    let certificate = certificate(
+        vec![assumption(atom("犯罪", "甲"), FactIdentity::UserAsserted)],
+        vec![
+            Node::Assumption { assumption: 0 },
+            rule("后果规则", atom("重伤", "甲"), vec![0], Vec::new()),
+        ],
+        Some(1),
+    );
+    let report = derive_risk(&env, &certificate).unwrap();
+    assert_eq!(
+        report.hint_line(),
+        Some(
+            "提示：案情中出现「犯罪」「重伤」相关用语，可能属于刑事、人身安全题材，\
+             但本案没有声明 risk；这只是提示，不改变标签、不改退出码。"
+        )
+    );
+}
+
+#[test]
+fn an_ambiguous_term_keeps_the_hint_wording_and_is_never_a_verdict() {
+    let env = env_with(&[]);
+    let certificate = certificate(
+        vec![assumption(atom("拘留", "甲"), FactIdentity::UserAsserted)],
+        vec![Node::Assumption { assumption: 0 }],
+        Some(0),
+    );
+    let report = derive_risk(&env, &certificate).unwrap();
+    let hint = report.hint_line().expect("the hint applies");
+    assert!(hint.starts_with("提示："), "{hint}");
+    assert!(hint.contains("可能属于刑事题材"), "{hint}");
+    assert!(
+        !hint.contains("高风险题材"),
+        "an ambiguous term must not be promoted into a verdict: {hint}"
+    );
+    assert!(!hint.contains("建议尽快咨询执业律师"), "{hint}");
+}
+
+#[test]
+fn the_hint_follows_the_root_graph_and_ignores_unrelated_facts() {
+    let env = env_with(&[]);
+    // 「犯罪 甲」 is an unrelated branch; the root states only 「触发 甲」.
+    let certificate = certificate(
+        vec![
+            assumption(atom("犯罪", "甲"), FactIdentity::UserAsserted),
+            assumption(atom("触发", "甲"), FactIdentity::UserAsserted),
+        ],
+        vec![
+            Node::Assumption { assumption: 0 },
+            Node::Assumption { assumption: 1 },
+        ],
+        Some(1),
+    );
+    let report = derive_risk(&env, &certificate).unwrap();
+    assert_eq!(report.hint_line(), None);
+}
+
+#[test]
+fn a_hint_is_derived_deterministically() {
+    let env = env_with(&[]);
+    let certificate = certificate(
+        vec![assumption(atom("犯罪", "甲"), FactIdentity::UserAsserted)],
+        vec![Node::Assumption { assumption: 0 }],
+        Some(0),
+    );
+    let first = derive_risk(&env, &certificate).unwrap();
+    let second = derive_risk(&env, &certificate).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.hint_line(), second.hint_line());
+}
+
+#[test]
 fn a_derivation_without_any_marker_is_not_high_risk() {
     let env = env_with(&[]);
     let certificate = certificate(

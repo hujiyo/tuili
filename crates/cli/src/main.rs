@@ -341,6 +341,17 @@
 //! from the certificate, is never written into it, and does not change any
 //! exit code: `:cert` JSON, certificate v8 and `:verify-cert` are unchanged.
 //!
+//! A theory that declares no `risk` covering the derivation shows no grading —
+//! and most theories declare none. So `:why` and `:explain` print one
+//! `提示：案情中出现「…」相关用语，可能属于…题材，但本案没有声明 risk；这只是提示，不改变标签、不改退出码。`
+//! sentence when the root graph's propositions mention a term from a small
+//! documented word list and no declaration matched. That sentence is explicitly
+//! not a judgment: it never says `高风险题材`, it names no rule and no source,
+//! `:labels` never prints it, and it changes no label, no exit code and no
+//! certificate field. The list lives in `std_deduce_cert::risk::HINT_TERMS` and
+//! in the README; it is not a classifier, and an ambiguous term (拘留) keeps the
+//! `可能属于` wording instead of becoming a verdict.
+//!
 //! Every result output of `:why`, `:explain`, `:labels` and `:cert` carries the
 //! one-line disclaimer `声明：这是模型内推导，不是法律意见。` as its own line.
 //! It is never placed inside the derivation tree and never inside the
@@ -4289,21 +4300,28 @@ fn write_trust_line(out: &mut impl Write, trust: &TrustReport) {
     writeln!(out, "{}", trust.summary()).ok();
 }
 
-/// Print the one explicit high-risk line and its evidence.
+/// Print the one explicit high-risk line and its evidence, or the one
+/// non-judgment hint when the case declares no `risk` covering this derivation.
 ///
 /// A high-risk derivation prints exactly one warning line, followed by one
 /// `  依据：…` line per proving node, so the reader can see which proposition,
-/// rule and source produced the grading. A low-risk derivation prints nothing:
-/// a clean case must not be buried under a line that says "no risk".
+/// rule and source produced the grading. A case without a matching declaration
+/// prints at most one `提示：…` line from a small documented word list; that line
+/// says it is only a hint, and it changes no label and no exit code. Neither
+/// branch prints anything when there is nothing to say: a clean case must not be
+/// buried under a line that says "no risk".
 fn write_risk_warning(out: &mut impl Write, risk: &RiskReport) {
-    let Some(warning) = risk.warning_line() else {
-        return;
-    };
-    writeln!(out, "{warning}").ok();
-    for theme in risk.themes() {
-        for evidence in risk.evidence(*theme) {
-            writeln!(out, "  依据：{evidence}").ok();
+    if let Some(warning) = risk.warning_line() {
+        writeln!(out, "{warning}").ok();
+        for theme in risk.themes() {
+            for evidence in risk.evidence(*theme) {
+                writeln!(out, "  依据：{evidence}").ok();
+            }
         }
+        return;
+    }
+    if let Some(hint) = risk.hint_line() {
+        writeln!(out, "{hint}").ok();
     }
 }
 
@@ -4312,7 +4330,9 @@ fn write_risk_warning(out: &mut impl Write, risk: &RiskReport) {
 /// The section is separate from the five trust labels on purpose: the trust
 /// labels say why the model may not decide (an open concept, a claim, a gap),
 /// the risk themes say what the case is about. Both can hold at once, so a
-/// theme is never folded into `需律师判断`.
+/// theme is never folded into `需律师判断`. The non-judgment hint is deliberately
+/// not printed here: `:labels` reports the certificate's declared themes and
+/// must not be affected by a word-list hint.
 fn write_risk_section(out: &mut impl Write, risk: &RiskReport) {
     if !risk.is_high_risk() {
         return;

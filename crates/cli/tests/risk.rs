@@ -292,6 +292,103 @@ fn an_unknown_risk_theme_fails_the_load() {
     );
 }
 
+#[test]
+fn a_case_without_a_risk_declaration_prints_one_hint_line_instead_of_silence() {
+    let dir = TempDir::new("hint");
+    let file = dir.write(
+        "case.std",
+        "sort 人\npred 犯罪 : 人 → Prop\nobj 甲 : 人\n\
+         axiom 甲犯罪 : 犯罪 甲\n  source text \"案情\" locator \"一\"\n",
+    );
+    let hint = "提示：案情中出现「犯罪」相关用语，可能属于刑事题材，\
+                但本案没有声明 risk；这只是提示，不改变标签、不改退出码。";
+    for command in ["why", "explain"] {
+        let output = session(&file, &[], &[&format!(":{command} 犯罪 甲")]);
+        assert_exit(&output, PROVED);
+        let out = stdout(&output);
+        assert_eq!(
+            out.matches(hint).count(),
+            1,
+            "`:{command}` prints exactly one hint line\n{out}"
+        );
+        assert!(
+            !out.contains("高风险题材"),
+            "a hint must not be promoted into a verdict\n{out}"
+        );
+        assert!(out.contains(DISCLAIMER), "{out}");
+    }
+
+    // The hint is not a label: `:labels` must stay unaffected.
+    let output = session(&file, &[], &[":labels 犯罪 甲"]);
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        !out.contains("提示："),
+        "`:labels` must not be affected by the word-list hint\n{out}"
+    );
+    assert!(!out.contains("高风险题材"), "{out}");
+    assert!(out.contains("信任：依赖假设"), "{out}");
+
+    // It is not part of the certificate either.
+    let output = session(&file, &[], &[":cert 犯罪 甲"]);
+    assert_exit(&output, PROVED);
+    let json = certificate_json(&output);
+    assert!(
+        !json.contains("提示：") && !json.contains("本案没有声明 risk"),
+        "the hint must not enter the certificate\n{json}"
+    );
+}
+
+#[test]
+fn a_declared_theme_suppresses_the_hint() {
+    let dir = TempDir::new("hint-suppressed");
+    let file = dir.write(
+        "case.std",
+        &themed_theory("刑事", "犯罪", "认定犯罪", "实施犯罪行为"),
+    );
+    let output = session(&file, &[], &[":why 犯罪 甲"]);
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(out.contains("高风险题材：涉及刑事"), "{out}");
+    assert!(
+        !out.contains("提示：案情中出现"),
+        "a graded case must not also print the word-list hint\n{out}"
+    );
+}
+
+#[test]
+fn the_hint_keeps_the_exit_code_and_reports_both_terms_and_themes() {
+    let dir = TempDir::new("hint-multi");
+    let file = dir.write(
+        "case.std",
+        "sort 人\npred 犯罪 : 人 → Prop\npred 重伤 : 人 → Prop\npred 案发经过 : 人 → Prop\n\
+         obj 甲 : 人\n\
+         axiom 甲犯罪 : 犯罪 甲\n  source text \"案情\" locator \"一\"\n\
+         axiom 甲重伤 : 重伤 甲\n  source text \"案情\" locator \"二\"\n\
+         rule 合并 :\n  params p : 人\n  premise 犯罪 p\n  premise 重伤 p\n  \
+         conclude 案发经过 p\n  source text \"测试法\" locator \"一\"\n",
+    );
+    let output = session(&file, &[], &[":why 案发经过 甲"]);
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("提示：案情中出现「犯罪」「重伤」相关用语，可能属于刑事、人身安全题材，")
+            && out.contains("但本案没有声明 risk；这只是提示，不改变标签、不改退出码。"),
+        "the hint names both matched terms and themes and stays a hint\n{out}"
+    );
+
+    // A gap with a listed term is still a gap: the hint adds no outcome.
+    let gap = dir.write(
+        "gap.std",
+        "sort 人\npred 犯罪 : 人 → Prop\nobj 甲 : 人\nobj 乙 : 人\n\
+         axiom 甲犯罪 : 犯罪 甲\n  source text \"案情\" locator \"一\"\n",
+    );
+    let output = session(&gap, &[], &[":why 犯罪 乙"]);
+    assert_exit(&output, GAP_OR_CONFLICT);
+    let out = stdout(&output);
+    assert!(out.contains("本案没有声明 risk"), "{out}");
+}
+
 /// A helper that returns the certificate JSON of a `:cert` run.
 fn certificate_json(output: &Output) -> String {
     let out = stdout(output);
