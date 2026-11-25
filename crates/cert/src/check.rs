@@ -105,6 +105,11 @@
 //!   conclusion head must agree with the conflict proposition when both heads
 //!   are concrete, and an assumption side's proposition must occur in the
 //!   certificate's assumption table. See "Root and conflicts" below.
+//! * A conflict the certificate does **not** record is not invisible: every
+//!   conclusion the root reaches is compared with every environment fact that
+//!   seeds a derivation, with the same conflict judgement the reasoner uses, and
+//!   the omitted conflict fails the check. See "Conflicts the certificate
+//!   omits" below for the scope and the resolution matrix.
 //!
 //! The derivability superset is not a second reasoner and does not claim the
 //! reasoner's exact semantics; it is deliberately larger. It may therefore
@@ -132,9 +137,14 @@
 //! that is itself an assumption is still proved, but the report says so
 //! (`root_is_assumption`) and gives the condition count (`assumption_count`).
 //!
-//! If the root proposition occurs in a recorded conflict, the check rejects an
-//! unresolved conflict and a root on the losing side. A root on the winning
-//! side is accepted and the report sets `conflict_resolved`.
+//! If the root proposition occurs in a recorded conflict, the check rejects a
+//! root on the losing side. An unresolved conflict normally rejects the root
+//! too; the exception is `conflicting_assumptions` (two facts, both strict or
+//! both claims), which records an honest factual standoff: the check passes,
+//! the report sets `root_conflict_unresolved`, and a renderer must not call
+//! the root a proved conclusion (the CLI says the root is an undecided strict
+//! fact / fact and exits `1` for the unresolved conflict). A root on the
+//! winning side is accepted and the report sets `conflict_resolved`.
 //!
 //! Every recorded conflict resolution is validated against the environment's
 //! declared priorities, not just the root's. Both conflict propositions must be
@@ -166,6 +176,35 @@
 //! passed; it does not mean every priority in the environment was inspected,
 //! and an order no conflict cites is never compared.
 //!
+//! ## Conflicts the certificate omits
+//!
+//! The recorded conflicts above are only half the layer: a certificate is
+//! user-supplied, so a missing record must not be invisible. Every conclusion
+//! the root reaches — a rule application, an interpretation application, a
+//! universal instance, and an assumption when the root is one — is compared
+//! with every environment fact that seeds a derivation, through the same
+//! [`crate::conflict::in_conflict`] judgement the reasoner records conflicts
+//! with. The environment facts are `verified`, `stipulated`, `user_asserted`
+//! and `assumed`; a `disputed` fact asserts what the other side claims and
+//! takes part in no derivation. A conflict found this way must already be
+//! recorded with the resolution the conflict model gives it:
+//!
+//! * a strict fact wins against a rule conclusion, an interpretation
+//!   conclusion, a universal instance and a claim;
+//! * two strict facts have no order: a conclusion that is itself a strict
+//!   fact must record the standoff as `conflicting_assumptions`, and the check
+//!   accepts the recorded unresolved conflict; the CLI's unresolved count
+//!   keeps the run at exit `1`;
+//! * a claim never wins: facing a conclusion it is `non_strict_fact`, facing
+//!   another fact it is `conflicting_assumptions`.
+//!
+//! A missing record, or a recorded resolution contrary to that matrix, fails
+//! the check with the node, the opposing proposition and its identity named.
+//! A fact a recorded conflict already removed from the fact base is not
+//! compared again: removals only accumulate, so the derivation itself has set
+//! that fact aside. The scan is bounded by `MAX_CONFLICT_COMPARISONS`; over
+//! the bound is an error, never a partial check.
+//!
 //! ## Calling preconditions
 //!
 //! `check` takes the loaded environment and the certificate as separate
@@ -189,10 +228,11 @@
 //! that the rule's conclusion head agrees with the conflict proposition when
 //! both are concrete, and that an assumption side's proposition is in the
 //! certificate's assumption table, but a rule that can conclude that predicate
-//! is trusted to be the actual instance. Conflicts the certificate omits are
-//! not reconstructed, so a truncated certificate can hide a conflict; the
-//! derivation layer is what records them. Citations are compared as data, and
-//! their legal effect is not judged. Open obligations other than the
+//! is trusted to be the actual instance. Conflicts between two conclusions
+//! with no environment fact involved — for example two rule conclusions
+//! contradicting each other — are not reconstructed: only a recorded one is
+//! validated. Citations are compared as data, and their legal effect is not
+//! judged. Open obligations other than the
 //! `open_concept` one do not fail the check; they set `requires_human`. The
 //! `open_concept` obligation is recomputed instead, as described above.
 //! Whether the root is proved depends only on the
@@ -214,6 +254,7 @@ use crate::applicability::{
     SessionEvidence,
 };
 use crate::closure;
+use crate::conflict::{in_conflict, view as conflict_view, ConflictView, Declarations};
 use crate::environment::EnvironmentIdentity;
 use crate::expr::CertExpr;
 use crate::key::expression_key;
@@ -248,6 +289,14 @@ pub struct CheckReport {
     /// on the winning side. The recorded resolution, including its priority
     /// edges, has been validated against the environment.
     pub conflict_resolved: bool,
+    /// Whether the root proposition is a side of an accepted unresolved
+    /// conflict: the certificate records that two facts (both strict, or both
+    /// claims) stand undecided. The check passes because the standoff is
+    /// honest, not because the root is settled; `root_proved` still describes
+    /// the node, but a renderer must not call this root a proved conclusion.
+    /// The CLI exits `1` for the unresolved conflict. False when the root
+    /// takes no recorded side, or when its conflict was decided.
+    pub root_conflict_unresolved: bool,
     /// Whether the certificate records open obligations, which need a human
     /// decision. They do not make the check fail.
     pub requires_human: bool,
@@ -957,6 +1006,14 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
         priority_edges_checked += validate_resolution(&priority, cert, index, conflict)?;
     }
 
+    // A certificate is user-supplied, so the checker cannot assume the
+    // producer recorded every conflict. Every conclusion the root reaches is
+    // compared with every environment fact that seeds a derivation: a fact
+    // the certificate omits from its `conflicts` array must not leave the
+    // conclusion looking proved. The scan runs after the recorded conflicts
+    // were validated, so a forged record is reported on its own terms first.
+    validate_conflict_completeness(env, cert, &facts)?;
+
     // An `open_concept` obligation is not free text: it is recomputed from the
     // environment's markers and the proof graph reachable from the root. The
     // check refuses a certificate that dropped it, invented it or edited its
@@ -970,9 +1027,14 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
     let root_is_assumption = cert
         .root
         .is_some_and(|root| matches!(&cert.nodes[root], Node::Assumption { .. }));
+    let mut root_conflict_unresolved = false;
     let conflict_resolved = match cert.root {
         Some(root) => match node_prop(cert, &cert.nodes[root]) {
-            Some(proposition) => root_conflict_resolved(env, cert, root, proposition)?,
+            Some(proposition) => {
+                let status = root_conflict_status(env, cert, root, proposition)?;
+                root_conflict_unresolved = status.unresolved;
+                status.resolved
+            }
             None => false,
         },
         None => false,
@@ -982,6 +1044,7 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
         root_is_assumption,
         assumption_count: cert.assumptions.len(),
         conflict_resolved,
+        root_conflict_unresolved,
         requires_human: !cert.open_obligations.is_empty(),
         // Every recorded priority edge has just been validated; a failure
         // returned above. This is true even when there is no such edge.
@@ -991,21 +1054,40 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
     })
 }
 
+/// What the recorded conflicts say about the root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RootConflict {
+    /// The root takes part in a defeat and is on the winning side.
+    resolved: bool,
+    /// The root takes part in an accepted unresolved conflict: two facts stand
+    /// undecided, so the root is not a settled conclusion.
+    unresolved: bool,
+}
+
 /// Check the root proposition against the certificate's recorded conflicts.
 ///
-/// An unresolved conflict, or one where the root is on the losing side, makes
-/// the certificate invalid. A root on the winning side is allowed and returns
-/// `true`. The resolution itself was already validated by
-/// [`validate_resolution`], so a root that reaches this point is not relying on
-/// a forged priority.
-fn root_conflict_resolved(
+/// A root on the losing side makes the certificate invalid. A root on the
+/// winning side is allowed and reports `resolved`; a root that takes no side
+/// reports neither. An unresolved conflict normally makes the root invalid —
+/// the root is not a conclusion. The exception is
+/// [`UnresolvedReason::ConflictingAssumptions`]: a certificate can honestly
+/// record that two facts, both strict or both claims, stand undecided. That is
+/// a factual dispute, not a forged proof, so the check passes and reports
+/// `unresolved`; the CLI turns that into exit `1` and never calls the root
+/// proved. Every other unresolved reason still rejects the root, because it
+/// says the derivation itself is incomplete (lost witnesses, undeclared or
+/// unusable priorities).
+///
+/// The resolution itself was already validated by [`validate_resolution`], so
+/// a root that reaches this point is not relying on a forged priority.
+fn root_conflict_status(
     env: &Env,
     cert: &Certificate,
     root: NodeId,
     proposition: &CertExpr,
-) -> Result<bool, CheckError> {
+) -> Result<RootConflict, CheckError> {
     let root_key = key(env, &Expr::from(proposition)).map_err(|m| CheckError::at(root, m))?;
-    let mut resolved = false;
+    let mut status = RootConflict::default();
     for (index, conflict) in cert.conflicts.iter().enumerate() {
         let left = key(env, &Expr::from(&conflict.left)).map_err(|m| CheckError::at(root, m))?;
         let right = key(env, &Expr::from(&conflict.right)).map_err(|m| CheckError::at(root, m))?;
@@ -1017,6 +1099,15 @@ fn root_conflict_resolved(
             continue;
         };
         match &conflict.resolution {
+            Resolution::Unresolved {
+                reason: UnresolvedReason::ConflictingAssumptions,
+            } => {
+                // Both sides are facts and nobody has an order: the
+                // certificate records the standoff instead of hiding it. The
+                // unresolved conflict keeps the run from a clean proof (the
+                // CLI exits `1`), but it is not a malformed certificate.
+                status.unresolved = true;
+            }
             Resolution::Unresolved { .. } => {
                 return Err(CheckError::at(
                     root,
@@ -1037,10 +1128,463 @@ fn root_conflict_resolved(
                     ),
                 ));
             }
-            Resolution::Defeated { .. } => resolved = true,
+            Resolution::Defeated { .. } => status.resolved = true,
         }
     }
-    Ok(resolved)
+    Ok(status)
+}
+
+/// The largest number of (root-reachable conclusion, environment fact) pairs
+/// the conflict-completeness scan compares.
+///
+/// The scan is quadratic: every conclusion the root reaches is compared with
+/// every environment fact that has a conflict view. Exceeding the bound is an
+/// error, never a partial check: the certificate is refused rather than
+/// scanned halfway and reported clean for the part that was looked at.
+const MAX_CONFLICT_COMPARISONS: usize = 1_000_000;
+
+/// The conflict-completeness scan's work budget: `conclusions × facts`.
+///
+/// Exceeding the bound (or an overflow) is an error naming both counts; it is
+/// never a signal to scan a prefix and report the rest clean. Kept as its own
+/// function so the bound itself is unit-tested.
+fn conflict_comparison_budget(conclusions: usize, facts: usize) -> Result<usize, CheckError> {
+    let comparisons = conclusions.checked_mul(facts).ok_or_else(|| CheckError {
+        node: None,
+        message: format!("冲突完备性检查规模溢出：{conclusions} 个根可达结论 × {facts} 条环境事实"),
+    })?;
+    if comparisons > MAX_CONFLICT_COMPARISONS {
+        return Err(CheckError {
+            node: None,
+            message: format!(
+                "冲突完备性检查规模超过上限 {MAX_CONFLICT_COMPARISONS}：\
+                 {conclusions} 个根可达结论 × {facts} 条环境事实 = {comparisons} 次比较；\
+                 证书或环境过大，无法完整检查"
+            ),
+        });
+    }
+    Ok(comparisons)
+}
+
+/// One environment fact as the conflict relation reads it.
+struct EnvironmentConflict {
+    /// The declaration's name, named by a diagnostic.
+    declaration: String,
+    /// The identity the ledger registers, in the certificate's wire form.
+    identity: FactIdentity,
+    /// Normalized structural key of the proposition.
+    key: String,
+    /// Predicate-headed view of the proposition.
+    view: ConflictView,
+    /// The normalized proposition, for the diagnostic.
+    proposition: Expr,
+}
+
+/// One conclusion the root reaches, as the conflict relation reads it.
+struct ReachableConclusion {
+    /// The node that states the conclusion.
+    node: NodeId,
+    /// Normalized structural key of the proposition.
+    key: String,
+    /// Predicate-headed view of the proposition.
+    view: ConflictView,
+    /// The normalized proposition, for the diagnostic.
+    proposition: Expr,
+    /// How the proposition is supported, as the reasoner would read it.
+    support: ConclusionSupport,
+}
+
+/// How a reachable conclusion is supported.
+///
+/// The reasoner prefers a registered fact over a derivation when the same
+/// proposition is both: the fact is its evidence. A conclusion whose
+/// proposition appears in the certificate's assumption table or is registered
+/// by the environment is therefore read as a fact, which decides whether a
+/// conflict is a fact-versus-fact or fact-versus-conclusion standoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConclusionSupport {
+    /// The proposition is a fact with this identity.
+    Fact(FactIdentity),
+    /// The proposition is derived: a rule application, an interpretation
+    /// application or a universal instance.
+    Derived,
+}
+
+/// The resolution the shared conflict model demands for one pair.
+enum ExpectedResolution {
+    /// One side must be recorded as the winner.
+    Defeated { winner: Side },
+    /// Neither side may win; the recorded reason must match.
+    Unresolved { reason: UnresolvedReason },
+}
+
+/// Check that every conclusion reachable from the root records its conflicts
+/// with the environment's facts.
+///
+/// This is the completeness side of the conflict layer: [`validate_resolution`]
+/// checks the conflicts a certificate records, but a certificate written by a
+/// third party can simply omit one. Every conclusion on the root's proof graph
+/// is therefore compared, through the same [`crate::conflict::in_conflict`]
+/// judgement the reasoner uses, with every environment fact that seeds a
+/// derivation (a `disputed` fact asserts only what the other side claims and
+/// takes part in no derivation). A conflict found this way must already be
+/// recorded, with the resolution the conflict model gives it:
+///
+/// * a strict fact (`verified` / `stipulated`) wins against a rule conclusion,
+///   an interpretation conclusion, a universal instance and a claim; two
+///   strict facts have no order, so a conclusion that is itself a strict fact
+///   must record the standoff as `conflicting_assumptions` (a recorded defeat
+///   is refused);
+/// * a claim (`user_asserted` / `assumed`) never beats an assumption, a rule
+///   conclusion or a universal instance: the conflict must be recorded as
+///   `conflicting_assumptions` (two facts) or `non_strict_fact` (a claim
+///   facing a conclusion), never as a defeat.
+///
+/// A fact a recorded conflict already removed from the fact base does not
+/// take part: an unresolved conflict removes both sides, a defeat removes the
+/// loser, and removals only accumulate (the reasoner's fixed point never
+/// re-adds one). That keeps the scan aligned with the producer instead of
+/// demanding a record for a fact the derivation itself set aside. Conflicts
+/// between two conclusions with no environment fact involved are not
+/// reconstructed; only the certificate's recorded ones are validated.
+fn validate_conflict_completeness(
+    env: &Env,
+    cert: &Certificate,
+    facts: &[EnvironmentFact],
+) -> Result<(), CheckError> {
+    let Some(root) = cert.root else {
+        // No root, no proved conclusion: nothing the root could rely on.
+        return Ok(());
+    };
+
+    // The recorded conflicts decide two things: which pairs are accounted for,
+    // and which propositions the derivation's fact base no longer holds.
+    let mut recorded: Vec<(String, String)> = Vec::with_capacity(cert.conflicts.len());
+    let mut removed: BTreeSet<String> = BTreeSet::new();
+    for (index, conflict) in cert.conflicts.iter().enumerate() {
+        let fail = |message: String| CheckError {
+            node: None,
+            message: format!("第 {} 个冲突：{message}", index + 1),
+        };
+        let left = key(env, &Expr::from(&conflict.left)).map_err(fail)?;
+        let right = key(env, &Expr::from(&conflict.right)).map_err(fail)?;
+        match &conflict.resolution {
+            Resolution::Unresolved { .. } => {
+                removed.insert(left.clone());
+                removed.insert(right.clone());
+            }
+            Resolution::Defeated { winner, .. } => {
+                let loser = match winner {
+                    Side::Left => &right,
+                    Side::Right => &left,
+                };
+                removed.insert(loser.clone());
+            }
+        }
+        recorded.push((left, right));
+    }
+    let mut recorded_by_pair: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    for (index, (left, right)) in recorded.iter().enumerate() {
+        let pair = if left <= right {
+            (left.clone(), right.clone())
+        } else {
+            (right.clone(), left.clone())
+        };
+        recorded_by_pair.entry(pair).or_default().push(index);
+    }
+
+    // The assumption table and the environment's fact registrations both make
+    // a proposition a fact rather than a derivation. The kernel owns the
+    // identity and the certificate's table uses the wire form, so both are
+    // converted before they are compared.
+    let mut assumption_identities: BTreeMap<String, FactIdentity> = BTreeMap::new();
+    for (index, entry) in cert.assumptions.iter().enumerate() {
+        let key = key(env, &Expr::from(&entry.proposition)).map_err(|message| CheckError {
+            node: None,
+            message: format!("第 {} 条假设：{message}", index + 1),
+        })?;
+        assumption_identities.entry(key).or_insert(entry.identity);
+    }
+    let mut environment_identities: BTreeMap<String, FactIdentity> = BTreeMap::new();
+    for fact in facts {
+        if !fact.identity.seeds_derivation() {
+            continue;
+        }
+        environment_identities
+            .entry(fact.key.clone())
+            .or_insert_with(|| FactIdentity::from(&fact.identity));
+    }
+
+    // Only conclusions that state a proposition take part; a gap states
+    // nothing. A proposition without a predicate head (a quantified or opaque
+    // statement) has no declared conflict relation and is skipped by `view`,
+    // exactly as the reasoner skips it.
+    let declarations = Declarations::from_env(env);
+    let mut conclusions: Vec<ReachableConclusion> = Vec::new();
+    for node in reachable_nodes(cert, root) {
+        let Some(proposition) = node_prop(cert, &cert.nodes[node]) else {
+            continue;
+        };
+        let expression = Expr::from(proposition);
+        let key = key(env, &expression).map_err(|message| CheckError::at(node, message))?;
+        let Some(view) = conflict_view(env, &expression).map_err(|m| CheckError::at(node, m))?
+        else {
+            continue;
+        };
+        let support = match &cert.nodes[node] {
+            Node::Assumption { assumption } => {
+                let entry = cert.assumptions.get(*assumption).ok_or_else(|| {
+                    CheckError::at(
+                        node,
+                        format!(
+                            "引用了不存在的假设 {assumption}：证书只有 {} 条假设",
+                            cert.assumptions.len()
+                        ),
+                    )
+                })?;
+                ConclusionSupport::Fact(entry.identity)
+            }
+            _ => match assumption_identities
+                .get(&key)
+                .or_else(|| environment_identities.get(&key))
+            {
+                Some(identity) => ConclusionSupport::Fact(*identity),
+                None => ConclusionSupport::Derived,
+            },
+        };
+        conclusions.push(ReachableConclusion {
+            node,
+            key,
+            view,
+            proposition: expression,
+            support,
+        });
+    }
+
+    // A gap root proves nothing and has no premise link, so its proof graph
+    // holds no conclusion. There is nothing to compare, and the environment
+    // facts need not be normalized for this certificate at all.
+    if conclusions.is_empty() {
+        return Ok(());
+    }
+
+    // Environment facts that already left the fact base through a recorded
+    // conflict are not compared again, and a disputed fact never seeds a
+    // derivation: it is not evidence and cannot be an opposing side.
+    let mut environment_conflicts: Vec<EnvironmentConflict> = Vec::new();
+    for fact in facts {
+        if !fact.identity.seeds_derivation() || removed.contains(&fact.key) {
+            continue;
+        }
+        let Some(view) = conflict_view(env, &fact.proposition).map_err(|message| CheckError {
+            node: None,
+            message: format!("环境事实 `{}`：{message}", escape_control(&fact.name)),
+        })?
+        else {
+            continue;
+        };
+        environment_conflicts.push(EnvironmentConflict {
+            declaration: fact.name.clone(),
+            identity: FactIdentity::from(&fact.identity),
+            key: fact.key.clone(),
+            view,
+            proposition: fact.proposition.clone(),
+        });
+    }
+
+    // The scan is quadratic; a certificate or environment beyond the bound is
+    // refused as a whole. Counting before scanning makes the refusal
+    // independent of which pairs would have matched first.
+    conflict_comparison_budget(conclusions.len(), environment_conflicts.len())?;
+
+    for conclusion in &conclusions {
+        for fact in &environment_conflicts {
+            if !in_conflict(&declarations, &conclusion.view, &fact.view) {
+                continue;
+            }
+            let pair = if conclusion.key <= fact.key {
+                (conclusion.key.clone(), fact.key.clone())
+            } else {
+                (fact.key.clone(), conclusion.key.clone())
+            };
+            let matches = recorded_by_pair
+                .get(&pair)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if matches.is_empty() {
+                return Err(CheckError::at(
+                    conclusion.node,
+                    missing_conflict_message(conclusion, fact),
+                ));
+            }
+            for index in matches {
+                // The side the environment fact occupies in this record.
+                let fact_side = if recorded[*index].0 == fact.key {
+                    Side::Left
+                } else {
+                    Side::Right
+                };
+                validate_expected_resolution(conclusion, fact, fact_side, &cert.conflicts[*index])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The diagnostic for a reachable conclusion whose conflict with `fact` the
+/// certificate does not record.
+fn missing_conflict_message(
+    conclusion: &ReachableConclusion,
+    fact: &EnvironmentConflict,
+) -> String {
+    let base = format!(
+        "结论「{}」与环境登记的{}事实「{}」（声明 `{}`）冲突",
+        print_expr(&conclusion.proposition),
+        fact.identity.label_zh(),
+        print_expr(&fact.proposition),
+        escape_control(&fact.declaration)
+    );
+    match (is_strict(fact.identity), conclusion.support) {
+        // Two strict facts have no order between them: the honest record is an
+        // unresolved conflict, not a defeat.
+        (true, ConclusionSupport::Fact(identity)) if is_strict(identity) => format!(
+            "{base}，而该节点也登记为{}；两侧都是严格事实，证书必须把它记录为未决冲突\
+             （conflicting_assumptions），但没有记录",
+            identity.label_zh()
+        ),
+        (true, _) => format!("{base}；这个严格事实必须胜出，但证书没有记录该冲突"),
+        (false, ConclusionSupport::Fact(identity)) if is_strict(identity) => format!(
+            "{base}；该节点登记为{}，严格事实应当胜出，但证书没有记录该冲突",
+            identity.label_zh()
+        ),
+        (false, _) => format!("{base}；证书必须把它记录为未决冲突，但没有记录"),
+    }
+}
+
+/// Validate the resolution a recorded conflict gives for the pair
+/// `(conclusion, fact)`, where `fact_side` is the side the fact occupies.
+fn validate_expected_resolution(
+    conclusion: &ReachableConclusion,
+    fact: &EnvironmentConflict,
+    fact_side: Side,
+    conflict: &Conflict,
+) -> Result<(), CheckError> {
+    let expected = if is_strict(fact.identity) {
+        match conclusion.support {
+            // Two strict facts have no order between them. The conflict is
+            // honest and unresolved, never a defeat: `resolve` records
+            // `conflicting_assumptions`, and the certificate must do the
+            // same. A root here stays a conditional proof; the unresolved
+            // conflict makes the CLI exit `1`.
+            ConclusionSupport::Fact(identity) if is_strict(identity) => {
+                ExpectedResolution::Unresolved {
+                    reason: UnresolvedReason::ConflictingAssumptions,
+                }
+            }
+            _ => ExpectedResolution::Defeated { winner: fact_side },
+        }
+    } else {
+        match conclusion.support {
+            // A strict conclusion outranks a claim: the reasoner records the
+            // defeat with the conclusion's side winning.
+            ConclusionSupport::Fact(identity) if is_strict(identity) => {
+                ExpectedResolution::Defeated {
+                    winner: match fact_side {
+                        Side::Left => Side::Right,
+                        Side::Right => Side::Left,
+                    },
+                }
+            }
+            // Two claims are both unproved.
+            ConclusionSupport::Fact(_) => ExpectedResolution::Unresolved {
+                reason: UnresolvedReason::ConflictingAssumptions,
+            },
+            // A claim facing a derived conclusion: neither side wins.
+            ConclusionSupport::Derived => ExpectedResolution::Unresolved {
+                reason: UnresolvedReason::NonStrictFact {
+                    identity: fact.identity,
+                },
+            },
+        }
+    };
+
+    let base = format!(
+        "结论「{}」与环境登记的{}事实「{}」（声明 `{}`）冲突",
+        print_expr(&conclusion.proposition),
+        fact.identity.label_zh(),
+        print_expr(&fact.proposition),
+        escape_control(&fact.declaration)
+    );
+    match expected {
+        ExpectedResolution::Defeated { winner } => match &conflict.resolution {
+            Resolution::Defeated {
+                winner: actual,
+                basis: ResolutionBasis::Assumption,
+            } if actual == &winner => Ok(()),
+            Resolution::Defeated { winner: actual, .. } if actual != &winner => {
+                Err(CheckError::at(
+                    conclusion.node,
+                    format!(
+                        "{base}；证书判为{}胜出，但按冲突模型胜出的是{}",
+                        side_label(*actual),
+                        side_label(winner)
+                    ),
+                ))
+            }
+            Resolution::Defeated { .. } => Err(CheckError::at(
+                conclusion.node,
+                format!("{base}；严格事实胜出必须以事实为裁决依据，而证书记录的不是"),
+            )),
+            Resolution::Unresolved { .. } => Err(CheckError::at(
+                conclusion.node,
+                format!(
+                    "{base}；证书把该冲突记录为未决，但{}是严格事实，应当胜出",
+                    if winner == fact_side {
+                        format!("{}事实", fact.identity.label_zh())
+                    } else {
+                        format!("登记为{}的该节点", fact.identity.label_zh())
+                    }
+                ),
+            )),
+        },
+        ExpectedResolution::Unresolved { reason } => match &conflict.resolution {
+            Resolution::Unresolved { reason: recorded } if recorded == &reason => Ok(()),
+            Resolution::Unresolved { reason: recorded } => Err(CheckError::at(
+                conclusion.node,
+                format!("{base}；证书记录的未决原因与事实身份不符：{recorded:?}，应为 {reason:?}"),
+            )),
+            Resolution::Defeated { winner, .. } => Err(CheckError::at(
+                conclusion.node,
+                format!(
+                    "{base}；证书把该冲突记为{}胜出，但按冲突模型它应当未决（{reason:?}）",
+                    side_label(*winner)
+                ),
+            )),
+        },
+    }
+}
+
+/// The nodes reachable from `root` by premise links.
+///
+/// The certificate's node references were validated before this scan runs, so
+/// the walk cannot leave the node array; the visited set also makes a repeated
+/// reference harmless. A [`Node::Gap`] proves nothing and has no premise
+/// reference, so it contributes no conclusion.
+fn reachable_nodes(cert: &Certificate, root: NodeId) -> BTreeSet<NodeId> {
+    let mut reachable: BTreeSet<NodeId> = BTreeSet::new();
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        if !reachable.insert(id) {
+            continue;
+        }
+        match &cert.nodes[id] {
+            Node::Assumption { .. } => {}
+            Node::RuleApplication { premises, .. } => pending.extend(premises.iter().copied()),
+            Node::InterpretationApplication { premise, .. } => pending.push(*premise),
+            Node::AxiomInstance { .. } | Node::Gap { .. } => {}
+        }
+    }
+    reachable
 }
 
 /// The environment's declared priority order, rebuilt from the kernel ledger.
@@ -3185,4 +3729,30 @@ pub(crate) fn key(env: &Env, expression: &Expr) -> Result<String, String> {
     normalize(env, &Ctx::new(), expression)
         .map(|normalized| expression_key(&normalized))
         .map_err(|error| format!("规范化命题失败，无法比较：{error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MAX_CONFLICT_COMPARISONS;
+
+    #[test]
+    fn the_comparison_budget_is_enforced_before_any_pair_is_compared() {
+        let at_bound =
+            super::conflict_comparison_budget(1000, 1000).expect("a scan at the bound is allowed");
+        assert_eq!(at_bound, MAX_CONFLICT_COMPARISONS);
+        let error = super::conflict_comparison_budget(1001, 1000)
+            .expect_err("one pair over the bound is refused");
+        assert!(error.node.is_none(), "the bound is not a node's fault");
+        assert!(
+            error
+                .message
+                .contains(&MAX_CONFLICT_COMPARISONS.to_string()),
+            "{error}"
+        );
+        assert!(error.message.contains("1001"), "{error}");
+        assert!(error.message.contains("1000"), "{error}");
+        let overflow = super::conflict_comparison_budget(usize::MAX, 2)
+            .expect_err("an overflowing product is refused");
+        assert!(overflow.message.contains("溢出"), "{overflow}");
+    }
 }
