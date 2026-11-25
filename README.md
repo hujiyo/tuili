@@ -1599,7 +1599,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 1032 个：kernel 25、lang 181、reason 90、cert 212、cli 361、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 1033 个：kernel 25、lang 181、reason 90、cert 212、cli 362、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（25）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
