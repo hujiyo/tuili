@@ -359,7 +359,7 @@ axiom 未批准 : 不批准 甲
     }
 }
 
-/// A version 5 certificate edited back to version 4 is refused by the version
+/// A version 6 certificate edited back to version 4 is refused by the version
 /// probe before any proof layer runs.
 #[test]
 fn a_version_4_certificate_is_rejected() {
@@ -378,8 +378,8 @@ axiom 违法事实 : 违法 张三
     let generated = check(session(&theory, &[":cert 违法 张三"]), PROVED, &[]);
     let certificate = certificate_json(&generated);
     let json = certificate.to_json_pretty().unwrap();
-    let old = json.replacen("\"format_version\": 5", "\"format_version\": 4", 1);
-    assert_ne!(old, json, "the generated certificate must be version 5");
+    let old = json.replacen("\"format_version\": 6", "\"format_version\": 4", 1);
+    assert_ne!(old, json, "the generated certificate must be version 6");
     let file = TempFile::new("version-4", "json", &old);
 
     let checked = session(&theory, &[&format!(":verify-cert {}", file.path.display())]);
@@ -388,7 +388,7 @@ axiom 违法事实 : 违法 张三
         ERROR,
         &["环境校验：未运行（证书 JSON 无效）", "逻辑校验：未运行"],
     );
-    check_stderr(checked, ERROR, &["不是有效的证书 JSON", "supports 5"]);
+    check_stderr(checked, ERROR, &["不是有效的证书 JSON", "supports 6"]);
 }
 
 /// Changing a claim's recorded identity to a strict one is caught by the

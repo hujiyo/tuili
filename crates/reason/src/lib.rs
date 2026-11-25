@@ -48,6 +48,27 @@
 //!    candidate rules, which premises are missing, and which blocking
 //!    conditions already hold. There is no `sorry` equivalent.
 //!
+//! ## Interpretations are explicit, one-step permissions
+//!
+//! An `interpret` declaration is inert until the caller enables it (the CLI's
+//! `--interpret` / `:interpret enable`). An enabled interpretation applies at
+//! most once per query, after the rule fixed point: when its `from` is already
+//! a registered fact or a rule conclusion, its `to` joins the fact base as a
+//! separate [`Node::InterpretationApplication`]. It never fires a rule, never
+//! consumes another interpretation's conclusion, and is never treated as a
+//! rule: there is no interpretation chain and no implicit rewriting. A
+//! conclusion licensed by an interpretation that takes part in a conflict is
+//! recorded as [`Provenance::Interpretation`] — a declaration witness, not a
+//! lost rule list; priorities order rules only, so such a conflict is
+//! unresolved unless a strict fact wins.
+//!
+//! Gap diagnostics keep the two stages apart: a rule's premises are judged
+//! against the facts and rule conclusions (never against an interpretation
+//! conclusion, which rules cannot consume), while whether the queried goal is
+//! proved uses the full settled base. The "only an unenabled interpretation is
+//! missing" hint likewise covers only the root goal, and only when the
+//! interpretation's `from` holds before any application would run.
+//!
 //! ## Certificates
 //!
 //! [`certificate`] converts a derivation into the versioned certificate
@@ -86,6 +107,15 @@ pub enum Node {
         bindings: Vec<(Name, Expr)>,
         sources: Vec<SourceRef>,
     },
+    /// One application of an enabled interpretation. It is a separate step,
+    /// never a rule: the declaration licenses the move from `from` to `to`,
+    /// and the premise is a registered fact or a rule conclusion (never
+    /// another interpretation's conclusion).
+    InterpretationApplication {
+        interpretation: Name,
+        conclusion: Expr,
+        premise: usize,
+    },
     /// An unclosed goal. The honest replacement for `sorry`.
     Gap {
         prop: Expr,
@@ -109,6 +139,24 @@ pub struct Derivation {
     pub nodes: Vec<Node>,
     pub root: Option<usize>,
     pub conflicts: Vec<Conflict>,
+    /// The interpretations enabled for this derivation, sorted by id. A
+    /// certificate lists only the entries its nodes or conflicts cite.
+    pub interpretations: Vec<InterpretationRecord>,
+}
+
+/// One enabled interpretation declaration, as the derivation records it.
+///
+/// It is declaration data, not a proof step: [`Node::InterpretationApplication`]
+/// records where it was applied. The record keeps everything a certificate
+/// needs to re-find the declaration in the environment and compare it field by
+/// field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterpretationRecord {
+    pub id: Name,
+    pub from: Expr,
+    pub to: Expr,
+    pub direction: std_deduce_kernel::InterpretationDirection,
+    pub sources: Vec<SourceRef>,
 }
 
 /// Which side of a recorded conflict a fact sits on.
@@ -126,6 +174,10 @@ pub enum Provenance {
     /// registered under decides whether it wins.
     Assumption,
     Rules(Vec<Name>),
+    /// The conclusion was licensed by the named interpretation. It is a
+    /// defeasible conclusion, not a fact: no priority orders it, and it never
+    /// counts as a lost rule witness.
+    Interpretation(Name),
 }
 
 /// How a conflict was adjudicated.
@@ -302,6 +354,16 @@ pub struct Conflict {
     pub resolution: Resolution,
 }
 
+/// One unenabled interpretation that would have applied to a queried
+/// proposition. The command layer prints these as suggestions; the reasoner
+/// never applies them on its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterpretationHint {
+    pub id: Name,
+    pub from: Expr,
+    pub to: Expr,
+}
+
 // ---------------------------------------------------------------- internals
 
 struct Assumption {
@@ -330,6 +392,7 @@ struct Instance {
 enum Support {
     Fact(FactIdentity),
     Rules(Vec<Name>),
+    Interpretation(Name),
 }
 
 impl Support {
@@ -338,19 +401,32 @@ impl Support {
         match self {
             Support::Fact(_) => Provenance::Assumption,
             Support::Rules(rules) => Provenance::Rules(rules.clone()),
+            Support::Interpretation(interpretation) => {
+                Provenance::Interpretation(interpretation.clone())
+            }
         }
     }
 }
 
 /// The settled result: the set of facts and a derivation for each.
 struct Fixed {
+    /// The settled fact base, including the conclusions an interpretation
+    /// licensed. A queried goal is proved against this set.
     facts: BTreeMap<String, Expr>,
+    /// The facts the rule stage could see: registered facts and rule
+    /// conclusions, without any interpretation application. Rules never
+    /// consume an interpretation's conclusion, so gap candidates must judge a
+    /// rule's premises against this set, not against [`Fixed::facts`].
+    rule_facts: BTreeMap<String, Expr>,
     nodes: Vec<Node>,
     ids: BTreeMap<String, usize>,
     conflicts: Vec<Conflict>,
     /// Conclusions that were derived but kept out of `facts` because of a
     /// conflict, keyed by the same normalised key as `facts`.
     contested: BTreeMap<String, Conflict>,
+    /// Interpretation conclusion key -> interpretation id, for the applications
+    /// that produced the settled fact base.
+    applications: BTreeMap<String, Name>,
 }
 
 // ---------------------------------------------------------------- reasoner
@@ -375,6 +451,9 @@ pub struct Reasoner<'a> {
     contraries: BTreeMap<Name, BTreeSet<Name>>,
     /// predicate -> argument positions declared single-valued (`unique`)
     uniques: BTreeMap<Name, BTreeSet<usize>>,
+    /// Interpretations this query enabled, sorted by id. Empty means the
+    /// default: every interpretation stays inert, and output is unchanged.
+    enabled: BTreeSet<Name>,
     fixed: Option<Fixed>,
     max_rounds: usize,
 }
@@ -401,6 +480,7 @@ impl<'a> Reasoner<'a> {
             cycles: graph.cycles,
             contraries,
             uniques,
+            enabled: BTreeSet::new(),
             fixed: None,
             max_rounds: 256,
         }
@@ -422,6 +502,153 @@ impl<'a> Reasoner<'a> {
         PriorityOrder {
             components: self.scc.clone(),
         }
+    }
+
+    /// Enable one interpretation for this query.
+    ///
+    /// An interpretation is an explicit permission, never an implicit rewrite:
+    /// it must name a declared `interpret`, may not be enabled twice, and two
+    /// enabled interpretations may not license kernel-equivalent conclusions —
+    /// otherwise a single step would have two indistinguishable justifications.
+    /// The error tells the reader to query them separately or disable one.
+    pub fn enable_interpretation(&mut self, id: &str) -> Result<(), String> {
+        let name = std_deduce_kernel::name(id);
+        let Some(decl) = self.env.get(&name) else {
+            return Err(format!("解释 `{id}` 不存在：当前环境没有这个声明"));
+        };
+        let DeclKind::Interpretation(interpretation) = &decl.kind else {
+            return Err(format!("`{id}` 不是解释声明，不能启用"));
+        };
+        if self.enabled.contains(&name) {
+            return Err(format!("解释 `{id}` 已经启用，不能重复启用"));
+        }
+        for existing in &self.enabled {
+            let Some(decl) = self.env.get(existing) else {
+                continue;
+            };
+            let DeclKind::Interpretation(other) = &decl.kind else {
+                continue;
+            };
+            let same = self.key_of(&other.to) == self.key_of(&interpretation.to)
+                || convertible(self.env, &Ctx::new(), &other.to, &interpretation.to).map_err(
+                    |error| {
+                        format!(
+                            "无法判定解释 `{id}` 与已启用的解释 `{existing}` 的 to 是否等价：{error}"
+                        )
+                    },
+                )?;
+            if same {
+                return Err(format!(
+                    "解释 `{id}` 的 to 与已启用的解释 `{existing}` 在内核下等价，\
+                     两个结论无法区分；请分别查询，或先 :interpret disable {existing}"
+                ));
+            }
+        }
+        self.enabled.insert(name);
+        Ok(())
+    }
+
+    /// The interpretations this query enabled, sorted by id.
+    pub fn enabled_interpretations(&self) -> Vec<Name> {
+        self.enabled.iter().cloned().collect()
+    }
+
+    /// Every interpretation the environment declares, sorted by id.
+    pub fn interpretation_records(&self) -> Vec<InterpretationRecord> {
+        let mut records: Vec<InterpretationRecord> = self
+            .env
+            .iter()
+            .filter_map(|decl| match &decl.kind {
+                DeclKind::Interpretation(interpretation) => Some(InterpretationRecord {
+                    id: decl.name.clone(),
+                    from: interpretation.from.clone(),
+                    to: interpretation.to.clone(),
+                    direction: interpretation.direction,
+                    sources: interpretation.sources.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        records.sort_by(|a, b| a.id.cmp(&b.id));
+        records
+    }
+
+    /// The enabled interpretation declarations, sorted by id.
+    fn enabled_records(&self) -> Vec<InterpretationRecord> {
+        self.interpretation_records()
+            .into_iter()
+            .filter(|record| self.enabled.contains(&record.id))
+            .collect()
+    }
+
+    /// Is `expression` already in `facts`, up to kernel definitional equality?
+    ///
+    /// The normalized key is an exact fast path; a miss compares every fact
+    /// with [`convertible`]. A failed comparison is an error, never "not
+    /// present": treating it as absent would silently skip a step whose
+    /// premise may hold.
+    fn holds(&self, facts: &BTreeMap<String, Expr>, expression: &Expr) -> Result<bool, String> {
+        if facts.contains_key(&self.key_of(expression)) {
+            return Ok(true);
+        }
+        for fact in facts.values() {
+            if convertible(self.env, &Ctx::new(), fact, expression).map_err(|error| {
+                format!("无法判定「{}」是否已成立：{error}", print_expr(expression))
+            })? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Unenabled interpretations that could prove the queried `goal` in one
+    /// more step: the interpretation's `to` is kernel-equivalent to the goal,
+    /// and its `from` already holds in the fact set *before* any interpretation
+    /// application.
+    ///
+    /// Only the root goal is considered. An unenabled interpretation is never
+    /// offered for a rule's missing premise: rules do not consume
+    /// interpretation conclusions, so enabling it could not close that gap.
+    /// The `from` check reads the rule-visible set for the same reason — an
+    /// already enabled interpretation's conclusion is not available to another
+    /// interpretation, so a hint built on it would be a dead end.
+    ///
+    /// These are hints, not derivations: nothing is applied, and the result is
+    /// sorted by id so the printed suggestion does not depend on declaration
+    /// order.
+    pub fn unused_interpretation_hints(
+        &self,
+        goal: &Expr,
+    ) -> Result<Vec<InterpretationHint>, String> {
+        let Some(fixed) = &self.fixed else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for record in self.interpretation_records() {
+            if self.enabled.contains(&record.id) {
+                continue;
+            }
+            let same_to = self.key_of(goal) == self.key_of(&record.to)
+                || convertible(self.env, &Ctx::new(), &record.to, goal).map_err(|error| {
+                    format!(
+                        "无法判定目标「{}」是否与解释 `{}` 的 to 等价：{error}",
+                        print_expr(goal),
+                        record.id
+                    )
+                })?;
+            if !same_to {
+                continue;
+            }
+            if !self.holds(&fixed.rule_facts, &record.from)? {
+                continue;
+            }
+            out.push(InterpretationHint {
+                id: record.id,
+                from: record.from,
+                to: record.to,
+            });
+        }
+        Ok(out)
     }
 
     /// Register an assumption together with the identity of the fact it
@@ -573,8 +800,18 @@ impl<'a> Reasoner<'a> {
         let mut seen: BTreeMap<(String, String), Conflict> = BTreeMap::new();
 
         for _ in 0..self.max_rounds {
-            let facts = self.fixed_point(&removed)?;
-            let conflicts = self.detect_conflicts(&facts);
+            let mut facts = self.fixed_point(&removed)?;
+            // Snapshot the rule-visible set before any interpretation runs:
+            // rules never consume an interpretation conclusion, so a gap
+            // candidate must not treat one as a satisfied premise.
+            let rule_facts = facts.clone();
+            // Interpretations are one explicit step after the rule fixed
+            // point. They read only the registered facts and rule conclusions;
+            // no rule runs afterwards, and no interpretation reads another
+            // interpretation's conclusion, so there is no interpretation
+            // chain.
+            let applications = self.apply_interpretations(&mut facts, &removed)?;
+            let conflicts = self.detect_conflicts(&facts, &applications);
             let mut next_removed = removed.clone();
             for c in &conflicts {
                 let lk = self.key_of(&c.left);
@@ -610,13 +847,53 @@ impl<'a> Reasoner<'a> {
                     contested.insert(self.key_of(&c.left), c.clone());
                     contested.insert(self.key_of(&c.right), c.clone());
                 }
-                let fixed = self.build_nodes(facts, conflicts, contested)?;
+                let fixed =
+                    self.build_nodes(facts, rule_facts, conflicts, contested, applications)?;
                 self.fixed = Some(fixed);
                 return Ok(());
             }
             removed = next_removed;
         }
         Err("冲突裁决在 256 轮内未收敛".into())
+    }
+
+    /// Apply every enabled interpretation whose `from` already holds.
+    ///
+    /// The base fact set is snapshotted first, so two interpretations enabled
+    /// in the same query cannot chain: each one reads only the registered
+    /// facts and the rule conclusions, never a conclusion another enabled
+    /// interpretation just licensed. The result maps a conclusion key to the
+    /// interpretation that licensed it; an interpretation whose `to` is
+    /// already established by a fact or a rule is not applied again.
+    ///
+    /// "Already established" is kernel conversion, not the structural key: an
+    /// alpha variant of a quantified fact is the same proposition, and adding
+    /// a second step for it would be a redundant interpretation application.
+    fn apply_interpretations(
+        &self,
+        facts: &mut BTreeMap<String, Expr>,
+        removed: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Name>, String> {
+        let mut applications = BTreeMap::new();
+        if self.enabled.is_empty() {
+            return Ok(applications);
+        }
+        let base = facts.clone();
+        for record in self.enabled_records() {
+            let key = self.key_of(&record.to);
+            if removed.contains(&key) {
+                continue;
+            }
+            if self.holds(&base, &record.to)? {
+                continue;
+            }
+            if !self.holds(&base, &record.from)? {
+                continue;
+            }
+            facts.insert(key.clone(), record.to.clone());
+            applications.insert(key, record.id);
+        }
+        Ok(applications)
     }
 
     fn fixed_point(&self, removed: &BTreeSet<String>) -> Result<BTreeMap<String, Expr>, String> {
@@ -707,7 +984,11 @@ impl<'a> Reasoner<'a> {
         differing.len() == 1 && positions.contains(&differing[0])
     }
 
-    fn detect_conflicts(&self, facts: &BTreeMap<String, Expr>) -> Vec<Conflict> {
+    fn detect_conflicts(
+        &self,
+        facts: &BTreeMap<String, Expr>,
+        applications: &BTreeMap<String, Name>,
+    ) -> Vec<Conflict> {
         let items: Vec<(&String, &Expr)> = facts.iter().collect();
         let mut out = Vec::new();
         for i in 0..items.len() {
@@ -717,8 +998,8 @@ impl<'a> Reasoner<'a> {
                 if !self.in_conflict(a, b) {
                     continue;
                 }
-                let left = self.support(ka, facts);
-                let right = self.support(kb, facts);
+                let left = self.support(ka, facts, applications);
+                let right = self.support(kb, facts, applications);
                 let resolution = self.resolve(&left, &right);
                 out.push(Conflict {
                     left: a.clone(),
@@ -733,13 +1014,21 @@ impl<'a> Reasoner<'a> {
     }
 
     /// How one side of a conflict is supported: a fact recorded in the
-    /// assumption table, with its identity, or a conclusion with the rules
-    /// that can still be rebuilt as its witnesses.
-    fn support(&self, target: &str, facts: &BTreeMap<String, Expr>) -> Support {
-        match self.assumption_identity(target) {
-            Some(identity) => Support::Fact(identity),
-            None => Support::Rules(self.derivers(target, facts)),
+    /// assumption table, with its identity, an interpretation application, or
+    /// a conclusion with the rules that can still be rebuilt as its witnesses.
+    fn support(
+        &self,
+        target: &str,
+        facts: &BTreeMap<String, Expr>,
+        applications: &BTreeMap<String, Name>,
+    ) -> Support {
+        if let Some(identity) = self.assumption_identity(target) {
+            return Support::Fact(identity);
         }
+        if let Some(interpretation) = applications.get(target) {
+            return Support::Interpretation(interpretation.clone());
+        }
+        Support::Rules(self.derivers(target, facts))
     }
 
     /// Every rule that has an unblocked instance concluding `target`, with all
@@ -795,7 +1084,8 @@ impl<'a> Reasoner<'a> {
                     },
                 }
             }
-            (Support::Fact(identity), Support::Rules(_)) => {
+            (Support::Fact(identity), Support::Rules(_))
+            | (Support::Fact(identity), Support::Interpretation(_)) => {
                 if identity.is_strict() {
                     Resolution::Defeated {
                         winner: Side::Left,
@@ -809,7 +1099,8 @@ impl<'a> Reasoner<'a> {
                     }
                 }
             }
-            (Support::Rules(_), Support::Fact(identity)) => {
+            (Support::Rules(_), Support::Fact(identity))
+            | (Support::Interpretation(_), Support::Fact(identity)) => {
                 if identity.is_strict() {
                     Resolution::Defeated {
                         winner: Side::Right,
@@ -823,6 +1114,15 @@ impl<'a> Reasoner<'a> {
                     }
                 }
             }
+            // A priority orders rules only. Nothing can order an
+            // interpretation conclusion, so a conflict with one on either side
+            // has no declared priority to decide it — and it is emphatically
+            // not a lost rule witness (`UnknownWitnesses`).
+            (Support::Interpretation(_), Support::Interpretation(_))
+            | (Support::Interpretation(_), Support::Rules(_))
+            | (Support::Rules(_), Support::Interpretation(_)) => Resolution::Unresolved {
+                reason: UnresolvedReason::NoPriority,
+            },
             (Support::Rules(l), Support::Rules(r)) => {
                 // An empty witness list means the conclusion was derived but
                 // its witnesses can no longer be rebuilt. It must never let
@@ -927,8 +1227,10 @@ impl<'a> Reasoner<'a> {
     fn build_nodes(
         &self,
         facts: BTreeMap<String, Expr>,
+        rule_facts: BTreeMap<String, Expr>,
         conflicts: Vec<Conflict>,
         contested: BTreeMap<String, Conflict>,
+        applications: BTreeMap<String, Name>,
     ) -> Result<Fixed, String> {
         let mut nodes: Vec<Node> = Vec::new();
         let mut ids: BTreeMap<String, usize> = BTreeMap::new();
@@ -954,7 +1256,7 @@ impl<'a> Reasoner<'a> {
 
         let mut pending: Vec<String> = facts
             .keys()
-            .filter(|k| !ids.contains_key(k.as_str()))
+            .filter(|k| !ids.contains_key(k.as_str()) && !applications.contains_key(k.as_str()))
             .cloned()
             .collect();
         pending.sort();
@@ -989,13 +1291,68 @@ impl<'a> Reasoner<'a> {
             }
         }
 
+        // Interpretation steps come after the facts and rule conclusions they
+        // consume: their premise is, by construction, a registered fact or a
+        // rule conclusion, never another interpretation's conclusion.
+        let records = self.enabled_records();
+        for (target, interpretation) in &applications {
+            let Some(conclusion) = facts.get(target) else {
+                return Err(format!(
+                    "解释 `{interpretation}` 的结论不在事实库中，无法构造解释应用步"
+                ));
+            };
+            let Some(record) = records.iter().find(|record| record.id == *interpretation) else {
+                return Err(format!("解释 `{interpretation}` 不在本次启用的解释记录中"));
+            };
+            let premise = self.premise_node(&facts, &ids, &record.from, interpretation)?;
+            let id = nodes.len();
+            nodes.push(Node::InterpretationApplication {
+                interpretation: interpretation.clone(),
+                conclusion: conclusion.clone(),
+                premise,
+            });
+            ids.insert(target.clone(), id);
+        }
+
         Ok(Fixed {
             facts,
+            rule_facts,
             nodes,
             ids,
             conflicts,
             contested,
+            applications,
         })
+    }
+
+    /// The node id that proves `expression`, compared by kernel conversion.
+    fn premise_node(
+        &self,
+        facts: &BTreeMap<String, Expr>,
+        ids: &BTreeMap<String, usize>,
+        expression: &Expr,
+        interpretation: &Name,
+    ) -> Result<usize, String> {
+        if let Some(id) = ids.get(&self.key_of(expression)) {
+            return Ok(*id);
+        }
+        for (key, fact) in facts {
+            let same = convertible(self.env, &Ctx::new(), fact, expression).map_err(|error| {
+                format!(
+                    "无法判定解释 `{interpretation}` 的前提「{}」是否已成立：{error}",
+                    print_expr(expression)
+                )
+            })?;
+            if same {
+                if let Some(id) = ids.get(key) {
+                    return Ok(*id);
+                }
+            }
+        }
+        Err(format!(
+            "解释 `{interpretation}` 的前提「{}」没有可引用的证明节点",
+            print_expr(expression)
+        ))
     }
 
     /// Find an unblocked rule application that concludes `target` and whose
@@ -1102,6 +1459,7 @@ impl<'a> Reasoner<'a> {
                 nodes: f.nodes.clone(),
                 root: None,
                 conflicts: f.conflicts.clone(),
+                interpretations: self.enabled_records(),
             },
             None => Derivation::default(),
         }
@@ -1110,18 +1468,73 @@ impl<'a> Reasoner<'a> {
     /// A derivation that reaches `prop` even when it is not in the fact base.
     ///
     /// Used to show both sides of an unresolved conflict: the conclusion is
-    /// not asserted, but the argument for it must still be inspectable.
+    /// not asserted, but the argument for it must still be inspectable. When
+    /// the side was licensed by an enabled interpretation, the rebuilt
+    /// derivation carries that application step too. The interpretation is
+    /// matched against the rule-visible facts, never against the settled base
+    /// with interpretation conclusions, so the reconstruction cannot invent a
+    /// chain by reading another interpretation's output.
     pub fn derivation_for(&self, prop: &Expr) -> Option<Derivation> {
         let k = self.key_of(prop);
         let base = self.fixed.as_ref()?;
         let mut facts = base.facts.clone();
         facts.insert(k.clone(), prop.clone());
-        let fixed = self.build_nodes(facts, Vec::new(), BTreeMap::new()).ok()?;
+        let mut applications = base.applications.clone();
+        if !applications.contains_key(&k) {
+            // The proposition is not in the settled base: it was removed by a
+            // conflict. Reconstruct its interpretation witness only when no
+            // rule can still conclude it; otherwise the rule is the witness
+            // the conflict recorded.
+            if self.derivers(&k, &facts).is_empty() {
+                if let Ok(Some(interpretation)) =
+                    self.interpretation_for(&k, prop, &base.rule_facts)
+                {
+                    applications.insert(k.clone(), interpretation);
+                }
+            }
+        }
+        let rule_facts: BTreeMap<String, Expr> = facts
+            .iter()
+            .filter(|(key, _)| !applications.contains_key(*key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let fixed = self
+            .build_nodes(facts, rule_facts, Vec::new(), BTreeMap::new(), applications)
+            .ok()?;
         Some(Derivation {
             root: fixed.ids.get(&k).copied(),
             nodes: fixed.nodes,
             conflicts: Vec::new(),
+            interpretations: self.enabled_records(),
         })
+    }
+
+    /// The enabled interpretation whose `to` is kernel-equivalent to `target`
+    /// and whose `from` already holds in `base`.
+    ///
+    /// The structural key is only a fast path: a converted-but-differently-keyed
+    /// `to` (an alpha variant of a quantified proposition, an eta variant) must
+    /// still be recognised as the same conclusion, so a rebuilt derivation never
+    /// invents a second interpretation step for it.
+    fn interpretation_for(
+        &self,
+        target: &str,
+        target_expr: &Expr,
+        base: &BTreeMap<String, Expr>,
+    ) -> Result<Option<Name>, String> {
+        for record in self.enabled_records() {
+            let same = self.key_of(&record.to) == target
+                || convertible(self.env, &Ctx::new(), &record.to, target_expr).map_err(
+                    |error| format!("无法判定解释 `{}` 的 to 是否与结论等价：{error}", record.id),
+                )?;
+            if !same {
+                continue;
+            }
+            if self.holds(base, &record.from)? {
+                return Ok(Some(record.id));
+            }
+        }
+        Ok(None)
     }
 
     /// Why is `goal` unreachable? List candidate rules with what each is
@@ -1152,6 +1565,9 @@ impl<'a> Reasoner<'a> {
                 },
                 None => "目标已可推出".to_string(),
             }),
+            GapStatus::InterpretedOnly => {
+                Some("目标由解释推出，但规则阶段不消费解释结论".to_string())
+            }
             GapStatus::Conflicted => {
                 Some("目标处于冲突中：未决的结论不进入事实库，需要人工裁决".to_string())
             }
@@ -1456,8 +1872,20 @@ impl<'a> Reasoner<'a> {
             GapStatus::NotAProposition
         } else if self.knows(goal) {
             // A defeated winner is in the fact base; `Proved` is the honest
-            // status even though the proposition took part in a conflict.
-            GapStatus::Proved
+            // status even though the proposition took part in a conflict. A
+            // conclusion only an enabled interpretation licensed is marked
+            // separately: as a rule premise it is still missing, because rules
+            // never consume interpretation conclusions.
+            let key = self.key_of(goal);
+            let rule_visible = self
+                .fixed
+                .as_ref()
+                .is_some_and(|fixed| fixed.rule_facts.contains_key(&key));
+            if rule_visible {
+                GapStatus::Proved
+            } else {
+                GapStatus::InterpretedOnly
+            }
         } else if let Some(conflict) = self.conflict_for(goal) {
             match &conflict.resolution {
                 Resolution::Unresolved { .. } => GapStatus::Conflicted,
@@ -1471,18 +1899,22 @@ impl<'a> Reasoner<'a> {
     /// Every rule whose head matches `goal`, in rule-name order, with the
     /// premises still missing and the blocking conditions that already hold.
     ///
-    /// This is the single-level candidate search shared by `explain` and the
+    /// The single-level candidate search is shared by `explain` and the
     /// recursive gap tree; the tree wraps each entry in a child node instead of
-    /// reimplementing the match. Both sides of the head match are normalised
-    /// first, so matching uses the same definitional identity as the keys that
-    /// deduplicate the tree: a `def` alias of the goal's head finds the rule
-    /// that concludes the definition, exactly as `convertible` and
-    /// [`structural_key`] would.
+    /// reimplementing the match. Premises and `unless` blockers are judged
+    /// against the rule-visible fact set, never against the interpretation
+    /// conclusions: rules do not consume those, so counting one as satisfied
+    /// would hide the very premise that keeps the rule from firing.
+    ///
+    /// Both sides of the head match are normalised first, so matching uses the
+    /// same definitional identity as the keys that deduplicate the tree: a
+    /// `def` alias of the goal's head finds the rule that concludes the
+    /// definition, exactly as `convertible` and [`structural_key`] would.
     fn gap_candidates(&self, goal: &Expr) -> Vec<GapCandidate> {
         let facts: BTreeMap<String, Expr> = self
             .fixed
             .as_ref()
-            .map(|f| f.facts.clone())
+            .map(|f| f.rule_facts.clone())
             .unwrap_or_default();
         let goal = normalize(self.env, &Ctx::new(), goal).unwrap_or_else(|_| goal.clone());
         let mut candidates = Vec::new();
@@ -1964,6 +2396,11 @@ pub enum GapStatus {
     Unreachable,
     /// It is in the settled fact base.
     Proved,
+    /// It is in the settled fact base only because an enabled interpretation
+    /// licensed it. Rules never consume an interpretation conclusion, so as a
+    /// rule premise it is still missing: the gap is real even though the
+    /// proposition is proved in the query's one-step sense.
+    InterpretedOnly,
     /// It is a side of an unresolved conflict, so it is not asserted and a
     /// human still has to decide between the sides.
     Conflicted,
@@ -2316,12 +2753,64 @@ pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
                     .map_err(|e| format!("节点 {id}：结论不是命题：{e}"))?;
                 proved.insert(key(env, conclusion), conclusion.clone());
             }
+            Node::InterpretationApplication { conclusion, .. } => {
+                check::check(env, &Ctx::new(), conclusion, &Expr::Sort(0))
+                    .map_err(|e| format!("节点 {id}：结论不是命题：{e}"))?;
+                proved.insert(key(env, conclusion), conclusion.clone());
+            }
             Node::Gap { .. } => {}
         }
     }
 
-    // Pass 2: rebuild each rule application from its own evidence.
+    // Pass 2: rebuild each interpretation application and each rule
+    // application from its own evidence.
     for (id, node) in d.nodes.iter().enumerate() {
+        if let Node::InterpretationApplication {
+            interpretation,
+            conclusion,
+            premise,
+        } = node
+        {
+            if !d
+                .interpretations
+                .iter()
+                .any(|record| record.id == *interpretation)
+            {
+                return Err(format!(
+                    "节点 {id}：解释 `{interpretation}` 未记录在本次启用的解释中"
+                ));
+            }
+            let decl = env
+                .get(interpretation)
+                .ok_or_else(|| format!("节点 {id}：未知解释 `{interpretation}`"))?;
+            let DeclKind::Interpretation(declared) = &decl.kind else {
+                return Err(format!("节点 {id}：`{interpretation}` 不是解释"));
+            };
+            if *premise >= id {
+                return Err(format!("节点 {id}：前提 {premise} 不是先前的节点"));
+            }
+            let actual = node_prop(&d.nodes[*premise])
+                .ok_or_else(|| format!("节点 {id}：前提 {premise} 是未闭合的缺口，不能充当前提"))?;
+            if !convertible(env, &Ctx::new(), actual, &declared.from)
+                .map_err(|e| format!("节点 {id}：无法判定解释前提是否等价：{e}"))?
+            {
+                return Err(format!(
+                    "节点 {id}：解释 `{interpretation}` 的 from 是 `{}`，而引用的节点 {premise} 证成的是 `{}`",
+                    print_expr(&declared.from),
+                    print_expr(actual)
+                ));
+            }
+            if !convertible(env, &Ctx::new(), conclusion, &declared.to)
+                .map_err(|e| format!("节点 {id}：无法判定解释结论是否等价：{e}"))?
+            {
+                return Err(format!(
+                    "节点 {id}：解释 `{interpretation}` 的 to 是 `{}`，而本步写的是 `{}`",
+                    print_expr(&declared.to),
+                    print_expr(conclusion)
+                ));
+            }
+            continue;
+        }
         let Node::RuleApplication {
             rule,
             conclusion,
@@ -2415,6 +2904,7 @@ fn node_prop(n: &Node) -> Option<&Expr> {
     match n {
         Node::Assumption { prop, .. } => Some(prop),
         Node::RuleApplication { conclusion, .. } => Some(conclusion),
+        Node::InterpretationApplication { conclusion, .. } => Some(conclusion),
         Node::Gap { .. } => None,
     }
 }
@@ -2451,6 +2941,55 @@ pub fn certificate(
     let mut assumptions = Vec::new();
     let mut nodes = Vec::with_capacity(d.nodes.len());
     let mut open_obligations = Vec::new();
+
+    // Only the interpretations this derivation cites are listed: an
+    // application node or a conflict witness. They are sorted by id, and the
+    // nodes and conflict witnesses refer to them by index in that order.
+    let mut used: BTreeSet<Name> = BTreeSet::new();
+    for node in &d.nodes {
+        if let Node::InterpretationApplication { interpretation, .. } = node {
+            used.insert(interpretation.clone());
+        }
+    }
+    for conflict in &d.conflicts {
+        for provenance in [&conflict.left_by, &conflict.right_by] {
+            if let Provenance::Interpretation(interpretation) = provenance {
+                used.insert(interpretation.clone());
+            }
+        }
+    }
+    let mut records: Vec<&InterpretationRecord> = d
+        .interpretations
+        .iter()
+        .filter(|record| used.contains(&record.id))
+        .collect();
+    records.sort_by(|a, b| a.id.cmp(&b.id));
+    let interpretations: Vec<std_deduce_cert::Interpretation> = records
+        .iter()
+        .map(|record| {
+            Ok::<_, String>(std_deduce_cert::Interpretation {
+                id: record.id.to_string(),
+                direction: (&record.direction).into(),
+                from: cert_expr(&record.from, None, &format!("解释 `{}` 的 from", record.id))?,
+                to: cert_expr(&record.to, None, &format!("解释 `{}` 的 to", record.id))?,
+                sources: record
+                    .sources
+                    .iter()
+                    .map(std_deduce_cert::Source::from)
+                    .collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let interpretation_index: BTreeMap<Name, usize> = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.id.clone(), index))
+        .collect();
+    for name in &used {
+        if !interpretation_index.contains_key(name) {
+            return Err(format!("推导引用了未在本次启用记录中登记的解释 `{name}`"));
+        }
+    }
 
     for (id, node) in d.nodes.iter().enumerate() {
         match node {
@@ -2490,6 +3029,22 @@ pub fn certificate(
                     premises: premises.clone(),
                     bindings: converted,
                     sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
+                });
+            }
+            Node::InterpretationApplication {
+                interpretation,
+                conclusion,
+                premise,
+            } => {
+                let Some(index) = interpretation_index.get(interpretation) else {
+                    return Err(format!(
+                        "节点 {id} 引用的解释 `{interpretation}` 没有进入证书的解释表"
+                    ));
+                };
+                nodes.push(std_deduce_cert::Node::InterpretationApplication {
+                    interpretation: *index,
+                    premise: *premise,
+                    conclusion: cert_expr(conclusion, Some(id), "结论")?,
                 });
             }
             Node::Gap {
@@ -2560,8 +3115,8 @@ pub fn certificate(
             Ok(std_deduce_cert::Conflict {
                 left: cert_expr(&conflict.left, None, &format!("冲突 {} 的左命题", i + 1))?,
                 right: cert_expr(&conflict.right, None, &format!("冲突 {} 的右命题", i + 1))?,
-                left_by: cert_provenance(&conflict.left_by),
-                right_by: cert_provenance(&conflict.right_by),
+                left_by: cert_provenance(&conflict.left_by, &interpretation_index)?,
+                right_by: cert_provenance(&conflict.right_by, &interpretation_index)?,
                 resolution: cert_resolution(&conflict.resolution),
             })
         })
@@ -2596,21 +3151,29 @@ pub fn certificate(
             UnresolvedReason::NonStrictFact { identity } => {
                 // The fact side is the one the conflict records as an
                 // assumption. `resolve` records this reason only for a
-                // fact-versus-rule pair, so a missing fact side is an internal
-                // inconsistency, never a reason to invent one.
+                // fact-versus-conclusion pair (a rule application or an
+                // interpretation application); a missing fact side is an
+                // internal inconsistency, never a reason to invent one.
                 let fact_side = match (&conflict.left_by, &conflict.right_by) {
                     (Provenance::Assumption, _) => &conflict.left,
                     (_, Provenance::Assumption) => &conflict.right,
                     _ => {
                         return Err(format!(
-                            "第 {} 个冲突记录为「主张与规则」未决，但两侧都不是事实：\
+                            "第 {} 个冲突记录为「主张与结论」未决，但两侧都不是事实：\
                              内部状态不一致",
                             index + 1
                         ));
                     }
                 };
+                let beaten = if matches!(conflict.left_by, Provenance::Interpretation(_))
+                    || matches!(conflict.right_by, Provenance::Interpretation(_))
+                {
+                    "解释结论"
+                } else {
+                    "规则结论"
+                };
                 format!(
-                    "「{}」只是「{}」，未经证明，不能自动胜过规则结论",
+                    "「{}」只是「{}」，未经证明，不能自动胜过{beaten}",
                     print_expr(fact_side),
                     identity.label_zh()
                 )
@@ -2650,6 +3213,7 @@ pub fn certificate(
         // cannot be serialized, so this certificate can never reach disk.
         environment: std_deduce_cert::EnvironmentIdentity::Unrecorded,
         assumptions,
+        interpretations,
         nodes,
         root: d.root,
         conflicts,
@@ -2684,13 +3248,26 @@ fn recorded_identity(d: &Derivation, expr: &Expr) -> Option<FactIdentity> {
     })
 }
 
-fn cert_provenance(provenance: &Provenance) -> std_deduce_cert::Provenance {
-    match provenance {
+fn cert_provenance(
+    provenance: &Provenance,
+    interpretation_index: &BTreeMap<Name, usize>,
+) -> Result<std_deduce_cert::Provenance, String> {
+    Ok(match provenance {
         Provenance::Assumption => std_deduce_cert::Provenance::Assumption,
         Provenance::Rules(rules) => std_deduce_cert::Provenance::Rules {
             rules: rules.iter().map(ToString::to_string).collect(),
         },
-    }
+        Provenance::Interpretation(interpretation) => {
+            let Some(index) = interpretation_index.get(interpretation) else {
+                return Err(format!(
+                    "冲突引用了解释 `{interpretation}`，但它没有进入证书的解释表"
+                ));
+            };
+            std_deduce_cert::Provenance::Interpretation {
+                interpretation: *index,
+            }
+        }
+    })
 }
 
 fn cert_resolution(resolution: &Resolution) -> std_deduce_cert::Resolution {

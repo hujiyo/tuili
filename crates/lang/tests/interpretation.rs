@@ -2,9 +2,9 @@
 //! and what it refuses.
 //!
 //! An interpretation is loaded as an opaque constant whose type is
-//! `from → to`. It is deliberately inert: this file asserts that loading one
-//! creates no rule and no fact, so a later branch has to opt into a semantics
-//! instead of inheriting one by accident.
+//! `from → to`. Loading creates no rule and no fact: only an explicitly
+//! enabled query may apply the permission (covered by the reason and CLI
+//! tests), so a load never changes a conclusion by accident.
 
 use std_deduce_kernel::{DeclKind, Expr, InterpretationDirection};
 use std_deduce_lang::ast::Item;

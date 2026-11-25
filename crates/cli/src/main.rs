@@ -22,7 +22,10 @@
 //! `--allow-community-packs` lowers the trust gate of the selected profile (it
 //! never accepts an `official` claim the registry's whitelist does not cover),
 //! `--closed-env` enables the closed environment, `--allow-case-rules` lifts
-//! its case-declaration check (only together with `--closed-env`), and
+//! its case-declaration check (only together with `--closed-env`),
+//! `--interpret <id>` enables one declared interpretation for the session (it
+//! may be repeated; two interpretations with kernel-equivalent `to`
+//! conclusions are refused), and
 //! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` set the session's legal
 //! as-of date and jurisdiction code; `:asof` / `:jurisdiction` print or replace
 //! the same session values and report whether they came from the command line
@@ -64,11 +67,22 @@
 //! without affecting explicit imports; `--profile` selects a profile by name or
 //! alias. The preload lines are printed only after the whole load commits, so a
 //! failed file never claims that the environment loaded. The profile and the
-//! packs it loaded are session objects, but a certificate v5 records the
+//! packs it loaded are session objects, but a certificate v6 records the
 //! environment identity it was produced in: the profile, the as-of date, the
 //! jurisdiction code and the loaded packs/corpora. `:cert` stamps it before
 //! writing, and `:verify-cert` compares it with the current environment before
 //! running the proof layers.
+//!
+//! Interpretations are off by default. `:interpret list` shows every declared
+//! interpretation with its state; `enable`/`disable` change the session set,
+//! which is the same set `--interpret` builds. When enabled, an interpretation
+//! applies once to a registered fact or rule conclusion: `from` must already
+//! hold, and its `to` becomes a fact in that query. It is a separate
+//! `interpretation_application` certificate step, never a rule; it does not
+//! trigger rules and cannot consume another interpretation's conclusion, so
+//! there is no interpretation chain. A `:gap` or `:why` that is only missing an
+//! unenabled interpretation prints `存在未启用解释 ...` instead of leaving the
+//! declaration invisible.
 //!
 //! A batch load uses the same path as `:load`, so it prints the same report. A
 //! file that does not pass its checks prints `path:line:col: error: ...` on
@@ -86,6 +100,9 @@
 //! :inspect                dump the ledger, including recorded scope and occurrence
 //! :asof [date]            show or set the session's legal as-of date
 //! :jurisdiction [code]    show or set the session's jurisdiction code
+//! :interpret [list]       list declared interpretations and their state
+//! :interpret enable <id>  enable one interpretation for later queries
+//! :interpret disable <id> disable it again (the default is off)
 //! :why <term>             derive, print the certificate's tree, and check it
 //! :explain <term>         derive, print a Chinese because-so explanation, and
 //!                         check the same certificate
@@ -448,6 +465,17 @@ fn parse_invocation(args: &[String]) -> Result<(environment::Options, Invocation
                 options.closed_env = true;
                 index += 1;
             }
+            "--interpret" => {
+                let value = invocation_value(args, index, "--interpret", "--interpret <解释名>")?;
+                if options.interpretations.contains(&value) {
+                    return Err(format!(
+                        "用法错误：--interpret `{}` 重复启用",
+                        escape_path(&value)
+                    ));
+                }
+                options.interpretations.push(value);
+                index += 2;
+            }
             "--allow-case-rules" => {
                 options.allow_case_rules = true;
                 index += 1;
@@ -599,6 +627,9 @@ struct Session {
     as_of_source: Option<SessionValueSource>,
     /// Where the session's jurisdiction came from; `None` when no value is set.
     jurisdiction_source: Option<SessionValueSource>,
+    /// The interpretations the session enabled, by declaration id. Empty is
+    /// the default: every interpretation stays inert and output is unchanged.
+    enabled_interpretations: BTreeSet<String>,
 }
 
 impl Session {
@@ -611,6 +642,7 @@ impl Session {
             .jurisdiction
             .as_ref()
             .map(|_| SessionValueSource::CommandLine);
+        let enabled_interpretations = options.interpretations.iter().cloned().collect();
         Session {
             lib: Library::new(),
             loaded: false,
@@ -619,6 +651,7 @@ impl Session {
             environment: environment::Environment::new(options),
             as_of_source,
             jurisdiction_source,
+            enabled_interpretations,
         }
     }
 
@@ -641,6 +674,15 @@ impl Session {
             &self.packs,
             &corpus_root,
         )
+    }
+
+    /// Build a reasoner with the session's enabled interpretations.
+    ///
+    /// The default session has none, so this is the old `Reasoner::new` in
+    /// every respect: no derivation, source, conflict or certificate byte
+    /// changes until an interpretation is explicitly enabled.
+    fn reasoner(&self) -> Result<Reasoner<'_>, String> {
+        configured_reasoner(&self.lib.env, &self.enabled_interpretations)
     }
 
     /// Load a theory file into the session and print the load report.
@@ -758,6 +800,15 @@ impl Session {
                 return Err(environment.annotate_closed_error(error));
             }
         };
+        // Interpretations named by `--interpret` or an earlier `:interpret
+        // enable` must still exist in the environment that was just loaded.
+        // Validating before the commit means a rejected setting leaves the
+        // session exactly as it was.
+        if !self.enabled_interpretations.is_empty() {
+            configured_reasoner(&lib.env, &self.enabled_interpretations).map_err(|error| {
+                format!("已启用的解释无法在当前环境解析：{error}（--interpret / :interpret enable 设置）")
+            })?;
+        }
         if environment.closed_env() {
             record_case_extensions(&lib, &existing_names, &mut case_extensions);
         }
@@ -875,11 +926,10 @@ impl Session {
                             }
                             _ => String::new(),
                         };
-                        // An interpretation is inert, so its direction and
-                        // provenance are the only things worth showing: the
-                        // direction is a declared choice, and the sources use
-                        // the same escaped one-line rendering as every other
-                        // declaration.
+                        // An interpretation's declaration data is what the
+                        // ledger can show; whether it is enabled is a session
+                        // setting, printed by `:interpret list`, not a
+                        // property of the loaded declaration.
                         let extra = match &decl.kind {
                             DeclKind::Interpretation(interpretation) => {
                                 let sources = interpretation
@@ -978,6 +1028,7 @@ impl Session {
                     Ok(Outcome::Proved)
                 }
                 "fact" => self.fact_command(arg, out),
+                "interpret" => self.interpret_command(arg, out),
                 "asof" => self.as_of_command(arg, out),
                 "jurisdiction" => self.jurisdiction_command(arg, out),
                 "why" => {
@@ -1245,6 +1296,102 @@ impl Session {
         Ok(Outcome::Proved)
     }
 
+    /// `:interpret list` / `enable <id>` / `disable <id>`.
+    ///
+    /// Enabling is explicit and per session: the list prints every declared
+    /// interpretation with its current state, `enable` validates existence,
+    /// duplicate enablement and kernel-equivalent `to` conclusions, and
+    /// `disable` restores the default inert behaviour immediately. The output
+    /// never applies an interpretation on its own.
+    fn interpret_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if !self.loaded {
+            return Err(
+                "尚未加载理论：:interpret 需要环境才能解析解释声明，请先 :load <文件>".into(),
+            );
+        }
+        let parts: Vec<&str> = arg.split_whitespace().collect();
+        match parts.as_slice() {
+            ["list"] => {
+                let records = Reasoner::new(&self.lib.env).interpretation_records();
+                if records.is_empty() {
+                    writeln!(out, "没有声明任何解释。").ok();
+                    return Ok(Outcome::Proved);
+                }
+                writeln!(
+                    out,
+                    "解释（已启用 {} 条，共 {} 条）：",
+                    self.enabled_interpretations.len(),
+                    records.len()
+                )
+                .ok();
+                for record in records {
+                    let state = if self.enabled_interpretations.contains(record.id.as_ref()) {
+                        "[已启用]"
+                    } else {
+                        "[未启用]"
+                    };
+                    writeln!(
+                        out,
+                        "  {state} {} : {} → {} 〔方向 {}〕",
+                        escape_control(&record.id),
+                        print_expr(&record.from),
+                        print_expr(&record.to),
+                        record.direction.keyword()
+                    )
+                    .ok();
+                }
+                Ok(Outcome::Proved)
+            }
+            ["enable", id] => {
+                if id.is_empty() {
+                    return Err("用法：:interpret enable <解释名>".into());
+                }
+                let mut reasoner = self.reasoner()?;
+                reasoner.enable_interpretation(id)?;
+                let name = std_deduce_kernel::name(id);
+                let Some(decl) = self.lib.env.get(&name) else {
+                    return Err(format!("解释 `{id}` 不存在：当前环境没有这个声明"));
+                };
+                let DeclKind::Interpretation(interpretation) = &decl.kind else {
+                    return Err(format!("`{id}` 不是解释声明，不能启用"));
+                };
+                self.enabled_interpretations.insert((*id).to_owned());
+                writeln!(
+                    out,
+                    "已启用解释 `{id}`（{} → {}）。",
+                    print_expr(&interpretation.from),
+                    print_expr(&interpretation.to)
+                )
+                .ok();
+                Ok(Outcome::Proved)
+            }
+            ["disable", id] => {
+                if id.is_empty() {
+                    return Err("用法：:interpret disable <解释名>".into());
+                }
+                let name = std_deduce_kernel::name(id);
+                match self.lib.env.get(&name).map(|decl| &decl.kind) {
+                    Some(DeclKind::Interpretation(_)) => {}
+                    Some(_) => {
+                        return Err(format!("`{id}` 不是解释声明，不能停用"));
+                    }
+                    None => {
+                        return Err(format!("解释 `{id}` 不存在：当前环境没有这个声明"));
+                    }
+                }
+                if !self.enabled_interpretations.remove(*id) {
+                    return Err(format!("解释 `{id}` 没有启用，不能停用"));
+                }
+                writeln!(out, "已停用解释 `{id}`。").ok();
+                Ok(Outcome::Proved)
+            }
+            _ => Err(
+                "用法：:interpret list | :interpret enable <解释名> | :interpret disable <解释名>"
+                    .into(),
+            ),
+        }
+    }
+
     /// Refuse `:why` / `:cert` when the loaded rules name two or more
     /// jurisdictions and the session has not chosen one.
     ///
@@ -1300,7 +1447,7 @@ impl Session {
                 CertNode::Gap { candidates, .. } => {
                     rules.extend(candidates.iter().map(|candidate| candidate.rule.as_str()));
                 }
-                CertNode::Assumption { .. } => {}
+                CertNode::Assumption { .. } | CertNode::InterpretationApplication { .. } => {}
             }
         }
         rules
@@ -1311,7 +1458,7 @@ impl Session {
 
     fn query(&mut self, cmd: &str, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let goal = self.goal(arg)?;
-        let mut r = Reasoner::new(&self.lib.env);
+        let mut r = self.reasoner()?;
         // Every axiom whose declared type is a proposition is usable as an
         // assumption. This is how a corpus of facts enters. See
         // `Reasoner::assume_ledger_axioms`.
@@ -1379,6 +1526,7 @@ impl Session {
                     writeln!(out, "  {note}").ok();
                 }
             }
+            write_interpretation_hints(out, &r, &goal)?;
             return Ok(Outcome::Gap);
         }
 
@@ -1412,6 +1560,14 @@ impl Session {
         // this is a warning, not a filter, and it never changes the exit code.
         for note in self.certificate_jurisdiction_notes(&certificate) {
             writeln!(out, "{note}").ok();
+        }
+        // An unreachable `:why` reports the same kind of gap as `:gap`, so it
+        // offers the same "only an unenabled interpretation is missing" hint.
+        // The hint is about the queried goal only: a rule's missing premise is
+        // never bridged by enabling an interpretation, because rules do not
+        // consume interpretation conclusions.
+        if cmd == "why" && !reachable {
+            write_interpretation_hints(out, &r, &goal)?;
         }
 
         let checked = std_deduce_cert::check(&self.lib.env, &certificate);
@@ -1524,7 +1680,7 @@ impl Session {
                     .into(),
             );
         }
-        let mut r = Reasoner::new(&self.lib.env);
+        let mut r = self.reasoner()?;
         r.assume_ledger_axioms()?;
         r.saturate()?;
         write_priority_cycle_warning(out, &r.priority_cycles());
@@ -1608,7 +1764,7 @@ impl Session {
         // speaking about. Choosing one only records it; no rule is filtered.
         self.require_jurisdiction()?;
         let goal = self.goal(arg)?;
-        let mut r = Reasoner::new(&self.lib.env);
+        let mut r = self.reasoner()?;
         r.assume_ledger_axioms()?;
         r.saturate()?;
 
@@ -1965,6 +2121,9 @@ impl Session {
                     }
                 }
                 Some(CertNode::RuleApplication { conclusion, .. }) => Expr::from(conclusion),
+                Some(CertNode::InterpretationApplication { conclusion, .. }) => {
+                    Expr::from(conclusion)
+                }
                 Some(CertNode::Gap { .. }) => {
                     return fail_goal_binding(out, "根为缺口，不证明任何命题");
                 }
@@ -3302,8 +3461,19 @@ fn root_summary(certificate: &Certificate, report: &CheckReport) -> String {
             )
         }
         Some(_) if report.root_proved => {
+            let derived_by = match certificate.root {
+                Some(root)
+                    if matches!(
+                        certificate.nodes[root],
+                        CertNode::InterpretationApplication { .. }
+                    ) =>
+                {
+                    "解释推导"
+                }
+                _ => "规则推导",
+            };
             format!(
-                "根已证明，根为规则推导，证书共 {} 条假设",
+                "根已证明，根为{derived_by}，证书共 {} 条假设",
                 report.assumption_count
             )
         }
@@ -3401,7 +3571,17 @@ fn write_unresolved_reason(
     use std_deduce_reason::UnresolvedReason;
     match reason {
         UnresolvedReason::NoPriority => {
-            writeln!(out, "  原因：两侧规则之间没有声明任何优先关系").ok();
+            if matches!(c.left_by, Provenance::Interpretation(_))
+                || matches!(c.right_by, Provenance::Interpretation(_))
+            {
+                writeln!(
+                    out,
+                    "  原因：解释结论与另一方之间没有可用的优先声明，不能判定谁胜出"
+                )
+                .ok();
+            } else {
+                writeln!(out, "  原因：两侧规则之间没有声明任何优先关系").ok();
+            }
         }
         UnresolvedReason::PriorityUnusable { declared } => {
             let order = r.priority_order();
@@ -3449,23 +3629,32 @@ fn write_unresolved_reason(
         UnresolvedReason::NonStrictFact { identity } => {
             // The reason records only the claim's identity; the claim's
             // proposition comes from the conflict, whose fact side is the one
-            // `resolve` recorded as an assumption.
+            // `resolve` recorded as an assumption. The other side names what
+            // the claim does not automatically beat: a rule conclusion, or an
+            // interpretation conclusion (which is never a rule step).
             let fact_side = match (&c.left_by, &c.right_by) {
                 (Provenance::Assumption, _) => Some(&c.left),
                 (_, Provenance::Assumption) => Some(&c.right),
                 _ => None,
             };
+            let beaten = if matches!(c.left_by, Provenance::Interpretation(_))
+                || matches!(c.right_by, Provenance::Interpretation(_))
+            {
+                "解释结论"
+            } else {
+                "规则结论"
+            };
             match fact_side {
                 Some(prop) => writeln!(
                     out,
-                    "  原因：「{}」只是「{}」，未经证明，不能自动胜过规则结论",
+                    "  原因：「{}」只是「{}」，未经证明，不能自动胜过{beaten}",
                     print_expr(prop),
                     identity.label_zh()
                 )
                 .ok(),
                 None => writeln!(
                     out,
-                    "  原因：一侧只是「{}」，未经证明，不能自动胜过规则结论",
+                    "  原因：一侧只是「{}」，未经证明，不能自动胜过{beaten}",
                     identity.label_zh()
                 )
                 .ok(),
@@ -3560,7 +3749,11 @@ fn write_reason_basis(
 ) {
     match basis {
         std_deduce_reason::ResolutionBasis::Assumption => {
-            let text = strict_fact_basis_text(matches!(loser, Provenance::Rules(_)));
+            let text = if matches!(loser, Provenance::Interpretation(_)) {
+                "严格事实优先于解释结论。"
+            } else {
+                strict_fact_basis_text(matches!(loser, Provenance::Rules(_)))
+            };
             writeln!(out, "  依据：{text}").ok();
         }
         std_deduce_reason::ResolutionBasis::Priority { edges } => {
@@ -3591,8 +3784,11 @@ fn write_certificate_basis(
 ) {
     match basis {
         ResolutionBasis::Assumption => {
-            let text =
-                strict_fact_basis_text(matches!(loser, std_deduce_cert::Provenance::Rules { .. }));
+            let text = if matches!(loser, std_deduce_cert::Provenance::Interpretation { .. }) {
+                "严格事实优先于解释结论。"
+            } else {
+                strict_fact_basis_text(matches!(loser, std_deduce_cert::Provenance::Rules { .. }))
+            };
             writeln!(out, "  依据：{text}").ok();
         }
         ResolutionBasis::Priority { edges } => {
@@ -3748,6 +3944,42 @@ fn collect_gap_rules(tree: &GapTree, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Print one hint per unenabled interpretation that could prove the queried
+/// goal in one more step. The reasoner only suggests: nothing is applied.
+fn write_interpretation_hints(
+    out: &mut impl Write,
+    reasoner: &Reasoner<'_>,
+    goal: &Expr,
+) -> Result<(), String> {
+    for hint in reasoner.unused_interpretation_hints(goal)? {
+        writeln!(
+            out,
+            "  存在未启用解释 `{}`（{} → {}）；用 :interpret enable {} 后重查",
+            escape_control(&hint.id),
+            print_expr(&hint.from),
+            print_expr(&hint.to),
+            escape_control(&hint.id)
+        )
+        .ok();
+    }
+    Ok(())
+}
+
+/// Build a reasoner with the given enabled interpretations.
+///
+/// This is the only place the CLI turns the session's set into reasoner state;
+/// the empty set produces exactly the default reasoner.
+fn configured_reasoner<'a>(
+    env: &'a Env,
+    enabled: &BTreeSet<String>,
+) -> Result<Reasoner<'a>, String> {
+    let mut reasoner = Reasoner::new(env);
+    for id in enabled {
+        reasoner.enable_interpretation(id)?;
+    }
+    Ok(reasoner)
+}
+
 /// Render one gap tree, with `label` on its root line.
 ///
 /// The tree is the reasoner's own recursion: every missing premise with a
@@ -3777,6 +4009,14 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
     match tree.status {
         GapStatus::Proved => {
             writeln!(out, "{pad}目标已可推出。").ok();
+            return;
+        }
+        GapStatus::InterpretedOnly => {
+            writeln!(
+                out,
+                "{pad}该命题已由解释推出，但规则阶段不消费解释结论，因此作为规则前提仍不算满足。"
+            )
+            .ok();
             return;
         }
         GapStatus::Conflicted => {
@@ -4004,6 +4244,9 @@ fn describe(p: &Provenance, identity: Option<FactIdentity>) -> String {
                 .collect::<Vec<_>>()
                 .join("、")
         ),
+        Provenance::Interpretation(interpretation) => {
+            format!("解释⟨{}⟩", escape_control(interpretation))
+        }
     }
 }
 
@@ -4105,6 +4348,11 @@ fn print_help(out: &mut impl Write) {
         "  --allow-case-rules           在封闭环境中允许案件本地规则（证书会标记为本地扩展）"
     )
     .ok();
+    writeln!(
+        out,
+        "  --interpret <解释名>         为本次会话启用一个解释（可重复；默认全部不启用）"
+    )
+    .ok();
     writeln!(out).ok();
     writeln!(
         out,
@@ -4126,6 +4374,12 @@ fn print_help(out: &mut impl Write) {
     writeln!(
         out,
         "形式推导：:why <命题>；中文「因为……所以……」说明：:explain <命题>。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "解释默认不启用：--interpret <解释名> 或 :interpret enable <解释名> 显式启用；\
+         :interpret list 查看状态，:gap / :why 的缺口会提示未启用的解释。"
     )
     .ok();
 }
@@ -4188,6 +4442,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
                 out,
                 ":load <文件>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
                  :asof [YYYY-MM-DD]  :jurisdiction [代码]  \
+                 :interpret [list|enable|disable <解释名>]  \
                  :why <命题>  :explain <命题>  :gap <命题>  :issues  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )

@@ -103,6 +103,12 @@ fn write_conclusion(
                 print_expr(&Expr::from(conclusion))
             ));
         }
+        Node::InterpretationApplication { conclusion, .. } => {
+            out.push_str(&format!(
+                "【结论】「{}」由解释推出。\n",
+                print_expr(&Expr::from(conclusion))
+            ));
+        }
         Node::Gap { proposition, .. } => {
             out.push_str(&format!(
                 "【结论】「{}」未获证明（此处是缺口）。\n",
@@ -130,10 +136,16 @@ fn collect_postorder(
         return Ok(());
     }
     seen[id] = true;
-    if let Node::RuleApplication { premises, .. } = node {
-        for premise in premises {
+    match node {
+        Node::RuleApplication { premises, .. } => {
+            for premise in premises {
+                collect_postorder(certificate, *premise, seen, order)?;
+            }
+        }
+        Node::InterpretationApplication { premise, .. } => {
             collect_postorder(certificate, *premise, seen, order)?;
         }
+        Node::Assumption { .. } | Node::Gap { .. } => {}
     }
     order.push(id);
     Ok(())
@@ -149,7 +161,11 @@ fn write_proof(
     let mut gaps = Vec::new();
     for id in order {
         match certificate.nodes.get(*id) {
-            Some(Node::Assumption { .. } | Node::RuleApplication { .. }) => steps.push(*id),
+            Some(
+                Node::Assumption { .. }
+                | Node::RuleApplication { .. }
+                | Node::InterpretationApplication { .. },
+            ) => steps.push(*id),
             Some(Node::Gap { .. }) => gaps.push(*id),
             None => {
                 return Err(format!(
@@ -242,6 +258,29 @@ fn write_step(
             }
             write_sources(sources, out);
         }
+        Node::InterpretationApplication {
+            interpretation,
+            premise,
+            conclusion,
+        } => {
+            let entry = certificate
+                .interpretations
+                .get(*interpretation)
+                .ok_or_else(|| {
+                    format!(
+                        "节点 {id}：引用了不存在的解释 {interpretation}：证书只有 {} 条解释",
+                        certificate.interpretations.len()
+                    )
+                })?;
+            let conclusion = print_expr(&Expr::from(conclusion));
+            let premise = premise_reference(certificate, *premise, step_of)?;
+            out.push_str(&format!(
+                "  {number}. 因为{premise}，根据解释「{}」（方向 {}），所以「{conclusion}」成立。\n",
+                escape_control(&entry.id),
+                entry.direction.keyword()
+            ));
+            write_sources(&entry.sources, out);
+        }
         Node::Gap { .. } => {
             return Err(format!("节点 {id}：缺口不应被编号为推理步骤"));
         }
@@ -266,6 +305,7 @@ fn premise_reference(
             &assumption_at(certificate, *assumption, id)?.proposition
         }
         Node::RuleApplication { conclusion, .. } => conclusion,
+        Node::InterpretationApplication { conclusion, .. } => conclusion,
         Node::Gap { proposition, .. } => proposition,
     };
     let printed = print_expr(&Expr::from(proposition));
@@ -425,6 +465,9 @@ fn blocker_assumption<'a>(
         matches!(
             node,
             Node::RuleApplication { conclusion, .. } if conclusion == proposition
+        ) || matches!(
+            node,
+            Node::InterpretationApplication { conclusion, .. } if conclusion == proposition
         )
     });
     if derived {
@@ -513,6 +556,16 @@ fn provenance_phrase(
                 .collect::<Vec<_>>()
                 .join("、")
         ),
+        Provenance::Interpretation { interpretation } => {
+            match certificate.interpretations.get(*interpretation) {
+                Some(entry) => format!(
+                    "由解释「{}」（方向 {}）推出",
+                    escape_control(&entry.id),
+                    entry.direction.keyword()
+                ),
+                None => "由解释推出，但证书没有记录可识别的解释".to_owned(),
+            }
+        }
     }
 }
 
@@ -551,6 +604,8 @@ fn write_defeat(
         ResolutionBasis::Assumption => {
             let text = if matches!(lose_by, Provenance::Rules { .. }) {
                 "严格事实优先于可废止规则结论。"
+            } else if matches!(lose_by, Provenance::Interpretation { .. }) {
+                "严格事实优先于解释结论。"
             } else {
                 "严格事实优先于未经证明的主张。"
             };
@@ -590,19 +645,31 @@ fn write_unresolved(
             }
         }
         UnresolvedReason::NonStrictFact { identity } => {
-            let fact_side = match (&conflict.left_by, &conflict.right_by) {
-                (Provenance::Assumption, _) => Some(&conflict.left),
-                (_, Provenance::Assumption) => Some(&conflict.right),
-                _ => None,
+            let (fact_side, other_is_interpretation) = match (&conflict.left_by, &conflict.right_by)
+            {
+                (Provenance::Assumption, other) => (
+                    Some(&conflict.left),
+                    matches!(other, Provenance::Interpretation { .. }),
+                ),
+                (other, Provenance::Assumption) => (
+                    Some(&conflict.right),
+                    matches!(other, Provenance::Interpretation { .. }),
+                ),
+                _ => (None, false),
+            };
+            let conclusion = if other_is_interpretation {
+                "解释结论"
+            } else {
+                "规则结论"
             };
             match fact_side {
                 Some(proposition) => format!(
-                    "「{}」只是「{}」，未经证明，不能自动胜过规则结论。",
+                    "「{}」只是「{}」，未经证明，不能自动胜过{conclusion}。",
                     print_expr(&Expr::from(proposition)),
                     identity.label_zh()
                 ),
                 None => format!(
-                    "一侧只是「{}」，未经证明，不能自动胜过规则结论。",
+                    "一侧只是「{}」，未经证明，不能自动胜过{conclusion}。",
                     identity.label_zh()
                 ),
             }
@@ -610,7 +677,15 @@ fn write_unresolved(
         UnresolvedReason::UnknownWitnesses => {
             "一侧由规则推出，但证书没有记录可重建的规则实例，无法核对优先级。".to_owned()
         }
-        UnresolvedReason::NoPriority => "两侧规则之间没有声明优先级，不能判定谁胜出。".to_owned(),
+        UnresolvedReason::NoPriority => {
+            let interpretation = matches!(conflict.left_by, Provenance::Interpretation { .. })
+                || matches!(conflict.right_by, Provenance::Interpretation { .. });
+            if interpretation {
+                "解释结论与另一方之间没有可用的优先声明，不能判定谁胜出。".to_owned()
+            } else {
+                "两侧规则之间没有声明优先级，不能判定谁胜出。".to_owned()
+            }
+        }
         UnresolvedReason::PriorityUnusable { .. } => {
             "声明的优先级不足以裁决（覆盖不全、双向覆盖或位于优先级环内）。".to_owned()
         }

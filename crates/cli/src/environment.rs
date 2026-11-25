@@ -68,6 +68,10 @@ pub(crate) struct Options {
     pub(crate) allow_case_rules: bool,
     pub(crate) as_of: Option<String>,
     pub(crate) jurisdiction: Option<String>,
+    /// Interpretations enabled for every query in this session, in command
+    /// line order. They are resolved against the loaded environment; a
+    /// default (empty) session keeps every interpretation inert.
+    pub(crate) interpretations: Vec<String>,
 }
 
 /// An enabled environment: the profile that selected it, where the registry

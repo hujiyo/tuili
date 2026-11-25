@@ -8,6 +8,9 @@
 //! * a rule node becomes `Const(rule)` applied first to the parameter values
 //!   from its bindings (in the rule's parameter order) and then to the proof
 //!   terms of its premises (in the rule's premise order);
+//! * an interpretation application becomes `Const(interpretation)` applied to
+//!   the proof term of its premise; the kernel's declaration type is
+//!   `from → to`, and the node's conclusion must be the declared `to`;
 //! * a [`Node::Gap`] has no proof term and cannot be a premise. A gap may be
 //!   the root; the report then has `root_proved = false`.
 //!
@@ -26,6 +29,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::DeclKind;
 use std_deduce_kernel::term::is_closed;
 use std_deduce_kernel::{check as kernel_check, Ctx, Env, Expr};
@@ -261,6 +265,80 @@ pub fn kernel_proof(env: &Env, cert: &Certificate) -> Result<KernelProofReport, 
                 });
                 proofs[id] = Some(term);
             }
+            Node::InterpretationApplication {
+                interpretation,
+                premise,
+                conclusion,
+            } => {
+                let Some(entry) = cert.interpretations.get(*interpretation) else {
+                    return Err(KernelProofError::at(
+                        id,
+                        format!(
+                            "引用了不存在的解释 {interpretation}：证书只有 {} 条解释",
+                            cert.interpretations.len()
+                        ),
+                    ));
+                };
+                let decl = env
+                    .get(&entry.id)
+                    .ok_or_else(|| KernelProofError::at(id, format!("未知解释 `{}`", entry.id)))?;
+                let DeclKind::Interpretation(declared) = &decl.kind else {
+                    return Err(KernelProofError::at(id, format!("`{}` 不是解释", entry.id)));
+                };
+                if *premise >= cert.nodes.len() {
+                    return Err(KernelProofError::at(
+                        id,
+                        format!(
+                            "前提节点索引 {premise} 越界：证书只有 {} 个节点",
+                            cert.nodes.len()
+                        ),
+                    ));
+                }
+                if *premise >= id {
+                    return Err(KernelProofError::at(
+                        id,
+                        format!("前提节点 {premise} 必须是当前节点之前的节点"),
+                    ));
+                }
+                let proof = proofs[*premise].as_ref().ok_or_else(|| {
+                    let reason = if matches!(&cert.nodes[*premise], Node::Gap { .. }) {
+                        "是未闭合的缺口，不能充当前提"
+                    } else {
+                        "没有可用的证明项"
+                    };
+                    KernelProofError::at(id, format!("前提 {premise} {reason}"))
+                })?;
+                // `Const(interpretation)` applied to the premise proof: the
+                // kernel's declaration type is `from → to`, so the term's type
+                // is the declaration's `to`. The certificate's conclusion must
+                // be that `to`, not merely a proposition.
+                let term = Expr::apps(Expr::constant(&entry.id), [proof.clone()]);
+                let conclusion_expr = Expr::from(conclusion);
+                let same_to = convertible(env, &Ctx::new(), &conclusion_expr, &declared.to)
+                    .map_err(|error| {
+                        KernelProofError::at(id, format!("无法判定解释结论与声明是否等价：{error}"))
+                    })?;
+                if !same_to {
+                    return Err(KernelProofError::at(
+                        id,
+                        format!(
+                            "解释 `{}` 的结论应当是 `{}`，本步写的是 `{}`",
+                            entry.id,
+                            std_deduce_kernel::pretty::print_expr(&declared.to),
+                            std_deduce_kernel::pretty::print_expr(&conclusion_expr)
+                        ),
+                    ));
+                }
+                kernel_check::check(env, &Ctx::new(), &conclusion_expr, &Expr::Sort(0))
+                    .map_err(|error| KernelProofError::at(id, format!("结论不是命题：{error}")))?;
+                kernel_check::check(env, &ctx, &term, &conclusion_expr).map_err(|error| {
+                    KernelProofError::at(
+                        id,
+                        format!("解释 `{}` 的证明项未通过内核检查：{error}", entry.id),
+                    )
+                })?;
+                proofs[id] = Some(term);
+            }
             Node::Gap { .. } => {}
         }
     }
@@ -288,10 +366,10 @@ pub fn kernel_proof(env: &Env, cert: &Certificate) -> Result<KernelProofReport, 
                 })?;
                 Some(term)
             }
-            Node::RuleApplication { .. } => Some(
+            Node::RuleApplication { .. } | Node::InterpretationApplication { .. } => Some(
                 proofs[root]
                     .clone()
-                    .ok_or_else(|| KernelProofError::at(root, "规则节点没有可用的证明项"))?,
+                    .ok_or_else(|| KernelProofError::at(root, "推导节点没有可用的证明项"))?,
             ),
         },
     };

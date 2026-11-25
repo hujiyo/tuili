@@ -328,9 +328,10 @@ pub enum DeclKind {
     /// A rule; opaque under conversion, driving the reasoner instead.
     Rule(Box<RuleDecl>),
     /// A marked interpretation: it turns a premise into another premise. The
-    /// declaration is opaque and *inert*: the reasoner does not apply it, and
-    /// no certificate node cites it yet. It is kept so a later branch can opt
-    /// into a semantics without inventing identities retroactively.
+    /// declaration is opaque under conversion; the reasoner applies it only
+    /// when the query explicitly enables it, and a v6 certificate records the
+    /// application step and its declaration. The kernel itself never applies
+    /// it or interprets its direction.
     Interpretation(Box<Interpretation>),
     /// Two predicates whose facts cannot both hold: any pair with these heads
     /// and identical arguments is a conflict. Declared, never guessed, because
@@ -413,8 +414,9 @@ pub struct PriorityDecl {
 /// How an interpretation moves between the two propositions it relates.
 ///
 /// The direction is declared data, not an inferred property: a legal
-/// interpretation is a choice someone makes and must be able to audit. This
-/// step stores the keyword but assigns it no reasoning behaviour.
+/// interpretation is a choice someone makes and must be able to audit. The
+/// reasoner never derives behaviour from it; it is stored and copied into
+/// `:inspect` and v6 certificates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InterpretationDirection {
     /// The words are applied as written.
@@ -459,8 +461,9 @@ pub struct Interpretation {
     pub name: Name,
     pub from: Expr,
     pub to: Expr,
-    /// The declared direction. It is metadata in this step; nothing in the
-    /// reasoner or certificate layer reads it yet.
+    /// The declared direction. It is declared data, not an inference: the
+    /// reasoner applies the permission, while inspection and v6 certificates
+    /// copy the keyword verbatim.
     pub direction: InterpretationDirection,
     pub sources: Vec<SourceRef>,
 }
