@@ -370,26 +370,17 @@ fn validate_corpus(field: &str, value: &str) -> Result<(), String> {
 /// Validate a jurisdiction or territory code.
 ///
 /// The code must be non-empty and contain only ASCII letters, digits and `-`.
-/// `pack.jurisdiction` and `pack.territory` use this rule, and so does the
-/// CLI's `--jurisdiction` option, so both accept exactly the same codes.
+/// `pack.jurisdiction` and `pack.territory` use this rule, and so do the CLI's
+/// `--jurisdiction` option and a rule's `jurisdiction` / `territory` clause, so
+/// every surface accepts exactly the same codes. The logic lives in
+/// [`std_deduce_kernel::meta`]; this entry point keeps the public API.
 /// `field` names the value in the error.
 pub fn validate_jurisdiction_code(field: &str, value: &str) -> Result<(), String> {
-    validate_code(field, value).map_err(|error| error.to_string())
+    std_deduce_kernel::meta::validate_jurisdiction_code(field, value)
 }
 
 fn validate_code(field: &str, value: &str) -> Result<(), ManifestError> {
-    if value.is_empty() {
-        return Err(ManifestError::new(format!("{field} 不能为空")));
-    }
-    let allowed = value
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-');
-    if !allowed {
-        return Err(ManifestError::new(format!(
-            "{field} `{value}` 含非法字符：只允许 ASCII 字母、数字和短横"
-        )));
-    }
-    Ok(())
+    validate_jurisdiction_code(field, value).map_err(ManifestError::new)
 }
 
 fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>

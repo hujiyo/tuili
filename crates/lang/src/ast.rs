@@ -74,6 +74,11 @@ pub enum Item {
         ty: Term,
         source: Option<SourceSpec>,
         identity: Option<FactIdentity>,
+        /// `occurred_at <YYYY-MM-DD>`: the day the fact occurred. Only an
+        /// `axiom` that elaborates to a proposition (a fact) may carry one.
+        occurred_at: Option<String>,
+        /// `occurred_in <CODE>`: where the fact occurred.
+        occurred_in: Option<String>,
     },
     /// `def 合法搜查 := ... : T`
     Def {
@@ -90,6 +95,10 @@ pub enum Item {
         conclusion: Term,
         defeaters: Vec<Defeater>,
         sources: Vec<SourceSpec>,
+        /// The scope clauses written on this rule. Missing fields are filled
+        /// from the containing pack's manifest by the loader; the parser only
+        /// records what was written.
+        scope: ScopeSpec,
     },
     /// `interpret 解释A : 概念 -> 概念`
     Interpretation {
@@ -138,6 +147,33 @@ pub enum Item {
 pub struct Premise {
     pub name: Option<String>,
     pub ty: Term,
+}
+
+/// The scope clauses written on one rule:
+/// `effective <YYYY-MM-DD>`, `repealed <YYYY-MM-DD>`, `jurisdiction <CODE>`,
+/// `territory <CODE>`.
+///
+/// The parser only records the raw values; dates and codes are validated when
+/// the theory is loaded. `repealed` maps to the exclusive end of the range.
+/// This is metadata, not applicability: nothing filters rules by it here.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScopeSpec {
+    /// First day the rule is in force (inclusive).
+    pub effective_from: Option<String>,
+    /// First day the rule is no longer in force (exclusive).
+    pub effective_to: Option<String>,
+    pub jurisdiction: Option<String>,
+    pub territory: Option<String>,
+}
+
+impl ScopeSpec {
+    /// Whether any scope clause was written.
+    pub fn is_empty(&self) -> bool {
+        self.effective_from.is_none()
+            && self.effective_to.is_none()
+            && self.jurisdiction.is_none()
+            && self.territory.is_none()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

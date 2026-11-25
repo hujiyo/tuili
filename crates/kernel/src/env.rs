@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::check;
 use crate::error::{Error, Result};
+use crate::meta::Scope;
 use crate::term::{Expr, Name};
 
 /// Where a declaration comes from.
@@ -319,6 +320,18 @@ pub struct Decl {
     /// arguments to prove that conclusion.
     pub ty: Expr,
     pub sources: Vec<SourceRef>,
+    /// Effective range and jurisdiction/territory recorded for the
+    /// declaration. Rules may carry one; every other kind records
+    /// [`Scope::default`]. The kernel stores the values and never filters on
+    /// them: applicability is a later judgement.
+    pub scope: Scope,
+    /// First day the fact occurred (inclusive), `YYYY-MM-DD`. Only a
+    /// [`DeclKind::Fact`] may carry one; the field is independent of any
+    /// query date and is never defaulted from one.
+    pub occurred_at: Option<String>,
+    /// Jurisdiction or territory code of where the fact occurred. Only a
+    /// [`DeclKind::Fact`] may carry one.
+    pub occurred_in: Option<String>,
     /// Position in the ledger, assigned on insertion.
     pub index: u64,
 }

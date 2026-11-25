@@ -27,9 +27,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use std_deduce_kernel::meta::{Scope, ScopeOrigin};
 use std_deduce_lang::ast::Item;
 use std_deduce_lang::module::escape_path;
-use std_deduce_lang::{Library, LoadError};
+use std_deduce_lang::{Library, LoadError, LoadOptions};
 use std_deduce_lawpack::{
     read_whitelist, scan, verify_lock, LoadedPack, Manifest, PackError, Trust, Whitelist,
     LOCK_FILE, MANIFEST_FILE, OFFICIAL_FILE,
@@ -377,8 +378,17 @@ impl<'a> PackageLoader<'a> {
         }
 
         let theory_files = self.collect_theory_files(name, &dir, &manifest, &manifest_path)?;
+        // The manifest's scope is the pack default every rule inherits field
+        // by field when it does not write that field itself.
+        let pack_scope = Scope {
+            effective_from: manifest.pack.effective_from.clone(),
+            effective_to: manifest.pack.effective_to.clone(),
+            jurisdiction: Some(manifest.pack.jurisdiction.clone()),
+            territory: Some(manifest.pack.territory.clone()),
+            origin: ScopeOrigin::PackDefault,
+        };
         self.stack.push(name.to_owned());
-        let loaded = self.load_theory_files(name, &namespace, &theory_files);
+        let loaded = self.load_theory_files(name, &namespace, &theory_files, &pack_scope);
         self.stack.pop();
         let decls = loaded?;
 
@@ -494,6 +504,7 @@ impl<'a> PackageLoader<'a> {
         name: &str,
         namespace: &str,
         files: &[TheoryFile],
+        pack_scope: &Scope,
     ) -> Result<BTreeSet<String>, String> {
         let mut decls = BTreeSet::new();
         for file in files {
@@ -525,8 +536,15 @@ impl<'a> PackageLoader<'a> {
                 .iter()
                 .map(|decl| decl.name.to_string())
                 .collect();
+            // A pack rule inherits the manifest's scope field by field unless
+            // it writes the field itself. The values are metadata only; the
+            // reasoner never filters on them here.
+            let options = LoadOptions {
+                pack_scope: Some(pack_scope.clone()),
+                case_local: false,
+            };
             self.lib
-                .load(&path, &file.src)
+                .load_with_options(&path, &file.src, &options)
                 .map_err(|error| error.render(&path))?;
             for decl in self.lib.env.iter() {
                 let name = decl.name.to_string();

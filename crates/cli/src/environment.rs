@@ -23,10 +23,13 @@
 //! recorded as an explicit `null`, never as a missing field.
 //!
 //! `--as-of <YYYY-MM-DD>` and `--jurisdiction <code>` are session options too:
-//! they are validated when the arguments are parsed, stored here, and only
-//! stamped into the certificate's environment identity by `:cert`. They never
-//! affect which packs load or how the reasoner derives; `:verify-cert` compares
-//! them exactly, so a certificate is checked against the same values.
+//! they are validated when the arguments are parsed, stored here, and stamped
+//! into the certificate's environment identity by `:cert`. The `:asof` /
+//! `:jurisdiction` commands replace the same session values. They never affect
+//! which packs load or how the reasoner derives; `:verify-cert` compares them
+//! exactly, so a certificate is checked against the same values. A session
+//! without a jurisdiction choice refuses `:why` / `:cert` when the loaded
+//! rules name two or more jurisdictions; that gate is in the CLI, not here.
 //!
 //! `--closed-env` is the closed-environment mode: a top-level `:load` may only
 //! load a *case* file, and the case may only use the declarations and rules its
@@ -211,7 +214,7 @@ impl Environment {
         }
     }
 
-    /// The `--as-of` value the session records, if any.
+    /// The `--as-of` / `:asof` value the session records, if any.
     ///
     /// It is an identity field only: it does not gate preparation and is not
     /// read by the reasoner.
@@ -219,12 +222,24 @@ impl Environment {
         self.options.as_of.as_deref()
     }
 
-    /// The `--jurisdiction` value the session records, if any.
+    /// Replace the session's legal as-of date after `:asof` validated it.
+    pub(crate) fn set_as_of(&mut self, value: String) {
+        self.options.as_of = Some(value);
+    }
+
+    /// The `--jurisdiction` / `:jurisdiction` value the session records, if
+    /// any.
     ///
-    /// It is an identity field only: it does not gate preparation and is not
-    /// read by the reasoner.
+    /// It is an identity field and the multi-jurisdiction gate's answer: it
+    /// does not gate preparation and is not read by the reasoner.
     pub(crate) fn jurisdiction(&self) -> Option<&str> {
         self.options.jurisdiction.as_deref()
+    }
+
+    /// Replace the session's jurisdiction code after `:jurisdiction`
+    /// validated it.
+    pub(crate) fn set_jurisdiction(&mut self, value: String) {
+        self.options.jurisdiction = Some(value);
     }
 
     /// The `（环境外：...）` suffix for an explicit import.
