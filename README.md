@@ -1354,7 +1354,7 @@ cargo test --workspace
 
 ## 测试
 
-`cargo test --workspace` 共 826 个：kernel 23、lang 115、reason 63、cert 161、cli 300、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 828 个：kernel 23、lang 116、reason 63、cert 161、cli 301、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（23）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -1388,11 +1388,12 @@ cargo test --workspace
   体/`obj`/`axiom`/`#check`/`#show` 的拒绝、局部 binder 豁免；两模块同名后缀与加载顺序无关；
   案件文件不能声明带点名字但仍可引用限定名；同名 theory 的 namespace 冲突；`defeated_by`/`prefer`
   目标必须存在且是规则并允许同文件前向引用；解释按同一命名规则装载；`LoadReport` 不含 namespace。
-- `crates/lang/tests/interpretation.rs`（13）：`interpret` 的语法与装载——完整声明解析成
-  `Item::Interpretation`（from/to 都是应用项）、装载为不透明常量和 `from → to` 类型，方向与首条来源
-  保存且不产生规则/事实；四个方向关键字逐个保留；缺 direction、缺 source、头行混写
-  direction/source、未加括号的箭头、概念到概念/非命题一侧、来源 `text`/`locator`/`version`
-  为空或空白、未知方向、重复 direction、重复 id 都拒绝且错误指出解释 id；案件文件可声明解释。
+- `crates/lang/tests/interpretation.rs`（14）：`interpret` 的语法与装载——完整声明解析成
+  `Item::Interpretation`（from/to 都是应用项）、装载为不透明常量和 `from → to` 类型（from/to 顺序与
+  声明级 sources 都逐字段核对），方向与首条来源保存且不产生规则/事实；四个方向关键字逐个保留；
+  缺 direction、缺 source、头行混写 direction/source、未加括号的箭头、概念到概念/非命题一侧、
+  来源 `text`/`locator`/`version` 为空或空白、未知方向、重复 direction、重复 id 都拒绝且错误指出
+  解释 id；缺 from/to 组件的解析错误也带 id 与失败侧；案件文件可声明解释。
 - `crates/lang/tests/priority.rs`（18）：顶层 `priority` 与跨包边界——模块声明加载后记录
   winner/loser/`declared_in` 与全部出处，加载报告写表面声明；解析器接受一条声明带多条出处，
   也接受暂时没有出处的声明（加载期才拒绝），缺 `over` 与未限定名报解析错误；
@@ -1534,10 +1535,11 @@ cargo test --workspace
 - `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
   `[ns]` 后缀；限定名 `:why` 通过证书复核；`a` 的事实不满足 `b` 的目标；交换两个模块的加载顺序后
   `:why` / `:cert` 结果一致；模块内未限定引用加载失败。
-- `crates/cli/tests/interpretation.rs`（5）：`:inspect` 显示 `interpret` 的方向与来源摘要并保留全部
+- `crates/cli/tests/interpretation.rs`（6）：`:inspect` 显示 `interpret` 的方向与来源摘要并保留全部
   来源字段、来源里的换行/双向覆盖字符被转义、模块解释标 `[ns]`；封闭环境默认拒绝案件解释并提示
   `--allow-case-rules`，允许后标 `[案件扩展]`；临时包里的解释经 `import` 加载并标
-  `[pkg@版本]`；加载解释后 `:why` 仍正常证明且解释不出现在推导树里。
+  `[pkg@版本]`；惰性用例不含任何规则：`:why` / `:gap` 都以缺口退出 `1`，`:cert` 的 JSON 根是缺口
+  节点、没有解释名，解释不进推导树也不作为缺口候选。
 - `crates/cli/tests/imports.rs`（31）：注册表导入端到端——临时 `lawpacks` + `std.lock` 后案件
   `import` 一个包并 `:why`；无 import 时没有注册表也能加载；缺锁、哈希不符（两个包的错误都列出）、
   锁缺包/多包、版本不符；坏清单、重复包名、重复 namespace、缺包；两个包同名后缀的限定名各自解析；

@@ -514,7 +514,13 @@ impl Parser {
                 self.peek()
             ));
         }
-        let from = self.application_until_interpret_clause()?;
+        let from = self
+            .application_until_interpret_clause()
+            .map_err(|error| ParseError {
+                msg: format!("`interpret {name}` 的 from：{}", error.msg),
+                line: error.line,
+                col: error.col,
+            })?;
         // A clause keyword after `from` is still on the header line; report it
         // as a line-placement error rather than as a missing arrow, so the
         // syntax stays line-oriented in both directions.
@@ -536,7 +542,13 @@ impl Parser {
                 self.peek()
             ));
         }
-        let to = self.application_until_interpret_clause()?;
+        let to = self
+            .application_until_interpret_clause()
+            .map_err(|error| ParseError {
+                msg: format!("`interpret {name}` 的 to：{}", error.msg),
+                line: error.line,
+                col: error.col,
+            })?;
         // `direction` and `source` are line-oriented clauses. Writing one on
         // the header line is refused here, before it can be mistaken for an
         // application argument.
@@ -796,10 +808,7 @@ impl Parser {
                 // Another item starts here. `#` covers every sigiled command:
                 // the lexer splits the sigil from the command name, so the
                 // combined spellings never reach this match.
-                "#" | "import" | "namespace" | "rule" | "sort" | "pred" | "axiom" | "def"
-                | "interpret" | "interpretation" | "contrary" | "unique" | "priority" | "obj"
-                | "object" | "individual" | "check" | "why" | "gap" | "proposition" | "assert"
-                | "show" => break,
+                other if is_item_keyword(other) => break,
                 other => return self.err(format!("规则 `{name}` 里未知的子句 `{other}`")),
             }
         }

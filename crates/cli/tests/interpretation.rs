@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const PROVED: i32 = 0;
 const LOAD_FAILED: i32 = 1;
+const GAP: i32 = 1;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -78,6 +79,15 @@ fn line_with<'a>(out: &'a str, needle: &str) -> &'a str {
     out.lines()
         .find(|line| line.contains(needle))
         .unwrap_or_else(|| panic!("no output line contains {needle:?}\n{out}"))
+}
+
+/// The certificate JSON the `:cert` command printed after its load report.
+fn certificate_json(output: &Output) -> String {
+    let text = stdout(output);
+    let start = text
+        .find('{')
+        .unwrap_or_else(|| panic!("no certificate JSON in stdout:\n{text}"));
+    text[start..].trim_end().to_owned()
 }
 
 struct TempDir {
@@ -294,36 +304,89 @@ fn an_imported_pack_interpretation_is_loaded_and_marked_with_its_pack() {
     );
 }
 
+/// A case that loads an interpretation but has no rule and no other way from
+/// `P 张三` to `Q 张三`. The interpretation must stay inert.
+const INERT_CASE: &str = "sort 人\npred P : 人 → Prop\npred Q : 人 → Prop\nobj 张三 : 人\n\
+     axiom 事实 : P 张三\n  source text \"案情\" locator \"一\"\n\
+     interpret 解释 : P 张三 → Q 张三\n  direction literal\n\
+     \x20 source text \"解释\" locator \"一\" version \"2020\"\n";
+
 #[test]
-fn a_loaded_interpretation_does_not_change_a_derivation() {
-    let temp = TempDir::new("inert");
-    let case = temp.write(
-        "case.std",
-        "sort 人\npred P : 人 → Prop\npred Q : 人 → Prop\nobj 张三 : 人\n\
-         axiom 事实 : P 张三\n  source text \"案情\" locator \"一\"\n\
-         rule 规则 :\n  params x : 人\n  premise P x\n  conclude Q x\n\
-         \x20 source text \"案情\" locator \"二\"\n\
-         interpret 解释 : P 张三 → Q 张三\n  direction literal\n\
-         \x20 source text \"解释\" locator \"一\" version \"2020\"\n",
-    );
+fn a_loaded_interpretation_does_not_make_its_target_provable() {
+    let temp = TempDir::new("inert-why");
+    let case = temp.write("case.std", INERT_CASE);
     let output = check(
         run(&[
             "--no-default-packs".to_owned(),
             case.display().to_string(),
             ":why Q 张三".to_owned(),
         ]),
-        PROVED,
-        &["▸ Q 张三", "推导已通过独立校验。", "+ 解释"],
+        GAP,
+        &["+ 解释", "? Q 张三", "根为缺口"],
     );
+
     let out = stdout(&output);
-    // The inert interpretation is loaded but is not a derivation step: it does
-    // not appear in the tree below the root.
-    let tree = out
-        .split_once("▸ Q 张三")
-        .map(|(_, tree)| tree)
-        .unwrap_or_else(|| panic!("no derivation tree:\n{out}"));
+    let result = out
+        .split_once("? Q 张三")
+        .map(|(_, result)| result)
+        .unwrap_or_else(|| panic!("no gap result:\n{out}"));
     assert!(
-        !tree.contains("解释"),
+        !result.contains("解释"),
         "an interpretation must not enter the derivation:\n{out}"
+    );
+    assert!(
+        !out.contains("推导已通过独立校验。"),
+        "a gap must not be reported as a proof:\n{out}"
+    );
+}
+
+#[test]
+fn gap_and_cert_do_not_apply_a_loaded_interpretation() {
+    let temp = TempDir::new("inert-gap-cert");
+    let case = temp.write("case.std", INERT_CASE);
+    let path = case.display().to_string();
+
+    // `:gap` reports the missing rule; the interpretation is not offered as a
+    // way to bridge the two propositions.
+    let output = run(&[
+        "--no-default-packs".to_owned(),
+        path.clone(),
+        ":gap Q 张三".to_owned(),
+    ]);
+    assert_exit(&output, GAP);
+    let out = stdout(&output);
+    assert!(out.contains("无法推出 Q 张三"), "got:\n{out}");
+    let gap = out
+        .split_once("无法推出 Q 张三")
+        .map(|(_, gap)| gap)
+        .unwrap_or_else(|| panic!("no gap explanation:\n{out}"));
+    assert!(
+        gap.contains("没有任何规则") && !gap.contains("解释"),
+        "the interpretation must not be a candidate:\n{out}"
+    );
+
+    // `:cert` records the gap root. Its JSON contains no interpretation: the
+    // declaration is not an assumption, a rule step, or a candidate.
+    let output = run(&[
+        "--no-default-packs".to_owned(),
+        path,
+        ":cert Q 张三".to_owned(),
+    ]);
+    assert_exit(&output, GAP);
+    let json = certificate_json(&output);
+    assert!(
+        !json.contains("解释"),
+        "the certificate mentions the inert interpretation:\n{json}"
+    );
+    assert!(json.contains("\"kind\": \"gap\""), "no gap node:\n{json}");
+    assert!(
+        json.contains("\"kind\": \"missing_premise\""),
+        "no missing-premise obligation:\n{json}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&json).expect("certificate JSON parses");
+    let root = value["root"].as_u64().expect("the gap root is recorded") as usize;
+    assert_eq!(
+        value["nodes"][root]["kind"], "gap",
+        "the root must be the gap node, not an interpretation step:\n{json}"
     );
 }

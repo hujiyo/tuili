@@ -211,6 +211,9 @@ axiom a.事实 : a.非法搜查 a.张三 a.甲宅
 def a.侵权 : a.公民 → Prop := λ (x : a.公民) := a.违法 x
 contrary a.违法 a.合法
 unique a.违法 1
+interpret a.解释 : a.P → a.Q
+  direction literal
+  source text "测试" locator "二" version "2020"
 "#;
     let lib = load(src).expect("every supported declaration kind must load");
     for name in [
@@ -225,6 +228,7 @@ unique a.违法 1
         "a.甲宅",
         "a.事实",
         "a.侵权",
+        "a.解释",
     ] {
         assert!(lib.env.get(name).is_some(), "missing `{name}`");
     }
@@ -232,8 +236,8 @@ unique a.违法 1
     assert_eq!(lib.env.unique_positions().len(), 1);
     assert_eq!(
         lib.env.interpretations().len(),
-        0,
-        "this fixture declares no interpretation"
+        1,
+        "the interpretation is one of the supported declaration kinds"
     );
 }
 

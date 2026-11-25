@@ -6,7 +6,7 @@
 //! creates no rule and no fact, so a later branch has to opt into a semantics
 //! instead of inheriting one by accident.
 
-use std_deduce_kernel::{DeclKind, InterpretationDirection};
+use std_deduce_kernel::{DeclKind, Expr, InterpretationDirection};
 use std_deduce_lang::ast::Item;
 use std_deduce_lang::parser::parse;
 use std_deduce_lang::Library;
@@ -90,6 +90,21 @@ fn a_complete_interpretation_loads_as_an_opaque_constant() {
     assert_eq!(interpretation.sources[0].text, "宪法");
     assert_eq!(interpretation.sources[0].locator, "第三十九条");
     assert_eq!(interpretation.sources[0].version, "2018");
+    // The two sides are stored in their declared order. A swap or a dropped
+    // side would leave the same Pi shape, so compare the actual expressions.
+    assert_eq!(interpretation.from, Expr::constant("a.P"));
+    assert_eq!(interpretation.to, Expr::constant("a.Q"));
+    assert_eq!(
+        decl.ty,
+        Expr::pi(Expr::constant("a.P"), Expr::constant("a.Q")),
+        "the recorded type must be `from → to`, not the reverse or a bare side"
+    );
+    // The declaration-level provenance is the same source list, so a future
+    // reader of `Decl.sources` cannot see an empty interpretation.
+    assert_eq!(decl.sources.len(), 1);
+    assert_eq!(decl.sources[0].text, "宪法");
+    assert_eq!(decl.sources[0].locator, "第三十九条");
+    assert_eq!(decl.sources[0].version, "2018");
 
     // Loading an interpretation must not manufacture a rule or a fact: this
     // step only registers the declaration, nothing consumes it.
@@ -142,6 +157,21 @@ fn a_missing_source_is_refused() {
     assert!(error.contains("`interpret 解释`"), "got: {error}");
     assert!(error.contains("source"), "got: {error}");
     assert!(error.contains("至少有一条"), "got: {error}");
+}
+
+#[test]
+fn a_missing_component_error_names_the_interpretation() {
+    for (src, side) in [
+        ("pred P : Prop\ninterpret 解释 :\n", "from"),
+        ("pred P : Prop\ninterpret 解释 : P →\n", "to"),
+    ] {
+        let error = load_error(src);
+        assert!(error.contains("`interpret 解释`"), "for {side}: {error}");
+        assert!(
+            error.contains(side),
+            "the error must say which side failed ({side}): {error}"
+        );
+    }
 }
 
 #[test]

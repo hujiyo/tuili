@@ -578,25 +578,10 @@ impl Library {
                     // reasoner nor the certificate layer inspects it. This is
                     // what makes "loaded but not enabled" checkable instead of
                     // letting a half-implemented syntax look supported.
-                    if sources.is_empty() {
-                        return Err(LoadError::new(format!(
-                            "`interpret {n}` 缺少 source 子句；解释必须至少有一条出处"
-                        )));
-                    }
-                    for source in &sources {
-                        for (field, value) in [
-                            ("text", source.text.as_str()),
-                            ("locator", source.locator.as_str()),
-                            ("version", source.version.as_str()),
-                        ] {
-                            if value.trim().is_empty() {
-                                return Err(LoadError::new(format!(
-                                    "`interpret {n}` 的 source 缺少非空的 `{field}`：\
-                                     解释的出处必须写明文本、条号与版本"
-                                )));
-                            }
-                        }
-                    }
+                    // The parser already requires at least one `source` line
+                    // and non-empty text/locator/version, so the loader does
+                    // not repeat that line-oriented check. What only the
+                    // loader can decide is whether both sides are propositions.
                     let efrom = elab::elab_top(&next.env, &from).map_err(|e| {
                         LoadError::new(format!("`interpret {n}` 的 from 无法精化：{}", e.msg))
                     })?;
