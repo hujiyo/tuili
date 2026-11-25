@@ -146,6 +146,20 @@
 //! because-so explanation. It attributes every fact to its recorded identity,
 //! keeps the recorded sources, bindings, conflicts, gaps and obligations, and
 //! reports a missing source or an unresolved conflict instead of filling it in.
+//!
+//! ## Trust labels
+//!
+//! [`derive_trust`] computes a [`TrustReport`] from the certificate's own
+//! fields: the root and its reachable proof graph, each assumption's fact
+//! identity, interpretation applications, conflicts and open obligations. The
+//! five labels are `已验证`, `依赖假设`, `事实待举证`, `争点未决` and
+//! `需律师判断`; [`trust`](mod@trust) documents the exact field-to-label
+//! mapping. The labels are a derived view: they are never serialized into the
+//! certificate, so `:cert` JSON and the v7 format are unchanged. `:why`,
+//! `:explain` and `:labels` all print the same [`TrustReport::summary`] and the
+//! same evidence, so a conclusion cannot be labelled differently by different
+//! renderers. A label never asserts legal correctness: `已验证` means the
+//! certificate proves the root under strict facts only and leaves nothing open.
 
 mod closure;
 mod key;
@@ -160,6 +174,7 @@ pub mod open;
 pub mod proof;
 pub mod render;
 pub mod source;
+pub mod trust;
 pub mod version;
 
 pub use applicability::{
@@ -188,4 +203,5 @@ pub use open::{
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
 pub use render::{render, render_with_annotations};
 pub use source::Source;
+pub use trust::{derive_trust, TrustLabel, TrustReport, LOCAL_EXTENSION_OBLIGATION_ID};
 pub use version::{FormatVersion, FORMAT_VERSION};

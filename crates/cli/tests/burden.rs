@@ -895,7 +895,18 @@ fn declaring_burden_and_standard_does_not_change_why_on_a_gap() {
         ":why must not gain the burden report"
     );
     let body = why_body(&declared_out);
-    for marker in ["举证", "主张方", "优势证据", "未声明举证责任"] {
+    // The trust label derived from the same certificate is part of `:why` by
+    // design (`事实待举证`), and its own name contains the characters 举证. What
+    // must not leak into `:why` is the burden *report*: the `〔举证：…〕` /
+    // `〔例外举证：…〕` annotations and their role/standard wording.
+    for marker in [
+        "〔举证：",
+        "〔例外举证：",
+        "主张方",
+        "优势证据",
+        "未声明举证责任",
+        "未声明证明标准",
+    ] {
         assert!(
             !body.contains(marker),
             ":why must not print {marker:?}:\n{body}"
