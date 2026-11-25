@@ -5,6 +5,7 @@
 
 sort 人
 pred 违法 : 人 → Prop
+pred 已确认 : 人 → Prop
 pred 行为 : 人 → Prop
 pred 损害 : 人 → Prop
 pred 情节严重 : 人 → Prop
@@ -12,6 +13,10 @@ pred 应罚 : 人 → Prop
 obj 张三 : 人
 
 axiom 张三违法 : 违法 张三
+  identity user_asserted
+  source text "用户陈述" locator "会话" note "未经独立证明"
+
+axiom 张三已确认 : 已确认 张三
   identity user_asserted
   source text "用户陈述" locator "会话" note "未经独立证明"
 
@@ -26,6 +31,7 @@ rule 处罚 :
 
 rule 严重 :
   params p : 人
+  premise 已确认 p
   premise 损害 p
   conclude 情节严重 p
   burden claimant

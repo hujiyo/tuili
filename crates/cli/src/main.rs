@@ -3807,7 +3807,15 @@ fn write_review_file(path: &str, report: &str) -> Result<(), String> {
         std::process::id()
     ));
     let existing_permissions = match fs::metadata(destination) {
-        Ok(meta) => Some(meta.permissions()),
+        Ok(meta) => {
+            if meta.permissions().readonly() {
+                return Err(format!(
+                    "写入复核报告 `{}` 失败：目标不可写（只读）",
+                    escape_path(path)
+                ));
+            }
+            Some(meta.permissions())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(format!(

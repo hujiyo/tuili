@@ -67,14 +67,20 @@ const ALL_LABELS: [TrustLabel; 5] = [
 struct RuleRecord {
     /// Rule-application nodes on the root's reachable proof graph.
     root_nodes: Vec<NodeId>,
-    /// Sources the certificate records for this rule's applications.
+    /// Sources the certificate records for this rule's applications. Never
+    /// filled from the environment: an applied rule with no recorded source
+    /// must read "证书未记录来源".
     cert_sources: Vec<Source>,
     /// Applicability texts of the certificate's rule applications.
     cert_verdicts: BTreeSet<String>,
-    /// Sources the gap trees record for this rule's candidates.
-    gap_sources: Vec<Source>,
+    /// Sources the current environment declares for this rule. This is a
+    /// separate, recomputable result; for a gap candidate it is displayed as
+    /// "来自当前环境声明（非证书记录）" and never mixed with `cert_sources`.
+    env_sources: Vec<Source>,
     /// Applicability texts of the gap-tree candidates.
     gap_verdicts: BTreeSet<String>,
+    /// Whether the rule appears as a gap candidate at all.
+    in_gap: bool,
     /// The first non-positive applicability verdict, if any, for the question
     /// section. `None` means every recorded instance is `适用`.
     needs_applicability_review: Option<String>,
@@ -86,8 +92,9 @@ impl RuleRecord {
             root_nodes: Vec::new(),
             cert_sources: Vec::new(),
             cert_verdicts: BTreeSet::new(),
-            gap_sources: Vec::new(),
+            env_sources: Vec::new(),
             gap_verdicts: BTreeSet::new(),
+            in_gap: false,
             needs_applicability_review: None,
         }
     }
@@ -98,9 +105,9 @@ impl RuleRecord {
         }
     }
 
-    fn push_gap_source(&mut self, source: &Source) {
-        if !self.gap_sources.contains(source) {
-            self.gap_sources.push(source.clone());
+    fn push_env_source(&mut self, source: &Source) {
+        if !self.env_sources.contains(source) {
+            self.env_sources.push(source.clone());
         }
     }
 }
@@ -238,7 +245,9 @@ fn write_conclusion_section(
         Some(_) if trust.root_proved() => "是（结论已证明）".to_owned(),
         Some(_) => "否（结论的证明里仍有缺口）".to_owned(),
     };
-    out.push_str(&format!("**根是否可达：**{root_state}\n"));
+    out.push_str(&format!(
+        "**根是否可达（即本次推导是否证明了结论）：**{root_state}\n"
+    ));
     out.push_str("信任标签（模型内确定性，不表示法律上正确）：\n");
     for label in ALL_LABELS {
         let name = label.name_zh();
@@ -379,7 +388,7 @@ fn write_issues_section(
     }
     for limit in &issues.limits {
         out.push_str(&format!(
-            "- 展开上限：{}；其余未列出。\n",
+            "- 已截断：{}；其余未列出。\n",
             gap_limit_text(limit)
         ));
     }
@@ -493,27 +502,9 @@ fn collect_rules(
         record.cert_verdicts.insert(verdict.clone());
         note_applicability_question(record, applicability.verdict, &verdict);
     }
-    // A gap candidate in the certificate also records its rule's sources and
-    // applicability. Those records are certificate data even though the
-    // recursive tree is not: collect them so the rule section does not report
-    // "the certificate records no source" for a candidate the certificate does
-    // carry.
-    for node in &certificate.nodes {
-        let Node::Gap { candidates, .. } = node else {
-            continue;
-        };
-        for candidate in candidates {
-            let record = rules
-                .entry(candidate.rule.clone())
-                .or_insert_with(RuleRecord::new);
-            for source in &candidate.sources {
-                record.push_cert_source(source);
-            }
-            let verdict = cert_applicability_text(&candidate.applicability);
-            record.cert_verdicts.insert(verdict.clone());
-            note_applicability_question(record, candidate.applicability.verdict, &verdict);
-        }
-    }
+    // Gap candidates are not applied rules. Their sources come from the gap
+    // tree (the current environment declaration) and are kept in `env_sources`
+    // so they cannot be mistaken for certificate-recorded sources.
     if let Some(tree) = root_gap {
         collect_gap_rules(tree, &mut rules);
     }
@@ -528,8 +519,9 @@ fn collect_gap_rules(tree: &GapTree, rules: &mut BTreeMap<String, RuleRecord>) {
         let record = rules
             .entry(candidate.rule.to_string())
             .or_insert_with(RuleRecord::new);
+        record.in_gap = true;
         for source in &candidate.sources {
-            record.push_gap_source(&Source::from(source));
+            record.push_env_source(&Source::from(source));
         }
         let verdict = candidate.applicability.summary_zh();
         record.gap_verdicts.insert(verdict.clone());
@@ -577,40 +569,56 @@ fn write_rules_section(
         } else {
             out.push_str("   - 用于结论的证明：是\n");
         }
-        let mut sources: Vec<Source> = record.cert_sources.clone();
-        for source in &record.gap_sources {
-            if !sources.contains(source) {
-                sources.push(source.clone());
-            }
+        if !record.root_nodes.is_empty() {
+            out.push_str(&format_source_line(
+                "证书出处",
+                "   ",
+                &record.cert_sources,
+                "证书未记录来源",
+            ));
         }
-        out.push_str(&format_source_line(
-            "出处",
-            "   ",
-            &sources,
-            "证书未记录来源",
-        ));
-        let mut verdicts = BTreeSet::new();
-        for verdict in record
-            .cert_verdicts
-            .iter()
-            .chain(record.gap_verdicts.iter())
-        {
-            verdicts.insert(verdict.clone());
+        if record.in_gap {
+            let label = "缺口候选出处（来自当前环境声明，非证书记录）";
+            out.push_str(&format_source_line(
+                label,
+                "   ",
+                &record.env_sources,
+                "当前环境声明未记录来源",
+            ));
         }
-        if verdicts.is_empty() {
-            out.push_str("   - 适用性：没有记录判定。\n");
-        } else {
-            for verdict in verdicts {
+        // Certificate applications and gap candidates use different inputs, so
+        // only one of the two lists is shown: a root-applied rule's certificate
+        // text wins; a candidate-only rule shows the gap tree's summary. The
+        // two wordings are never both printed for the same rule.
+        if !record.cert_verdicts.is_empty() {
+            for verdict in &record.cert_verdicts {
                 out.push_str(&format!("   - 适用性：{}\n", verdict));
             }
+        } else if !record.gap_verdicts.is_empty() {
+            for verdict in &record.gap_verdicts {
+                out.push_str(&format!("   - 适用性：{}\n", verdict));
+            }
+        } else {
+            out.push_str("   - 适用性：没有记录判定。\n");
         }
-        if record.cert_sources.is_empty() && record.gap_sources.is_empty() {
+        if record.root_nodes.is_empty() && record.env_sources.is_empty() {
             questions
                 .entry(7)
                 .or_default()
                 .push(Question {
                     text: format!(
-                        "规则「{}」的出处没有记录；请补充可核对的来源（文本、条号、版本、管辖、引文）。",
+                        "缺口候选规则「{}」在当前环境声明里没有记录来源；请补充可核对的来源（文本、条号、版本、管辖、引文）。",
+                        escape_control(name)
+                    ),
+                    anchor: format!("「规则与出处」第 {number} 条"),
+                });
+        } else if !record.root_nodes.is_empty() && record.cert_sources.is_empty() {
+            questions
+                .entry(7)
+                .or_default()
+                .push(Question {
+                    text: format!(
+                        "规则「{}」在证书记录里没有来源；请补充可核对的来源（文本、条号、版本、管辖、引文）。",
                         escape_control(name)
                     ),
                     anchor: format!("「规则与出处」第 {number} 条"),
@@ -656,8 +664,12 @@ fn write_facts_section(
             })
             .collect();
         let mut root_held = BTreeSet::new();
-        if root_gap.is_some() {
-            collect_certificate_held(certificate, &mut root_held);
+        if let Some(tree) = root_gap {
+            collect_tree_held(tree, &mut root_held);
+        }
+        let mut issue_held = BTreeSet::new();
+        for tree in issues_sorted {
+            collect_tree_held(tree, &mut issue_held);
         }
 
         let mut ordered: Vec<(usize, String)> = certificate
@@ -675,6 +687,8 @@ fn write_facts_section(
                 "用于结论的证明".to_owned()
             } else if root_held.contains(&expression_key(&Expr::from(&entry.proposition))) {
                 "结论缺口已掌握的材料（缺口未闭合，不能当作证明）".to_owned()
+            } else if issue_held.contains(&expression_key(&Expr::from(&entry.proposition))) {
+                "争点缺口已掌握的材料（缺口未闭合，不能当作证明）".to_owned()
             } else {
                 "未用于结论的证明（推导的其他部分）".to_owned()
             };
@@ -884,6 +898,47 @@ fn write_gap_body(
     indent: &str,
     pleadings: &BTreeMap<String, RulePleading>,
 ) {
+    match tree.status {
+        GapStatus::Unreachable => {}
+        GapStatus::Proved => {
+            out.push_str(&format!("{indent}- 目标已可推出。\n"));
+            return;
+        }
+        GapStatus::InterpretedOnly => {
+            out.push_str(&format!(
+                "{indent}- 该命题已由解释推出，但规则前提不消费解释结论，因此作为规则前提仍不算满足。\n"
+            ));
+            return;
+        }
+        GapStatus::Conflicted => {
+            out.push_str(&format!(
+                "{indent}- 该命题处于未决冲突，未决的结论不作为已证明的前提。\n"
+            ));
+            return;
+        }
+        GapStatus::Defeated => {
+            out.push_str(&format!(
+                "{indent}- 该命题在已裁决的冲突中败出，按记录不作为已证明的前提。\n"
+            ));
+            return;
+        }
+        GapStatus::NotAProposition => {
+            out.push_str(&format!("{indent}- 该目标不是命题。\n"));
+            return;
+        }
+        GapStatus::OpenPattern => {
+            out.push_str(&format!(
+                "{indent}- 该前提仍依赖未确定的规则参数，无法继续展开。\n"
+            ));
+            return;
+        }
+        GapStatus::Cycle => {
+            out.push_str(&format!(
+                "{indent}- 循环依赖：同一命题已在当前展开路径上，停止递归。\n"
+            ));
+            return;
+        }
+    }
     let mut candidates: Vec<&std_deduce_reason::GapRule> = tree.candidates.iter().collect();
     candidates.sort_by(|a, b| a.rule.cmp(&b.rule));
     if candidates.is_empty() && tree.limit.is_none() {
@@ -897,8 +952,28 @@ fn write_gap_body(
             escape_control(&candidate.rule),
             candidate.applicability.summary_zh()
         ));
+        if matches!(
+            candidate.applicability,
+            std_deduce_reason::Applicability::Undecidable { .. }
+        ) {
+            out.push_str(&format!(
+                "{indent}  - 提示：需要为该争点显式指定引用时间（尚未实现）。\n"
+            ));
+        }
         if candidate.missing.is_empty() && candidate.blocked_by.is_empty() {
-            out.push_str(&format!("{indent}  - 这里没有记录它缺少什么。\n"));
+            if candidate.applicability.is_applicable() {
+                out.push_str(&format!("{indent}  - 这里没有记录它缺少什么。\n"));
+            } else {
+                out.push_str(&format!(
+                    "{indent}  - 这条规则没有缺失前提，但因适用性为{}，规则不触发。\n",
+                    candidate.applicability.summary_zh()
+                ));
+            }
+        }
+        if !candidate.missing.is_empty() {
+            out.push_str(&format!(
+                "{indent}  - 判定口径：按已持有事实；补上缺失前提后判定可能变化。\n"
+            ));
         }
         for premise in &candidate.missing {
             let proposition = expr_text(&premise.premise);
@@ -917,11 +992,20 @@ fn write_gap_body(
                     out.push_str(&format!("{indent}    - 子缺口：\n"));
                     write_gap_body(out, child, &format!("{indent}      "), pleadings);
                 }
-                None => {
-                    out.push_str(&format!(
-                        "{indent}    - 子缺口：「{proposition}」未展开（已达到缺口展开的节点上限）。\n"
-                    ));
-                }
+                None => match gap_truncation_reason(tree, candidate) {
+                    Some(reason) => {
+                        out.push_str(&format!(
+                            "{indent}    - 子缺口：「{proposition}」未展开（已截断：{reason}）。\n"
+                        ));
+                    }
+                    None => {
+                        out.push_str(&format!(
+                            "{indent}    - 子缺口：「{proposition}」未展开：候选规则「{}」的适用性为{}，补上该前提也不会让它触发。\n",
+                            escape_control(&candidate.rule),
+                            candidate.applicability.summary_zh()
+                        ));
+                    }
+                },
             }
         }
         write_burden_lines(
@@ -958,6 +1042,21 @@ fn write_gap_body(
             gap_limit_text(limit)
         ));
     }
+}
+
+/// Why a missing premise was not expanded, read from the candidate's own limit
+/// or its parent gap node's limit. `None` means the candidate was listed but
+/// deliberately not expanded (inapplicable/undecidable), not truncated.
+fn gap_truncation_reason(tree: &GapTree, candidate: &std_deduce_reason::GapRule) -> Option<String> {
+    if !candidate.applicability.allows_firing() {
+        // The candidate was listed because it cannot fire, not because a limit
+        // cut it off. Its own applicability summary is the reason.
+        return None;
+    }
+    if let Some(limit) = &candidate.limit {
+        return Some(gap_limit_text(limit));
+    }
+    tree.limit.as_ref().map(gap_limit_text)
 }
 
 /// Two declared burden lines. `None` means the rule's declaration was not
@@ -1157,9 +1256,9 @@ fn write_open_concepts_section(
             ));
             let nodes = concept_nodes(env, certificate, dependency, concept)?;
             if nodes.is_empty() {
-                out.push_str("   - 所在节点：没有定位到具体节点。\n");
+                out.push_str("   - 所在推导步骤：没有定位到具体节点。\n");
             } else {
-                out.push_str("   - 所在节点：\n");
+                out.push_str("   - 所在推导步骤：\n");
                 for node in &nodes {
                     out.push_str(&format!(
                         "     - {}\n",
@@ -1345,14 +1444,14 @@ fn node_description(certificate: &Certificate, node_id: NodeId) -> Result<String
         Node::Assumption { .. } => {
             let proposition = node_proposition(certificate, node_id)?;
             format!(
-                "节点 {node_id}（结论命题「{}」，作为事实断言）",
+                "推导步骤 {node_id}（结论命题「{}」，作为事实断言）",
                 cert_expr_text(proposition)
             )
         }
         Node::RuleApplication {
             rule, conclusion, ..
         } => format!(
-            "节点 {node_id}（规则「{}」的结论「{}」）",
+            "推导步骤 {node_id}（规则「{}」的结论「{}」）",
             escape_control(rule),
             cert_expr_text(conclusion)
         ),
@@ -1371,13 +1470,13 @@ fn node_description(certificate: &Certificate, node_id: NodeId) -> Result<String
                     )
                 })?;
             format!(
-                "节点 {node_id}（解释「{}」的结论「{}」）",
+                "推导步骤 {node_id}（解释「{}」的结论「{}」）",
                 escape_control(&entry.id),
                 cert_expr_text(conclusion)
             )
         }
         Node::Gap { proposition, .. } => format!(
-            "节点 {node_id}（缺口命题「{}」）",
+            "推导步骤 {node_id}（缺口命题「{}」）",
             cert_expr_text(proposition)
         ),
     })
@@ -1679,7 +1778,7 @@ fn node_suffix(nodes: &[NodeId]) -> String {
     if nodes.is_empty() {
         String::new()
     } else {
-        format!("（相关节点：{}）", node_list_text(nodes))
+        format!("（相关推导步骤：{}）", node_list_text(nodes))
     }
 }
 
@@ -1705,20 +1804,19 @@ fn candidate_names(candidates: &[std_deduce_reason::GapRule]) -> String {
         .join("、")
 }
 
-/// Collect every held premise the certificate's gap nodes record.
+/// Collect every held premise in a gap tree, including nested candidates.
 ///
-/// Only the certificate's own `gap` node candidates carry `held`; the reasoner's
-/// recursive gap tree does not (the certificate format, not the report, is the
-/// place that records it). A nested gap is not in the certificate, so a fact
-/// that only a nested candidate holds is not marked here.
-fn collect_certificate_held(certificate: &Certificate, out: &mut BTreeSet<String>) {
-    for node in &certificate.nodes {
-        let Node::Gap { candidates, .. } = node else {
-            continue;
-        };
-        for candidate in candidates {
-            for held in &candidate.held {
-                out.insert(expression_key(&Expr::from(held)));
+/// The reasoner keeps each candidate's held premises at every tree level, so a
+/// fact consumed by a nested candidate is attributed to the conclusion's gap
+/// rather than called an unrelated branch.
+fn collect_tree_held(tree: &GapTree, out: &mut BTreeSet<String>) {
+    for candidate in &tree.candidates {
+        for held in &candidate.held {
+            out.insert(expression_key(held));
+        }
+        for premise in &candidate.missing {
+            if let Some(child) = &premise.gap {
+                collect_tree_held(child, out);
             }
         }
     }
@@ -1878,5 +1976,68 @@ fn origin_label(origin: Option<&std_deduce_cert::ScopeOriginRecord>) -> &'static
     match origin {
         Some(origin) => origin.label_zh(),
         None => "未记录",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(text: &str) -> Source {
+        Source {
+            text: text.to_owned(),
+            locator: "第五条".to_owned(),
+            version: "2024".to_owned(),
+            effective: None,
+            note: String::new(),
+            quote: String::new(),
+            url: String::new(),
+            jurisdiction: String::new(),
+            retrieved_at: String::new(),
+            hash: String::new(),
+        }
+    }
+
+    fn render(record: RuleRecord) -> String {
+        let mut rules = BTreeMap::new();
+        rules.insert("处罚".to_owned(), record);
+        let mut questions = BTreeMap::new();
+        let mut out = String::new();
+        write_rules_section(&mut out, &rules, &mut questions);
+        out
+    }
+
+    #[test]
+    fn an_applied_rule_without_a_recorded_source_never_uses_the_environment_source() {
+        let mut record = RuleRecord::new();
+        record.root_nodes.push(0);
+        record.in_gap = true;
+        record.push_env_source(&source("示例法"));
+        let out = render(record);
+        let certificate_line = out
+            .lines()
+            .find(|line| line.contains("证书出处"))
+            .unwrap_or_else(|| panic!("no certificate source line:\n{out}"));
+        assert!(
+            certificate_line.contains("证书未记录来源"),
+            "an applied rule with no certificate source must say so: {certificate_line}"
+        );
+        assert!(
+            !certificate_line.contains("示例法"),
+            "the environment source must not be substituted for the certificate source: {certificate_line}"
+        );
+        assert!(
+            out.contains("非证书记录") && out.contains("示例法"),
+            "the gap candidate's environment source must be displayed separately:\n{out}"
+        );
+    }
+
+    #[test]
+    fn an_applied_rule_without_a_gap_still_says_the_source_is_not_recorded() {
+        let mut record = RuleRecord::new();
+        record.root_nodes.push(0);
+        let out = render(record);
+        assert!(out.contains("证书未记录来源"), "{out}");
+        assert!(!out.contains("非证书记录"), "{out}");
     }
 }

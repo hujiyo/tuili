@@ -2204,6 +2204,7 @@ impl<'a> Reasoner<'a> {
             let mut rule = GapRule {
                 rule: candidate.rule,
                 applicability: candidate.applicability,
+                held: candidate.held,
                 missing: Vec::new(),
                 blocked_by: candidate.blocked_by,
                 sources: candidate.sources,
@@ -3092,6 +3093,11 @@ pub struct GapRule {
     /// because it may still fire; an inapplicable/undecidable one is listed
     /// but not expanded.
     pub applicability: Applicability,
+    /// Premises that already hold for this instantiation, in the rule's
+    /// premise order. The certificate's root gap candidate records them; the
+    /// recursive tree keeps them so a derived report can attribute a fact to
+    /// a nested gap instead of treating it as unrelated.
+    pub held: Vec<Expr>,
     /// Missing premises in the rule's own premise order, each with the gap
     /// that explains why it is missing.
     pub missing: Vec<GapPremise>,
@@ -3154,6 +3160,7 @@ impl GapRule {
         GapRule {
             rule: candidate.rule,
             applicability: candidate.applicability,
+            held: candidate.held,
             missing: candidate
                 .missing
                 .into_iter()

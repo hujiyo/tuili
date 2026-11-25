@@ -260,7 +260,7 @@ fn closed_strict_fact_proof_is_verified_and_has_no_gap() {
             "# 律师复核报告",
             "不是法律意见",
             "**结论命题：**「受罚 张三」",
-            "**根是否可达：**是",
+            "**根是否可达（即本次推导是否证明了结论）：**是",
             "「已验证」：成立",
             "模型内：结论的证明只使用严格事实（法院查明 1 条、双方无争议 0 条）",
             "## 二、争点",
@@ -293,7 +293,7 @@ fn user_claim_gap_reports_fact_needs_evidence_burden_and_missing_premise() {
         report,
         &[
             "事实待举证",
-            "**根是否可达：**否（结论未获证明）",
+            "**根是否可达（即本次推导是否证明了结论）：**否（结论未获证明）",
             "「违法 张三」：身份：用户陈述（主张，不是证明）",
             "结论缺口已掌握的材料",
             "1. 结论「受罚 张三」未获证明（缺口）",
@@ -301,6 +301,7 @@ fn user_claim_gap_reports_fact_needs_evidence_burden_and_missing_premise() {
             "缺：「故意 张三」",
             "举证责任：主张方",
             "证明标准：优势证据",
+            "判定口径：按已持有事实；补上缺失前提后判定可能变化。",
             "例外举证：未声明举证责任",
             "例外证明标准：未声明证明标准",
             "没有任何规则以这个命题为结论",
@@ -321,7 +322,7 @@ fn proved_user_claim_reports_depends_on_assumption_and_gap_issue() {
         report,
         &[
             "「依赖假设」：成立（据用户陈述 1 条）",
-            "**根是否可达：**是",
+            "**根是否可达（即本次推导是否证明了结论）：**是",
             "1. 「受罚 张三」：候选规则「处罚」；缺少前提合计 1 条",
             "1. 争点「受罚 张三」的缺口",
         ],
@@ -345,8 +346,8 @@ fn open_concept_with_effective_range_reports_lawyer_judgment_and_basis() {
         &[
             "「需律师判断」：成立",
             "开放概念「严重情节」：需要人来解释的法律用语",
-            "所在节点",
-            "节点 1（规则「认定严重」的结论「严重情节 张三」）",
+            "所在推导步骤",
+            "推导步骤 1（规则「认定严重」的结论「严重情节 张三」）",
             "为什么不能自动判定",
             "适用（事件时间 2005-05-06（区间内）",
             "生效范围 2000-01-01..2010-01-01（开始：规则；结束：规则）",
@@ -496,6 +497,7 @@ fn three_level_gap_expands_to_the_leaf_and_keeps_each_layer_burden() {
             "证明标准：优势证据",
             "证明标准：清楚可信",
             "举证责任：相对方",
+            "「已确认 张三」：身份：用户陈述（主张，不是证明）；与结论的关系：结论缺口已掌握的材料",
         ],
         "three-level gap report",
     );
@@ -685,4 +687,260 @@ fn review_does_not_change_why_or_cert_output() {
         stdout(&after_review_cert).ends_with(expected_cert),
         ":review changed :cert output"
     );
+}
+
+#[test]
+fn a_gap_node_limit_reports_the_node_limit_not_a_generic_reason() {
+    let temp = TempDir::new("node-limit");
+    let mut theory = String::from("sort 人\nobj 张三 : 人\npred G : 人 → Prop\n");
+    for rule in 0..3 {
+        for premise in 0..63 {
+            theory.push_str(&format!("pred Q{rule}_{premise} : 人 → Prop\n"));
+        }
+    }
+    // Three rules with 63 premises each hit the 128-node bound before the last
+    // premise is expanded.
+    for rule in 0..3 {
+        theory.push_str(&format!(
+            "rule R{rule} :\n  params p : 人\n  premise Q{rule}_0 p\n"
+        ));
+        for premise in 1..63 {
+            theory.push_str(&format!("  premise Q{rule}_{premise} p\n"));
+        }
+        theory.push_str(&format!(
+            "  conclude G p\n  source text \"示例法\" locator \"{rule}\"\n"
+        ));
+    }
+    let path = temp.write("wide.std", &theory);
+    let output = run(&[path, ":review G 张三".to_owned()]);
+    assert_exit(&output, NOT_PROVED);
+    let out_text = stdout(&output);
+    let report = report_part(&out_text);
+    assert_contains(
+        report,
+        &[
+            "已截断：达到最大节点数（128 个）",
+            "未展开（已截断：达到最大节点数（128 个）",
+        ],
+        "node-limit report",
+    );
+}
+
+#[test]
+fn a_rule_attempt_limit_reports_the_rule_and_its_attempt_bound() {
+    let temp = TempDir::new("attempt-limit");
+    let mut theory = String::from(
+        "sort 人\nobj 张三 : 人\npred G : 人 → Prop\npred H : 人 → Prop\npred X : 人 → Prop\n",
+    );
+    for index in 0..9 {
+        theory.push_str(&format!(
+            "rule A{index} :\n  params p : 人\n  premise H p\n  conclude G p\n  source text \"示例法\" locator \"{index}\"\n"
+        ));
+    }
+    theory.push_str(
+        "rule R :\n  params p : 人\n  premise X p\n  conclude H p\n  source text \"示例法\" locator \"R\"\n",
+    );
+    let path = temp.write("attempts.std", &theory);
+    let output = run(&[path, ":review G 张三".to_owned()]);
+    assert_exit(&output, NOT_PROVED);
+    let out_text = stdout(&output);
+    let report = report_part(&out_text);
+    assert_contains(
+        report,
+        &["规则 ⟨R⟩ 的尝试次数已达上限（8 次）"],
+        "attempt-limit report",
+    );
+}
+
+#[test]
+fn an_inapplicable_candidate_is_not_reported_as_a_node_limit() {
+    let temp = TempDir::new("inapplicable");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred 违法 : 人 → Prop
+pred 其他 : 人 → Prop
+pred 受罚 : 人 → Prop
+obj 张三 : 人
+axiom 张三违法 : 违法 张三
+  identity verified
+  source text "判决" locator "第一页"
+  occurred_at 2030-01-01
+rule 旧法 :
+  params p : 人
+  premise 违法 p
+  premise 其他 p
+  conclude 受罚 p
+  effective 1999-01-01
+  repealed 2000-01-01
+  source text "示例法" locator "第一条"
+"#,
+    );
+    let output = run(&[theory, ":review 受罚 张三".to_owned()]);
+    assert_exit(&output, NOT_PROVED);
+    let out_text = stdout(&output);
+    let report = report_part(&out_text);
+    assert_contains(
+        report,
+        &[
+            "适用性：不适用（",
+            "未展开：候选规则「旧法」的适用性为不适用（",
+            "补上该前提也不会让它触发",
+        ],
+        "inapplicable report",
+    );
+    assert!(
+        !report.contains("节点上限"),
+        "an inapplicable candidate must not be described as a node-limit truncation:\n{report}"
+    );
+}
+
+#[test]
+fn an_undecidable_candidate_carries_the_reference_time_notice() {
+    let temp = TempDir::new("undecidable");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred 早 : 人 → Prop
+pred 晚 : 人 → Prop
+pred 结果 : 人 → Prop
+obj 张三 : 人
+axiom 早事实 : 早 张三
+  identity verified
+  source text "判决" locator "第一页"
+  occurred_at 2005-01-01
+axiom 晚事实 : 晚 张三
+  identity verified
+  source text "判决" locator "第二页"
+  occurred_at 2015-01-01
+rule 规则 :
+  params p : 人
+  premise 早 p
+  premise 晚 p
+  conclude 结果 p
+  effective 2000-01-01
+  repealed 2010-01-01
+  source text "示例法" locator "第一条"
+"#,
+    );
+    let output = run(&[theory, ":review 结果 张三".to_owned()]);
+    assert_exit(&output, NOT_PROVED);
+    let out_text = stdout(&output);
+    let report = report_part(&out_text);
+    assert_contains(
+        report,
+        &[
+            "适用性无法判定",
+            "需要为该争点显式指定引用时间（尚未实现）。",
+        ],
+        "undecidable report",
+    );
+}
+
+#[test]
+fn the_report_header_names_the_model_report_and_denies_legal_advice() {
+    let output = session(CLOSED, &[], &[":review 受罚 张三"]);
+    assert_exit(&output, PROVED);
+    let out_text = stdout(&output);
+    let report = report_part(&out_text);
+    let header: String = report.lines().take(4).collect::<Vec<_>>().join("\n");
+    assert!(
+        header.contains("模型内推导报告"),
+        "the first lines must declare the report is model-internal:\n{header}"
+    );
+    assert!(
+        header.contains("不是法律意见"),
+        "the first lines must deny legal advice:\n{header}"
+    );
+}
+
+#[test]
+fn issue_scan_truncation_uses_the_explicit_marker() {
+    let temp = TempDir::new("issue-limit");
+    let mut theory = String::from("sort 人\nobj 张三 : 人\n");
+    for index in 0..33 {
+        theory.push_str(&format!(
+            "pred P{index} : 人 → Prop\npred Q{index} : 人 → Prop\n"
+        ));
+    }
+    for index in 0..33 {
+        theory.push_str(&format!(
+            "rule R{index} :\n  params p : 人\n  premise Q{index} p\n  conclude P{index} p\n  source text \"示例法\" locator \"{index}\"\n"
+        ));
+    }
+    let path = temp.write("issues.std", &theory);
+    let output = run(&[path, ":review P0 张三".to_owned()]);
+    assert_exit(&output, NOT_PROVED);
+    let out_text = stdout(&output);
+    let report = report_part(&out_text);
+    assert_contains(
+        report,
+        &[
+            "当前事实集下可争的结论 32 条",
+            "已截断：可争的结论已达到上限（32 条）",
+        ],
+        "issue-limit report",
+    );
+}
+
+#[test]
+fn a_rule_in_both_a_proof_and_a_gap_has_one_applicability_wording() {
+    let temp = TempDir::new("one-applicability");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred A : 人 → Prop
+pred B : 人 → Prop
+obj 甲 : 人
+obj 乙 : 人
+axiom 甲成立 : A 甲
+  identity verified
+  source text "判决" locator "第一页"
+rule R :
+  params p : 人
+  premise A p
+  conclude B p
+  source text "示例法" locator "第一条"
+"#,
+    );
+    let output = run(&[theory, ":review B 甲".to_owned()]);
+    assert_exit(&output, PROVED);
+    let out_text = stdout(&output);
+    let report = report_part(&out_text);
+    let rules = section(report, "三、规则与出处");
+    assert_eq!(
+        rules.matches("适用性：").count(),
+        1,
+        "the same rule must not print two differently-worded applicability lines:\n{rules}"
+    );
+}
+
+#[test]
+fn a_read_only_destination_fails_closed_with_an_explicit_message() {
+    let temp = TempDir::new("read-only");
+    let destination = temp.path.join("只读报告.md");
+    fs::write(&destination, "原始内容").expect("write original");
+    let original_permissions = fs::metadata(&destination).expect("metadata").permissions();
+    let mut permissions = original_permissions.clone();
+    permissions.set_readonly(true);
+    fs::set_permissions(&destination, permissions).expect("set read-only");
+    let command = format!(":review 受罚 张三 --out \"{}\"", destination.display());
+    let output = session(CLAIM_GAP, &[], &[command.as_str()]);
+    assert_exit(&output, COMMAND_ERROR);
+    let err = stderr(&output);
+    assert!(
+        err.contains("目标不可写（只读）"),
+        "a read-only destination must have an explicit error:\n{err}"
+    );
+    assert_eq!(
+        fs::read_to_string(&destination).expect("read original"),
+        "原始内容",
+        "a failed write must not change the target"
+    );
+    let metadata = fs::metadata(&destination).expect("metadata after");
+    assert!(metadata.permissions().readonly());
+    fs::set_permissions(&destination, original_permissions).expect("restore permissions");
 }
