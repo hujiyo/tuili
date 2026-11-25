@@ -170,7 +170,7 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 | 命令 | 作用 |
 |---|---|
 | `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则 |
-| `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签；解释显示为 `interpret` 并附方向与来源摘要（`〔方向 …〕〔来源 …〕`）。规则与事实已记录的生效区间、管辖、地域和发生时间/地点以 `〔生效 from..to〕`、`〔管辖 CN〕`、`〔地域 CN-HN〕`、`〔发生 2020-05-06〕`、`〔发生地 CN-HN〕` 显示，未声明的字段不打印占位符；区间端点继承自包清单时标 `（继承）`，规则自写时标 `（规则）`。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
+| `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签；解释显示为 `interpret` 并附方向与来源摘要（`〔方向 …〕〔来源 …〕`）。规则与事实已记录的生效区间、管辖、地域和发生时间/地点以 `〔生效 from..to〕`、`〔管辖 CN〕`、`〔地域 CN-HN〕`、`〔发生 2020-05-06〕`、`〔发生地 CN-HN〕` 显示，未声明的字段不打印占位符；区间端点继承自包清单时标 `（继承）`，规则自写时标 `（规则）`。规则只显示已声明的举证/证明标准：`〔举证 claimant · 标准 preponderance〕`，有例外声明时再显示 `〔例外举证 … · 例外标准 …〕`，未声明的字段不显示占位。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
 | `:given <命题>` | 以「用户陈述」身份手工登记一条事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示。手工登记的事实不记录发生时间/地点（不会被会话基准日填充） |
 | `:asof [YYYY-MM-DD]` | 无参数打印会话基准日与来源（`命令行` / `会话命令` / `未设置`）；带参数校验并设置同一会话值，供 `:cert` 记录、`:verify-cert` 比对。不参与推理，也不改变规则是否触发 |
 | `:jurisdiction [代码]` | 无参数打印会话管辖与来源；带参数校验并设置同一会话值。它是多法域门禁的答案，也是证书环境身份的一部分；不会用代码过滤规则 |
@@ -1096,6 +1096,10 @@ rule 住宅不受侵犯 :
   repealed 2021-01-01              -- 仅规则：失效日（不含当天）；须与 effective 同用且更晚
   jurisdiction CN                  -- 仅规则：法律体系/制定机关代码，可省略
   territory CN-HN                  -- 仅规则：地域代码，可省略
+  burden claimant                 -- 正面要件的举证责任（可省略）
+  standard preponderance          -- 正面要件的证明标准（可省略）
+  exception_burden respondent     -- 该规则全部 unless 的举证责任（可省略）
+  exception_standard clear_and_convincing   -- 例外的证明标准（可省略）
   source text "宪法" locator "第三十九条" version "2018"
          effective "1982-12-04" jurisdiction "CN"
          quote "中华人民共和国公民的住宅不受侵犯。禁止非法搜查或者非法侵入公民的住宅。"
@@ -1167,6 +1171,34 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 - `interpret` 必须有另起一行的 `direction`（literal / expand / narrow / analogy，无默认）与至少一条
   另起一行的 `source`，来源的 `text`、`locator`、`version` 都非空；`from`/`to` 必须是命题（`Sort 0`），
   概念到概念的解释明确拒绝。加载后它是不透明常量，不进入推理，也不改变证书。
+
+### 举证责任与证明标准（声明层）
+
+规则体内可以另起一行声明四个子句，每个子句独占一行、每个最多出现一次：
+
+- `burden claimant|respondent|court`：规则的正面要件由谁证明。三个取值是**相对角色**，
+  不是当事人姓名：`claimant`（主张方）、`respondent`（相对方）、`court`（法院职权）。
+- `standard preponderance|clear_and_convincing|beyond_reasonable_doubt`：正面要件的证明标准。
+- `exception_burden claimant|respondent|court`：该规则**全部** `unless`（抗辩/例外）由谁证明。
+- `exception_standard preponderance|clear_and_convincing|beyond_reasonable_doubt`：
+  该规则全部 `unless` 的证明标准。
+
+四条都可省略。省略即**未声明**（内核里是 `None`），不会被默认成 `claimant` 或
+`preponderance`，也不参与推理、冲突裁决、排序或证书生成。证明标准只是标签，
+系统不给它们任何数值或概率。非法取值与缺取值是解析错误，带源码行列、规则名、
+字段名与允许的取值集合；同一子句重复也是解析错误，指出规则名、字段名与行列。
+`exception_*` 只对带 `unless` 的规则有意义，写在没有任何例外的规则上是加载错误。
+
+`:inspect` 只显示已声明的字段，未声明的字段不显示占位：
+
+```
+  rule  有声明 : …  〔举证 claimant · 标准 preponderance〕  〔例外举证 respondent · 例外标准 clear_and_convincing〕
+  rule  只有标准 : …  〔标准 beyond_reasonable_doubt〕
+  rule  未声明 : …
+```
+
+**当前只做到声明层**：这些字段可加载、可展示，但还不进入推理、`:why` / `:gap` / `:explain`
+或证书。"现在缺的那份证据应该由谁提出"的报告留给后续，证书格式（v5）不变。
 
 ## 架构与职责边界
 
@@ -1438,6 +1470,10 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   15 partial / 17 indexed / 105 needs_ontology），`:audit` 显示它、`:packs` 通过清单的 `corpus`
   链接显示计数与本体缺口；`:load` 不读取语料。证书 v5 记录导出时的包身份/哈希、profile 与
   链接语料的文件哈希，但多个文件加载后仍合并成一个扁平环境。
+- **举证责任与证明标准只有声明层。** 规则可以带 `burden` / `standard` /
+  `exception_burden` / `exception_standard`，`:inspect` 也会显示已声明的字段；但推理、
+  冲突裁决、`:why` / `:gap` / `:explain` 与证书都还不读取它们，未声明的字段也不会被补成
+  默认值。把“缺的那份证据该由谁提出”写进报告、把举证责任写进证书，留给后续。
 - **同一结论多路径只留一条。** `build_nodes` 用 `or_insert`，另一条推导及其出处丢失。
 
 ### 修复顺序
@@ -1465,9 +1501,9 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 952 个：kernel 24、lang 154、reason 79、cert 196、cli 335、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 971 个：kernel 25、lang 168、reason 79、cert 196、cli 339、lawpack 164（含 1 个 doc test）。
 
-- `crates/kernel/tests/kernel.rs`（24）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
+- `crates/kernel/tests/kernel.rs`（25）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
   `types_stay_predicative`（Type 层不许自包含），以及规则常量的两条：
   类型是 `∀ 参数, 前提 → 结论`，应用到全部参数与前提后正好得到结论；
@@ -1475,7 +1511,8 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   另有一条固定的加载期拒绝：参数与前提 binder 重名；`pred` 的共域必须是 `Prop`
   （`人 → 人` 被拒，`def` 别名先展开再判形状）；事实与常量声明的类型边界：
   `Fact` 的类型必须是命题、`Axiom` 不能断言命题；`FactIdentity` 五个关键字/中文标签/
-  `is_strict`/`seeds_derivation` 的表驱动用例；以及来源渲染的几条：
+  `is_strict`/`seeds_derivation` 的表驱动用例；`Burden` / `Standard` 三个取值的关键字、
+  `parse` 往返与允许集合；以及来源渲染的几条：
   `one_line` 保持旧格式并转义控制字符、字面反斜杠与不可见格式字符，`full` 逐行列出全部非空字段并转义。
 - `crates/lang/tests/lang.rs`（29）：最小规则和 `contrary` 声明能加载；`pred` 共域不是 `Prop` 时
   加载失败并指出声明名与类型，空/一阶/高阶谓词以及函数、类型别名的 `def` 不受影响；
@@ -1489,6 +1526,10 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   模块默认 `assumed`；未知身份关键字、缺关键字、重复子句、写在 source 同一行都报解析错误；
   非命题 `axiom` 无身份可加载、带身份被拒；声明形状的 `identity 定义 : …` 不被前一条事实吞掉，
   由项解析器在它自己的行列报错。
+- `crates/lang/tests/burden.rs`（12）：举证责任/证明标准的声明层——四个子句各自解析全部允许取值、
+  任意顺序同时出现；省略即为 `None`、加载后仍是 `None`（不默认成 claimant/preponderance）；
+  加载后四个字段原样进入 `RuleDecl`；非法取值与缺取值报错并给出规则名、字段名与允许集合；
+  重复子句在其关键字处报错（行 13 列 3）。
 - `crates/lang/src/module.rs`（4 个单元测试）：`LoadError` 的 Lean 风格渲染——有位置时
   `x.std:2:3: error: ...`，无位置时 `x.std: error: ...`；`Display` 始终只输出消息本身；
   `escape_path` 保留 Windows 反斜杠，把换行/回车/制表符与控制、格式字符写成短转义或
@@ -1641,6 +1682,11 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   都显示 `〔用户陈述〕`。此外 `:given` 不能改写环境已登记的 `verified` 身份；`:fact assumed` 之后
   `:fact add` 同一命题被拒绝且不打印假成功，两次相同身份允许；`:gap` 与 `:why` 的缺口说明都在
   阻断条件后显示 `〔用户陈述〕`。
+- `crates/cli/tests/burden.rs`（4）：举证责任/证明标准的端到端——`:inspect` 显示
+  `〔举证 claimant · 标准 preponderance〕` 与 `〔例外举证 respondent · 例外标准 clear_and_convincing〕`，
+  只声明标准或只声明例外举证的规则不出现多余分组、未声明的规则不显示占位；
+  声明这些子句前后 `:why` 的推导与 `:cert` 的 JSON 逐字节相同（证明不参与推理）；
+  非法取值经 `:load` 以 `错误：` 前缀、带规则名/字段名/允许集合退出 `2`。
 - `crates/cli/tests/environment.rs`（30）：默认环境与 `std env` 端到端——仓库根下 `env` 打印
   `cn.default`、description、`official`、版本映射与锁哈希、锁校验与环境加载通过；`--profile cn`
   解析别名；`--no-default-packs` 下 env 报告未启用但仍校验锁，事实-only 示例加载失败并追加

@@ -21,7 +21,9 @@ pub mod norm;
 pub mod pretty;
 pub mod term;
 
-pub use env::{Ctx, Decl, DeclKind, Env, FactIdentity, InterpretationDirection, RuleDecl};
+pub use env::{
+    Burden, Ctx, Decl, DeclKind, Env, FactIdentity, InterpretationDirection, RuleDecl, Standard,
+};
 pub use error::{Error, Result};
 pub use meta::{Scope, ScopeOrigin};
 pub use term::{name, Expr, Level, Name};

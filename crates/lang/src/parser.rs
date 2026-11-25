@@ -21,6 +21,10 @@
 //!           | 'unless' term
 //!           | 'defeated_by' IDENT
 //!           | 'prefer' IDENT
+//!           | 'burden' burden_value
+//!           | 'standard' standard_value
+//!           | 'exception_burden' burden_value
+//!           | 'exception_standard' standard_value
 //!           | 'source' (source_key STRING)+
 //!           | 'effective' DATE | 'repealed' DATE
 //!           | 'jurisdiction' CODE | 'territory' CODE
@@ -30,6 +34,9 @@
 //!           -- every source clause (at least one is required and text,
 //!           -- locator and version must be non-empty). Both sides are
 //!           -- application terms: an arrow inside one needs parentheses.
+//! burden_value   := 'claimant' | 'respondent' | 'court'
+//! standard_value := 'preponderance' | 'clear_and_convincing'
+//!                 | 'beyond_reasonable_doubt'
 //! priority := 'priority' IDENT 'over' IDENT source*
 //! DIRECTION := 'literal' | 'expand' | 'narrow' | 'analogy'
 //! source_key := 'text' | 'locator' | 'version' | 'effective' | 'quote' | 'url'
@@ -47,7 +54,7 @@
 //! clause unless a term is syntactically incomplete. This keeps rule blocks
 //! looking like prose, which is what a legal reader needs.
 
-use std_deduce_kernel::{FactIdentity, InterpretationDirection};
+use std_deduce_kernel::{Burden, FactIdentity, InterpretationDirection, Standard};
 
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
@@ -836,6 +843,12 @@ impl Parser {
         let mut defeaters = Vec::new();
         let mut sources = Vec::new();
         let mut scope = ScopeSpec::default();
+        // The pleading clauses are optional and each may appear at most once.
+        // `None` here means "not declared": nothing fills in a default.
+        let mut burden = None;
+        let mut standard = None;
+        let mut exception_burden = None;
+        let mut exception_standard = None;
 
         loop {
             // Whether the next clause starts on a fresh line. Scope clauses
@@ -909,6 +922,38 @@ impl Parser {
                     self.bump();
                     defeaters.push(Defeater::Prefer(self.ident()?));
                 }
+                "burden" => {
+                    let (line, col) = (self.here().line, self.here().col);
+                    self.bump();
+                    if burden.is_some() {
+                        return Err(duplicate_clause(&name, "burden", line, col));
+                    }
+                    burden = Some(self.burden_value(&name, "burden")?);
+                }
+                "standard" => {
+                    let (line, col) = (self.here().line, self.here().col);
+                    self.bump();
+                    if standard.is_some() {
+                        return Err(duplicate_clause(&name, "standard", line, col));
+                    }
+                    standard = Some(self.standard_value(&name, "standard")?);
+                }
+                "exception_burden" => {
+                    let (line, col) = (self.here().line, self.here().col);
+                    self.bump();
+                    if exception_burden.is_some() {
+                        return Err(duplicate_clause(&name, "exception_burden", line, col));
+                    }
+                    exception_burden = Some(self.burden_value(&name, "exception_burden")?);
+                }
+                "exception_standard" => {
+                    let (line, col) = (self.here().line, self.here().col);
+                    self.bump();
+                    if exception_standard.is_some() {
+                        return Err(duplicate_clause(&name, "exception_standard", line, col));
+                    }
+                    exception_standard = Some(self.standard_value(&name, "exception_standard")?);
+                }
                 "source" => {
                     // A source clause inside a rule body names the rule in its
                     // diagnostics, so a malformed quote or a misplaced scope
@@ -962,6 +1007,10 @@ impl Parser {
             defeaters,
             sources,
             scope,
+            burden,
+            standard,
+            exception_burden,
+            exception_standard,
         })
     }
 
@@ -1030,6 +1079,65 @@ impl Parser {
             });
         }
         Ok(())
+    }
+
+    /// The written value of a `burden` / `exception_burden` clause together
+    /// with its position. A value must follow on the same line; a clause whose
+    /// value is missing is an error, not an omitted declaration.
+    fn burden_value(&mut self, rule: &str, field: &str) -> PResult<Burden> {
+        let (written, line, col) = self.clause_value(rule, field, Burden::labels())?;
+        match Burden::parse(&written) {
+            Some(value) => Ok(value),
+            None => Err(ParseError {
+                msg: format!(
+                    "规则 `{rule}` 的 {field} 取值 `{written}` 非法；允许的取值：{}",
+                    Burden::labels().join("、")
+                ),
+                line,
+                col,
+            }),
+        }
+    }
+
+    /// The written value of a `standard` / `exception_standard` clause.
+    fn standard_value(&mut self, rule: &str, field: &str) -> PResult<Standard> {
+        let (written, line, col) = self.clause_value(rule, field, Standard::labels())?;
+        match Standard::parse(&written) {
+            Some(value) => Ok(value),
+            None => Err(ParseError {
+                msg: format!(
+                    "规则 `{rule}` 的 {field} 取值 `{written}` 非法；允许的取值：{}",
+                    Standard::labels().join("、")
+                ),
+                line,
+                col,
+            }),
+        }
+    }
+
+    /// Read one keyword value for a rule clause, or report that it is missing
+    /// together with the allowed set. The value must be on the clause's own
+    /// line: a newline here means the author forgot it.
+    fn clause_value(
+        &mut self,
+        rule: &str,
+        field: &str,
+        allowed: &[&str],
+    ) -> PResult<(String, usize, usize)> {
+        let (line, col) = (self.here().line, self.here().col);
+        if let Tok::Ident(written) = self.peek().clone() {
+            self.bump();
+            Ok((written, line, col))
+        } else {
+            Err(ParseError {
+                msg: format!(
+                    "规则 `{rule}` 的 {field} 缺少取值；允许的取值：{}",
+                    allowed.join("、")
+                ),
+                line,
+                col,
+            })
+        }
     }
 
     fn skip_newlines_in_list(&mut self) {
@@ -1444,6 +1552,17 @@ fn is_item_keyword(keyword: &str) -> bool {
             | "assert"
             | "show"
     )
+}
+
+/// A repeated rule clause is an error: the second declaration would silently
+/// override or duplicate the first, so the file would be ambiguous. The
+/// position points at the repeated clause's keyword.
+fn duplicate_clause(rule: &str, field: &str, line: usize, col: usize) -> ParseError {
+    ParseError {
+        msg: format!("规则 `{rule}` 的 {field} 重复声明；同一子句只能出现一次"),
+        line,
+        col,
+    }
 }
 
 /// Parse a whole program.

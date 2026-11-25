@@ -515,6 +515,10 @@ impl Library {
                     defeaters,
                     sources,
                     scope: scope_spec,
+                    burden,
+                    standard,
+                    exception_burden,
+                    exception_standard,
                 } => {
                     // The scope clauses are metadata; validate them before any
                     // elaboration so a bad date is reported as such and not as
@@ -631,6 +635,17 @@ impl Library {
                         }
                     }
 
+                    // Pleading clauses on the exceptions are vacuous without an
+                    // exception to plead: refuse the declaration instead of
+                    // storing metadata that can never be read.
+                    if unlesses.is_empty()
+                        && (exception_burden.is_some() || exception_standard.is_some())
+                    {
+                        return Err(LoadError::new(format!(
+                            "`rule {n}`：`exception_burden`/`exception_standard` 只对带 `unless` 的规则有意义，该规则没有例外"
+                        )));
+                    }
+
                     let rdecl = std_deduce_kernel::RuleDecl {
                         params: rule_params,
                         premises: rule_premises,
@@ -640,6 +655,13 @@ impl Library {
                         prefers,
                         sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
                         declared_in: namespace.as_ref().map(std_deduce_kernel::name),
+                        // The pleading clauses are declaration metadata: they
+                        // are stored as written (or left undeclared) and are
+                        // not read by the reasoner or the certificate.
+                        burden,
+                        standard,
+                        exception_burden,
+                        exception_standard,
                     };
                     let ty = std_deduce_kernel::env::rule_type(&rdecl);
                     let decl = Decl {

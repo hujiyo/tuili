@@ -338,7 +338,7 @@ use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
 use std_deduce_kernel::meta::{validate_date, validate_jurisdiction_code, Scope, ScopeOrigin};
 use std_deduce_kernel::pretty::print_expr;
-use std_deduce_kernel::{check, Expr, Name};
+use std_deduce_kernel::{check, Expr, Name, RuleDecl};
 use std_deduce_lang::module::escape_path;
 use std_deduce_lang::{elab, Library, LoadOptions, LoadReport};
 use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus, CoverageStatus};
@@ -895,6 +895,12 @@ impl Session {
                         // "default" placeholder.
                         let scope = declared_scope_text(&decl.scope);
                         let occurrence = declared_occurrence_text(decl);
+                        // A rule shows the burden/standard clauses it declared;
+                        // undeclared fields print nothing at all.
+                        let pleading = match &decl.kind {
+                            DeclKind::Rule(rule) => rule_pleading_suffix(rule),
+                            _ => String::new(),
+                        };
                         // A priority has no user-written name: its ledger name
                         // is a synthetic key. Print the surface declaration the
                         // module wrote, the same way the load report does.
@@ -920,7 +926,7 @@ impl Session {
                         };
                         writeln!(
                             out,
-                            "  {kind} {name} : {}{identity}{extra}{scope}{occurrence}{namespace}",
+                            "  {kind} {name} : {}{identity}{extra}{scope}{occurrence}{pleading}{namespace}",
                             print_expr(&decl.ty)
                         )
                         .ok();
@@ -3914,6 +3920,36 @@ fn won_conflict_note(
         return Ok(Some((Expr::from(other), other_by.clone(), basis.clone())));
     }
     Ok(None)
+}
+
+/// The burden/standard annotations of a rule, as `:inspect` displays them.
+///
+/// Only declared fields are shown: an omitted clause prints nothing, neither a
+/// placeholder nor a default. The positive group and the exception group are
+/// independent; a group never contains a dangling `·`.
+fn rule_pleading_suffix(rule: &RuleDecl) -> String {
+    let mut groups = Vec::new();
+    let mut requirements = Vec::new();
+    if let Some(burden) = rule.burden {
+        requirements.push(format!("举证 {}", burden.label()));
+    }
+    if let Some(standard) = rule.standard {
+        requirements.push(format!("标准 {}", standard.label()));
+    }
+    if !requirements.is_empty() {
+        groups.push(format!("  〔{}〕", requirements.join(" · ")));
+    }
+    let mut exceptions = Vec::new();
+    if let Some(burden) = rule.exception_burden {
+        exceptions.push(format!("例外举证 {}", burden.label()));
+    }
+    if let Some(standard) = rule.exception_standard {
+        exceptions.push(format!("例外标准 {}", standard.label()));
+    }
+    if !exceptions.is_empty() {
+        groups.push(format!("  〔{}〕", exceptions.join(" · ")));
+    }
+    groups.concat()
 }
 
 /// How one side of a conflict is supported, for a `:why` line.

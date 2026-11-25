@@ -571,6 +571,10 @@ fn kernel_rejects_a_malformed_telescope() {
         prefers: vec![],
         sources: vec![],
         declared_in: None,
+        burden: None,
+        standard: None,
+        exception_burden: None,
+        exception_standard: None,
     };
     let _ = rule;
     // A rule whose conclusion is a bare predicate symbol is not a proposition.
@@ -584,6 +588,10 @@ fn kernel_rejects_a_malformed_telescope() {
         prefers: vec![],
         sources: vec![],
         declared_in: None,
+        burden: None,
+        standard: None,
+        exception_burden: None,
+        exception_standard: None,
     };
     let decl = Decl {
         name: name("r2"),
@@ -1816,6 +1824,10 @@ fn a_priority_self_loop_is_reported_as_a_cycle() {
             prefers: vec![],
             sources: vec![],
             declared_in: Some(name("x")),
+            burden: None,
+            standard: None,
+            exception_burden: None,
+            exception_standard: None,
         };
         let ty = std_deduce_kernel::env::rule_type(&rule);
         env.insert(

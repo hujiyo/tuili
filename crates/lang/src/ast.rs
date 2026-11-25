@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use std_deduce_kernel::{FactIdentity, InterpretationDirection};
+use std_deduce_kernel::{Burden, FactIdentity, InterpretationDirection, Standard};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
@@ -99,6 +99,16 @@ pub enum Item {
         /// from the containing pack's manifest by the loader; the parser only
         /// records what was written.
         scope: ScopeSpec,
+        /// `burden claimant|respondent|court`: who must prove the positive
+        /// requirements. `None` means the file declared nothing; the parser
+        /// never substitutes a default.
+        burden: Option<Burden>,
+        /// `standard preponderance|clear_and_convincing|beyond_reasonable_doubt`.
+        standard: Option<Standard>,
+        /// `exception_burden …`: who must prove every `unless` of this rule.
+        exception_burden: Option<Burden>,
+        /// `exception_standard …`: the standard for every `unless` of this rule.
+        exception_standard: Option<Standard>,
     },
     /// `interpret 解释A : P → Q` followed by a required `direction` line and
     /// at least one `source` line. Both sides must be propositions; the

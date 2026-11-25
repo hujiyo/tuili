@@ -197,6 +197,8 @@ fn closed_env_rejects_every_case_declaration_kind() {
     rule.push_str("  params x : cn.constitution.人\n");
     rule.push_str("  premise cn.constitution.中国国籍 x\n");
     rule.push_str("  conclude cn.constitution.公民 x\n");
+    rule.push_str("  burden claimant\n");
+    rule.push_str("  standard preponderance\n");
     rule.push_str("  source text \"案情\" locator \"测试\"\n");
     let mut contrary = String::from("pred 恶意左 : cn.constitution.人 → Prop\n");
     contrary.push_str("pred 恶意右 : cn.constitution.人 → Prop\ncontrary 恶意左 恶意右\n");
