@@ -1,0 +1,41 @@
+-- 复核报告示例四：三层缺口。
+-- 「应罚」缺「情节严重」，「情节严重」缺「损害」，「损害」缺「行为」，
+-- 而「行为」没有任何规则可以推出。报告应把整棵树递归展开到叶子，
+-- 并在每一层写出该层规则的举证责任与证明标准。
+
+sort 人
+pred 违法 : 人 → Prop
+pred 行为 : 人 → Prop
+pred 损害 : 人 → Prop
+pred 情节严重 : 人 → Prop
+pred 应罚 : 人 → Prop
+obj 张三 : 人
+
+axiom 张三违法 : 违法 张三
+  identity user_asserted
+  source text "用户陈述" locator "会话" note "未经独立证明"
+
+rule 处罚 :
+  params p : 人
+  premise 违法 p
+  premise 情节严重 p
+  conclude 应罚 p
+  burden claimant
+  standard preponderance
+  source text "示例法" locator "第五条" version "2024"
+
+rule 严重 :
+  params p : 人
+  premise 损害 p
+  conclude 情节严重 p
+  burden claimant
+  standard clear_and_convincing
+  source text "示例法" locator "第六条" version "2024"
+
+rule 损害认定 :
+  params p : 人
+  premise 行为 p
+  conclude 损害 p
+  burden respondent
+  standard preponderance
+  source text "示例法" locator "第七条" version "2024"

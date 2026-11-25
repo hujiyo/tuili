@@ -849,6 +849,7 @@ const COVERED_EXAMPLES: &[&str] = &[
     "复核-闭合证明.std",
     "复核-用户陈述与缺口.std",
     "复核-开放概念与生效区间.std",
+    "复核-三层缺口.std",
 ];
 
 #[test]

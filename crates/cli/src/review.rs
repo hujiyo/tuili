@@ -75,10 +75,6 @@ struct RuleRecord {
     gap_sources: Vec<Source>,
     /// Applicability texts of the gap-tree candidates.
     gap_verdicts: BTreeSet<String>,
-    /// Whether the rule appears on the root's proof graph.
-    in_root: bool,
-    /// Whether the rule appears as a candidate in a gap tree.
-    in_gap: bool,
     /// The first non-positive applicability verdict, if any, for the question
     /// section. `None` means every recorded instance is `适用`.
     needs_applicability_review: Option<String>,
@@ -92,8 +88,6 @@ impl RuleRecord {
             cert_verdicts: BTreeSet::new(),
             gap_sources: Vec::new(),
             gap_verdicts: BTreeSet::new(),
-            in_root: false,
-            in_gap: false,
             needs_applicability_review: None,
         }
     }
@@ -137,7 +131,7 @@ pub(crate) fn render_review(
     // The root's proposition, or an explicit statement that there is none.
     let root_proposition = match certificate.root {
         Some(root) => node_proposition_text(certificate, root)?,
-        None => "证书没有根节点".to_owned(),
+        None => "本案推导没有结论命题".to_owned(),
     };
     let root_expr = certificate
         .root
@@ -158,7 +152,7 @@ pub(crate) fn render_review(
 
     let rules = collect_rules(certificate, trust, root_gap, &issues_sorted);
 
-    write_conclusion_section(&mut out, certificate, trust, &root_proposition);
+    write_conclusion_section(&mut out, certificate, trust, dependency, &root_proposition);
 
     // Sections are rendered in order; each records the item numbers the
     // question section cites, so a question can always point at an item the
@@ -186,7 +180,6 @@ pub(crate) fn render_review(
     )?;
     let gap_inputs = GapSection {
         env,
-        certificate,
         root_gap,
         issues: &issues_sorted,
         root_expr: root_expr.as_ref(),
@@ -214,12 +207,14 @@ fn write_header(out: &mut String) {
     out.push_str("# 律师复核报告\n\n");
     out.push_str(
         "> **本报告是模型内推导报告，不是法律意见。** \
-         它只陈述 std-deduce 在当前理论内记录的推导、缺口、冲突与信任标签；\
-         信任标签只表示模型内的确定性（例如「已验证」只表示证书在严格事实下证明了根、\
-         根可达图里没有与根相关的未决事项），不表示法律上正确，也不能代替律师对事实、\
+         它只整理本案已有的推导、缺口、冲突与信任标签；\
+         信任标签只表示模型内的确定性（例如「已验证」只表示结论在严格事实下已证明、\
+         没有与结论相关的未决事项），不表示法律上正确，也不能代替律师对事实、\
          法律解释与计算结果的判断。\n\n",
     );
-    out.push_str("- 报告来源：证书（格式 v7）、缺口树、规则举证元数据、信任标签（派生视图）。\n");
+    out.push_str(
+        "- 报告范围：本案推导、缺口展开、规则声明与信任标签；不新增推导，也不是法律意见。\n",
+    );
     out.push_str(
         "- 隐私边界：命题与来源文本中的人名、地名等原样保留，本报告未做脱敏（脱敏尚未实现）。\n",
     );
@@ -230,25 +225,25 @@ fn write_conclusion_section(
     out: &mut String,
     certificate: &Certificate,
     trust: &TrustReport,
+    dependency: Option<&OpenConceptDependency>,
     root_proposition: &str,
 ) {
     begin_section(out, "## 一、结论与信任标签");
     out.push_str(&format!("**结论命题：**「{root_proposition}」\n"));
     let root_state = match certificate.root {
-        None => "否（证书没有根节点）".to_owned(),
+        None => "否（本案推导没有结论节点）".to_owned(),
         Some(root) if matches!(certificate.nodes.get(root), Some(Node::Gap { .. })) => {
-            "否（根是缺口，结论未获证明）".to_owned()
+            "否（结论未获证明）".to_owned()
         }
-        Some(root) if trust.root_proved() => format!("是（根节点 {root} 已证明）"),
-        Some(_) => "否（根的可达推导里仍有缺口）".to_owned(),
+        Some(_) if trust.root_proved() => "是（结论已证明）".to_owned(),
+        Some(_) => "否（结论的证明里仍有缺口）".to_owned(),
     };
     out.push_str(&format!("**根是否可达：**{root_state}\n"));
-    out.push_str(&format!("**{}**\n", trust.summary()));
     out.push_str("信任标签（模型内确定性，不表示法律上正确）：\n");
     for label in ALL_LABELS {
         let name = label.name_zh();
         if trust.contains(label) {
-            let evidence = trust.evidence(label).join("；");
+            let evidence = label_evidence(certificate, trust, dependency, label);
             if evidence.is_empty() {
                 out.push_str(&format!("- 「{name}」：成立\n"));
             } else {
@@ -264,19 +259,99 @@ fn write_conclusion_section(
     out.push_str("信任标签不涵盖时空适用性：规则实例的判定依据单独列在「规则与出处」。\n");
 }
 
+/// A lawyer-facing evidence line for one trust label. The trust report's own
+/// evidence for `需律师判断` names obligation ids; this renderer replaces them
+/// with plain counts, so the report does not expose internal identifiers.
+fn label_evidence(
+    certificate: &Certificate,
+    trust: &TrustReport,
+    dependency: Option<&OpenConceptDependency>,
+    label: TrustLabel,
+) -> String {
+    if label == TrustLabel::NeedsLawyerJudgment {
+        let mut parts = Vec::new();
+        let concepts = dependency
+            .map(|dependency| dependency.concepts.len())
+            .unwrap_or(0);
+        if concepts > 0 {
+            parts.push(format!("{concepts} 个开放概念需要解释"));
+        }
+        let extensions = certificate
+            .open_obligations
+            .iter()
+            .filter(|obligation| {
+                obligation.kind == ObligationKind::NeedsHumanDetermination
+                    && obligation.id == LOCAL_EXTENSION_OBLIGATION_ID
+                    && obligation_is_root_relevant(trust, obligation)
+            })
+            .count();
+        if extensions > 0 {
+            parts.push(format!("{extensions} 项案件扩展需要律师确认"));
+        }
+        let human = certificate
+            .open_obligations
+            .iter()
+            .filter(|obligation| {
+                obligation.kind == ObligationKind::NeedsHumanDetermination
+                    && obligation.id != LOCAL_EXTENSION_OBLIGATION_ID
+                    && obligation_is_root_relevant(trust, obligation)
+            })
+            .count();
+        if human > 0 {
+            parts.push(format!("{human} 项需要人判断的事项"));
+        }
+        return parts.join("；");
+    }
+    lawyer_evidence(&trust.evidence(label).join("；"))
+}
+
+/// Whether a recorded item is attached to the conclusion's proof. A non-empty
+/// node list is authoritative; an empty list means the record was not localized
+/// and is treated as relevant, the same conservative rule the labels use.
+fn obligation_is_root_relevant(
+    trust: &TrustReport,
+    obligation: &std_deduce_cert::OpenObligation,
+) -> bool {
+    obligation.nodes.is_empty()
+        || obligation
+            .nodes
+            .iter()
+            .any(|node| trust.reachable_nodes().contains(node))
+}
+
+/// Rewrite the trust report's internal wording for a lawyer reader: no
+/// certificate/root-graph jargon, no obligation ids. The label's meaning is
+/// unchanged; only the display words are replaced.
+fn lawyer_evidence(text: &str) -> String {
+    let mut text = text.to_owned();
+    for (from, to) in [
+        ("根为缺口，结论未获证明", "结论未获证明"),
+        ("证书记录", "本案推导"),
+        ("与根相关", "与结论相关"),
+        ("根可达子图", "结论的证明"),
+        ("根推导", "结论的证明"),
+        ("根为缺口", "结论未获证明"),
+        ("根已证明", "结论已证明"),
+        ("根缺口", "结论缺口"),
+        ("未决义务", "未决事项"),
+        ("缺少前提义务", "缺少证据事项"),
+    ] {
+        text = text.replace(from, to);
+    }
+    text
+}
+
 fn absent_label_reason(label: TrustLabel) -> &'static str {
     match label {
         TrustLabel::NeedsLawyerJudgment => {
-            "证书记录里没有与根相关的开放概念、需人判断义务或案件扩展"
+            "本案推导没有与结论相关的开放概念、需人判断事项或案件扩展"
         }
-        TrustLabel::DisputeUnresolved => {
-            "证书没有与根相关的未决冲突，也没有与根相关的缺少来源或其他未解决事项"
-        }
-        TrustLabel::FactNeedsEvidence => "根已证明，且没有与根相关的缺少前提义务",
+        TrustLabel::DisputeUnresolved => "本案推导没有与结论相关的未决冲突，也没有其他未解决事项",
+        TrustLabel::FactNeedsEvidence => "结论已证明，且没有与结论相关的缺少证据事项",
         TrustLabel::DependsOnAssumption => {
-            "根未证明，或根推导没有使用用户陈述、分析假设、对方争议或解释"
+            "结论未证明，或结论的证明没有使用用户陈述、分析假设、对方争议或解释"
         }
-        TrustLabel::Verified => "根未证明，或根推导使用了主张，或仍有与根相关的未决事项",
+        TrustLabel::Verified => "结论未证明，或结论的证明使用了主张，或仍有与结论相关的未决事项",
     }
 }
 
@@ -290,12 +365,12 @@ fn write_issues_section(
     questions: &mut BTreeMap<u8, Vec<Question>>,
 ) -> Result<(), String> {
     begin_section(out, "## 二、争点");
-    out.push_str("争点：当前事实集下尚未证明、仍可被主张的结论（来自 :issues 扫描）。\n");
+    out.push_str("争点：当前事实集下尚未证明、仍可被主张的结论。\n");
     if issues_sorted.is_empty() {
-        out.push_str("当前事实集下没有可争的结论（:issues 扫描为空）。\n");
+        out.push_str("当前事实集下没有可争的结论。\n");
     } else {
         out.push_str(&format!(
-            "当前事实集下可争的结论 {} 条（按结构键排序）：\n",
+            "当前事实集下可争的结论 {} 条：\n",
             issues_sorted.len()
         ));
         for (index, tree) in issues_sorted.iter().enumerate() {
@@ -304,20 +379,20 @@ fn write_issues_section(
     }
     for limit in &issues.limits {
         out.push_str(&format!(
-            "- 扫描上限：{}；其余未列出。\n",
+            "- 展开上限：{}；其余未列出。\n",
             gap_limit_text(limit)
         ));
     }
     if !issues.uninstantiable.is_empty() {
         out.push_str(&format!(
-            "- 另有 {} 条规则无法在当前事实集上实例化（参数类型没有已声明的常量，或结论依赖前提证明）：{}\n",
+            "- 另有 {} 条规则因当前事实集缺少可枚举的对象，或结论依赖前提的证明，无法逐一检查其结论：{}\n",
             issues.uninstantiable.len(),
             format_limited_names(&issues.uninstantiable)
         ));
     }
     if !issues.excluded.is_empty() {
         out.push_str(&format!(
-            "- 另有 {} 条规则因所有可枚举实例都被时空适用性排除而未扫描：{}\n",
+            "- 另有 {} 条规则因时空适用性被排除，未作为争点检查：{}\n",
             issues.excluded.len(),
             issues
                 .excluded
@@ -353,7 +428,7 @@ fn write_issue_item(
             let names = candidate_names(&tree.candidates);
             if same_as_root {
                 out.push_str(&format!(
-                    "{number}. 「{goal}」：与根结论是同一命题；缺口见「缺口与举证」第 1 条。\n"
+                    "{number}. 「{goal}」：与结论是同一命题；缺口见「缺口与举证」第 1 条。\n"
                 ));
             } else {
                 out.push_str(&format!(
@@ -408,7 +483,6 @@ fn collect_rules(
             continue;
         };
         let record = rules.entry(rule.clone()).or_insert_with(RuleRecord::new);
-        record.in_root = true;
         if !record.root_nodes.contains(node_id) {
             record.root_nodes.push(*node_id);
         }
@@ -454,7 +528,6 @@ fn collect_gap_rules(tree: &GapTree, rules: &mut BTreeMap<String, RuleRecord>) {
         let record = rules
             .entry(candidate.rule.to_string())
             .or_insert_with(RuleRecord::new);
-        record.in_gap = true;
         for source in &candidate.sources {
             record.push_gap_source(&Source::from(source));
         }
@@ -491,74 +564,44 @@ fn write_rules_section(
     questions: &mut BTreeMap<u8, Vec<Question>>,
 ) {
     begin_section(out, "## 三、规则与出处");
-    out.push_str(
-        "规则与出处只列根推导使用的规则和本报告缺口树里的候选规则；\
-         证书固定点其他分支里的规则不列入。\n",
-    );
+    out.push_str("规则与出处只列本案结论的证明实际用到的规则，以及缺口中的候选规则。\n");
     if rules.is_empty() {
-        out.push_str("证书记录里没有用到任何规则。\n");
+        out.push_str("本案推导没有用到任何规则。\n");
         return;
     }
     for (index, (name, record)) in rules.iter().enumerate() {
         let number = index + 1;
         out.push_str(&format!("{number}. 规则「{}」\n", escape_control(name)));
         if record.root_nodes.is_empty() {
-            out.push_str("   - 根推导使用：否（只作为缺口候选规则）\n");
+            out.push_str("   - 用于结论的证明：否（只作为缺口候选规则）\n");
         } else {
-            out.push_str(&format!(
-                "   - 根推导使用：是（节点 {}）\n",
-                record
-                    .root_nodes
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("、")
-            ));
+            out.push_str("   - 用于结论的证明：是\n");
+        }
+        let mut sources: Vec<Source> = record.cert_sources.clone();
+        for source in &record.gap_sources {
+            if !sources.contains(source) {
+                sources.push(source.clone());
+            }
         }
         out.push_str(&format_source_line(
-            "证书出处",
+            "出处",
             "   ",
-            &record.cert_sources,
+            &sources,
             "证书未记录来源",
         ));
-        if record.in_gap {
-            let extra: Vec<Source> = record
-                .gap_sources
-                .iter()
-                .filter(|source| !record.cert_sources.contains(source))
-                .cloned()
-                .collect();
-            if extra.is_empty() {
-                if record.gap_sources.is_empty() {
-                    out.push_str("   - 缺口树补充出处：无（缺口树没有记录额外来源）\n");
-                } else {
-                    out.push_str("   - 缺口树补充出处：无（证书已经记录了同一份来源）\n");
-                }
-            } else {
-                out.push_str(&format_source_line(
-                    "缺口树补充出处",
-                    "   ",
-                    &extra,
-                    "缺口树未记录来源",
-                ));
-            }
+        let mut verdicts = BTreeSet::new();
+        for verdict in record
+            .cert_verdicts
+            .iter()
+            .chain(record.gap_verdicts.iter())
+        {
+            verdicts.insert(verdict.clone());
         }
-        if record.cert_verdicts.is_empty() && record.gap_verdicts.is_empty() {
-            out.push_str("   - 适用性：证书与缺口树都没有记录判定。\n");
+        if verdicts.is_empty() {
+            out.push_str("   - 适用性：没有记录判定。\n");
         } else {
-            for verdict in &record.cert_verdicts {
-                out.push_str(&format!("   - 适用性（证书记录）：{}\n", verdict));
-            }
-            let mut extra_gap_verdicts = 0usize;
-            for verdict in &record.gap_verdicts {
-                if record.cert_verdicts.contains(verdict) {
-                    continue;
-                }
-                extra_gap_verdicts += 1;
-                out.push_str(&format!("   - 适用性（缺口树记录）：{}\n", verdict));
-            }
-            if record.in_gap && !record.gap_verdicts.is_empty() && extra_gap_verdicts == 0 {
-                out.push_str("   - 缺口树判定与证书记录相同。\n");
+            for verdict in verdicts {
+                out.push_str(&format!("   - 适用性：{}\n", verdict));
             }
         }
         if record.cert_sources.is_empty() && record.gap_sources.is_empty() {
@@ -567,7 +610,7 @@ fn write_rules_section(
                 .or_default()
                 .push(Question {
                     text: format!(
-                        "规则「{}」的出处没有被证书或缺口树记录；请补充可核对的来源（文本、条号、版本、管辖、引文）。",
+                        "规则「{}」的出处没有记录；请补充可核对的来源（文本、条号、版本、管辖、引文）。",
                         escape_control(name)
                     ),
                     anchor: format!("「规则与出处」第 {number} 条"),
@@ -602,7 +645,7 @@ fn write_facts_section(
          不是证明；对方争议只记录对方的主张，不参与推导。\n",
     );
     if certificate.assumptions.is_empty() {
-        out.push_str("证书没有记录任何假设事实。\n");
+        out.push_str("本案推导没有记录任何假设事实。\n");
     } else {
         let reachable_assumptions: BTreeSet<usize> = trust
             .reachable_nodes()
@@ -629,14 +672,14 @@ fn write_facts_section(
             let proposition = cert_expr_text(&entry.proposition);
             let (identity, strictness) = identity_text(entry.identity);
             let relation = if reachable_assumptions.contains(&index) {
-                "根推导使用".to_owned()
+                "用于结论的证明".to_owned()
             } else if root_held.contains(&expression_key(&Expr::from(&entry.proposition))) {
-                "根缺口候选的已持有前提（缺口未闭合，不能当作证明）".to_owned()
+                "结论缺口已掌握的材料（缺口未闭合，不能当作证明）".to_owned()
             } else {
-                "未进入根推导（证书固定点的其他分支）".to_owned()
+                "未用于结论的证明（推导的其他部分）".to_owned()
             };
             out.push_str(&format!(
-                "- 「{proposition}」：身份：{identity}（{strictness}）；与根的关系：{relation}\n"
+                "- 「{proposition}」：身份：{identity}（{strictness}）；与结论的关系：{relation}\n"
             ));
             if let Some(label) = &entry.label {
                 out.push_str(&format!("  - 标签：{}\n", escape_control(label)));
@@ -665,11 +708,11 @@ fn write_facts_section(
 
     out.push_str("缺口命题（不是事实，只是缺少的证据）：\n");
     if root_gap.is_none() && issues_sorted.is_empty() {
-        out.push_str("- 无。根已完成证明，当前事实集下也没有可争结论。\n");
+        out.push_str("- 无。结论已证明，当前事实集下也没有可争结论。\n");
     } else {
         if let Some(tree) = root_gap {
             out.push_str(&format!(
-                "- 「{}」〔缺口〕：根结论未获证明；见「缺口与举证」第 1 条。\n",
+                "- 「{}」〔缺口〕：结论未获证明；见「缺口与举证」第 1 条。\n",
                 expr_text(&tree.goal)
             ));
         }
@@ -697,7 +740,6 @@ fn write_facts_section(
 /// object instead of a long argument list.
 struct GapSection<'a> {
     env: &'a Env,
-    certificate: &'a Certificate,
     root_gap: Option<&'a GapTree>,
     issues: &'a [&'a GapTree],
     root_expr: Option<&'a Expr>,
@@ -706,24 +748,24 @@ struct GapSection<'a> {
 
 /// Section five: every gap with what it lacks and who must prove it.
 ///
-/// The root's gap tree is expanded recursively. The gap trees of the other
-/// contestable conclusions are shown one level deep; the report says so instead
-/// of silently truncating them.
+/// The root's gap tree and every contestable conclusion's gap tree are expanded
+/// recursively with the reasoner's own tree: its depth, node and rule-attempt
+/// limits are already applied, and each node's limit marker is printed where it
+/// stopped the expansion.
 fn write_gaps_section(
     out: &mut String,
     inputs: &GapSection<'_>,
     questions: &mut BTreeMap<u8, Vec<Question>>,
 ) -> Result<(), String> {
     let env = inputs.env;
-    let certificate = inputs.certificate;
     let root_gap = inputs.root_gap;
     let issues_sorted = inputs.issues;
     let root_expr = inputs.root_expr;
     let pleadings = inputs.pleadings;
     begin_section(out, "## 五、缺口与举证");
     out.push_str(
-        "缺口：一条命题没有被任何可用的推导闭合，它和冲突是两回事（本节的展开来自推理器的缺口树，\
-         不是证书记录）。举证责任：谁应当提出证据；证明标准：证据应达到的程度。\
+        "缺口：一条命题没有被任何可用的推导闭合，它和冲突是两回事。\
+         举证责任：谁应当提出证据；证明标准：证据应达到的程度。\
          证明标准只是标签，不量化；未声明的字段写作未声明。\n",
     );
     let mut number = 0usize;
@@ -738,7 +780,7 @@ fn write_gaps_section(
                 .or_default()
                 .push(Question {
                     text: format!(
-                        "根结论「{}」未获证明；请确认缺少的证据是否存在，以及报告所列的举证责任与证明标准是否适用。",
+                        "结论「{}」未获证明；请确认缺少的证据是否存在，以及报告所列的举证责任与证明标准是否适用。",
                         expr_text(&tree.goal)
                     ),
                     anchor: format!("「缺口与举证」第 {number} 条"),
@@ -755,38 +797,18 @@ fn write_gaps_section(
             number += 1;
             wrote_any = true;
             out.push_str(&format!(
-                "{number}. 争点「{}」的缺口（只列第一层；更深缺口用 :gap <命题> 查看）\n",
+                "{number}. 争点「{}」的缺口\n",
                 expr_text(&tree.goal)
             ));
-            write_gap_body(out, tree, "   ", false, pleadings);
+            write_gap_body(out, tree, "   ", pleadings);
         }
     }
 
     if !wrote_any {
         if issues_sorted.is_empty() {
-            out.push_str("根已证明，当前事实集下也没有可争结论，因此没有缺口。\n");
+            out.push_str("结论已证明，当前事实集下也没有可争结论，因此没有缺口。\n");
         } else {
-            out.push_str("根已证明；当前争点都不是可展开的缺口，因此没有缺口。\n");
-        }
-    }
-    // The certificate records a `MissingPremise` obligation for every gap node
-    // it contains. Name them here so the evidence gap and its obligation id
-    // cannot drift apart.
-    let missing: Vec<&std_deduce_cert::OpenObligation> = certificate
-        .open_obligations
-        .iter()
-        .filter(|obligation| obligation.kind == ObligationKind::MissingPremise)
-        .collect();
-    if !missing.is_empty() {
-        out.push_str("证书记录的缺少前提义务：\n");
-        for obligation in missing {
-            out.push_str(&format!(
-                "- 「{}」：{}（义务编号：{}；相关节点：{}）\n",
-                escape_control(&obligation.id),
-                escape_control(&obligation.description),
-                escape_control(&obligation.id),
-                node_list_text(&obligation.nodes)
-            ));
+            out.push_str("结论已证明；当前争点都不是可展开的缺口，因此没有缺口。\n");
         }
     }
     Ok(())
@@ -801,29 +823,29 @@ fn write_root_gap_item(
     match tree.status {
         GapStatus::Unreachable => {
             out.push_str(&format!(
-                "{number}. 根结论「{}」未获证明（缺口）\n",
+                "{number}. 结论「{}」未获证明（缺口）\n",
                 expr_text(&tree.goal)
             ));
-            write_gap_body(out, tree, "   ", true, pleadings);
+            write_gap_body(out, tree, "   ", pleadings);
             Ok(())
         }
         GapStatus::Conflicted => {
             out.push_str(&format!(
-                "{number}. 根结论「{}」处于未决冲突（缺口根）\n   - 该命题处于未决冲突，不能作为缺口展开；见「未决与冲突」。\n",
+                "{number}. 结论「{}」处于未决冲突（缺口）\n   - 该命题处于未决冲突，不能作为缺口展开；见「未决与冲突」。\n",
                 expr_text(&tree.goal)
             ));
             Ok(())
         }
         GapStatus::Defeated => {
             out.push_str(&format!(
-                "{number}. 根结论「{}」在已裁决的冲突中败出（缺口根）\n   - 按冲突记录它不进入事实库；见「未决与冲突」。\n",
+                "{number}. 结论「{}」在已裁决的冲突中败出（缺口）\n   - 按冲突记录，它不作为已证明的结论；见「未决与冲突」。\n",
                 expr_text(&tree.goal)
             ));
             Ok(())
         }
         GapStatus::InterpretedOnly => {
             out.push_str(&format!(
-                "{number}. 根结论「{}」只由解释推出（缺口根）\n   - 规则阶段不消费解释结论，因此作为根结论仍不算证明；见「规则与出处」。\n",
+                "{number}. 结论「{}」只由解释推出（缺口）\n   - 解释推出的结论不能作为规则的已证明前提，因此仍不算证明；见「规则与出处」。\n",
                 expr_text(&tree.goal)
             ));
             Ok(())
@@ -836,14 +858,14 @@ fn write_root_gap_item(
         }
         GapStatus::OpenPattern => {
             out.push_str(&format!(
-                "{number}. 根结论「{}」含未闭合的规则参数（缺口根）\n   - 前提含有未随目标闭合的规则参数，无法继续展开。\n",
+                "{number}. 结论「{}」仍依赖未确定的规则参数（缺口）\n   - 前提中有未随结论确定的规则参数，无法继续展开。\n",
                 expr_text(&tree.goal)
             ));
             Ok(())
         }
         GapStatus::Cycle => {
             out.push_str(&format!(
-                "{number}. 根结论「{}」形成规则环（缺口根）\n   - 循环依赖：同一命题已在当前展开路径上，停止递归。\n",
+                "{number}. 结论「{}」形成循环依赖（缺口）\n   - 同一命题已在当前展开路径上，停止递归。\n",
                 expr_text(&tree.goal)
             ));
             Ok(())
@@ -851,13 +873,15 @@ fn write_root_gap_item(
     }
 }
 
-/// Render one gap tree body. `expand_children` controls whether nested missing
-/// premises are expanded or only named.
+/// Render one gap tree body recursively.
+///
+/// The recursion is the reasoner's own tree: its limits (depth 6, 128 nodes per
+/// tree, 8 attempts per rule) are already applied when the tree is built, and
+/// the report prints every limit marker the tree carries.
 fn write_gap_body(
     out: &mut String,
     tree: &GapTree,
     indent: &str,
-    expand_children: bool,
     pleadings: &BTreeMap<String, RulePleading>,
 ) {
     let mut candidates: Vec<&std_deduce_reason::GapRule> = tree.candidates.iter().collect();
@@ -874,7 +898,7 @@ fn write_gap_body(
             candidate.applicability.summary_zh()
         ));
         if candidate.missing.is_empty() && candidate.blocked_by.is_empty() {
-            out.push_str(&format!("{indent}  - 证书没有记录它缺少什么。\n"));
+            out.push_str(&format!("{indent}  - 这里没有记录它缺少什么。\n"));
         }
         for premise in &candidate.missing {
             let proposition = expr_text(&premise.premise);
@@ -889,18 +913,13 @@ fn write_gap_body(
                 "证明标准",
             );
             match &premise.gap {
-                Some(child) if expand_children => {
+                Some(child) => {
                     out.push_str(&format!("{indent}    - 子缺口：\n"));
-                    write_gap_body(out, child, &format!("{indent}      "), true, pleadings);
-                }
-                Some(_) => {
-                    out.push_str(&format!(
-                        "{indent}    - 子缺口：「{proposition}」在本报告只列第一层；更深缺口用 :gap <命题> 查看。\n"
-                    ));
+                    write_gap_body(out, child, &format!("{indent}      "), pleadings);
                 }
                 None => {
                     out.push_str(&format!(
-                        "{indent}    - 子缺口：「{proposition}」未展开（已达到缺口树节点上限）。\n"
+                        "{indent}    - 子缺口：「{proposition}」未展开（已达到缺口展开的节点上限）。\n"
                     ));
                 }
             }
@@ -977,7 +996,7 @@ fn write_conflicts_section(
     begin_section(out, "## 六、未决与冲突");
     out.push_str("未决冲突：两条相反结论，没有任何已记录的优先关系或严格事实能判出胜负。\n");
     if conflicts.is_empty() {
-        out.push_str("证书记录里没有冲突。\n");
+        out.push_str("本案推导没有记录冲突。\n");
     } else {
         for (index, conflict) in conflicts.iter().enumerate() {
             let number = index + 1;
@@ -1081,14 +1100,13 @@ fn write_conflicts_section(
         )
     });
     if !other.is_empty() {
-        out.push_str("证书记录的其他未决义务：\n");
+        out.push_str("其他未决事项：\n");
         for obligation in other {
             out.push_str(&format!(
-                "- [{}]「{}」：{}（相关节点：{}）\n",
+                "- [{}] {}{}\n",
                 obligation_kind_label(obligation.kind),
-                escape_control(&obligation.id),
                 escape_control(&obligation.description),
-                node_list_text(&obligation.nodes)
+                node_suffix(&obligation.nodes)
             ));
         }
     }
@@ -1124,7 +1142,7 @@ fn write_open_concepts_section(
 ) -> Result<(), String> {
     begin_section(out, "## 七、需人判断");
     out.push_str(
-        "需人判断：模型不能替代人对法律概念、未经本项目审核的案件规则或逻辑未决事项作出判断。\n",
+        "需人判断：模型不能替代人对法律概念、未经官方法律包审核的案件规则或逻辑未决事项作出判断。\n",
     );
     let mut number = 0usize;
     let mut wrote_any = false;
@@ -1139,7 +1157,7 @@ fn write_open_concepts_section(
             ));
             let nodes = concept_nodes(env, certificate, dependency, concept)?;
             if nodes.is_empty() {
-                out.push_str("   - 所在节点：证书记录的开放概念义务没有定位到具体节点。\n");
+                out.push_str("   - 所在节点：没有定位到具体节点。\n");
             } else {
                 out.push_str("   - 所在节点：\n");
                 for node in &nodes {
@@ -1151,12 +1169,8 @@ fn write_open_concepts_section(
             }
             out.push_str(
                 "   - 为什么不能自动判定：概念的含义、判断标准以及本案是否满足，必须由律师或法院解释；\
-                 证书只记录模型在推导中把它当成了已成立的命题。\n",
+                 这里只记录模型在推导中把它当成了已成立的命题。\n",
             );
-            out.push_str(&format!(
-                "   - 对应义务：`{}`\n",
-                std_deduce_cert::OPEN_CONCEPT_OBLIGATION_ID
-            ));
             questions
                 .entry(1)
                 .or_default()
@@ -1190,15 +1204,14 @@ fn write_open_concepts_section(
         number += 1;
         wrote_any = true;
         out.push_str(&format!(
-            "{number}. 开放概念义务「{}」：{}（相关节点：{}）。\n",
-            escape_control(&obligation.id),
+            "{number}. 开放概念事项：{}{}\n",
             escape_control(&obligation.description),
-            node_list_text(&obligation.nodes)
+            node_suffix(&obligation.nodes)
         ));
         questions.entry(1).or_default().push(Question {
             text: format!(
-                "开放概念义务「{}」需要人判断；请确认相关概念的判断标准。",
-                escape_control(&obligation.id)
+                "有一项开放概念需要解释：{}。请确认相关概念的判断标准。",
+                escape_control(&obligation.description)
             ),
             anchor: format!("「需人判断」第 {number} 条"),
         });
@@ -1217,18 +1230,14 @@ fn write_open_concepts_section(
         number += 1;
         wrote_any = true;
         out.push_str(&format!(
-            "{number}. 需人判断义务「{}」：{}{}\n",
-            escape_control(&obligation.id),
+            "{number}. 需人判断事项：{}{}\n",
             escape_control(&obligation.description),
             node_suffix(&obligation.nodes)
         ));
-        out.push_str(
-            "   - 为什么不能自动判定：这条义务记录的事项需要人来决定，证书不替人给出判断。\n",
-        );
+        out.push_str("   - 为什么不能自动判定：这条事项需要人来决定，模型不替人给出判断。\n");
         questions.entry(2).or_default().push(Question {
             text: format!(
-                "义务「{}」需要人判断：{}。请确认应当如何处理。",
-                escape_control(&obligation.id),
+                "需人判断事项：{}。请确认应当如何处理。",
                 escape_control(&obligation.description)
             ),
             anchor: format!("「需人判断」第 {number} 条"),
@@ -1253,8 +1262,8 @@ fn write_open_concepts_section(
             node_suffix(&obligation.nodes)
         ));
         out.push_str(
-            "   - 为什么不能自动判定：这些规则由案件文件声明，未经官方包审核；\
-             它们不是本项目审计过的法律依据。\n",
+            "   - 为什么不能自动判定：这些规则由案件文件声明，未经官方法律包审核；\
+             它们不是已审核的法律依据。\n",
         );
         questions.entry(3).or_default().push(Question {
             text: format!(
@@ -1266,7 +1275,7 @@ fn write_open_concepts_section(
     }
 
     if !wrote_any {
-        out.push_str("证书没有记录开放概念、需人判断义务或案件扩展。\n");
+        out.push_str("本案推导没有记录开放概念、需人判断事项或案件扩展。\n");
     }
     Ok(())
 }
@@ -1336,7 +1345,7 @@ fn node_description(certificate: &Certificate, node_id: NodeId) -> Result<String
         Node::Assumption { .. } => {
             let proposition = node_proposition(certificate, node_id)?;
             format!(
-                "节点 {node_id}（根命题「{}」，作为事实断言）",
+                "节点 {node_id}（结论命题「{}」，作为事实断言）",
                 cert_expr_text(proposition)
             )
         }
@@ -1441,10 +1450,10 @@ fn provenance_text(
                     None => format!("事实〔{identity}〕"),
                 }
             }
-            None => "证书列为事实，但没有可识别的身份记录".to_owned(),
+            None => "记为事实，但没有可识别的身份记录".to_owned(),
         },
         Provenance::Rules { rules } if rules.is_empty() => {
-            "由规则推出，但证书没有记录具体规则".to_owned()
+            "由规则推出，但没有记录具体规则".to_owned()
         }
         Provenance::Rules { rules } => format!(
             "由规则{}推出",
@@ -1461,7 +1470,7 @@ fn provenance_text(
                     escape_control(&entry.id),
                     entry.direction.keyword()
                 ),
-                None => "由解释推出，但证书没有记录可识别的解释".to_owned(),
+                None => "由解释推出，但没有记录可识别的解释".to_owned(),
             }
         }
     }
@@ -1488,7 +1497,7 @@ fn unresolved_text(
                 {
                     "两侧都只是主张，未经证明，不能判出一方胜出。".to_owned()
                 }
-                _ => "两侧都是事实，证书没有记录可判定的身份先后。".to_owned(),
+                _ => "两侧都是事实，但没有记录可判定的身份先后。".to_owned(),
             }
         }
         UnresolvedReason::NonStrictFact { identity } => {
@@ -1519,7 +1528,7 @@ fn unresolved_text(
             }
         }
         UnresolvedReason::UnknownWitnesses => {
-            "一侧由规则推出，但证书没有记录可重建的规则实例，无法核对优先级。".to_owned()
+            "一侧由规则推出，但没有记录可重建的规则实例，无法核对优先级。".to_owned()
         }
         UnresolvedReason::NoPriority => {
             let interpretation = matches!(conflict.left_by, Provenance::Interpretation { .. })
@@ -1676,7 +1685,7 @@ fn node_suffix(nodes: &[NodeId]) -> String {
 
 fn node_list_text(nodes: &[NodeId]) -> String {
     if nodes.is_empty() {
-        return "证书未记录".to_owned();
+        return "未记录".to_owned();
     }
     nodes
         .iter()

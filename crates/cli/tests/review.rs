@@ -234,9 +234,9 @@ fn assert_questions_are_grounded(report: &str) {
             );
         }
         let gaps_section = section(report, "五、缺口与举证");
-        for goal in quoted_values(line, "根结论「") {
+        for goal in quoted_values(line, "结论「") {
             assert!(
-                gaps_section.contains(&format!("根结论「{goal}」")),
+                gaps_section.contains(&format!("结论「{goal}」")),
                 "question names root {goal:?}, which the gap section does not list:\n{line}"
             );
         }
@@ -246,6 +246,7 @@ fn assert_questions_are_grounded(report: &str) {
 const CLOSED: &str = "examples/复核-闭合证明.std";
 const CLAIM_GAP: &str = "examples/复核-用户陈述与缺口.std";
 const OPEN_CONCEPT: &str = "examples/复核-开放概念与生效区间.std";
+const THREE_LEVEL: &str = "examples/复核-三层缺口.std";
 
 #[test]
 fn closed_strict_fact_proof_is_verified_and_has_no_gap() {
@@ -261,17 +262,16 @@ fn closed_strict_fact_proof_is_verified_and_has_no_gap() {
             "**结论命题：**「受罚 张三」",
             "**根是否可达：**是",
             "「已验证」：成立",
-            "模型内：根推导只使用严格事实（法院查明 1 条、双方无争议 0 条）",
+            "模型内：结论的证明只使用严格事实（法院查明 1 条、双方无争议 0 条）",
             "## 二、争点",
             "当前事实集下没有可争的结论",
             "规则「处罚」",
             "文本：「示例法」；条号：「第一条」；版本：「2024」",
             "法院查明（严格事实）",
             "## 五、缺口与举证",
-            "根已证明，当前事实集下也没有可争结论，因此没有缺口",
+            "结论已证明，当前事实集下也没有可争结论，因此没有缺口",
             "## 七、需人判断",
-            "证书没有记录开放概念、需人判断义务或案件扩展",
-            "**信任：已验证（",
+            "本案推导没有记录开放概念、需人判断事项或案件扩展",
             "〔见「规则与出处」第 1 条〕",
         ],
         "closed proof report",
@@ -293,10 +293,10 @@ fn user_claim_gap_reports_fact_needs_evidence_burden_and_missing_premise() {
         report,
         &[
             "事实待举证",
-            "**根是否可达：**否（根是缺口，结论未获证明）",
+            "**根是否可达：**否（结论未获证明）",
             "「违法 张三」：身份：用户陈述（主张，不是证明）",
-            "根缺口候选的已持有前提",
-            "1. 根结论「受罚 张三」未获证明（缺口）",
+            "结论缺口已掌握的材料",
+            "1. 结论「受罚 张三」未获证明（缺口）",
             "候选规则「处罚」",
             "缺：「故意 张三」",
             "举证责任：主张方",
@@ -321,7 +321,6 @@ fn proved_user_claim_reports_depends_on_assumption_and_gap_issue() {
         report,
         &[
             "「依赖假设」：成立（据用户陈述 1 条）",
-            "**信任：依赖假设（",
             "**根是否可达：**是",
             "1. 「受罚 张三」：候选规则「处罚」；缺少前提合计 1 条",
             "1. 争点「受罚 张三」的缺口",
@@ -363,7 +362,7 @@ fn open_concept_with_effective_range_reports_lawyer_judgment_and_basis() {
 
 #[test]
 fn the_same_case_twice_is_byte_identical() {
-    for file in [CLOSED, CLAIM_GAP, OPEN_CONCEPT] {
+    for file in [CLOSED, CLAIM_GAP, OPEN_CONCEPT, THREE_LEVEL] {
         let options: &[&str] = if file == OPEN_CONCEPT {
             &["--jurisdiction", "CN"]
         } else {
@@ -371,6 +370,8 @@ fn the_same_case_twice_is_byte_identical() {
         };
         let command = if file == OPEN_CONCEPT {
             ":review 严重情节 张三"
+        } else if file == THREE_LEVEL {
+            ":review 应罚 张三"
         } else {
             ":review 受罚 张三"
         };
@@ -450,6 +451,60 @@ fn file_mode_writes_the_whole_report_and_reports_a_path_with_spaces() {
         report_part(&stdout_text),
         "file mode and stdout mode must contain the same report"
     );
+}
+
+#[test]
+fn a_gap_chain_past_the_depth_limit_prints_the_truncation_marker() {
+    let temp = TempDir::new("depth-limit");
+    let mut theory = String::from("sort 人\nobj 张三 : 人\n");
+    for index in 0..=8 {
+        theory.push_str(&format!("pred P{index} : 人 → Prop\n"));
+    }
+    for index in 0..8 {
+        theory.push_str(&format!(
+            "rule R{index} :\n  params p : 人\n  premise P{next} p\n  conclude P{index} p\n  source text \"示例法\" locator \"第{index}条\"\n",
+            next = index + 1
+        ));
+    }
+    let path = temp.write("deep.std", &theory);
+    let output = run(&[path, ":review P0 张三".to_owned()]);
+    assert_exit(&output, NOT_PROVED);
+    let out_text = stdout(&output);
+    let report = report_part(&out_text);
+    assert_contains(
+        report,
+        &["已截断：达到最大展开深度（6 层）", "其余缺口不再展开"],
+        "truncated gap report",
+    );
+}
+
+#[test]
+fn three_level_gap_expands_to_the_leaf_and_keeps_each_layer_burden() {
+    let output = session(THREE_LEVEL, &[], &[":review 应罚 张三"]);
+    assert_exit(&output, NOT_PROVED);
+    let out_text = stdout(&output);
+    let report = report_part(&out_text);
+    assert_contains(
+        report,
+        &[
+            "1. 结论「应罚 张三」未获证明（缺口）",
+            "缺：「情节严重 张三」",
+            "缺：「损害 张三」",
+            "缺：「行为 张三」",
+            "没有任何规则以这个命题为结论",
+            "举证责任：主张方",
+            "证明标准：优势证据",
+            "证明标准：清楚可信",
+            "举证责任：相对方",
+        ],
+        "three-level gap report",
+    );
+    assert_eq!(
+        report.matches("子缺口：").count(),
+        6,
+        "the root tree has three nested levels and each contestable conclusion repeats its own subtree:\n{report}"
+    );
+    assert_questions_are_grounded(report);
 }
 
 #[test]

@@ -2180,9 +2180,11 @@ impl Session {
     /// It adds no inference of its own and is not legal advice. Without `--out`
     /// the report goes to stdout; with `--out` it is written to the named file
     /// and only the path line is printed. The write happens after the complete
-    /// report string exists, through a temporary file in the destination
-    /// directory, so a failed write leaves no half-written report and no
-    /// partial destination.
+    /// report string exists, through a temporary file in the destination's own
+    /// directory; an existing destination's permission bits are copied to the
+    /// temporary file before the rename, so the replacement keeps the target's
+    /// permissions. A failed write, permission copy or rename leaves no
+    /// half-written report and no partial destination.
     ///
     /// The exit code is `:why`'s: `0` only when the root is proved and no open
     /// obligation or unresolved conflict is recorded; every other outcome is
@@ -3780,10 +3782,13 @@ fn unquote_report_path(path: &str) -> Result<&str, String> {
 
 /// Write the report through a temporary file next to the destination.
 ///
-/// The whole report exists before this is called. A failed write or rename
-/// removes the temporary file and returns an error, so the destination never
-/// contains half a report; a successful rename replaces the old file in one
-/// step.
+/// The whole report exists before this is called. The temporary file lives in
+/// the destination's own directory, so it is on the same file system and the
+/// rename is atomic. If the destination already exists, its permission bits are
+/// copied to the temporary file before the rename; a new destination gets the
+/// directory's default permissions, exactly as a file created at that path
+/// would. A failed write, permission copy or rename removes the temporary file
+/// and returns an error, so the destination never contains half a report.
 fn write_review_file(path: &str, report: &str) -> Result<(), String> {
     let destination = Path::new(path);
     let Some(file_name) = destination.file_name() else {
@@ -3801,12 +3806,31 @@ fn write_review_file(path: &str, report: &str) -> Result<(), String> {
         file_name.to_string_lossy(),
         std::process::id()
     ));
+    let existing_permissions = match fs::metadata(destination) {
+        Ok(meta) => Some(meta.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "写入复核报告 `{}` 失败：无法读取目标文件权限：{error}",
+                escape_path(path)
+            ));
+        }
+    };
     if let Err(error) = fs::write(&temporary, report) {
         let _ = fs::remove_file(&temporary);
         return Err(format!(
             "写入复核报告 `{}` 失败：{error}",
             escape_path(path)
         ));
+    }
+    if let Some(permissions) = existing_permissions {
+        if let Err(error) = fs::set_permissions(&temporary, permissions) {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!(
+                "写入复核报告 `{}` 失败：无法设置报告文件权限：{error}",
+                escape_path(path)
+            ));
+        }
     }
     if let Err(error) = fs::rename(&temporary, destination) {
         let _ = fs::remove_file(&temporary);
@@ -5249,6 +5273,7 @@ fn print_help(out: &mut impl Write) {
         out,
         "律师复核报告：:review <命题> [--out <文件>]；报告只由证书、缺口树、举证元数据与信任标签生成，\
          不是法律意见。不写 --out 时报告写到 stdout；写文件时只打印报告路径，文件内容与 stdout 形式逐字节相同。\
+         写文件采用同目录临时文件加原子改名的原子写语义，失败不留半份报告。\
          退出码与 :why 一致：根已证明且无未决义务为 0，其余为 1。"
     )
     .ok();
