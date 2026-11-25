@@ -386,6 +386,7 @@ impl<'a> PackageLoader<'a> {
             jurisdiction: Some(manifest.pack.jurisdiction.clone()),
             territory: Some(manifest.pack.territory.clone()),
             origin: ScopeOrigin::PackDefault,
+            ..Scope::default()
         };
         self.stack.push(name.to_owned());
         let loaded = self.load_theory_files(name, &namespace, &theory_files, &pack_scope);

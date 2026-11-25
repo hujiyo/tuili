@@ -183,8 +183,10 @@ fn inspect_shows_declared_scope_and_occurrence_without_placeholders() {
 
     let scoped = line_containing(&out, "rule  已废止规则 :");
     assert!(
-        scoped.contains("〔生效 1999-10-01..2021-01-01〕〔管辖 CN〕〔地域 CN-HN〕"),
-        "the rule line must show the declared scope: {scoped:?}"
+        scoped.contains(
+            "〔生效 1999-10-01..2021-01-01（规则）〕〔管辖 CN（规则）〕〔地域 CN-HN（规则）〕"
+        ),
+        "the rule line must show the declared scope and its provenance: {scoped:?}"
     );
     let fact = line_containing(&out, "fact  事实 :");
     assert!(
@@ -197,7 +199,8 @@ fn inspect_shows_declared_scope_and_occurrence_without_placeholders() {
     );
 
     let unscoped = line_containing(&out, "rule  无作用域规则 :");
-    for placeholder in ["〔生效", "〔管辖", "〔地域", "默认"] {
+    for placeholder in ["〔生效", "〔管辖", "〔地域", "默认", "（规则）", "（继承）"]
+    {
         assert!(
             !unscoped.contains(placeholder),
             "an undeclared scope must not be filled in ({placeholder}): {unscoped:?}"
@@ -261,14 +264,14 @@ fn invalid_scope_values_are_load_errors() {
         (
             "repealed-without-effective",
             "  repealed 2021-01-01\n",
-            "repealed",
+            "起点",
             "effective",
         ),
         (
             "repealed-not-later",
             "  effective 2021-01-01\n  repealed 2021-01-01\n",
-            "repealed",
-            "晚于",
+            "生效起点",
+            "失效日",
         ),
         ("bad-date", "  effective 2021-02-30\n", "effective", "日期"),
         (
@@ -292,6 +295,10 @@ fn invalid_scope_values_are_load_errors() {
         assert!(
             err.contains(needle_a) && err.contains(needle_b),
             "{tag}: the error must name {needle_a:?} and {needle_b:?}: {err}"
+        );
+        assert!(
+            err.contains("`rule 规则`"),
+            "{tag}: the load error must name the rule: {err}"
         );
     }
 }
@@ -326,6 +333,12 @@ rule pkg.a.显式 :
   conclude pkg.a.处罚 x
   territory CN-HN
   source text "测试法" locator "第二条"
+rule pkg.a.继承起点 :
+  params x : pkg.a.人
+  premise pkg.a.犯规 x
+  conclude pkg.a.处罚 x
+  repealed 2020-01-01
+  source text "测试法" locator "第三条"
 "#;
     temp.write_pack("pkg.a", manifest, &[("theory.std", theory)]);
     temp.lock();
@@ -344,13 +357,70 @@ rule pkg.a.显式 :
 
     let inherited = line_containing(&out, "rule  pkg.a.继承 :");
     assert!(
-        inherited.contains("〔生效 1999-10-01..2021-01-01〕〔管辖 CN〕〔地域 CN〕"),
+        inherited.contains(
+            "〔生效 1999-10-01..2021-01-01（继承）〕〔管辖 CN（继承）〕〔地域 CN（继承）〕"
+        ),
         "the whole manifest scope is inherited: {inherited:?}"
     );
     let explicit = line_containing(&out, "rule  pkg.a.显式 :");
     assert!(
-        explicit.contains("〔生效 1999-10-01..2021-01-01〕〔管辖 CN〕〔地域 CN-HN〕"),
+        explicit.contains(
+            "〔生效 1999-10-01..2021-01-01（继承）〕〔管辖 CN（继承）〕〔地域 CN-HN（规则）〕"
+        ),
         "the explicit territory wins and the rest is inherited: {explicit:?}"
+    );
+    // A rule may write only `repealed`; its start comes from the manifest, and
+    // the two endpoints keep different provenance markers.
+    let inherited_start = line_containing(&out, "rule  pkg.a.继承起点 :");
+    assert!(
+        inherited_start.contains(
+            "〔生效 1999-10-01..2020-01-01（继承/规则）〕〔管辖 CN（继承）〕〔地域 CN（继承）〕"
+        ),
+        "a written repealed takes the manifest start and keeps both origins: {inherited_start:?}"
+    );
+}
+
+/// A merged interval with the rule's start after the manifest's end is refused
+/// at load time, naming the rule and both dates.
+#[test]
+fn a_pack_rule_start_after_the_manifest_end_is_refused() {
+    let temp = TempRoot::new("merged-out-of-range");
+    let manifest = "[pack]\n\
+                    name = \"pkg.a\"\n\
+                    version = \"0.1.0\"\n\
+                    jurisdiction = \"CN\"\n\
+                    territory = \"CN\"\n\
+                    effective_from = \"1999-10-01\"\n\
+                    effective_to = \"2001-01-01\"\n\
+                    namespace = \"pkg.a\"\n\
+                    \n[[files]]\npath = \"theory.std\"\nkind = \"theory\"\n";
+    let theory = r#"
+namespace pkg.a
+sort pkg.a.人
+pred pkg.a.犯规 : pkg.a.人 → Prop
+pred pkg.a.处罚 : pkg.a.人 → Prop
+rule pkg.a.越界 :
+  params x : pkg.a.人
+  premise pkg.a.犯规 x
+  conclude pkg.a.处罚 x
+  effective 2005-01-01
+  source text "测试法" locator "第一条"
+"#;
+    temp.write_pack("pkg.a", manifest, &[("theory.std", theory)]);
+    temp.lock();
+    let case = temp.write(
+        "case.std",
+        "import pkg.a\nobj 甲 : pkg.a.人\n\
+         axiom 事实 : pkg.a.犯规 甲\n  source text \"案件材料\" locator \"第一页\"\n",
+    );
+    let output = run_in(temp.root(), &[format!(":load {}", case.display())]);
+    // A pack that fails to load is an environment/usage error and exits `2`,
+    // like the other registry and lock failures.
+    assert_exit(&output, ERROR);
+    let err = stderr(&output);
+    assert!(
+        err.contains("pkg.a.越界") && err.contains("2005-01-01") && err.contains("2001-01-01"),
+        "the load error must name the rule and both dates: {err}"
     );
 }
 

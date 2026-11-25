@@ -414,7 +414,7 @@ impl Parser {
                         "effective" | "repealed" | "jurisdiction" | "territory"
                     ) {
                         return self.err(format!(
-                            "`{keyword}` 只能写在规则（rule）上；事实只能写 occurred_at / occurred_in"
+                            "`axiom {name}`：`{keyword}` 只能写在规则（rule）上；事实只能写 occurred_at / occurred_in"
                         ));
                     }
                 }
@@ -570,7 +570,12 @@ impl Parser {
         let mut scope = ScopeSpec::default();
 
         loop {
+            // Whether the next clause starts on a fresh line. Scope clauses
+            // require it, like `identity`: a clause crammed onto the previous
+            // line is refused instead of silently accepted.
+            let save = self.pos;
             self.skip_newlines();
+            let on_new_line = self.pos > save;
             if matches!(self.peek(), Tok::Eof) {
                 break;
             }
@@ -627,18 +632,37 @@ impl Parser {
                     defeaters.push(Defeater::Prefer(self.ident()?));
                 }
                 "source" => {
-                    sources.push(self.source_spec()?);
+                    // A source clause inside a rule body names the rule in its
+                    // diagnostics, so a malformed quote or a misplaced scope
+                    // keyword points at which rule must be fixed.
+                    let spec = self.source_spec().map_err(|mut error| {
+                        error.msg = format!("`rule {name}` 的 source 子句：{}", error.msg);
+                        error
+                    })?;
+                    sources.push(spec);
                 }
                 // Scope clauses are metadata on the rule, one clause per line.
                 // The values are validated when the theory is loaded; the
                 // parser only refuses duplicates and wrong clause kinds.
-                "effective" => self.scope_clause("effective", &mut scope.effective_from)?,
-                "repealed" => self.scope_clause("repealed", &mut scope.effective_to)?,
-                "jurisdiction" => self.scope_clause("jurisdiction", &mut scope.jurisdiction)?,
-                "territory" => self.scope_clause("territory", &mut scope.territory)?,
+                "effective" => {
+                    self.require_clause_new_line(&name, "effective", on_new_line)?;
+                    self.scope_clause(&name, "effective", &mut scope.effective_from)?;
+                }
+                "repealed" => {
+                    self.require_clause_new_line(&name, "repealed", on_new_line)?;
+                    self.scope_clause(&name, "repealed", &mut scope.effective_to)?;
+                }
+                "jurisdiction" => {
+                    self.require_clause_new_line(&name, "jurisdiction", on_new_line)?;
+                    self.scope_clause(&name, "jurisdiction", &mut scope.jurisdiction)?;
+                }
+                "territory" => {
+                    self.require_clause_new_line(&name, "territory", on_new_line)?;
+                    self.scope_clause(&name, "territory", &mut scope.territory)?;
+                }
                 "occurred_at" | "occurred_in" => {
                     return self.err(format!(
-                        "`{kw}` 只能写在事实（axiom 命题）上；规则不能声明发生时间或发生地"
+                        "`rule {name}` 的 `{kw}`：它只能写在事实（axiom 命题）上；规则不能声明发生时间或发生地"
                     ));
                 }
                 // Another item starts here. `#` covers every sigiled command:
@@ -666,11 +690,33 @@ impl Parser {
         })
     }
 
+    /// Refuse a rule scope clause that does not start its own line.
+    ///
+    /// Every new clause is line-oriented: `effective 1999-10-01 repealed
+    /// 2021-01-01` on one line is refused rather than read as a clause plus a
+    /// stray token. Ordinary identifiers after a scope value are still left to
+    /// the regular unknown-clause diagnostic.
+    fn require_clause_new_line(&self, rule: &str, keyword: &str, on_new_line: bool) -> PResult<()> {
+        if on_new_line {
+            return Ok(());
+        }
+        self.err(format!(
+            "`rule {rule}` 的 `{keyword}` 子句必须另起一行；每个作用域子句独占一行"
+        ))
+    }
+
     /// Parse the value of one scope clause and store it, refusing a repeat.
     ///
     /// The value is a bare token; dates and codes are checked by the loader so
-    /// a malformed date and a malformed `--as-of` share one error message.
-    fn scope_clause(&mut self, keyword: &str, slot: &mut Option<String>) -> PResult<()> {
+    /// a malformed date and a malformed `--as-of` share one error message. The
+    /// messages name the rule: the loader's errors do too, so both stages point
+    /// at the declaration that must be fixed.
+    fn scope_clause(
+        &mut self,
+        rule: &str,
+        keyword: &str,
+        slot: &mut Option<String>,
+    ) -> PResult<()> {
         let (line, col) = {
             let token = self.here();
             (token.line, token.col)
@@ -681,11 +727,20 @@ impl Parser {
                 self.bump();
                 value
             }
+            Tok::Newline | Tok::Eof => {
+                return Err(ParseError {
+                    msg: format!(
+                        "`rule {rule}` 的 `{keyword}` 缺少值（用法：`{keyword} <日期或代码>`）"
+                    ),
+                    line,
+                    col,
+                })
+            }
             other => {
                 return Err(ParseError {
                     msg: format!(
-                        "`{keyword}` 之后必须是裸值（日期或代码），实际是 `{other:?}`；\
-                         不要写成字符串字面量"
+                        "`rule {rule}` 的 `{keyword}` 之后必须是裸值（日期或代码），\
+                         实际是 `{other:?}`；不要写成字符串字面量"
                     ),
                     line,
                     col,
@@ -694,7 +749,7 @@ impl Parser {
         };
         if slot.replace(value).is_some() {
             return Err(ParseError {
-                msg: format!("`{keyword}` 子句重复：一个作用域字段只能写一次"),
+                msg: format!("`rule {rule}` 的 `{keyword}` 子句重复：一个作用域字段只能写一次"),
                 line,
                 col,
             });
@@ -886,6 +941,22 @@ impl Parser {
                 Tok::Str(value) => {
                     self.bump();
                     value
+                }
+                // `effective`, `jurisdiction` and `territory` are also rule
+                // scope clause keywords with bare values. Reaching this branch
+                // means a scope clause was misplaced inside a source (same
+                // line, or before any source field); say so instead of
+                // claiming a source value must be quoted.
+                other if is_scope_clause_key(&key) => {
+                    return Err(ParseError {
+                        msg: format!(
+                            "`source` 的键 `{key}` 需要双引号字符串；\
+                             规则作用域子句 `{key} <日期或代码>` 必须单独占一行，写在 source 子句之外\
+                             （实际是 `{other:?}`）"
+                        ),
+                        line: key_line,
+                        col: key_col,
+                    })
                 }
                 other => {
                     return self.err(format!(

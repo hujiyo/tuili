@@ -298,7 +298,7 @@ use std_deduce_cert::{
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
-use std_deduce_kernel::meta::{validate_date, validate_jurisdiction_code, Scope};
+use std_deduce_kernel::meta::{validate_date, validate_jurisdiction_code, Scope, ScopeOrigin};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr, Name};
 use std_deduce_lang::module::escape_path;
@@ -1174,6 +1174,44 @@ impl Session {
         ))
     }
 
+    /// The warning line for one rule whose recorded jurisdiction differs from
+    /// the session's chosen jurisdiction, if it does.
+    ///
+    /// M2-6/M2-7 do not judge applicability, so a differing code is reported
+    /// instead of filtering the rule. The note never changes an exit code or a
+    /// conclusion; M2-20 owns the actual applicability decision.
+    fn jurisdiction_note(&self, rule: &str) -> Option<String> {
+        let query = self.environment.jurisdiction()?;
+        let code = self.lib.env.get(rule)?.scope.jurisdiction.as_deref()?;
+        if code == query {
+            return None;
+        }
+        Some(format!(
+            "注：规则 {} 的管辖 {code} 与查询管辖 {query} 不同；本步不判定适用性，M2-20 做适用性判定。",
+            escape_control(rule)
+        ))
+    }
+
+    /// One note per distinct applied or candidate rule in a certificate.
+    fn certificate_jurisdiction_notes(&self, certificate: &Certificate) -> Vec<String> {
+        let mut rules: BTreeSet<&str> = BTreeSet::new();
+        for node in &certificate.nodes {
+            match node {
+                CertNode::RuleApplication { rule, .. } => {
+                    rules.insert(rule.as_str());
+                }
+                CertNode::Gap { candidates, .. } => {
+                    rules.extend(candidates.iter().map(|candidate| candidate.rule.as_str()));
+                }
+                CertNode::Assumption { .. } => {}
+            }
+        }
+        rules
+            .into_iter()
+            .filter_map(|rule| self.jurisdiction_note(rule))
+            .collect()
+    }
+
     fn query(&mut self, cmd: &str, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let goal = self.goal(arg)?;
         let mut r = Reasoner::new(&self.lib.env);
@@ -1262,6 +1300,11 @@ impl Session {
                     )
                     .ok();
                 }
+                // The candidate may belong to another jurisdiction. Say so;
+                // the code never filters the candidate (M2-20 decides).
+                if let Some(note) = self.jurisdiction_note(&c.rule) {
+                    writeln!(out, "    {note}").ok();
+                }
             }
             return Ok(Outcome::Gap);
         }
@@ -1286,6 +1329,11 @@ impl Session {
         // is checked by both layers: the tree the user sees and the object
         // being checked cannot diverge.
         writeln!(out, "{}", render(&certificate)?).ok();
+        // Applied or candidate rules from another jurisdiction are called out;
+        // this is a warning, not a filter, and it never changes the exit code.
+        for note in self.certificate_jurisdiction_notes(&certificate) {
+            writeln!(out, "{note}").ok();
+        }
 
         let checked = std_deduce_cert::check(&self.lib.env, &certificate);
         let kernel = std_deduce_cert::kernel_proof(&self.lib.env, &certificate);
@@ -2825,24 +2873,72 @@ fn effective_range(info: &PackInfo) -> String {
     }
 }
 
+/// Render one field's provenance as a compact `（规则）` / `（继承）` / `（案件）`
+/// marker, or nothing for a value with no recorded origin.
+fn scope_origin_marker(origin: Option<ScopeOrigin>) -> String {
+    match origin {
+        Some(origin) => format!("（{}）", origin.label_zh()),
+        None => String::new(),
+    }
+}
+
+/// Render the range's provenance in endpoint order, collapsing equal origins.
+///
+/// A range that mixes an explicit start with an inherited end reads
+/// `（规则/继承）`, so a reader does not have to guess which endpoint came from
+/// the rule and which from the manifest.
+fn scope_range_marker(scope: &Scope) -> String {
+    let mut origins: Vec<ScopeOrigin> = Vec::new();
+    for origin in [scope.effective_from_origin, scope.effective_to_origin]
+        .into_iter()
+        .flatten()
+    {
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    match origins.as_slice() {
+        [] => String::new(),
+        [one] => format!("（{}）", one.label_zh()),
+        many => format!(
+            "（{}）",
+            many.iter()
+                .map(|origin| origin.label_zh())
+                .collect::<Vec<_>>()
+                .join("/")
+        ),
+    }
+}
+
 /// Render a declaration's recorded scope for `:inspect`.
 ///
 /// Only declared or inherited fields are shown; an absent field prints nothing
-/// (never a `默认` placeholder, and never a guessed value). The effective range
-/// is `from..to` with an open endpoint left empty.
+/// (never a `默认` placeholder, and never a guessed value). Each value carries
+/// its provenance: `（规则）` for a value written on the rule, `（继承）` for a
+/// pack-manifest default, and `（案件）` for a case-local rule. The effective
+/// range is `from..to` with an open endpoint left empty.
 fn declared_scope_text(scope: &Scope) -> String {
     let mut parts = Vec::new();
-    match (&scope.effective_from, &scope.effective_to) {
-        (Some(from), Some(to)) => parts.push(format!("〔生效 {from}..{to}〕")),
-        (Some(from), None) => parts.push(format!("〔生效 {from}..〕")),
-        (None, Some(to)) => parts.push(format!("〔生效 ..{to}〕")),
-        (None, None) => {}
+    let range = match (&scope.effective_from, &scope.effective_to) {
+        (Some(from), Some(to)) => format!("{from}..{to}"),
+        (Some(from), None) => format!("{from}.."),
+        (None, Some(to)) => format!("..{to}"),
+        (None, None) => String::new(),
+    };
+    if !range.is_empty() {
+        parts.push(format!("〔生效 {range}{}〕", scope_range_marker(scope)));
     }
     if let Some(code) = &scope.jurisdiction {
-        parts.push(format!("〔管辖 {code}〕"));
+        parts.push(format!(
+            "〔管辖 {code}{}〕",
+            scope_origin_marker(scope.jurisdiction_origin)
+        ));
     }
     if let Some(code) = &scope.territory {
-        parts.push(format!("〔地域 {code}〕"));
+        parts.push(format!(
+            "〔地域 {code}{}〕",
+            scope_origin_marker(scope.territory_origin)
+        ));
     }
     parts.concat()
 }

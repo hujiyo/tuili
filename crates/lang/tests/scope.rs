@@ -9,14 +9,6 @@ use std_deduce_lang::ast::{Item, ScopeSpec};
 use std_deduce_lang::parser::parse;
 use std_deduce_lang::{Library, LoadOptions};
 
-const PACK_SCOPE: Scope = Scope {
-    effective_from: None,
-    effective_to: None,
-    jurisdiction: None,
-    territory: None,
-    origin: ScopeOrigin::PackDefault,
-};
-
 fn pack_scope() -> Scope {
     Scope {
         effective_from: Some("1999-10-01".to_owned()),
@@ -24,6 +16,7 @@ fn pack_scope() -> Scope {
         jurisdiction: Some("CN".to_owned()),
         territory: Some("CN".to_owned()),
         origin: ScopeOrigin::PackDefault,
+        ..Scope::default()
     }
 }
 
@@ -168,7 +161,104 @@ fn duplicate_scope_clauses_are_parse_errors() {
         );
         let error = parse(&src).expect_err("a duplicate scope clause is a parse error");
         assert!(error.msg.contains("重复"), "{clause}: {error}");
+        assert!(
+            error.msg.contains("`rule 规则`"),
+            "a rule-body error must name the rule: {clause}: {error}"
+        );
     }
+}
+
+#[test]
+fn scope_clause_errors_name_the_rule_and_the_missing_value() {
+    let src = r#"
+sort 人
+pred 犯规 : 人 → Prop
+pred 处罚 : 人 → Prop
+rule 规则 :
+  params x : 人
+  premise 犯规 x
+  conclude 处罚 x
+  effective
+  source text "测试法" locator "第一条"
+"#;
+    let error = parse(src).expect_err("a scope clause without a value is an error");
+    assert!(
+        error.msg.contains("`rule 规则`") && error.msg.contains("缺少值"),
+        "{error}"
+    );
+
+    let src = r#"
+sort 人
+pred 犯规 : 人 → Prop
+pred 处罚 : 人 → Prop
+rule 规则 :
+  params x : 人
+  premise 犯规 x
+  conclude 处罚 x
+  effective "1999-10-01"
+  source text "测试法" locator "第一条"
+"#;
+    let error = parse(src).expect_err("a quoted scope value is an error");
+    assert!(
+        error.msg.contains("`rule 规则`") && error.msg.contains("裸值"),
+        "{error}"
+    );
+}
+
+/// Every scope clause occupies its own line. Cramming several onto one line is
+/// refused instead of being read as a clause plus stray tokens.
+#[test]
+fn scope_clauses_must_start_their_own_line() {
+    for clause in [
+        "effective 1999-10-01 repealed 2021-01-01",
+        "effective 1999-10-01 jurisdiction CN",
+    ] {
+        let src = format!(
+            "sort 人\npred 犯规 : 人 → Prop\npred 处罚 : 人 → Prop\n\
+             rule 规则 :\n  params x : 人\n  premise 犯规 x\n  conclude 处罚 x\n  {clause}\n\
+             \x20 source text \"测试法\" locator \"第一条\"\n"
+        );
+        let error = parse(&src).expect_err("two scope clauses on one line are an error");
+        assert!(
+            error.msg.contains("`rule 规则`") && error.msg.contains("另起一行"),
+            "{clause}: {error}"
+        );
+    }
+
+    // The clause on the same line as `rule ... :` is refused too.
+    let error = parse(
+        "sort 人\npred P : 人 → Prop\nrule 规则 : effective 1999-10-01\n  params x : 人\n  premise P x\n  conclude P x\n  source text \"x\" locator \"y\"\n",
+    )
+    .expect_err("a scope clause on the rule header line is an error");
+    assert!(
+        error.msg.contains("`rule 规则`") && error.msg.contains("另起一行"),
+        "{error}"
+    );
+}
+
+/// A bare scope keyword inside a source is explained as a misplaced scope
+/// clause, not as a missing string quote.
+#[test]
+fn a_scope_keyword_inside_a_source_gets_the_right_diagnostic() {
+    let src = r#"
+sort 人
+pred 犯规 : 人 → Prop
+rule 规则 :
+  params x : 人
+  premise 犯规 x
+  conclude 犯规 x
+  source
+    effective 1999-10-01
+    text "测试法"
+    locator "第一条"
+"#;
+    let error = parse(src).expect_err("a bare scope keyword cannot be a source field");
+    assert!(
+        error.msg.contains("`rule 规则` 的 source 子句")
+            && error.msg.contains("作用域子句")
+            && error.msg.contains("source 子句之外"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -249,6 +339,14 @@ rule pkg.a.全显式 :
     assert_eq!(inherited.jurisdiction.as_deref(), Some("CN"));
     assert_eq!(inherited.territory.as_deref(), Some("CN"));
     assert_eq!(inherited.origin, ScopeOrigin::PackDefault);
+    for origin in [
+        inherited.effective_from_origin,
+        inherited.effective_to_origin,
+        inherited.jurisdiction_origin,
+        inherited.territory_origin,
+    ] {
+        assert_eq!(origin, Some(ScopeOrigin::PackDefault));
+    }
 
     let partial = &lib
         .env
@@ -260,6 +358,13 @@ rule pkg.a.全显式 :
     assert_eq!(partial.jurisdiction.as_deref(), Some("CN"));
     assert_eq!(partial.territory.as_deref(), Some("CN-HN"));
     assert_eq!(partial.origin, ScopeOrigin::Rule);
+    assert_eq!(
+        partial.effective_from_origin,
+        Some(ScopeOrigin::PackDefault)
+    );
+    assert_eq!(partial.effective_to_origin, Some(ScopeOrigin::PackDefault));
+    assert_eq!(partial.jurisdiction_origin, Some(ScopeOrigin::PackDefault));
+    assert_eq!(partial.territory_origin, Some(ScopeOrigin::Rule));
 
     let explicit = &lib.env.get("pkg.a.全显式").expect("the rule loaded").scope;
     assert_eq!(explicit.effective_from.as_deref(), Some("2001-01-01"));
@@ -267,6 +372,100 @@ rule pkg.a.全显式 :
     assert_eq!(explicit.jurisdiction.as_deref(), Some("JP"));
     assert_eq!(explicit.territory.as_deref(), Some("JP-13"));
     assert_eq!(explicit.origin, ScopeOrigin::Rule);
+    for origin in [
+        explicit.effective_from_origin,
+        explicit.effective_to_origin,
+        explicit.jurisdiction_origin,
+        explicit.territory_origin,
+    ] {
+        assert_eq!(origin, Some(ScopeOrigin::Rule));
+    }
+}
+
+/// `repealed` is the end of the range, so its start may come from the pack
+/// manifest; only a merged range with no start at all is invalid.
+#[test]
+fn repealed_may_take_its_start_from_the_manifest() {
+    let src = r#"
+namespace pkg.a
+sort pkg.a.人
+pred pkg.a.犯规 : pkg.a.人 → Prop
+pred pkg.a.处罚 : pkg.a.人 → Prop
+rule pkg.a.继承起点 :
+  params x : pkg.a.人
+  premise pkg.a.犯规 x
+  conclude pkg.a.处罚 x
+  repealed 2020-01-01
+  source text "测试法" locator "第一条"
+"#;
+    let options = LoadOptions {
+        pack_scope: Some(pack_scope()),
+        case_local: false,
+    };
+    let lib = load_with(src, &options);
+    let scope = &lib
+        .env
+        .get("pkg.a.继承起点")
+        .expect("the rule loaded")
+        .scope;
+    assert_eq!(scope.effective_from.as_deref(), Some("1999-10-01"));
+    assert_eq!(scope.effective_to.as_deref(), Some("2020-01-01"));
+    assert_eq!(scope.effective_from_origin, Some(ScopeOrigin::PackDefault));
+    assert_eq!(scope.effective_to_origin, Some(ScopeOrigin::Rule));
+    assert_eq!(scope.origin, ScopeOrigin::Rule);
+
+    // The same rule without a pack start has no interval at all.
+    let mut lib = Library::new();
+    let error = lib
+        .load_with_options("t", &src.replace("pkg.a", "c"), &LoadOptions::default())
+        .expect_err("a repealed end with no start must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("c.继承起点")
+            && message.contains("2020-01-01")
+            && message.contains("起点"),
+        "{message}"
+    );
+}
+
+/// A range built by merging the rule's own start with the manifest's end must
+/// still have the start before the end; the error names the rule and both
+/// dates.
+#[test]
+fn a_merged_range_with_its_start_after_its_end_is_refused() {
+    let src = r#"
+namespace pkg.a
+sort pkg.a.人
+pred pkg.a.犯规 : pkg.a.人 → Prop
+pred pkg.a.处罚 : pkg.a.人 → Prop
+rule pkg.a.越界 :
+  params x : pkg.a.人
+  premise pkg.a.犯规 x
+  conclude pkg.a.处罚 x
+  effective 2005-01-01
+  source text "测试法" locator "第一条"
+"#;
+    let mut scope = pack_scope();
+    scope.effective_to = Some("2001-01-01".to_owned());
+    let options = LoadOptions {
+        pack_scope: Some(scope),
+        case_local: false,
+    };
+    let mut lib = Library::new();
+    let error = lib
+        .load_with_options("t", src, &options)
+        .expect_err("a merged range with the start after the end must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("pkg.a.越界")
+            && message.contains("2005-01-01")
+            && message.contains("2001-01-01"),
+        "the error must name the rule and both dates: {message}"
+    );
+    assert!(
+        !lib.env.contains("pkg.a.越界"),
+        "the failed load must insert nothing"
+    );
 }
 
 /// A plain module outside a pack inherits nothing: no scope means an empty
@@ -320,6 +519,8 @@ rule 无作用域 :
     assert_eq!(local.effective_from, None);
     assert_eq!(local.territory, None);
     assert_eq!(local.origin, ScopeOrigin::CaseLocal);
+    assert_eq!(local.jurisdiction_origin, Some(ScopeOrigin::Rule));
+    assert_eq!(local.effective_from_origin, None);
 
     let unscoped = &lib.env.get("无作用域").expect("the rule loaded").scope;
     assert!(unscoped.is_unscoped());
@@ -376,15 +577,15 @@ axiom 命题 : Prop
 }
 
 /// The loader validates scope values with the shared date/code rules and the
-/// `repealed` relationship; these are load errors, not ignored metadata.
+/// merged range relationship; these are load errors, not ignored metadata.
 #[test]
 fn invalid_scope_values_are_load_errors() {
     let cases = [
-        ("repealed 2021-01-01", "repealed", "effective"),
+        ("repealed 2021-01-01", "起点", "effective"),
         (
             "effective 2021-01-01\n  repealed 2020-01-01",
-            "repealed",
-            "晚于",
+            "生效起点",
+            "失效日",
         ),
         ("effective 2021-02-30", "effective", "日期"),
         ("jurisdiction CN_HN", "jurisdiction", "非法字符"),
@@ -403,6 +604,10 @@ fn invalid_scope_values_are_load_errors() {
         assert!(
             message.contains(needle_a) && message.contains(needle_b),
             "{clause}: {message}"
+        );
+        assert!(
+            message.contains("`rule 规则`"),
+            "the load error must name the rule: {clause}: {message}"
         );
     }
 }
@@ -455,8 +660,9 @@ rule 规则 :
     );
 }
 
-/// The sentinel keeps `PACK_SCOPE` referenced without a second construction
-/// path; it also documents that `origin` is ignored when the loader inherits.
+/// The pack scope's own `origin` field is ignored: a rule that inherits
+/// nothing still records `PackDefault` because the containing pack supplied
+/// (an empty) scope.
 #[test]
 fn the_pack_scope_origin_is_ignored() {
     let src = r#"
@@ -470,7 +676,10 @@ rule 规则 :
   source text "测试法" locator "第一条"
 "#;
     let options = LoadOptions {
-        pack_scope: Some(PACK_SCOPE),
+        pack_scope: Some(Scope {
+            origin: ScopeOrigin::PackDefault,
+            ..Scope::default()
+        }),
         case_local: false,
     };
     let lib = load_with(src, &options);

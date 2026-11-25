@@ -113,6 +113,18 @@ impl ScopeOrigin {
             ScopeOrigin::Unspecified => "unspecified",
         }
     }
+
+    /// The compact Chinese label a reader sees in `:inspect`:
+    /// `规则` for a value written on the rule, `继承` for a manifest default,
+    /// `案件` for a case-local rule.
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            ScopeOrigin::Rule => "规则",
+            ScopeOrigin::PackDefault => "继承",
+            ScopeOrigin::CaseLocal => "案件",
+            ScopeOrigin::Unspecified => "未注明",
+        }
+    }
 }
 
 /// The effective range and jurisdiction/territory a declaration records.
@@ -132,8 +144,24 @@ pub struct Scope {
     /// The territory the declaration covers, when it differs from the
     /// jurisdiction.
     pub territory: Option<String>,
-    /// How the values above were determined.
+    /// How the record as a whole was determined: `Rule` when the rule wrote at
+    /// least one field, `PackDefault` when every value was inherited,
+    /// `CaseLocal` for a case-local rule, `Unspecified` when there is no data.
+    /// This summary does not say which *field* was written; the per-field
+    /// origins below do, so `:inspect` can mark each value.
     pub origin: ScopeOrigin,
+    /// Provenance of [`Scope::effective_from`]; `Some` exactly when the value
+    /// is present.
+    pub effective_from_origin: Option<ScopeOrigin>,
+    /// Provenance of [`Scope::effective_to`]; `Some` exactly when the value is
+    /// present.
+    pub effective_to_origin: Option<ScopeOrigin>,
+    /// Provenance of [`Scope::jurisdiction`]; `Some` exactly when the value is
+    /// present.
+    pub jurisdiction_origin: Option<ScopeOrigin>,
+    /// Provenance of [`Scope::territory`]; `Some` exactly when the value is
+    /// present.
+    pub territory_origin: Option<ScopeOrigin>,
 }
 
 impl Scope {

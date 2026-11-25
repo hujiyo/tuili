@@ -1275,9 +1275,15 @@ fn validate_pack_scope(scope: &Scope) -> Result<(), String> {
 ///
 /// Values are decided field by field: a written clause wins, and a missing one
 /// falls back to the manifest for a pack rule. Case-local rules never inherit.
-/// `repealed` is the exclusive end and must be written together with
-/// `effective` and be later than it; the comparison is a plain string compare,
-/// which is correct for validated `YYYY-MM-DD` values.
+/// A written `repealed` may take its start from the manifest as well, so the
+/// range is validated **after** merging: it must have a start and the end must
+/// be later than it. The comparison is a plain string compare, which is correct
+/// for validated `YYYY-MM-DD` values.
+///
+/// Each present field keeps its own origin (`Rule` if the rule wrote it,
+/// `PackDefault` if it came from the manifest), so `:inspect` can distinguish a
+/// written value from an inherited one. The record-level [`Scope::origin`]
+/// remains the summary the original scope contract asked for.
 fn rule_scope(name: &str, written: &ScopeSpec, options: &LoadOptions) -> Result<Scope, String> {
     if let Some(date) = &written.effective_from {
         validate_date(&format!("`rule {name}` 的 effective"), date)?;
@@ -1291,52 +1297,69 @@ fn rule_scope(name: &str, written: &ScopeSpec, options: &LoadOptions) -> Result<
     if let Some(code) = &written.territory {
         validate_jurisdiction_code(&format!("`rule {name}` 的 territory"), code)?;
     }
-    if written.effective_to.is_some() && written.effective_from.is_none() {
-        return Err(format!(
-            "`rule {name}`：`repealed` 必须与 `effective` 同用；失效日不能没有生效起点"
-        ));
-    }
-    if let (Some(from), Some(to)) = (&written.effective_from, &written.effective_to) {
+
+    let inherited = if options.case_local {
+        None
+    } else {
+        options.pack_scope.as_ref()
+    };
+    let effective_from = written
+        .effective_from
+        .clone()
+        .or_else(|| inherited.and_then(|scope| scope.effective_from.clone()));
+    let effective_to = written
+        .effective_to
+        .clone()
+        .or_else(|| inherited.and_then(|scope| scope.effective_to.clone()));
+    let jurisdiction = written
+        .jurisdiction
+        .clone()
+        .or_else(|| inherited.and_then(|scope| scope.jurisdiction.clone()));
+    let territory = written
+        .territory
+        .clone()
+        .or_else(|| inherited.and_then(|scope| scope.territory.clone()));
+
+    // The merged range must be well formed even when one endpoint was
+    // inherited: a rule's own `effective 2005` with a manifest end of 2001 is
+    // not a record of any interval that can exist.
+    if let Some(to) = &effective_to {
+        let Some(from) = &effective_from else {
+            return Err(format!(
+                "`rule {name}`：失效日 `{to}` 没有生效起点；请写 `effective`，或由包清单提供 `effective_from`（案件本地规则不继承清单）"
+            ));
+        };
         if to <= from {
             return Err(format!(
-                "`rule {name}`：`repealed` `{to}` 必须晚于 `effective` `{from}`（失效日不含当天）"
+                "`rule {name}`：合并后的生效区间无效：生效起点 `{from}` 必须早于失效日 `{to}`（`repealed` 不含当天，必须更晚）"
             ));
         }
     }
-    if options.case_local {
-        return Ok(Scope {
-            effective_from: written.effective_from.clone(),
-            effective_to: written.effective_to.clone(),
-            jurisdiction: written.jurisdiction.clone(),
-            territory: written.territory.clone(),
-            origin: ScopeOrigin::CaseLocal,
-        });
-    }
-    let inherited = options.pack_scope.as_ref();
-    let origin = if !written.is_empty() {
+
+    let field_origin = |explicit: &Option<String>, merged: &Option<String>| match (explicit, merged)
+    {
+        (Some(_), _) => merged.as_ref().map(|_| ScopeOrigin::Rule),
+        (None, Some(_)) => Some(ScopeOrigin::PackDefault),
+        (None, None) => None,
+    };
+    let origin = if options.case_local {
+        ScopeOrigin::CaseLocal
+    } else if !written.is_empty() {
         ScopeOrigin::Rule
-    } else if inherited.is_some() {
+    } else if options.pack_scope.is_some() {
         ScopeOrigin::PackDefault
     } else {
         ScopeOrigin::Unspecified
     };
     Ok(Scope {
-        effective_from: written
-            .effective_from
-            .clone()
-            .or_else(|| inherited.and_then(|scope| scope.effective_from.clone())),
-        effective_to: written
-            .effective_to
-            .clone()
-            .or_else(|| inherited.and_then(|scope| scope.effective_to.clone())),
-        jurisdiction: written
-            .jurisdiction
-            .clone()
-            .or_else(|| inherited.and_then(|scope| scope.jurisdiction.clone())),
-        territory: written
-            .territory
-            .clone()
-            .or_else(|| inherited.and_then(|scope| scope.territory.clone())),
+        effective_from_origin: field_origin(&written.effective_from, &effective_from),
+        effective_to_origin: field_origin(&written.effective_to, &effective_to),
+        jurisdiction_origin: field_origin(&written.jurisdiction, &jurisdiction),
+        territory_origin: field_origin(&written.territory, &territory),
+        effective_from,
+        effective_to,
+        jurisdiction,
+        territory,
         origin,
     })
 }
