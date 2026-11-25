@@ -416,8 +416,8 @@ interpret i1 : P 张三 → Q 张三
     // both layers accept it (the root is the fact, not the conflicted `Q`).
     let mut derivation = reasoner.derivation();
     derivation.root = reasoner.root_for(&atom("P"));
-    let certificate =
-        certificate(&derivation, &reasoner.priority_order()).expect("the derivation converts");
+    let certificate = certificate(&lib.env, &derivation, &reasoner.priority_order())
+        .expect("the derivation converts");
     assert_eq!(certificate.interpretations.len(), 1);
     assert_eq!(certificate.interpretations[0].id, "i1");
     let witness = [
@@ -443,8 +443,8 @@ fn an_interpretation_application_certificate_checks_and_proves() {
     let reasoner = reasoner(&lib, &["i1"]);
     let mut derivation = reasoner.derivation();
     derivation.root = reasoner.root_for(&atom("Q"));
-    let certificate =
-        certificate(&derivation, &reasoner.priority_order()).expect("the derivation converts");
+    let certificate = certificate(&lib.env, &derivation, &reasoner.priority_order())
+        .expect("the derivation converts");
 
     assert_eq!(certificate.interpretations.len(), 1);
     assert_eq!(

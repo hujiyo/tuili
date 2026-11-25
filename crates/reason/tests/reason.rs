@@ -1931,7 +1931,7 @@ fn a_strict_fact_defeats_a_rule_conclusion() {
 
         let mut d = r.derivation();
         d.root = r.root_for(&approved());
-        let certificate = std_deduce_reason::certificate(&d, &r.priority_order())
+        let certificate = std_deduce_reason::certificate(&lib.env, &d, &r.priority_order())
             .expect("the derivation converts");
         let strict = certificate
             .assumptions

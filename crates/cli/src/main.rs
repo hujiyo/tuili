@@ -255,6 +255,18 @@
 //! prints the formal tree, so the certificate remains expandable; `:cert` JSON
 //! is unchanged.
 //!
+//! `:why` and `:explain` also report the `open` concept marker. A rule step
+//! whose conclusion head is an open predicate, or a root that is one, makes the
+//! derivation depend on a human judgement: the certificate records one
+//! `open_concept` obligation (stable id `open-concept`, a description naming the
+//! concept, and the direct dependency nodes), `:why` prints
+//! `  此处需人判断：`<concept>`` after the derivation and `:explain` prints it
+//! after the conclusion. Such a query exits `1` and never prints
+//! `推导已通过独立校验。`. The judgement follows the root's proof graph only:
+//! an open concept derived on an unrelated branch, or one merely supplied as a
+//! fact, does not reach the root. The candidate interpretations and branch
+//! re-runs this marker will eventually drive are not implemented yet.
+//!
 //! `:gap` prints a recursive gap tree: every candidate rule names the premises
 //! it is missing and the blocking conditions that already hold, and every
 //! missing premise is expanded into its own gap — the rules that could conclude
@@ -277,8 +289,10 @@
 //! Neither command touches the certificate format.
 //!
 //! `:cert` requires a loaded theory and writes only the certificate JSON to
-//! stdout; a gap becomes a `MissingPremise` obligation and an unresolved
-//! conflict becomes an `UnresolvedConflict` obligation in that JSON. Before
+//! stdout; a gap becomes a `MissingPremise` obligation, an unresolved
+//! conflict becomes an `UnresolvedConflict` obligation, and a root derivation
+//! that turned an `open` concept into a proved proposition becomes one
+//! `open_concept` obligation in that JSON. Before
 //! serialization the certificate is stamped with the environment identity:
 //! the canonical profile name, the session's as-of date and jurisdiction code
 //! (from `--as-of`/`--jurisdiction` or `:asof`/`:jurisdiction`; explicit `null`
@@ -310,7 +324,11 @@
 //! none (`没有记录优先关系`), so a defeat is never presented without the
 //! evidence that its declaration was checked. A priority cycle in the current
 //! environment adds one warning line after it; the warning changes no exit
-//! code. A certificate that records a
+//! code. An `open_concept` obligation is recomputed from the environment's
+//! markers and the proof graph rather than trusted: a certificate that dropped,
+//! invented or edited it fails the logical layer (exit `2`). When it passes,
+//! one `  此处需人判断：`<concept>`` line names the concept after the
+//! `需人判断：` summary. A certificate that records a
 //! `local-extension` obligation (its proof applied a rule the case file
 //! declared) gets one `  本地扩展：...` line after the four report lines and
 //! before any goal binding, and counts as an open obligation. The process exits
@@ -347,9 +365,9 @@ use std::path::{Path, PathBuf};
 use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
-    render, render_narrative, Certificate, CheckReport, EnvironmentDifference, EnvironmentIdentity,
-    EnvironmentRecord, Node as CertNode, ObligationKind, OpenObligation, PriorityClause,
-    PriorityEdge, PriorityOrigin, ResolutionBasis, Source, TrustLevel,
+    render, render_narrative_with_open_concepts, Certificate, CheckReport, EnvironmentDifference,
+    EnvironmentIdentity, EnvironmentRecord, Node as CertNode, ObligationKind, OpenObligation,
+    PriorityClause, PriorityEdge, PriorityOrigin, ResolutionBasis, Source, TrustLevel,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
@@ -1544,18 +1562,25 @@ impl Session {
             d.root = Some(id);
         }
 
-        let mut certificate = reason_certificate(&d, &r.priority_order())?;
+        let mut certificate = reason_certificate(&self.lib.env, &d, &r.priority_order())?;
         self.mark_case_extensions(&mut certificate);
+        // The concepts the root's proof graph decided. This is the certificate
+        // layer's own recomputation, the same one `cert::check` runs, so the
+        // notice printed here and the recorded obligation cannot disagree.
+        let open_concepts = self.open_concepts(&certificate)?;
         // The tree or the narrative is printed from the certificate, then that
         // same certificate is checked by both layers: what the user sees and
         // the object being checked cannot diverge. `:why` keeps the formal
         // tree; `:explain` prints the Chinese because-so rendering of it.
         let rendered = if cmd == "explain" {
-            render_narrative(&certificate)?
+            render_narrative_with_open_concepts(&certificate, &open_concepts)?
         } else {
             render(&certificate)?
         };
         writeln!(out, "{rendered}").ok();
+        if cmd == "why" {
+            write_open_concept_lines(out, &open_concepts);
+        }
         // Applied or candidate rules from another jurisdiction are called out;
         // this is a warning, not a filter, and it never changes the exit code.
         for note in self.certificate_jurisdiction_notes(&certificate) {
@@ -1783,8 +1808,8 @@ impl Session {
             d.root = Some(id);
         }
 
-        let mut certificate =
-            reason_certificate(&d, &r.priority_order())?.with_environment(self.identity()?);
+        let mut certificate = reason_certificate(&self.lib.env, &d, &r.priority_order())?
+            .with_environment(self.identity()?);
         self.mark_case_extensions(&mut certificate);
         let json = certificate
             .to_json_pretty()
@@ -1839,6 +1864,27 @@ impl Session {
             ),
             nodes,
         });
+    }
+
+    /// The concepts the certificate's root derivation turns into proved
+    /// propositions, recomputed from the loaded environment and the proof graph.
+    ///
+    /// This is the certificate layer's own recomputation
+    /// ([`std_deduce_cert::open_concept_dependency`]), which `cert::check`
+    /// compares with the recorded `open_concept` obligation. Display never
+    /// parses an obligation's description to recover the concept names.
+    fn open_concepts(&self, certificate: &Certificate) -> Result<Vec<String>, String> {
+        let dependency = std_deduce_cert::open_concept_dependency(&self.lib.env, certificate)
+            .map_err(|error| format!("无法重算开放概念义务：{error}"))?;
+        Ok(dependency
+            .map(|dependency| {
+                dependency
+                    .concepts
+                    .into_iter()
+                    .map(|concept| concept.to_string())
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     /// Check a certificate against the loaded environment, without rerunning
@@ -1974,6 +2020,12 @@ impl Session {
             human_summary(&certificate, requires_human, unresolved)
         )
         .ok();
+
+        // An open concept the root derivation decided is named, so
+        // "需人判断：是" points at which concept and which proof node. The
+        // names come from the checker's recomputation, not from the recorded
+        // description, which the checker has just validated field by field.
+        write_open_concept_lines(out, &self.open_concepts(&certificate)?);
 
         // Case-local rules are recorded as an open obligation; name them so
         // "需人判断：是" points at what needs a human.
@@ -3289,6 +3341,18 @@ fn write_verify_cert_checks_not_run(out: &mut impl Write, reason: &str) {
     writeln!(out, "需人判断：未评估（{reason}）").ok();
 }
 
+/// Print one `此处需人判断：`<concept>`` line per open concept the root
+/// derivation decided.
+///
+/// The names are the checked recomputation of the environment's `open` markers
+/// and the proof graph, never text parsed out of the certificate. They are
+/// escaped, so a concept name cannot forge another output line.
+fn write_open_concept_lines(out: &mut impl Write, concepts: &[String]) {
+    for concept in concepts {
+        writeln!(out, "  此处需人判断：`{}`", escape_control(concept)).ok();
+    }
+}
+
 /// Print one `  本地扩展：...` line per case-local-extension obligation.
 ///
 /// The description comes from the certificate, so it is escaped before it is
@@ -3882,7 +3946,7 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
         writeln!(out, "  （推导无法重建：它的前提本身已不在事实库）").ok();
         return;
     };
-    let certificate = match reason_certificate(&d, &r.priority_order()) {
+    let certificate = match reason_certificate(r.env(), &d, &r.priority_order()) {
         Ok(certificate) => certificate,
         Err(error) => {
             writeln!(out, "  （该推导未能生成证书：{error}）").ok();

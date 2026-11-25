@@ -76,7 +76,22 @@
 //! order, premise order, bindings, sources, conflicts and the root are
 //! carried over unchanged. It does not decide anything the derivation did
 //! not already decide, and it refuses to drop an expression it cannot
-//! encode.
+//! encode. One derived fact is added: when the root's proof graph turns an
+//! `open` concept (`重大`, `情节严重`) into a proved proposition, the
+//! certificate records an `open_concept` obligation naming the concepts and
+//! the nodes that state them. An open concept is never exported as an
+//! unconditional conclusion.
+//!
+//! ## Open concepts are not silently booleanised
+//!
+//! `open <pred>` is kernel metadata: it seeds no derivation and blocks no `unless`.
+//! It is not inert for output, though. A rule step whose conclusion head is an
+//! open predicate, or a queried root that is one, depends on a human judgement;
+//! the dependency propagates from the root's proof graph and becomes the
+//! certificate obligation. A fact the user or the court supplied is evidence,
+//! not a decision of the concept, so an open concept that merely appears as an
+//! assumption premise is not counted. The candidate interpretations and the
+//! branch re-run this marker will eventually drive are not implemented yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -2924,6 +2939,16 @@ fn node_prop(n: &Node) -> Option<&Expr> {
 /// nothing about packs or corpora, so only the CLI can stamp a real identity
 /// before exporting.
 ///
+/// `env` is the environment the derivation was produced in. It is read for one
+/// thing only: the `open` markers ([`Env::open_predicates`]). When the root's
+/// proof graph turns such a concept (`重大`, `情节严重`) into a proved
+/// proposition, the certificate gains one `open_concept` obligation naming the
+/// concepts and the nodes that state them, so an open concept is never
+/// exported as an unconditional conclusion. The obligation is computed by
+/// [`std_deduce_cert::open_concept_dependency`], the same function the
+/// certificate checker recomputes with; a derivation over no open concept
+/// records none.
+///
 /// `priority_order` is the [`Reasoner::priority_order`] of the reasoner that
 /// produced `d`. It is consulted only to say how many recorded priority edges
 /// lie on a priority cycle in an unresolved-conflict description; a derivation
@@ -2935,6 +2960,7 @@ fn node_prop(n: &Node) -> Option<&Expr> {
 /// An expression that cannot be represented aborts the conversion with an
 /// error naming the node and the field, rather than being dropped.
 pub fn certificate(
+    env: &Env,
     d: &Derivation,
     priority_order: &PriorityOrder,
 ) -> Result<std_deduce_cert::Certificate, String> {
@@ -3206,7 +3232,7 @@ pub fn certificate(
         });
     }
 
-    Ok(std_deduce_cert::Certificate {
+    let mut certificate = std_deduce_cert::Certificate {
         format_version: std_deduce_cert::FormatVersion::CURRENT,
         // The reasoner knows nothing about profiles, pack versions or corpus
         // files; the CLI stamps the real identity before exporting. The marker
@@ -3223,7 +3249,15 @@ pub fn certificate(
             tool: Some("std-deduce".to_owned()),
             tool_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         },
-    })
+    };
+    // A root derivation that turns an open concept into a proved proposition
+    // must say so. The obligation is recomputed from the environment markers
+    // and the proof graph by the same function the certificate checker uses,
+    // and a derivation over no open concept records none of it.
+    if let Some(dependency) = std_deduce_cert::open_concept_dependency(env, &certificate)? {
+        certificate.open_obligations.push(dependency.obligation());
+    }
+    Ok(certificate)
 }
 
 /// Encode one kernel expression, naming its location on failure.

@@ -664,6 +664,9 @@ pub enum ObligationKind {
     /// A declaration lacks a citation.
     MissingSource,
     /// An open legal concept needs an interpretation (`合理`, `重大`, ...).
+    /// One obligation is recorded per certificate root derivation whose proof
+    /// graph states such a concept; it is recomputed from the environment's
+    /// `open` markers and the proof nodes, never taken on trust.
     OpenConcept,
     /// A conflict has no winner.
     UnresolvedConflict,
