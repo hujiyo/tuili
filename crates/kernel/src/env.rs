@@ -244,6 +244,28 @@ impl Burden {
         }
     }
 
+    /// The Chinese role name shown by the burden report. These are relative
+    /// roles, not party names: the report never invents a person.
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            Burden::Claimant => "主张方",
+            Burden::Respondent => "相对方",
+            Burden::Court => "法院职权",
+        }
+    }
+
+    /// The role as the actor of the report's plain-language sentence:
+    /// `主张方提出`, `相对方提出`, `法院依职权查明`. `court` is not a
+    /// person, so the sentence names the court's own inquiry instead of
+    /// saying that the role "presents" evidence.
+    pub fn actor_zh(self) -> &'static str {
+        match self {
+            Burden::Claimant => "主张方提出",
+            Burden::Respondent => "相对方提出",
+            Burden::Court => "法院依职权查明",
+        }
+    }
+
     /// The values the clause accepts, in a stable order. Error messages list
     /// the same set, so a near miss can be corrected from the diagnostic.
     pub fn labels() -> &'static [&'static str] {
@@ -285,6 +307,16 @@ impl Standard {
         }
     }
 
+    /// The Chinese label shown by the burden report. It names the standard of
+    /// proof and nothing more: no probability or score is attached.
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            Standard::Preponderance => "优势证据",
+            Standard::ClearAndConvincing => "清楚可信",
+            Standard::BeyondReasonableDoubt => "排除合理怀疑",
+        }
+    }
+
     /// The values the clause accepts, in a stable order.
     pub fn labels() -> &'static [&'static str] {
         &[
@@ -302,6 +334,99 @@ impl Standard {
             "clear_and_convincing" => Some(Standard::ClearAndConvincing),
             "beyond_reasonable_doubt" => Some(Standard::BeyondReasonableDoubt),
             _ => None,
+        }
+    }
+}
+
+/// The burden and standard a rule declares for one group of propositions.
+///
+/// `None` is a real answer: the file declared nothing, so every report spells
+/// out `未声明举证责任` / `未声明证明标准` instead of naming a default party or
+/// standard. The standard is a label only; nothing here is a probability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProofBurden {
+    /// Who must prove the group, or `None` when undeclared.
+    pub burden: Option<Burden>,
+    /// The standard of proof for the group, or `None` when undeclared.
+    pub standard: Option<Standard>,
+}
+
+impl ProofBurden {
+    /// The burden and standard the rule declares for its positive premises.
+    pub fn requirements(rule: &RuleDecl) -> Self {
+        ProofBurden {
+            burden: rule.burden,
+            standard: rule.standard,
+        }
+    }
+
+    /// The burden and standard the rule declares for its `unless` exceptions.
+    pub fn exceptions(rule: &RuleDecl) -> Self {
+        ProofBurden {
+            burden: rule.exception_burden,
+            standard: rule.exception_standard,
+        }
+    }
+
+    /// The declared values as report text, in the fixed order
+    /// `(举证方, 证明标准)`. An undeclared value is written out; it is never
+    /// replaced by a default role or standard.
+    pub fn labels_zh(self) -> (&'static str, &'static str) {
+        (
+            match self.burden {
+                Some(burden) => burden.label_zh(),
+                None => "未声明举证责任",
+            },
+            match self.standard {
+                Some(standard) => standard.label_zh(),
+                None => "未声明证明标准",
+            },
+        )
+    }
+
+    /// The one-line pair the gap tree prints in brackets:
+    /// `主张方 / 优势证据`, `主张方 / 未声明证明标准`,
+    /// `未声明举证责任 / 优势证据` or `未声明举证责任 / 未声明证明标准`.
+    pub fn pair_zh(self) -> String {
+        let (burden, standard) = self.labels_zh();
+        format!("{burden} / {standard}")
+    }
+
+    /// The plain-language sentence the narrative prints. `exceptions` selects
+    /// the exception group's wording; the values are the same ones
+    /// [`ProofBurden::pair_zh`] writes, so the two reports cannot disagree.
+    pub fn sentence_zh(self, exceptions: bool) -> String {
+        let (burden, standard) = self.labels_zh();
+        let actor = match self.burden {
+            Some(burden) => burden.actor_zh(),
+            None => burden,
+        };
+        let subject = if exceptions { "例外" } else { "这条证据" };
+        match (self.burden, self.standard) {
+            (Some(_), Some(_)) => format!("{subject}由{actor}，标准是{standard}"),
+            (Some(_), None) => format!("{subject}由{actor}，但{standard}"),
+            (None, Some(_)) => format!("{subject}{burden}，标准是{standard}"),
+            (None, None) => format!("{subject}{burden}，{standard}"),
+        }
+    }
+}
+
+/// The two burden reports a rule can declare: its positive requirements and
+/// its `unless` exceptions. They are independent; a group is never filled in
+/// from the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RulePleading {
+    pub requirements: ProofBurden,
+    pub exceptions: ProofBurden,
+}
+
+impl RulePleading {
+    /// Read both groups from a rule's declaration, keeping an undeclared field
+    /// as `None`.
+    pub fn of_rule(rule: &RuleDecl) -> Self {
+        RulePleading {
+            requirements: ProofBurden::requirements(rule),
+            exceptions: ProofBurden::exceptions(rule),
         }
     }
 }
@@ -372,8 +497,9 @@ pub struct RuleDecl {
     pub unlesses: Vec<Expr>,
     /// Who must prove the rule's positive requirements (`burden …`), or
     /// `None` when the file declared no burden. An undeclared burden is not
-    /// defaulted to the claimant and is not used by reasoning: the field is
-    /// recorded for a later report, not read by the calculus.
+    /// defaulted to the claimant and is not used by reasoning: the gap report
+    /// reads it from the declaration (see [`RulePleading`]), and the calculus
+    /// never does.
     pub burden: Option<Burden>,
     /// The standard for those requirements (`standard …`), or `None` when
     /// undeclared. Not defaulted to `preponderance`.
