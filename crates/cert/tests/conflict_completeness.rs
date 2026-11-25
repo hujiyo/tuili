@@ -8,10 +8,10 @@
 //! conflict out.
 
 use std_deduce_cert::{
-    check, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind, ApplicabilityVerdict,
-    Assumption, Binding, CertExpr, Certificate, Conflict, EnvironmentIdentity, Explicit,
-    FactIdentity, FormatVersion, Node, Provenance, Resolution, ResolutionBasis, RuleApplicability,
-    Side, Source, UnresolvedReason,
+    check, check_display_projection, ApplicabilityBasis, ApplicabilityReason,
+    ApplicabilityReasonKind, ApplicabilityVerdict, Assumption, Binding, CertExpr, Certificate,
+    Conflict, EnvironmentIdentity, Explicit, FactIdentity, FormatVersion, Node, Provenance,
+    Resolution, ResolutionBasis, RuleApplicability, Side, Source, UnresolvedReason,
 };
 use std_deduce_kernel::env::{DeclKind, Env};
 use std_deduce_lang::Library;
@@ -724,4 +724,20 @@ fn a_recorded_defeat_between_two_strict_facts_is_rejected() {
     });
     let error = reject(&cert, &env);
     assert!(error.message.contains("两侧都是严格事实"), "{error}");
+}
+
+/// The display projection is deliberately weaker than certificate validity: it
+/// skips only the certificate-wide conflict-completeness scan. The very object
+/// `check` rejects (an unrecorded strict-fact conflict) passes the projection,
+/// which is why the projection must never be used to decide whether a
+/// certificate is valid.
+#[test]
+fn the_display_projection_is_not_certificate_validity() {
+    let env = env_from("conflict-completeness-projection", STRICT_THEORY);
+    let cert = certificate(strict_assumptions(), strict_nodes(), Some(1));
+    let error = reject(&cert, &env);
+    assert!(error.message.contains("没有记录该冲突"), "{error}");
+    let projection = check_display_projection(&env, &cert)
+        .expect("the display projection skips only the completeness scan");
+    assert!(projection.root_proved);
 }

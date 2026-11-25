@@ -864,3 +864,64 @@ axiom 未批准 : 不批准 甲
     assert!(out.contains("逻辑校验：失败"), "{out}");
     assert!(out.contains("两侧都是严格事实"), "{out}");
 }
+
+/// A certificate that only the display-projection check would accept must still
+/// fail `:verify-cert`. The projection check is intentionally weaker than
+/// `cert::check` (it skips the certificate-wide conflict-completeness scan), so
+/// a root whose registered fact conflicts with another registered strict fact
+/// but records no conflict is a verification error, not a valid projection-based
+/// pass. This pins the separation between the display path and the validity
+/// path.
+#[test]
+fn a_projection_only_certificate_is_a_verification_error() {
+    let theory = TempFile::new(
+        "projection-only",
+        "std",
+        r#"
+sort 申请
+pred 批准 : 申请 → Prop
+pred 不批准 : 申请 → Prop
+contrary 批准 不批准
+obj 甲 : 申请
+axiom 已批准 : 批准 甲
+  identity verified
+  source text "判决" locator "第一页"
+axiom 未批准 : 不批准 甲
+  identity verified
+  source text "判决" locator "第二页"
+"#,
+    );
+    let generated = session(&theory, &[":cert 批准 甲"]);
+    let mut certificate = certificate_json(&generated);
+    let root = certificate
+        .nodes
+        .iter()
+        .position(|node| match node {
+            Node::Assumption { assumption } => {
+                print_expr(&Expr::from(
+                    &certificate.assumptions[*assumption].proposition,
+                )) == "批准 甲"
+            }
+            _ => false,
+        })
+        .expect("the strict fact has an assumption node");
+    certificate.root = Some(root);
+    // Clear the recorded standoff: a certificate that omits the conflict is
+    // exactly what the conflict-completeness scan rejects. The display
+    // projection skips that scan, so it would accept this object.
+    certificate.conflicts.clear();
+    certificate.open_obligations.clear();
+
+    let verified = verify_cert(&theory, "projection-only-card", &certificate);
+    let out = stdout(&verified);
+    assert_eq!(
+        verified.status.code(),
+        Some(ERROR),
+        "a certificate that only the display projection accepts must not verify:\n{out}"
+    );
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    assert!(
+        out.contains("但没有记录"),
+        "the rejection must name the omitted conflict, not a projection result:\n{out}"
+    );
+}

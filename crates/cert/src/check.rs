@@ -350,22 +350,38 @@ impl std::error::Error for CheckError {}
 
 /// Check that every node of `cert` is a legal step against `env`.
 ///
+/// This is the only function that decides certificate validity: `:verify-cert`
+/// and every consumer that accepts a certificate must use it. It runs the
+/// certificate-wide checks too, including the conflict-completeness scan: a
+/// root-reachable conclusion that conflicts with a registered environment fact
+/// but is not recorded in `conflicts` is an error here.
+///
+/// For one side of a conflict that is only being displayed, see
+/// [`check_display_projection`]; a successful projection check is **not**
+/// certificate validity and must never be rendered as one.
+///
 /// See the module documentation for the checked criteria and the boundaries.
 pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
     check_with(env, cert, true)
 }
 
-/// Check one **display projection** of a derivation, such as one side of a
+/// Check a **display projection** of a derivation, such as one side of a
 /// conflict that `:why` renders as its own tree.
 ///
 /// A projection is not an exported certificate: by construction it holds one
 /// side only and carries no certificate-wide `conflicts` array, so the
 /// completeness scan (which requires an unrecorded conflict to have been
 /// recorded) cannot apply to it. Every node-level and obligation-level check
-/// still runs; this is explicitly narrower than [`check`], not a tolerance of
-/// a failed check, and the strict [`check`] remains what `:verify-cert` and
-/// `:cert` consumers use.
-pub fn check_projection(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
+/// still runs; only the certificate-wide completeness scan is skipped.
+///
+/// **This result is not certificate validity.** A certificate that fails
+/// [`check`] can pass this projection check, because the projection check does
+/// not look at conflicts the certificate omitted. Never treat a successful
+/// projection as "the derivation passed independent verification": the
+/// display path may say the projection itself is consistent, not that the
+/// certificate is valid. `:verify-cert`, `:cert` consumers and every validity
+/// decision use [`check`].
+pub fn check_display_projection(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
     check_with(env, cert, false)
 }
 
@@ -1035,7 +1051,7 @@ fn check_with(
     // conclusion looking proved. The scan runs after the recorded conflicts
     // were validated, so a forged record is reported on its own terms first.
     // A display projection (one side of a conflict) has no certificate-wide
-    // conflict records by construction; `check_projection` skips this scan.
+    // conflict records by construction; `check_display_projection` skips this scan.
     if completeness {
         validate_conflict_completeness(env, cert, &facts)?;
     }

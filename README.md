@@ -2188,9 +2188,10 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 `reason::verify` 不判断两条结论谁优先：它只回答“这一步是不是该规则的合法实例”，
 非根冲突与优先级来源不在它的范围内。`cert::check` 会复核每个冲突**记录下来的**裁决
 （见「证书链的当前边界」），但裁决本身由推理器产生；冲突分支展示的两条推导各自从证书渲染，
-并用 `cert::check_projection` 复核——这是 `cert::check` 的显式投影版本，只跳过“证书没有记录的
-冲突”这条证书级完备性扫描（单侧投影按设计没有证书级的 `conflicts` 记录），节点级检查仍全部执行；
-导出的证书（`:cert` / `:verify-cert`）仍走严格 `cert::check`。
+并用 `cert::check_display_projection` 复核——这是 `cert::check` 的显式单侧展示版本，只跳过
+“证书没有记录的冲突”这条证书级完备性扫描（单侧投影按设计没有证书级的 `conflicts` 记录），
+节点级检查仍全部执行；它的“通过”只说明该单侧投影的节点检查通过，**不构成证书有效性**，
+输出也按这个口径措辞。导出的证书（`:cert` / `:verify-cert`）必须走严格 `cert::check`。
 
 ### 其余已确认缺陷
 
@@ -2248,7 +2249,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 1305 个：kernel 26、lang 200、reason 133、cert 285、cli 497、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 1307 个：kernel 26、lang 200、reason 133、cert 286、cli 498、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（26）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -2391,11 +2392,13 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   三个假设事件时间/地点不一致（日期、地点、显式 `null`）都被拒绝；P0 派生前提仍按命题查环境
   登记（有登记拒绝、无登记仍按 `unchecked` 通过）；缺口候选按绑定/已持有前提重建，伪造判定、
   改日期、换入无关已持有命题都被拒绝。
-- `crates/cert/tests/conflict_completeness.rs`（15）：证书没有记录的冲突必须被拒绝——删掉
+- `crates/cert/tests/conflict_completeness.rs`（16）：证书没有记录的冲突必须被拒绝——删掉
   `conflicts` 并把根指到被严格事实否决的规则结论/公理实例/根假设时失败并点名节点、另一侧命题与
   身份；正确记录并裁决后通过；非严格主张必须记录为未决（缺失或记成胜出都失败）；两条严格事实
   互斥时只能记录为未决 `conflicting_assumptions`（诚实记录通过、记成已裁决失败）；`disputed`
   不参与；不可达节点上的冲突不影响根；`def` 别名、`unique` 参数位与量词实例三种冲突来源各有一条。
+  另有一条边界断言：同一个对象 `cert::check` 拒绝、`cert::check_display_projection` 接受，证明单侧
+  展示投影的“通过”不构成证书有效性。
 - `crates/cert/src/key.rs`（2 个单元测试）：表达式身份按 AST 结构编码，`Var(i)` 与同名 `Const`
   不同键，binder 名不影响键。
 - `crates/cert/src/conflict.rs`（5 个单元测试）：共享的冲突判定——`contrary` 参数全同才冲突、
@@ -2531,7 +2534,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   `已截断：达到最大展开深度（6 层）`；33 条结论时只列 32 条并打印结论数上限截断；10 个实例时
   每条规则的 8 次枚举上限会打印“其余实例未枚举”；无法实例化的规则单独列出；已裁决冲突的
   河南种子案示例不产生争点、退出 `0`。
-- `crates/cli/tests/fact_identity.rs`（13）：事实身份的端到端用例——严格事实对规则结论时 `:why`
+- `crates/cli/tests/fact_identity.rs`（14）：事实身份的端到端用例——严格事实对规则结论时 `:why`
   退出 `0`，打印 `冲突（已裁决）` 与 `依据：严格事实优先于可废止规则结论。`，被否决方一行带
   `事实〔法院查明〕`，`:cert` 的假设 `identity` 是 `verified`，`:verify-cert` 根摘要显示
   `根为假设（法院查明）`；严格事实对主张时依据写“优先于未经证明的主张”；主张对规则时 `:why`
@@ -2548,7 +2551,9 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   另一条同名结论挂在根不可达的旁支上、冲突记录被删掉时，`:verify-cert` 仍退出 `0`
   （不可达分支不影响根）；两条严格事实互斥、证书正确记录为未决时，`:verify-cert` 四行结果正常
   但退出 `1`（未决义务），根摘要写「根为已登记的严格事实，但与另一严格事实的冲突未决」且
-  不同时出现「根已证明」，把该冲突改记成一方胜出则退出 `2`。
+  不同时出现「根已证明」，把该冲突改记成一方胜出则退出 `2`。另有一条边界用例：只把证书根改到
+  严格事实节点并删掉冲突记录（这种对象只有单侧展示投影会接受）时，`:verify-cert` 必须退出 `2`
+  并点名被省略的冲突，防止展示路径被接到验证路径。
 - `crates/cli/tests/burden.rs`（12）：举证责任/证明标准的声明层与报告层端到端——`:inspect` 显示
   `〔举证 claimant · 标准 preponderance〕` 与 `〔例外举证 respondent · 例外标准 clear_and_convincing〕`，
   只声明标准或只声明例外举证的规则不出现多余分组、未声明的规则不显示占位；

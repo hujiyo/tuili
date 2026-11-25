@@ -237,7 +237,7 @@ pub use applicability::{
     ApplicabilityReasonKind, ApplicabilityVerdict, CodeDimension, DateField, DatedEvidence,
     PlaceEvidence, RuleApplicability, ScopeEvidence, ScopeOriginRecord, SessionEvidence,
 };
-pub use check::{check, check_projection, CheckError, CheckReport};
+pub use check::{check, check_display_projection, CheckError, CheckReport};
 pub use environment::{
     CorpusRecord, EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, ExplicitText,
     PackRecord, TrustLevel, UnrecordedEnvironment,

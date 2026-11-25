@@ -5085,17 +5085,29 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
             return;
         }
     };
-    match std_deduce_cert::check_projection(r.env(), &certificate) {
+    // Display projection only: `check_display_projection` skips the
+    // certificate-wide conflict-completeness scan, so its "ok" says the
+    // one-sided tree is internally consistent — never that a certificate is
+    // valid. The wording below must not claim independent verification.
+    match std_deduce_cert::check_display_projection(r.env(), &certificate) {
         Ok(report) if report.root_proved => {
-            writeln!(out, "  （该推导通过证书逻辑校验）").ok();
+            writeln!(
+                out,
+                "  （该单侧展示的节点检查通过；证书有效性以完整证书的校验为准）"
+            )
+            .ok();
         }
         Ok(_) => {
-            writeln!(out, "  （该推导未通过证书逻辑校验：根未被证明）").ok();
+            writeln!(
+                out,
+                "  （该单侧展示的节点检查未通过：根未被证明；证书有效性以完整证书的校验为准）"
+            )
+            .ok();
         }
         Err(error) => {
             writeln!(
                 out,
-                "  （该推导未通过证书逻辑校验：{}）",
+                "  （该单侧展示的节点检查未通过：{}）",
                 escape_control(&error.to_string())
             )
             .ok();
