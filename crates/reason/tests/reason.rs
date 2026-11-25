@@ -2221,3 +2221,150 @@ pred 侵占 : 公民 → Prop
     assert!(error.contains("法院查明"), "got: {error}");
     assert!(error.contains("用户陈述"), "got: {error}");
 }
+
+/// A conflict declared over the underlying predicates must see a fact written
+/// through a `def` alias: the head is taken after kernel normalization, not
+/// from the raw term. Before this, the alias fact silently passed while its
+/// contrary fact was in the same base.
+#[test]
+fn a_definition_fact_conflicts_with_a_contrary_fact() {
+    let src = r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+pred 非配偶 : 人 → 人 → Prop
+obj 张三 : 人
+obj 李四 : 人
+def 夫妻 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 配偶 a b
+contrary 配偶 非配偶
+axiom 夫妻事实 : 夫妻 张三 李四
+  source text "测试" locator "夹具"
+axiom 相反事实 : 非配偶 张三 李四
+  source text "测试" locator "夹具"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+
+    let alias = Expr::apps(
+        Expr::constant("夫妻"),
+        [Expr::constant("张三"), Expr::constant("李四")],
+    );
+    let exposed = Expr::apps(
+        Expr::constant("配偶"),
+        [Expr::constant("张三"), Expr::constant("李四")],
+    );
+    assert!(
+        r.conflict_for(&alias).is_some(),
+        "the alias fact must take part in the conflict"
+    );
+    let cs = r.conflicts();
+    assert_eq!(cs.len(), 1, "exactly one contrary pair must be reported");
+    assert_eq!(
+        cs[0].resolution,
+        Resolution::Unresolved {
+            reason: UnresolvedReason::ConflictingAssumptions,
+        }
+    );
+    assert!(
+        !r.knows(&exposed)
+            && !r.knows(&Expr::apps(
+                Expr::constant("非配偶"),
+                [Expr::constant("张三"), Expr::constant("李四")]
+            )),
+        "an unresolved conflict must keep both sides out of the fact base"
+    );
+    assert!(
+        r.derivation_for(&alias).is_some(),
+        "the argument for the alias side stays inspectable"
+    );
+}
+
+/// A rule conclusion written through a `def` alias must be checked against a
+/// contrary fact after normalization too; the conclusion then stays contested
+/// instead of quietly joining the fact base.
+#[test]
+fn a_definition_rule_conclusion_conflicts_with_a_contrary_fact() {
+    let src = r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+pred 非配偶 : 人 → 人 → Prop
+pred 合格 : 人 → Prop
+obj 张三 : 人
+obj 李四 : 人
+def 夫妻 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 配偶 a b
+contrary 配偶 非配偶
+axiom 合格事实 : 合格 张三
+  source text "测试" locator "夹具"
+axiom 相反事实 : 非配偶 张三 李四
+  source text "测试" locator "夹具"
+rule 认定夫妻 :
+  params x : 人
+  premise 合格 x
+  conclude 夫妻 x 李四
+  source text "测试" locator "夹具"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+
+    let conclusion = Expr::apps(
+        Expr::constant("夫妻"),
+        [Expr::constant("张三"), Expr::constant("李四")],
+    );
+    assert!(
+        r.conflict_for(&conclusion).is_some(),
+        "the alias conclusion must be checked against the contrary fact"
+    );
+    let cs = r.conflicts();
+    assert_eq!(cs.len(), 1);
+    assert_eq!(
+        cs[0].resolution,
+        Resolution::Unresolved {
+            reason: UnresolvedReason::NonStrictFact {
+                identity: FactIdentity::UserAsserted,
+            },
+        }
+    );
+    assert!(
+        !r.knows(&conclusion),
+        "a contested rule conclusion is not asserted"
+    );
+}
+
+/// `unique` compares the normalized predicate too: a def alias fact and a
+/// native fact of the same predicate that differ at the declared position are
+/// one conflict.
+#[test]
+fn a_definition_fact_conflicts_under_unique() {
+    let src = r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+obj 张三 : 人
+obj 李四 : 人
+obj 王五 : 人
+def 夫妻 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 配偶 a b
+unique 配偶 1
+axiom 夫妻事实 : 夫妻 张三 李四
+  source text "测试" locator "夹具"
+axiom 另一事实 : 配偶 王五 李四
+  source text "测试" locator "夹具"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+
+    let alias = Expr::apps(
+        Expr::constant("夫妻"),
+        [Expr::constant("张三"), Expr::constant("李四")],
+    );
+    let native = Expr::apps(
+        Expr::constant("配偶"),
+        [Expr::constant("王五"), Expr::constant("李四")],
+    );
+    let cs = r.conflicts();
+    assert_eq!(cs.len(), 1, "the unique declaration must see both writings");
+    assert_eq!(
+        cs[0].resolution,
+        Resolution::Unresolved {
+            reason: UnresolvedReason::ConflictingAssumptions,
+        }
+    );
+    assert!(!r.knows(&alias) && !r.knows(&native));
+}

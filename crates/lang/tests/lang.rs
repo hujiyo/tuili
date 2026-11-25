@@ -329,8 +329,8 @@ fn a_predicate_must_return_a_proposition_at_load() {
         .expect_err("a predicate whose codomain is a sort must be refused")
         .to_string();
     assert!(
-        err.starts_with("`pred`："),
-        "the load error must say which declaration shape failed: {err}"
+        err.starts_with("`pred 坏人`："),
+        "the load error must say which declaration failed: {err}"
     );
     assert!(
         err.contains("`坏人`"),
@@ -682,4 +682,210 @@ fn an_identity_shaped_declaration_is_not_swallowed() {
     assert!(err.msg.contains("未知声明关键字 `identity`"), "{err}");
     assert!(!err.msg.contains("重复"), "{err}");
     assert!(!err.msg.contains("未知事实身份"), "{err}");
+}
+
+/// A `def` is a named macro: the kernel unfolds it by delta, so one
+/// definition can stand in a fact type, a premise, a conclusion and an
+/// `unless`, and the elaborated ledger still converts the name to its body.
+#[test]
+fn a_definition_is_a_named_macro_in_every_rule_position() {
+    let src = r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+pred 殴打 : 人 → 人 → Prop
+def 夫妻 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 配偶 a b
+def 互殴 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 殴打 b a
+obj 张三 : 人
+obj 李四 : 人
+axiom 事实 : 互殴 张三 李四
+  source text "测试" locator "事实类型"
+rule 结论用定义 :
+  params a : 人, b : 人
+  premise 互殴 a b
+  unless 夫妻 a b
+  conclude 夫妻 b a
+  source text "测试" locator "规则"
+"#;
+    let mut lib = Library::new();
+    lib.load("t", src)
+        .expect("the definition is usable everywhere");
+    assert!(
+        matches!(
+            lib.env.get("夫妻").expect("decl").kind,
+            DeclKind::Def { .. }
+        ),
+        "the name stays a def declaration, not an expanded copy"
+    );
+    let applied = std_deduce_kernel::Expr::apps(
+        std_deduce_kernel::Expr::constant("夫妻"),
+        [
+            std_deduce_kernel::Expr::constant("李四"),
+            std_deduce_kernel::Expr::constant("张三"),
+        ],
+    );
+    let unfolded = std_deduce_kernel::Expr::apps(
+        std_deduce_kernel::Expr::constant("配偶"),
+        [
+            std_deduce_kernel::Expr::constant("李四"),
+            std_deduce_kernel::Expr::constant("张三"),
+        ],
+    );
+    assert!(
+        std_deduce_kernel::conv::convertible(
+            &lib.env,
+            &std_deduce_kernel::Ctx::new(),
+            &applied,
+            &unfolded
+        )
+        .expect("the kernel can decide it"),
+        "an application of the definition must convert to its body"
+    );
+}
+
+/// A definition cannot refer to itself: the loader refuses it by name and
+/// position instead of reporting a bare unknown name.
+#[test]
+fn a_recursive_definition_is_refused_with_its_name_and_position() {
+    let src = "sort 人\npred 殴打 : 人 → Prop\ndef 循环 : 人 → Prop := λ (x : 人) := 循环 x\n";
+    let err = Library::new()
+        .load("t", src)
+        .expect_err("a self-referential definition must be refused");
+    assert_eq!(err.position(), Some((3, 1)), "{err}");
+    assert!(
+        err.msg.contains("定义不能递归") && err.msg.contains("`def 循环`"),
+        "{err}"
+    );
+    assert!(err.msg.contains("循环"), "{err}");
+
+    // A module must qualify the reference, but that does not make a
+    // self-reference legal.
+    let module = "namespace a\nsort a.人\npred a.殴打 : a.人 → Prop\ndef a.循环 : a.人 → Prop := λ (x : a.人) := a.循环 x\n";
+    let err = Library::new()
+        .load("m", module)
+        .expect_err("a self-referential module definition must be refused");
+    assert_eq!(err.position(), Some((4, 1)), "{err}");
+    assert!(
+        err.msg.contains("定义不能递归") && err.msg.contains("a.循环"),
+        "{err}"
+    );
+}
+
+/// A free name in the body must be covered by a λ/∀ or declared first; a
+/// name that is neither is refused with both the definition and the name.
+#[test]
+fn a_definition_body_may_not_leave_a_name_unbound() {
+    let src = "sort 人\npred 殴打 : 人 → Prop\ndef 缺参 : 人 → Prop := λ (x : 人) := 殴打 y\n";
+    let err = Library::new()
+        .load("t", src)
+        .expect_err("an unbound free name must be refused");
+    assert_eq!(err.position(), Some((3, 1)), "{err}");
+    assert!(
+        err.msg.contains("`def 缺参`") && err.msg.contains("`y`"),
+        "{err}"
+    );
+    assert!(err.msg.contains("未绑定"), "{err}");
+
+    // A forward reference is refused the same way: `后向` is not in the
+    // ledger when `前向` loads, which is what rules out mutual recursion.
+    let forward = "sort 人\npred 殴打 : 人 → Prop\ndef 前向 : 人 → Prop := λ (x : 人) := 后向 x\ndef 后向 : 人 → Prop := λ (x : 人) := 殴打 x\n";
+    let err = Library::new()
+        .load("t", forward)
+        .expect_err("a forward reference must be refused");
+    assert_eq!(err.position(), Some((3, 1)), "{err}");
+    assert!(
+        err.msg.contains("`def 前向`") && err.msg.contains("`后向`"),
+        "{err}"
+    );
+}
+
+/// A definition name lives in the same ledger as every other declaration, so
+/// a clash with an existing sort/obj/pred/axiom/fact/rule/def is reported at
+/// the definition, naming the existing kind exactly.
+#[test]
+fn a_definition_name_may_not_clash_with_any_declaration() {
+    let cases = [
+        ("sort X\ndef X : Type := Prop\n", "sort", 2, "def X"),
+        ("pred P : Prop\ndef P : Prop := P\n", "pred", 2, "def P"),
+        ("sort 人\nobj 甲 : 人\ndef 甲 : 人 := 甲\n", "obj", 3, "def 甲"),
+        (
+            "axiom 真 : Prop\n  source text \"测试\" locator \"夹具\"\ndef 真 : Prop := 真\n",
+            "axiom",
+            3,
+            "def 真",
+        ),
+        (
+            "sort 人\npred Q : 人 → Prop\nobj 甲 : 人\nrule 名 :\n  params x : 人\n  premise Q x\n  conclude Q x\n  source text \"测试\" locator \"夹具\"\ndef 名 : Prop := Prop\n",
+            "rule",
+            9,
+            "def 名",
+        ),
+        (
+            "sort 人\nobj 乙 : 人\ndef 甲 : 人 := 乙\ndef 甲 : 人 := 乙\n",
+            "def",
+            4,
+            "def 甲",
+        ),
+        (
+            "sort 人\npred P : 人 → Prop\nobj 甲 : 人\naxiom 事实 : P 甲\n  source text \"测试\" locator \"夹具\"\ndef 事实 : Prop := Prop\n",
+            "fact",
+            6,
+            "def 事实",
+        ),
+    ];
+    for (src, kind, line, written) in cases {
+        let err = Library::new()
+            .load("t", src)
+            .expect_err("a duplicate definition name must be refused");
+        assert_eq!(err.position(), Some((line, 1)), "{src}\n{err}");
+        assert!(
+            err.msg.contains(&format!("已声明为 `{kind}`")),
+            "the clashing kind must be named exactly, not merely appear in the \
+             message's list of kinds: {src}\n{err}"
+        );
+        assert!(
+            err.msg.contains(&format!("`{written}`")),
+            "the written declaration must be named: {src}\n{err}"
+        );
+    }
+
+    // The other direction: `def` first, then a later declaration of the same
+    // name. The clash is reported at the later declaration with its position
+    // and the existing kind, not as a nameless `pred` error.
+    let reverse = "sort 人\naxiom 真 : Prop\n  source text \"测试\" locator \"夹具\"\ndef 名 : Prop := 真\npred 名 : 人 → Prop\n";
+    let err = Library::new()
+        .load("t", reverse)
+        .expect_err("a pred reusing a def name must be refused");
+    assert_eq!(err.position(), Some((5, 1)), "{err}");
+    assert!(err.msg.contains("`pred 名`"), "{err}");
+    assert!(err.msg.contains("已声明为 `def`"), "{err}");
+}
+
+/// A definition whose body does not have the declared type is rejected at
+/// load, and the error names the definition and its source position.
+#[test]
+fn a_definition_body_of_the_wrong_type_is_rejected_with_name_and_position() {
+    let src = "sort 人\npred 殴打 : 人 → Prop\ndef 坏 : 人 → Prop := λ (x : 人) := λ (y : 人) := 殴打 y\n";
+    let err = Library::new()
+        .load("t", src)
+        .expect_err("a body that does not match the declared type must be refused");
+    assert_eq!(err.position(), Some((3, 1)), "{err}");
+    assert!(err.msg.contains("`def 坏`"), "{err}");
+    assert!(err.msg.contains("类型不匹配"), "{err}");
+}
+
+/// `#show` prints the body of a definition, so the expansion can be audited
+/// without guessing from the type alone.
+#[test]
+fn show_prints_a_definition_body() {
+    let src = "sort 人\npred 配偶 : 人 → 人 → Prop\ndef 夫妻 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 配偶 a b\n#show 夫妻\n";
+    let mut lib = Library::new();
+    let report = lib.load("t", src).expect("#show must load");
+    assert_eq!(report.shown.len(), 1, "{:?}", report.shown);
+    let line = &report.shown[0];
+    assert!(line.starts_with("夫妻 :"), "{line}");
+    assert!(line.contains("配偶 a b"), "{line}");
+    assert!(
+        line.find("λ (a").expect("a is shown") < line.find("λ (b").expect("b is shown"),
+        "the parameter order must be visible: {line}"
+    );
 }

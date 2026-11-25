@@ -209,7 +209,12 @@ impl Library {
                     name: n,
                     ty,
                     source,
+                    line,
+                    col,
                 } => {
+                    if let Some(err) = decl_name_clash(&next.env, &n, "pred", line, col) {
+                        return Err(err);
+                    }
                     let ety = elab::elab_top(&next.env, &ty)
                         .map_err(|e| LoadError::new(format!("`pred {n}`：{}", e.msg)))?;
                     let decl = Decl {
@@ -224,7 +229,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError::new(format!("`pred`：{e}")))?;
+                        .map_err(|e| LoadError::new(format!("`pred {n}`：{e}")))?;
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
@@ -320,11 +325,30 @@ impl Library {
                     ty,
                     body,
                     source,
+                    line,
+                    col,
                 } => {
+                    // The ledger has one namespace for every declaration
+                    // kind, so a definition may not shadow an existing
+                    // sort/obj/pred/axiom/fact/rule/def. Report the clash at
+                    // the definition with both names, before the body is
+                    // examined.
+                    if let Some(err) = decl_name_clash(&next.env, &n, "def", line, col) {
+                        return Err(err);
+                    }
+                    // A definition is a macro the kernel unfolds by delta: its
+                    // body must be resolvable when the declaration loads. A
+                    // self-reference, a reference to a name declared later
+                    // (mutual recursion) or a name bound by no λ/∀ is refused
+                    // here, before elaboration, so the error names the
+                    // definition and the offending name at its own position
+                    // instead of surfacing as a bare "unknown name".
+                    check_definition_body(&n, &body, &next.env)
+                        .map_err(|msg| LoadError::at(msg, line, col))?;
                     let ety = elab::elab_top(&next.env, &ty)
-                        .map_err(|e| LoadError::new(format!("`def {n}`：{}", e.msg)))?;
+                        .map_err(|e| LoadError::at(format!("`def {n}`：{}", e.msg), line, col))?;
                     let ebody = elab::elab_top(&next.env, &body)
-                        .map_err(|e| LoadError::new(format!("`def {n}`：{}", e.msg)))?;
+                        .map_err(|e| LoadError::at(format!("`def {n}`：{}", e.msg), line, col))?;
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
                         kind: std_deduce_kernel::DeclKind::Def { body: ebody },
@@ -337,7 +361,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError::new(format!("`def {n}`：{e}")))?;
+                        .map_err(|e| LoadError::at(format!("`def {n}`：{e}"), line, col))?;
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
@@ -797,11 +821,22 @@ impl Library {
                 }
                 Item::Show(n) => {
                     if let Some(d) = next.env.get(&n) {
-                        report.shown.push(format!(
-                            "{} : {}",
-                            d.name,
-                            std_deduce_kernel::pretty::print_expr(&d.ty)
-                        ));
+                        // A definition is a macro, so `#show` prints its body
+                        // as well as its type: the expansion is never hidden.
+                        let shown = match &d.kind {
+                            std_deduce_kernel::DeclKind::Def { body } => format!(
+                                "{} : {} := {}",
+                                d.name,
+                                std_deduce_kernel::pretty::print_expr(&d.ty),
+                                std_deduce_kernel::pretty::print_expr(body)
+                            ),
+                            _ => format!(
+                                "{} : {}",
+                                d.name,
+                                std_deduce_kernel::pretty::print_expr(&d.ty)
+                            ),
+                        };
+                        report.shown.push(shown);
                     } else {
                         return Err(LoadError::new(format!("`#show {n}`：未知名称")));
                     }
@@ -1264,6 +1299,116 @@ fn check_term(ns: &str, what: &str, locals: &[String], term: &Term) -> Result<()
         Term::App(func, arg) => {
             check_term(ns, what, locals, func)?;
             check_term(ns, what, locals, arg)
+        }
+    }
+}
+
+/// The load error for a declaration name that is already in the ledger.
+///
+/// Every declaration kind shares one name space. The message names the
+/// declaration that tried to reuse the name, the existing kind, and the
+/// source position; it keeps the kernel's own phrase (`名称已被占用`) so the
+/// ledger remains the single authority on name clashes. A duplicate that
+/// reaches `Env::insert` anyway is still reported, but without this position.
+fn decl_name_clash(
+    env: &Env,
+    written: &str,
+    keyword: &str,
+    line: usize,
+    col: usize,
+) -> Option<LoadError> {
+    let existing = env.get(written)?;
+    Some(LoadError::at(
+        format!(
+            "`{keyword} {written}`：名称已被占用：`{written}`（已声明为 `{}`）；\
+             所有声明共用同一个名字空间，不能与任何已有声明重名",
+            decl_kind_label(&existing.kind)
+        ),
+        line,
+        col,
+    ))
+}
+
+/// The surface keyword of a declaration kind, for a name-clash diagnostic.
+fn decl_kind_label(kind: &std_deduce_kernel::DeclKind) -> &'static str {
+    use std_deduce_kernel::DeclKind;
+    match kind {
+        DeclKind::Sort => "sort",
+        DeclKind::Obj => "obj",
+        DeclKind::Pred => "pred",
+        DeclKind::Axiom => "axiom",
+        DeclKind::Fact { .. } => "fact",
+        DeclKind::Def { .. } => "def",
+        DeclKind::Rule(_) => "rule",
+        DeclKind::Interpretation(_) => "interpret",
+        DeclKind::Contrary { .. } => "contrary",
+        DeclKind::Unique { .. } => "unique",
+        DeclKind::Priority { .. } => "priority",
+        DeclKind::OpenConcept { .. } => "open",
+    }
+}
+
+/// Every name a definition's body mentions without a local binder and without
+/// an already-loaded declaration to supply it.
+///
+/// A `def` is a macro the kernel unfolds by delta, so the body has to be
+/// closed over the ledger as it stands when the declaration is loaded. There
+/// are only two fixes, and both are explicit: bind the name with a λ/∀ (a
+/// parameter), or declare it first. This is why a definition cannot be
+/// recursive (it is not in the ledger yet) and cannot refer forward (a
+/// tempting mutual recursion, which would make delta unfolding diverge).
+fn check_definition_body(name: &str, body: &Term, env: &Env) -> Result<(), String> {
+    let mut free = Vec::new();
+    collect_free_names(body, &mut Vec::new(), &mut free);
+    if free.iter().any(|ident| ident == name) {
+        return Err(format!(
+            "定义不能递归：`def {name}` 的定义体引用了它自己；\
+             参数请用 λ 绑定，展开由内核的 delta 规则完成"
+        ));
+    }
+    for ident in &free {
+        if !env.contains(ident) {
+            return Err(format!(
+                "`def {name}` 的定义体里有未绑定的名字 `{ident}`：\
+                 定义体的自由变量必须被 λ/∀ 绑定，其余名字必须是已声明的项；\
+                 定义不能引用自身或尚未声明的名字（递归与前向互引用都不允许）"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_free_names(term: &Term, bound: &mut Vec<String>, out: &mut Vec<String>) {
+    match term {
+        Term::Prop | Term::Type(_) => {}
+        Term::Ident(name) => {
+            if !bound.iter().any(|binder| binder == name) && !out.iter().any(|seen| seen == name) {
+                out.push(name.clone());
+            }
+        }
+        Term::Pi {
+            name,
+            domain,
+            codomain,
+        } => {
+            collect_free_names(domain, bound, out);
+            if let Some(binder) = name {
+                bound.push(binder.clone());
+                collect_free_names(codomain, bound, out);
+                bound.pop();
+            } else {
+                collect_free_names(codomain, bound, out);
+            }
+        }
+        Term::Lam { name, domain, body } => {
+            collect_free_names(domain, bound, out);
+            bound.push(name.clone());
+            collect_free_names(body, bound, out);
+            bound.pop();
+        }
+        Term::App(func, arg) => {
+            collect_free_names(func, bound, out);
+            collect_free_names(arg, bound, out);
         }
     }
 }

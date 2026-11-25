@@ -59,10 +59,15 @@ pub enum Item {
         source: Option<SourceSpec>,
     },
     /// `pred 侵害 : 公民 → 行为 → Prop`
+    ///
+    /// The position is recorded so a name clash with an earlier declaration
+    /// (for example a `def` of the same name) is reported at this line.
     Pred {
         name: String,
         ty: Term,
         source: Option<SourceSpec>,
+        line: usize,
+        col: usize,
     },
     /// `axiom 张三是公民 : 公民 张三`
     ///
@@ -81,11 +86,17 @@ pub enum Item {
         occurred_in: Option<String>,
     },
     /// `def 合法搜查 := ... : T`
+    ///
+    /// The position is recorded because a definition is elaborated and
+    /// kernel-checked after the item is parsed; those load errors still have
+    /// to point at this declaration instead of at the file as a whole.
     Def {
         name: String,
         ty: Term,
         body: Term,
         source: Option<SourceSpec>,
+        line: usize,
+        col: usize,
     },
     /// A defeasible rule, the centre of the system.
     Rule {
