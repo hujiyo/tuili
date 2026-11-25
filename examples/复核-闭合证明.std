@@ -1,0 +1,20 @@
+-- 复核报告示例一：严格事实 + 规则，闭合证明。
+-- 法院查明的事实加上一条规则直接推出结论；报告应显示「已验证」且没有缺口。
+-- 这条规则没有声明时空范围，报告会把它的适用性如实标成「适用性未判定」。
+
+sort 人
+pred 违法 : 人 → Prop
+pred 受罚 : 人 → Prop
+obj 张三 : 人
+
+axiom 张三违法 : 违法 张三
+  identity verified
+  source text "示例判决" locator "第一页" version "2024" note "示例法院查明事实"
+
+rule 处罚 :
+  params p : 人
+  premise 违法 p
+  conclude 受罚 p
+  burden claimant
+  standard preponderance
+  source text "示例法" locator "第一条" version "2024" quote "违法者受罚"

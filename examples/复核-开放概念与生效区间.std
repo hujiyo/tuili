@@ -1,0 +1,26 @@
+-- 复核报告示例三：开放概念 + 生效区间。
+-- 「严重情节」是开放概念：模型不能自动判断它是否成立。规则声明了生效区间、
+-- 管辖与地域；前提事实记录了发生时间与地点。报告应显示「需律师判断」、
+-- 概念名与适用性依据。用 --jurisdiction CN 运行会话时，判定为「适用」。
+
+sort 人
+pred 违法 : 人 → Prop
+pred 严重情节 : 人 → Prop
+open 严重情节
+obj 张三 : 人
+
+axiom 张三违法 : 违法 张三
+  identity verified
+  source text "示例判决" locator "第一页" version "2000" note "示例法院查明事实"
+  occurred_at 2005-05-06
+  occurred_in CN-HN
+
+rule 认定严重 :
+  params p : 人
+  premise 违法 p
+  conclude 严重情节 p
+  effective 2000-01-01
+  repealed 2010-01-01
+  jurisdiction CN
+  territory CN-HN
+  source text "示例法" locator "第四条" version "2000" quote "情节严重的，从重处罚"

@@ -108,9 +108,30 @@ impl TrustLabel {
 pub struct TrustReport {
     labels: Vec<TrustLabel>,
     evidence: Vec<(TrustLabel, Vec<String>)>,
+    root_proved: bool,
+    reachable: BTreeSet<NodeId>,
 }
 
 impl TrustReport {
+    /// Whether the certificate's root is proved.
+    ///
+    /// This is the same judgement the labels use: the root exists, is not a
+    /// gap, and no gap is reachable from it. A report that has to say whether
+    /// the conclusion is reachable uses this instead of re-walking the graph.
+    pub fn root_proved(&self) -> bool {
+        self.root_proved
+    }
+
+    /// Every node reachable from the root along premises.
+    ///
+    /// The set is empty when the certificate has no root. It is the reachable
+    /// proof graph the labels are computed over, exposed so a derived report
+    /// can distinguish the root's facts and rules from records attached to
+    /// other branches without recomputing the walk.
+    pub fn reachable_nodes(&self) -> &BTreeSet<NodeId> {
+        &self.reachable
+    }
+
     /// The label that comes first in precedence order.
     pub fn primary(&self) -> TrustLabel {
         self.labels
@@ -506,7 +527,12 @@ pub fn derive_trust(certificate: &Certificate) -> Result<TrustReport, String> {
 
     let labels: Vec<TrustLabel> = entries.iter().map(|(label, _)| *label).collect();
     let evidence = entries;
-    Ok(TrustReport { labels, evidence })
+    Ok(TrustReport {
+        labels,
+        evidence,
+        root_proved,
+        reachable,
+    })
 }
 
 /// Whether a conflict is about the root's proof graph.
