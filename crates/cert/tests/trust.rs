@@ -295,12 +295,11 @@ fn a_local_extension_obligation_requires_lawyer_judgement() {
 }
 
 #[test]
-fn a_claim_with_an_unrelated_unresolved_conflict_is_not_needs_lawyer() {
-    // The proved root uses a claim, and the certificate records an unresolved
-    // conflict elsewhere. Logic cannot decide the conflict, so the labels are
-    // `争点未决` + `依赖假设`; neither is a semantic judgement, and the old
-    // "high-risk combination" must not turn every such certificate into
-    // `需律师判断`.
+fn an_unrelated_unresolved_conflict_does_not_change_the_root_label() {
+    // The proved root uses a claim; the certificate records an unresolved
+    // conflict on an unrelated branch. The conflict is not root-relevant, so
+    // the root is still only `依赖假设`; a claim alone does not turn this into
+    // `需律师判断` either.
     let mut certificate = certificate(
         vec![assumption(atom("违法", "张三"), FactIdentity::UserAsserted)],
         vec![
@@ -329,18 +328,152 @@ fn a_claim_with_an_unrelated_unresolved_conflict_is_not_needs_lawyer() {
         nodes: Vec::new(),
     });
     let report = derive_trust(&certificate).unwrap();
-    assert_eq!(report.primary(), TrustLabel::DisputeUnresolved);
-    assert!(report.contains(TrustLabel::DisputeUnresolved));
-    assert!(report.contains(TrustLabel::DependsOnAssumption));
+    assert_eq!(report.primary(), TrustLabel::DependsOnAssumption);
+    assert_eq!(report.labels(), &[TrustLabel::DependsOnAssumption]);
+    assert!(
+        !report.contains(TrustLabel::DisputeUnresolved),
+        "an unrelated conflict must not become 争点未决"
+    );
     assert!(
         !report.contains(TrustLabel::NeedsLawyerJudgment),
         "an unresolved conflict plus a claim must not become 需律师判断"
     );
+}
+
+#[test]
+fn an_unrelated_unresolved_conflict_does_not_remove_verified() {
+    // A strict-fact proof elsewhere in the certificate can carry the same
+    // unresolved conflict; only the root's own graph decides its label.
+    let mut certificate = certificate(
+        vec![assumption(atom("违法", "张三"), FactIdentity::Verified)],
+        vec![
+            Node::Assumption { assumption: 0 },
+            rule(atom("受罚", "张三"), vec![0]),
+        ],
+        Some(1),
+    );
+    certificate.conflicts.push(Conflict {
+        left: atom("批准", "甲"),
+        right: atom("不批准", "甲"),
+        left_by: Provenance::Rules {
+            rules: vec!["批准规则".to_owned()],
+        },
+        right_by: Provenance::Rules {
+            rules: vec!["不批准规则".to_owned()],
+        },
+        resolution: Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+    });
+    certificate.open_obligations.push(OpenObligation {
+        id: "conflict-0".to_owned(),
+        kind: ObligationKind::UnresolvedConflict,
+        description: "冲突未决".to_owned(),
+        nodes: Vec::new(),
+    });
+    let report = derive_trust(&certificate).unwrap();
+    assert_eq!(report.labels(), &[TrustLabel::Verified]);
+    assert!(!report.contains(TrustLabel::DisputeUnresolved));
+}
+
+#[test]
+fn an_unrelated_local_extension_obligation_does_not_need_lawyer() {
+    // The obligation names a rule application that is not reachable from the
+    // root; it must not turn the root's label into 需律师判断.
+    let mut certificate = certificate(
+        vec![assumption(atom("违法", "张三"), FactIdentity::Verified)],
+        vec![
+            Node::Assumption { assumption: 0 },
+            rule(atom("受罚", "张三"), vec![0]),
+        ],
+        Some(1),
+    );
+    certificate.open_obligations.push(OpenObligation {
+        id: "local-extension".to_owned(),
+        kind: ObligationKind::NeedsHumanDetermination,
+        description: "规则由案件文件声明".to_owned(),
+        nodes: vec![99],
+    });
+    let report = derive_trust(&certificate).unwrap();
+    assert_eq!(report.labels(), &[TrustLabel::Verified]);
+    assert!(!report.contains(TrustLabel::NeedsLawyerJudgment));
+}
+
+#[test]
+fn missing_source_and_other_obligations_map_to_dispute_unresolved() {
+    // P2: a proved strict root with only these two obligation kinds must not be
+    // `已验证` and must not be an error; it is an unresolved item.
+    let mut certificate = certificate(
+        vec![assumption(atom("违法", "张三"), FactIdentity::Verified)],
+        vec![
+            Node::Assumption { assumption: 0 },
+            rule(atom("受罚", "张三"), vec![0]),
+        ],
+        Some(1),
+    );
+    certificate.open_obligations.push(OpenObligation {
+        id: "missing-source".to_owned(),
+        kind: ObligationKind::MissingSource,
+        description: "缺少来源".to_owned(),
+        nodes: Vec::new(),
+    });
+    certificate.open_obligations.push(OpenObligation {
+        id: "other".to_owned(),
+        kind: ObligationKind::Other,
+        description: "其他未决事项".to_owned(),
+        nodes: Vec::new(),
+    });
+    let report = derive_trust(&certificate).unwrap();
+    assert_eq!(report.primary(), TrustLabel::DisputeUnresolved);
+    assert!(!report.contains(TrustLabel::Verified));
+    let summary = report.summary();
+    assert!(summary.contains("缺少来源 1 项"), "{summary}");
+    assert!(summary.contains("其他 1 项"), "{summary}");
+}
+
+#[test]
+fn a_root_relevant_missing_premise_obligation_maps_to_fact_needs_evidence() {
+    let mut certificate = certificate(
+        vec![assumption(atom("违法", "张三"), FactIdentity::Verified)],
+        vec![
+            Node::Assumption { assumption: 0 },
+            rule(atom("受罚", "张三"), vec![0]),
+        ],
+        Some(1),
+    );
+    certificate.open_obligations.push(OpenObligation {
+        id: "gap-0".to_owned(),
+        kind: ObligationKind::MissingPremise,
+        description: "缺少前提".to_owned(),
+        nodes: vec![0],
+    });
+    let report = derive_trust(&certificate).unwrap();
+    assert_eq!(report.primary(), TrustLabel::FactNeedsEvidence);
+    assert!(!report.contains(TrustLabel::Verified));
     assert!(
-        report.summary().contains("另含：依赖假设"),
+        report.summary().contains("与根相关的缺少前提义务 1 项"),
         "{}",
         report.summary()
     );
+}
+
+#[test]
+fn an_unattached_open_concept_is_still_root_relevant() {
+    // An empty nodes list is "not localized", never "unrelated": dropping it
+    // would silently hide a human judgement.
+    let mut certificate = certificate(
+        Vec::new(),
+        vec![rule(atom("重大", "甲"), Vec::new())],
+        Some(0),
+    );
+    certificate.open_obligations.push(OpenObligation {
+        id: "open-concept".to_owned(),
+        kind: ObligationKind::OpenConcept,
+        description: "开放概念".to_owned(),
+        nodes: Vec::new(),
+    });
+    let report = derive_trust(&certificate).unwrap();
+    assert_eq!(report.labels(), &[TrustLabel::NeedsLawyerJudgment]);
 }
 
 #[test]

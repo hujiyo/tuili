@@ -295,10 +295,13 @@
 //! is never `已验证`, an unresolved conflict always makes `争点未决` appear,
 //! and `需律师判断` comes from an open concept, a human-judgement obligation or
 //! a case extension — never from an unresolved conflict alone, so the two
-//! labels can appear together. `已验证` says only that the certificate proves
-//! the root under strict facts with nothing left open — it is not a claim that
-//! the conclusion is legally correct. `:cert` JSON is unchanged: the labels are
-//! not a certificate field and the format stays v7.
+//! labels can appear together. Only records attached to the root's reachable
+//! proof graph count; an unrelated conflict or case extension elsewhere in the
+//! certificate does not change the root's label. `已验证` says only that the
+//! certificate proves the root under strict facts and leaves no root-relevant
+//! obligation — it is not a claim that the conclusion is legally correct.
+//! `:cert` JSON is unchanged: the labels are not a certificate field and the
+//! format stays v7.
 //!
 //! `:why` and `:explain` also report the `open` concept marker. A rule step
 //! whose conclusion head is an open predicate, or a root that is one, makes the
@@ -437,9 +440,9 @@ use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
     derive_trust, render_narrative_with_context, render_with_annotations, Certificate, CheckReport,
-    EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, Node as CertNode,
-    ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, ResolutionBasis,
-    Source, TrustLabel, TrustLevel, TrustReport, LOCAL_EXTENSION_OBLIGATION_ID,
+    EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, KernelProofReport,
+    Node as CertNode, ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin,
+    ResolutionBasis, Source, TrustLabel, TrustLevel, TrustReport, LOCAL_EXTENSION_OBLIGATION_ID,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
@@ -1599,7 +1602,18 @@ impl Session {
             if let Some(c) = r.conflict_for(&goal) {
                 match &c.resolution {
                     Resolution::Unresolved { reason } => {
-                        if let Some(trust) = &trust {
+                        if cmd == "why" {
+                            // Validate before printing a label: a certificate
+                            // that fails either layer must never be labelled.
+                            let Some(certificate) = &certificate else {
+                                return Err(
+                                    "内部状态错误：:why 的冲突分支应当在构建证书之后".to_owned()
+                                );
+                            };
+                            self.certificate_layers(certificate, out)?;
+                            let Some(trust) = &trust else {
+                                return Err("内部状态错误：冲突分支应当已经派生信任标签".to_owned());
+                            };
                             write_trust_line(out, trust);
                         }
                         report_unresolved(out, &r, &goal, &c, reason);
@@ -1608,7 +1622,17 @@ impl Session {
                     Resolution::Defeated { winner, basis } => {
                         let side = r.conflict_side(&c, &goal);
                         if side != Some(*winner) {
-                            if let Some(trust) = &trust {
+                            if cmd == "why" {
+                                let Some(certificate) = &certificate else {
+                                    return Err("内部状态错误：:why 的冲突分支应当在构建证书之后"
+                                        .to_owned());
+                                };
+                                self.certificate_layers(certificate, out)?;
+                                let Some(trust) = &trust else {
+                                    return Err(
+                                        "内部状态错误：冲突分支应当已经派生信任标签".to_owned()
+                                    );
+                                };
                                 write_trust_line(out, trust);
                             }
                             report_defeated(out, &r, &goal, &c, *winner, basis);
@@ -1708,25 +1732,7 @@ impl Session {
             write_interpretation_hints(out, &r, &goal)?;
         }
 
-        let checked = std_deduce_cert::check(&self.lib.env, &certificate);
-        let kernel = std_deduce_cert::kernel_proof(&self.lib.env, &certificate);
-        let (report, kernel_report) = match (checked, kernel) {
-            (Ok(report), Ok(kernel)) => (report, kernel),
-            (checked, kernel) => {
-                let mut failures = Vec::new();
-                if let Err(error) = checked {
-                    let error = escape_control(&error.to_string());
-                    writeln!(out, "逻辑校验失败：{error}").ok();
-                    failures.push(format!("逻辑层：{error}"));
-                }
-                if let Err(error) = kernel {
-                    let error = escape_control(&error.to_string());
-                    writeln!(out, "内核证明失败：{error}").ok();
-                    failures.push(format!("内核层：{error}"));
-                }
-                return Err(format!("证书校验失败（{}）", failures.join("；")));
-            }
-        };
+        let (report, kernel_report) = self.certificate_layers(&certificate, out)?;
 
         let root = certificate
             .root
@@ -2116,12 +2122,8 @@ impl Session {
         let mut certificate = reason_certificate(&self.lib.env, &d, &r.priority_order())?;
         self.mark_case_extensions(&mut certificate);
 
-        if let Err(error) = std_deduce_cert::check(&self.lib.env, &certificate) {
-            return Err(format!("证书逻辑校验失败：{error}"));
-        }
-        if let Err(error) = std_deduce_cert::kernel_proof(&self.lib.env, &certificate) {
-            return Err(format!("证书内核校验失败：{error}"));
-        }
+        // The labels are printed only after both layers accept the certificate.
+        self.certificate_layers(&certificate, out)?;
 
         let trust = derive_trust(&certificate)?;
         writeln!(out, "{}", trust.summary()).ok();
@@ -2205,6 +2207,40 @@ impl Session {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    /// Run the two certificate layers and report their failures.
+    ///
+    /// Both layers run and are reported separately: `cert::check` rebuilds
+    /// rule instances and side conditions, then `kernel_proof` rebuilds the
+    /// monotone proof terms and asks the kernel. A logical pass with a kernel
+    /// failure is an error (`2`), not a valid certificate. Every caller that
+    /// prints a trust line must call this first; a failed certificate must not
+    /// be labelled as a conclusion.
+    fn certificate_layers(
+        &self,
+        certificate: &Certificate,
+        out: &mut impl Write,
+    ) -> Result<(CheckReport, KernelProofReport), String> {
+        let checked = std_deduce_cert::check(&self.lib.env, certificate);
+        let kernel = std_deduce_cert::kernel_proof(&self.lib.env, certificate);
+        match (checked, kernel) {
+            (Ok(report), Ok(kernel)) => Ok((report, kernel)),
+            (checked, kernel) => {
+                let mut failures = Vec::new();
+                if let Err(error) = checked {
+                    let error = escape_control(&error.to_string());
+                    writeln!(out, "逻辑校验失败：{error}").ok();
+                    failures.push(format!("逻辑层：{error}"));
+                }
+                if let Err(error) = kernel {
+                    let error = escape_control(&error.to_string());
+                    writeln!(out, "内核证明失败：{error}").ok();
+                    failures.push(format!("内核层：{error}"));
+                }
+                Err(format!("证书校验失败（{}）", failures.join("；")))
+            }
+        }
     }
 
     /// Check a certificate against the loaded environment, without rerunning
