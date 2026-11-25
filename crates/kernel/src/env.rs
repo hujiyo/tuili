@@ -354,8 +354,10 @@ pub enum DeclKind {
     /// A predicate marked as an open concept: `open 重大`. The marker records
     /// that applying the concept (「重大」「合理」「善意」「情节严重」) needs a
     /// human judgement; it asserts nothing itself. The declaration is metadata:
-    /// it seeds no derivation, blocks no `unless`, and no certificate node
-    /// cites it yet.
+    /// it seeds no derivation and blocks no `unless`. Consumers outside the
+    /// kernel read it through [`Env::open_predicates`]: `:inspect` shows the
+    /// marker, and a certificate records an `open_concept` obligation when a
+    /// derivation depends on it.
     OpenConcept { pred: Name },
 }
 
@@ -684,8 +686,11 @@ impl Env {
     /// Predicates marked as open concepts, in declaration order.
     ///
     /// A marker is metadata about how a predicate should be read. The kernel
-    /// stores it and never lets it seed a derivation or block a rule; readers
-    /// (`:inspect`) use this list to show the marker next to the predicate.
+    /// stores it and never lets it seed a derivation or block a rule. Readers
+    /// use this list: `:inspect` shows the marker next to the predicate, and the
+    /// certificate layer compares predicate heads against it so a derivation
+    /// that concludes an open concept records an `open_concept` obligation
+    /// instead of being reported as an unconditional proof.
     pub fn open_predicates(&self) -> Vec<Name> {
         self.iter()
             .filter_map(|d| match &d.kind {

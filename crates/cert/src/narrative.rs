@@ -50,13 +50,35 @@ const QUOTE_SUMMARY_CHARS: usize = 60;
 /// because-so steps with their sources and parameter bindings, every gap,
 /// every conflict resolution and every open obligation. An invalid node
 /// reference or a cyclic node graph is an error naming the offending node.
+///
+/// This entry point prints no open-concept notice; use
+/// [`render_narrative_with_open_concepts`] when the caller has recomputed the
+/// concepts the root derivation depends on.
 pub fn render_narrative(certificate: &Certificate) -> Result<String, String> {
+    render_narrative_with_open_concepts(certificate, &[])
+}
+
+/// Render as [`render_narrative`], with a "needs human judgement" notice after
+/// the conclusion for each open concept the root derivation depends on.
+///
+/// `open_concepts` is the recomputed list ([`crate::open::dependency`]) of the
+/// certificate in its environment: the narrative never parses an obligation's
+/// description to recover the concept names, and `std_deduce_cert::check`
+/// rejects a certificate whose recorded obligation disagrees with that
+/// recomputation. Naming the concepts here is what keeps a conclusion over
+/// 「重大」 from reading as an unconditional proof; the names are escaped, so a
+/// concept name cannot forge another explanation line.
+pub fn render_narrative_with_open_concepts(
+    certificate: &Certificate,
+    open_concepts: &[String],
+) -> Result<String, String> {
     validate(certificate)?;
 
     let mut out = String::new();
     match certificate.root {
         Some(root) => {
             write_conclusion(certificate, root, &mut out)?;
+            write_open_concept_notice(open_concepts, &mut out);
             let mut order = Vec::new();
             let mut seen = vec![false; certificate.nodes.len()];
             collect_postorder(certificate, root, &mut seen, &mut order)?;
@@ -76,6 +98,13 @@ pub fn render_narrative(certificate: &Certificate) -> Result<String, String> {
     write_conflicts(certificate, &mut out)?;
     write_obligations(certificate, &mut out);
     Ok(out)
+}
+
+/// Write one `此处需人判断：`<concept>`` line per concept, after the conclusion.
+fn write_open_concept_notice(open_concepts: &[String], out: &mut String) {
+    for concept in open_concepts {
+        out.push_str(&format!("此处需人判断：`{}`\n", escape_control(concept)));
+    }
 }
 
 /// Write the one-line conclusion the certificate's root states.

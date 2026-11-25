@@ -65,7 +65,7 @@ fn constitution_certificate_round_trips_and_checks() {
     let (d, order) = derive(&lib, &constitution_goal());
     assert!(d.root.is_some(), "the goal must be derived");
 
-    let certificate = certificate(&d, &order).expect("the derivation converts");
+    let certificate = certificate(&lib.env, &d, &order).expect("the derivation converts");
     // The reasoner records no environment; an exported certificate needs one.
     // This test runs against the theory alone, so an empty record is right.
     let certificate = certificate.with_environment(cert::EnvironmentIdentity::none());
@@ -84,7 +84,7 @@ fn gap_certificate_is_valid_but_the_root_is_not_proved() {
     let lib = example("刑法第二十条-基本.std");
     let goal = Expr::apps(Expr::constant("应当负刑事责任"), [Expr::constant("乙行为")]);
     let (d, order) = derive(&lib, &goal);
-    let certificate = certificate(&d, &order).expect("the gap derivation converts");
+    let certificate = certificate(&lib.env, &d, &order).expect("the gap derivation converts");
 
     let root = certificate.root.expect("a gap certificate has a root");
     let cert::Node::Gap {
@@ -129,7 +129,7 @@ fn conflicts_keep_both_sides_provenance_and_resolution() {
     let (d, order) = derive(&lib, &goal);
     assert!(!d.conflicts.is_empty(), "the example records a conflict");
 
-    let certificate = certificate(&d, &order).expect("the derivation converts");
+    let certificate = certificate(&lib.env, &d, &order).expect("the derivation converts");
     assert_eq!(certificate.conflicts.len(), d.conflicts.len());
 
     let conflict = &certificate.conflicts[0];
@@ -191,7 +191,8 @@ fn an_unencodable_expression_is_a_clear_error() {
         conflicts: Vec::new(),
         interpretations: Vec::new(),
     };
-    let error = certificate(&d, &PriorityOrder::default())
+    let env = std_deduce_kernel::Env::new();
+    let error = certificate(&env, &d, &PriorityOrder::default())
         .expect_err("the index does not fit the certificate format");
     assert!(error.contains("节点 0"), "{error}");
     assert!(error.contains("缺口命题"), "{error}");
@@ -269,8 +270,8 @@ fn certificate_is_identical_when_independent_packages_load_in_a_different_order(
 
     let (d1, order1) = derive(&first, &goal);
     let (d2, order2) = derive(&second, &goal);
-    let c1 = certificate(&d1, &order1).expect("the first derivation converts");
-    let c2 = certificate(&d2, &order2).expect("the second derivation converts");
+    let c1 = certificate(&first.env, &d1, &order1).expect("the first derivation converts");
+    let c2 = certificate(&second.env, &d2, &order2).expect("the second derivation converts");
     assert_eq!(
         c1, c2,
         "the certificate depends on the order packages loaded in"
@@ -393,7 +394,7 @@ fn an_unresolved_conflict_obligation_names_why_it_is_unresolved() {
     let lib = example("冲突-互补谓词.std");
     let goal = Expr::apps(Expr::constant("批准"), [Expr::constant("甲")]);
     let (d, order) = derive(&lib, &goal);
-    let document = certificate(&d, &order).expect("the derivation converts");
+    let document = certificate(&lib.env, &d, &order).expect("the derivation converts");
     let conflict = d
         .conflicts
         .iter()
@@ -419,7 +420,7 @@ fn an_unresolved_conflict_obligation_names_why_it_is_unresolved() {
         [Expr::constant("c.甲"), Expr::constant("c.选A")],
     );
     let (d, order) = derive(&lib, &goal);
-    let document = certificate(&d, &order).expect("the cycle derivation converts");
+    let document = certificate(&lib.env, &d, &order).expect("the cycle derivation converts");
     let conflict = d
         .conflicts
         .iter()
@@ -446,7 +447,7 @@ fn an_unresolved_conflict_obligation_names_why_it_is_unresolved() {
     let lib = load_sources("assumption-cert", &[("case.std", ASSUMPTION_CASE)]);
     let goal = Expr::apps(Expr::constant("该批准"), [Expr::constant("甲")]);
     let (d, order) = derive(&lib, &goal);
-    let document = certificate(&d, &order).expect("the assumption derivation converts");
+    let document = certificate(&lib.env, &d, &order).expect("the assumption derivation converts");
     let conflict = d
         .conflicts
         .iter()
@@ -489,7 +490,7 @@ fn an_unresolved_conflict_obligation_names_why_it_is_unresolved() {
         &[("case.std", STRICT_ASSUMPTION_CASE)],
     );
     let (d, order) = derive(&lib, &goal);
-    let document = certificate(&d, &order).expect("the strict derivation converts");
+    let document = certificate(&lib.env, &d, &order).expect("the strict derivation converts");
     let conflict = d
         .conflicts
         .iter()
@@ -562,7 +563,7 @@ fn a_claim_against_a_rule_carries_its_identity_into_the_certificate() {
                 )
             })
             .expect("the claim and the rule conclusion conflict");
-        let document = certificate(&d, &order).expect("the derivation converts");
+        let document = certificate(&lib.env, &d, &order).expect("the derivation converts");
 
         let recorded = document
             .assumptions

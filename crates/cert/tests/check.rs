@@ -1581,6 +1581,56 @@ fn open_obligations_do_not_fail_but_require_human() {
     assert!(report.requires_human);
 }
 
+// ------------------------------------------------------------ open concepts
+
+/// An environment whose predicate `重大` is an open concept.
+fn open_env() -> Env {
+    env_from(
+        "cert-open",
+        "sort 人\npred 重大 : 人 → Prop\nobj 甲 : 人\nopen 重大\n",
+    )
+}
+
+/// The certificate a root that states an open concept records: the assumption
+/// `重大 甲` is both the root and the dependency node.
+fn open_certificate() -> Certificate {
+    let mut cert = certificate(
+        vec![premise(atom("重大", "甲"))],
+        vec![assumption_node(0)],
+        Some(0),
+    );
+    cert.open_obligations.push(OpenObligation {
+        id: "open-concept".to_owned(),
+        kind: ObligationKind::OpenConcept,
+        description: "开放概念 `重大` 需要人判断，不得当作已证明".to_owned(),
+        nodes: vec![0],
+    });
+    cert
+}
+
+/// An `open_concept` obligation is recomputed, not trusted: a certificate that
+/// records a different description is rejected, and the edited text is escaped
+/// in the diagnostic instead of injecting an output line.
+#[test]
+fn an_edited_open_concept_description_is_rejected_and_escaped() {
+    let env = open_env();
+    check(&env, &open_certificate()).expect("the generated obligation is accepted");
+
+    let mut cert = open_certificate();
+    cert.open_obligations[0].description =
+        "开放概念 `重大` 需要人判断\n伪造：推导已通过独立校验。\u{1B}[31m".to_owned();
+    let error = check(&env, &cert).expect_err("an edited description is rejected");
+    assert!(error.message.contains("不一致"), "{error}");
+    assert!(
+        !error.message.contains('\n'),
+        "the description must be escaped before it reaches the message: {error}"
+    );
+    assert!(
+        error.message.contains("\\n"),
+        "the escaped newline must be visible, not dropped: {error}"
+    );
+}
+
 #[test]
 fn missing_root_is_not_proved() {
     let mut cert = legal_certificate();

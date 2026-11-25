@@ -2,18 +2,27 @@
 //!
 //! The marker is declared in a case, module or pack. These tests cover what is
 //! visible to a reader (`:inspect`), the closed-environment gate, pack loading,
-//! and that marking a predicate does not change any derivation or certificate.
+//! and the inference-layer obligation added in M2-9b: a rule step that concludes
+//! an open concept (or a root that is one) makes the derivation depend on a
+//! human judgement, so `:why`, `:explain` and `:verify-cert` report it and exit
+//! non-zero instead of presenting the conclusion as proved.
+//!
+//! The candidate interpretations and the branch re-run the marker will
+//! eventually drive are not implemented yet; this layer only records the
+//! obligation.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std_deduce_cert::{Certificate, Node as CertNode, ObligationKind, OpenObligation};
 use std_deduce_lawpack::{build_lock, LOCK_FILE};
 
 const PROVED: i32 = 0;
 const GAP: i32 = 1;
 const LOAD_FAILED: i32 = 1;
+const ERROR: i32 = 2;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -337,73 +346,491 @@ fn a_pack_may_declare_an_open_concept_and_closed_env_loads_it_normally() {
 }
 
 // ---------------------------------------------------------------------------
-// The marker is inert
+// Open concepts are obligations
 // ---------------------------------------------------------------------------
 
-/// The same theory, with and without an `open` line: today's derivation and
-/// certificate must be byte-for-byte identical. Only the load report gains the
-/// marker line.
+/// The open-concept fixture. A rule derives the open concept `重大` from a
+/// closed premise; another rule concludes the closed predicate `轻伤` from the
+/// same premise; a third consumes `重大` and concludes the closed predicate
+/// `从重处罚`. Nothing supplies `重大` as a fact, so only a rule can state it.
+const OPEN_CONCEPT_CASE: &str = r#"sort 人
+pred 损害 : 人 → Prop
+pred 重大 : 人 → Prop
+pred 轻伤 : 人 → Prop
+pred 从重处罚 : 人 → Prop
+obj 甲 : 人
+open 重大
+axiom 损害事实 : 损害 甲
+  source text "案件" locator "一"
+rule 重大推定 :
+  params x : 人
+  premise 损害 x
+  conclude 重大 x
+  source text "测试" locator "二"
+rule 轻伤结论 :
+  params x : 人
+  premise 损害 x
+  conclude 轻伤 x
+  source text "测试" locator "三"
+rule 从重 :
+  params x : 人
+  premise 重大 x
+  conclude 从重处罚 x
+  source text "测试" locator "五"
+"#;
+
+/// `OPEN_CONCEPT_CASE` with the open concept supplied as a user fact instead:
+/// the rule `从重` then consumes evidence, not a decision the derivation made.
+fn open_concept_case_with_the_fact() -> String {
+    format!("{OPEN_CONCEPT_CASE}axiom 重大事实 : 重大 甲\n  source text \"案情\" locator \"四\"\n")
+}
+
+/// The certificate JSON of a `:cert` run, parsed.
+fn certificate_json(output: &Output) -> Certificate {
+    let text = stdout(output);
+    let start = text
+        .find('{')
+        .unwrap_or_else(|| panic!("no certificate JSON in stdout:\n{text}"));
+    Certificate::from_json(text[start..].trim_end())
+        .unwrap_or_else(|error| panic!("invalid certificate JSON: {error}\n{text}"))
+}
+
+/// The certificate part of a `:cert` run, byte for byte.
+fn certificate_text(output: &Output) -> String {
+    let text = stdout(output);
+    let start = text
+        .find('{')
+        .unwrap_or_else(|| panic!("no certificate JSON in stdout:\n{text}"));
+    text[start..].to_owned()
+}
+
+/// A rule that concludes an open concept depends on a human judgement: the
+/// certificate records the obligation, and neither `:why` nor `:explain` may
+/// present the conclusion as an unconditional proof.
 #[test]
-fn opening_a_predicate_changes_neither_why_nor_cert() {
-    let temp = TempDir::new("inert");
-    let base = "sort 人\n\
-                pred 损害 : 人 → Prop\n\
-                pred 重大 : 人 → Prop\n\
-                obj 甲 : 人\n\
-                axiom 损害事实 : 损害 甲\n\
-                  source text \"案件\" locator \"一\"\n\
-                rule 重大推定 :\n\
-                  params x : 人\n\
-                  premise 损害 x\n\
-                  conclude 重大 x\n\
-                  source text \"测试\" locator \"二\"\n";
-    let marked = base.replace(
-        "pred 重大 : 人 → Prop\n",
-        "pred 重大 : 人 → Prop\nopen 重大\n",
+fn a_rule_that_concludes_an_open_concept_records_the_obligation() {
+    let temp = TempDir::new("rule-obligation");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let path = theory.display().to_string();
+
+    let why = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":why 重大 甲".to_owned(),
+        ]),
+        GAP,
+        &["▸ 重大 甲", "此处需人判断：`重大`", "仍有未决义务"],
     );
-    assert_ne!(base, marked, "the fixture must actually add the marker");
-    let plain = temp.write("plain.std", base);
-    let opened = temp.write("opened.std", &marked);
+    assert!(
+        !stdout(&why).contains("推导已通过独立校验。"),
+        "an open concept must not be rendered as an unconditional proof:\n{}",
+        stdout(&why)
+    );
 
-    for (query, start) in [(":why 重大 甲", "▸"), (":cert 重大 甲", "{")] {
-        let plain_out = check(
-            run(&[
-                "--no-default-packs".to_owned(),
-                plain.display().to_string(),
-                query.to_owned(),
-            ]),
-            PROVED,
-            &["已加载"],
-        );
-        let opened_out = check(
-            run(&[
-                "--no-default-packs".to_owned(),
-                opened.display().to_string(),
-                query.to_owned(),
-            ]),
-            PROVED,
-            &["已加载", "+ open 重大"],
-        );
+    // The certificate can still be exported — the root is proved — but it
+    // carries the obligation, and a rule application concluded the concept.
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":cert 重大 甲".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+    let certificate = certificate_json(&exported);
+    let root = certificate.root.expect("the root is recorded");
+    assert_eq!(
+        certificate.open_obligations.len(),
+        1,
+        "{:?}",
+        certificate.open_obligations
+    );
+    let obligation = &certificate.open_obligations[0];
+    assert_eq!(obligation.kind, ObligationKind::OpenConcept);
+    assert_eq!(obligation.id, "open-concept");
+    assert_eq!(
+        obligation.description, "开放概念 `重大` 需要人判断，不得当作已证明",
+        "the description must name the concept"
+    );
+    assert_eq!(
+        obligation.nodes,
+        vec![root],
+        "the rule step concluding 「重大」 is the dependency node"
+    );
 
-        let plain_text = stdout(&plain_out);
-        let opened_text = stdout(&opened_out);
-        let tail = |text: &str| {
-            let index = text
-                .find(start)
-                .unwrap_or_else(|| panic!("no {start:?} section in:\n{text}"));
-            text[index..].to_owned()
-        };
-        assert_eq!(
-            tail(&plain_text),
-            tail(&opened_text),
-            "`{query}` must be identical with and without the marker\nplain:\n{plain_text}\nopened:\n{opened_text}"
-        );
-    }
+    let explain = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            ":explain 重大 甲".to_owned(),
+        ]),
+        GAP,
+        &["此处需人判断：`重大`", "【未决义务】", "开放概念"],
+    );
+    assert!(
+        !stdout(&explain).contains("推导已通过独立校验。"),
+        "the narrative must not call an open-concept conclusion independently checked:\n{}",
+        stdout(&explain)
+    );
+}
+
+/// The dependency travels up the proof graph: the root may be a closed
+/// conclusion, while the node that states the open concept is listed. The
+/// obligation names only the direct dependency node, never every node on the
+/// path.
+#[test]
+fn an_open_concept_dependency_propagates_to_the_root() {
+    let temp = TempDir::new("propagation");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let path = theory.display().to_string();
+
+    let why = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":why 从重处罚 甲".to_owned(),
+        ]),
+        GAP,
+        &["▸ 从重处罚 甲", "此处需人判断：`重大`"],
+    );
+
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            ":cert 从重处罚 甲".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+    let certificate = certificate_json(&exported);
+    let root = certificate.root.expect("the closed conclusion is proved");
+    let obligation = certificate
+        .open_obligations
+        .iter()
+        .find(|obligation| obligation.kind == ObligationKind::OpenConcept)
+        .unwrap_or_else(|| panic!("no open-concept obligation: {certificate:?}"));
+    let dependency = certificate
+        .nodes
+        .iter()
+        .position(
+            |node| matches!(node, CertNode::RuleApplication { rule, .. } if rule == "重大推定"),
+        )
+        .expect("the rule concluding 「重大」 is a proof node");
+    assert_eq!(
+        obligation.nodes,
+        vec![dependency],
+        "only the node that states the open concept is listed"
+    );
+    assert_ne!(
+        dependency, root,
+        "the closed root conclusion is not itself a dependency"
+    );
+    assert!(
+        !stdout(&why).contains("推导已通过独立校验。"),
+        "a closed root over a decided open concept is not unconditional"
+    );
+}
+
+/// The judgement reads the kernel term, not the printed head: a rule that
+/// concludes a `def` alias of the open predicate (`重大情节` = `重大 x`) still
+/// depends on 「重大」, although its written conclusion head is not the marked
+/// name.
+const OPEN_CONCEPT_ALIAS_CASE: &str = r#"sort 人
+pred 损害 : 人 → Prop
+pred 重大 : 人 → Prop
+def 重大情节 : 人 → Prop := λ (x : 人) := 重大 x
+obj 甲 : 人
+open 重大
+axiom 损害事实 : 损害 甲
+  source text "案件" locator "一"
+rule 别名推定 :
+  params x : 人
+  premise 损害 x
+  conclude 重大情节 x
+  source text "测试" locator "二"
+"#;
+
+/// A closed conclusion reached through a `def` alias of an open predicate is
+/// still a decided open concept: the head is compared after kernel
+/// normalization, so text that merely differs is not compared.
+#[test]
+fn a_def_alias_of_an_open_concept_is_still_the_concept() {
+    let temp = TempDir::new("alias");
+    let theory = temp.write("case.std", OPEN_CONCEPT_ALIAS_CASE);
+    let path = theory.display().to_string();
+
+    let why = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":why 重大情节 甲".to_owned(),
+        ]),
+        GAP,
+        &["▸ 重大情节 甲", "此处需人判断：`重大`"],
+    );
+    assert!(
+        !stdout(&why).contains("推导已通过独立校验。"),
+        "the alias conclusion must not be an unconditional proof:\n{}",
+        stdout(&why)
+    );
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            ":cert 重大情节 甲".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+    let certificate = certificate_json(&exported);
+    let obligation = certificate
+        .open_obligations
+        .iter()
+        .find(|obligation| obligation.kind == ObligationKind::OpenConcept)
+        .unwrap_or_else(|| panic!("no open-concept obligation: {certificate:?}"));
+    assert_eq!(
+        obligation.description, "开放概念 `重大` 需要人判断，不得当作已证明",
+        "the concept is the normalized head, not the alias name"
+    );
+}
+
+/// An open concept derived on a branch the root does not use leaves the root
+/// untouched: the judgement follows the root's proof graph, it does not scan
+/// every node or the whole environment.
+#[test]
+fn a_closed_goal_is_not_affected_by_an_open_concept_on_an_unrelated_branch() {
+    let temp = TempDir::new("unrelated");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let path = theory.display().to_string();
+
+    let why = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":why 轻伤 甲".to_owned(),
+        ]),
+        PROVED,
+        &["推导已通过独立校验。"],
+    );
+    assert!(
+        !stdout(&why).contains("此处需人判断"),
+        "the unrelated open concept must not reach the root:\n{}",
+        stdout(&why)
+    );
+
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            ":cert 轻伤 甲".to_owned(),
+        ]),
+        PROVED,
+        &[],
+    );
+    let certificate = certificate_json(&exported);
+    assert!(
+        certificate.open_obligations.is_empty(),
+        "the closed root records no open-concept obligation: {:?}",
+        certificate.open_obligations
+    );
+    // The unrelated rule step is still part of the derivation graph; the
+    // absence of the obligation is about the root, not about the graph.
+    assert!(
+        certificate.nodes.iter().any(
+            |node| matches!(node, CertNode::RuleApplication { rule, .. } if rule == "重大推定")
+        ),
+        "the fixture must derive 「重大」 on the unrelated branch: {:?}",
+        certificate.nodes
+    );
+}
+
+/// A fact the user supplied is evidence, not a decision of the concept: a rule
+/// that consumes `重大 甲` as an assumed fact does not make its closed
+/// conclusion depend on an open concept.
+#[test]
+fn an_open_concept_supplied_as_a_fact_is_not_a_dependency() {
+    let temp = TempDir::new("fact-premise");
+    let theory = temp.write("case.std", &open_concept_case_with_the_fact());
+    let path = theory.display().to_string();
+
+    let why = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":why 从重处罚 甲".to_owned(),
+        ]),
+        PROVED,
+        &["推导已通过独立校验。"],
+    );
+    assert!(
+        !stdout(&why).contains("此处需人判断"),
+        "a supplied open-concept fact is not a booleanized concept:\n{}",
+        stdout(&why)
+    );
+
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            ":cert 从重处罚 甲".to_owned(),
+        ]),
+        PROVED,
+        &[],
+    );
+    let certificate = certificate_json(&exported);
+    assert!(
+        certificate.open_obligations.is_empty(),
+        "a premise fact states the concept; it does not decide it: {:?}",
+        certificate.open_obligations
+    );
+}
+
+/// Two processes generating the certificate for the same case must produce
+/// byte-identical JSON: the obligation id, its description and the node order
+/// are deterministic.
+#[test]
+fn regenerating_the_certificate_is_byte_identical_across_processes() {
+    let temp = TempDir::new("deterministic");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let path = theory.display().to_string();
+
+    let first = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":cert 从重处罚 甲".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+    let second = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            ":cert 从重处罚 甲".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+    assert_eq!(
+        certificate_text(&first),
+        certificate_text(&second),
+        "the certificate (including the obligation) must not depend on the process"
+    );
+    assert_eq!(
+        certificate_json(&first).open_obligations,
+        certificate_json(&second).open_obligations
+    );
+}
+
+/// `:verify-cert` reports the obligation and exits `1`; a certificate that
+/// drops the obligation would make an open concept look proved, so the checker
+/// recomputes it from the environment and rejects the file (`2`).
+#[test]
+fn verify_cert_reports_the_obligation_and_rejects_a_certificate_that_drops_it() {
+    let temp = TempDir::new("verify-open");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let path = theory.display().to_string();
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":cert 重大 甲".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+    let certificate = certificate_json(&exported);
+    let file = temp.write("certificate.json", &certificate.to_json_pretty().unwrap());
+    let verify = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            format!(":verify-cert {}", file.display()),
+        ]),
+        GAP,
+        &[
+            "环境校验：通过",
+            "逻辑校验：通过",
+            "需人判断：是（open_obligations 1 项：开放概念 1 项）",
+            "此处需人判断：`重大`",
+        ],
+    );
+    assert!(
+        !stdout(&verify).contains("推导已通过独立校验。"),
+        ":verify-cert must not report an open-concept root as an unconditional proof"
+    );
+
+    // Dropping the obligation is the forgery the check exists for.
+    let mut dropped = certificate.clone();
+    dropped
+        .open_obligations
+        .retain(|obligation| obligation.kind != ObligationKind::OpenConcept);
+    let dropped_file = temp.write("dropped.json", &dropped.to_json_pretty().unwrap());
+    let rejected = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            format!(":verify-cert {}", dropped_file.display()),
+        ]),
+        ERROR,
+        &["逻辑校验：失败", "开放概念", "没有记录开放概念义务"],
+    );
+    assert!(
+        stderr(&rejected).contains("开放概念"),
+        "the error must name what is missing:\n{}",
+        stderr(&rejected)
+    );
+}
+
+/// A certificate that records an open-concept obligation its proof does not
+/// support is rejected too: the obligation is derived data, not a note the
+/// writer may add.
+#[test]
+fn a_certificate_with_an_invented_obligation_is_rejected() {
+    let temp = TempDir::new("invented-open");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let path = theory.display().to_string();
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":cert 轻伤 甲".to_owned(),
+        ]),
+        PROVED,
+        &[],
+    );
+    let mut certificate = certificate_json(&exported);
+    assert!(certificate.open_obligations.is_empty());
+
+    certificate.open_obligations.push(OpenObligation {
+        id: "open-concept".to_owned(),
+        kind: ObligationKind::OpenConcept,
+        description: "开放概念 `重大` 需要人判断，不得当作已证明".to_owned(),
+        nodes: Vec::new(),
+    });
+    let file = temp.write("invented.json", &certificate.to_json_pretty().unwrap());
+    check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            format!(":verify-cert {}", file.display()),
+        ]),
+        ERROR,
+        &["逻辑校验：失败", "开放概念", "不能手工添加"],
+    );
 }
 
 /// A marker occupies a ledger slot, so a session fact must not be numbered by
 /// the ledger length: otherwise adding `open` would rename `:given` facts and
 /// change `:why` output for reasons that have nothing to do with the marker.
+///
+/// The queried root is the open concept itself, so the query now exits `1` with
+/// the "needs human judgement" notice (M2-9b). The naming assertion is what
+/// this test is about and is unchanged.
 #[test]
 fn a_given_fact_name_does_not_shift_when_a_marker_is_added() {
     let temp = TempDir::new("given-name");
@@ -421,8 +848,8 @@ fn a_given_fact_name_does_not_shift_when_a_marker_is_added() {
             ":given 损害 甲".to_owned(),
             ":why 损害 甲".to_owned(),
         ]),
-        PROVED,
-        &["已加载", "+ open 损害"],
+        GAP,
+        &["已加载", "+ open 损害", "此处需人判断：`损害`"],
     );
     let text = stdout(&opened_out);
     assert!(
@@ -467,4 +894,351 @@ fn issues_does_not_enumerate_open_markers_as_constants() {
         !text.contains("open:"),
         "the marker must not be enumerated as a constant:\n{text}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Interpretation applications, several concepts, a nullary predicate
+// ---------------------------------------------------------------------------
+
+/// The open concept is licensed by an enabled interpretation, not by a rule:
+/// the proof step that states it is an `interpretation_application`.
+const OPEN_CONCEPT_INTERPRETATION_CASE: &str = r#"sort 人
+pred 损害 : 人 → Prop
+pred 重大 : 人 → Prop
+obj 甲 : 人
+open 重大
+axiom 损害事实 : 损害 甲
+  source text "案件" locator "一"
+interpret 重大解释 : 损害 甲 → 重大 甲
+  direction literal
+  source text "解释文本" locator "二" version "2020"
+"#;
+
+/// An interpretation that licenses an open concept is a dependency too: the
+/// certificate must record the obligation on its `interpretation_application`
+/// node, and the query must not read as an unconditional proof.
+#[test]
+fn an_interpretation_that_concludes_an_open_concept_is_an_obligation() {
+    let temp = TempDir::new("interpretation");
+    let theory = temp.write("case.std", OPEN_CONCEPT_INTERPRETATION_CASE);
+    let path = theory.display().to_string();
+    let query = |command: &str| {
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "重大解释".to_owned(),
+            path.clone(),
+            command.to_owned(),
+        ])
+    };
+
+    let why = check(
+        query(":why 重大 甲"),
+        GAP,
+        &[
+            "▸ 重大 甲  〈解释 重大解释（literal）〉",
+            "此处需人判断：`重大`",
+        ],
+    );
+    assert!(
+        !stdout(&why).contains("推导已通过独立校验。"),
+        "an interpretation over an open concept must not read as unconditional:\n{}",
+        stdout(&why)
+    );
+    let explain = check(
+        query(":explain 重大 甲"),
+        GAP,
+        &["此处需人判断：`重大`", "开放概念"],
+    );
+    assert!(
+        !stdout(&explain).contains("推导已通过独立校验。"),
+        "the narrative must not call an interpretation open concept checked:\n{}",
+        stdout(&explain)
+    );
+
+    let exported = check(query(":cert 重大 甲"), PROVED, &["open-concept"]);
+    let certificate = certificate_json(&exported);
+    assert_eq!(
+        certificate.open_obligations.len(),
+        1,
+        "{:?}",
+        certificate.open_obligations
+    );
+    let obligation = &certificate.open_obligations[0];
+    assert_eq!(obligation.kind, ObligationKind::OpenConcept);
+    let dependency = certificate
+        .nodes
+        .iter()
+        .position(|node| matches!(node, CertNode::InterpretationApplication { .. }))
+        .expect("the interpretation step is a proof node");
+    assert_eq!(
+        obligation.nodes,
+        vec![dependency],
+        "the interpretation_application node is the dependency node"
+    );
+    assert!(
+        matches!(
+            certificate.nodes[dependency],
+            CertNode::InterpretationApplication { .. }
+        ),
+        "the obligation must point at the interpretation step"
+    );
+
+    let file = temp.write("certificate.json", &certificate.to_json_pretty().unwrap());
+    let verify = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "重大解释".to_owned(),
+            path.clone(),
+            format!(":verify-cert {}", file.display()),
+        ]),
+        GAP,
+        &["逻辑校验：通过", "此处需人判断：`重大`"],
+    );
+    assert!(
+        !stdout(&verify).contains("推导已通过独立校验。"),
+        "verify-cert must report the interpretation obligation"
+    );
+
+    let mut dropped = certificate.clone();
+    dropped
+        .open_obligations
+        .retain(|obligation| obligation.kind != ObligationKind::OpenConcept);
+    let dropped_file = temp.write("dropped.json", &dropped.to_json_pretty().unwrap());
+    let rejected = check_stderr(
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "重大解释".to_owned(),
+            path,
+            format!(":verify-cert {}", dropped_file.display()),
+        ]),
+        ERROR,
+        &["开放概念", "没有记录开放概念义务"],
+    );
+    assert!(
+        stdout(&rejected).contains("逻辑校验：失败"),
+        "a dropped obligation must fail the logical layer:\n{}",
+        stdout(&rejected)
+    );
+}
+
+/// Two open concepts on one root derivation: one obligation, both concepts
+/// joined with `、` and sorted by name, so the description does not depend on
+/// node order.
+const OPEN_CONCEPT_MULTI_CASE: &str = r#"sort 人
+pred 损害 : 人 → Prop
+pred 重大 : 人 → Prop
+pred 情节严重 : 人 → Prop
+pred 从重处罚 : 人 → Prop
+obj 甲 : 人
+open 重大
+open 情节严重
+axiom 损害事实 : 损害 甲
+  source text "案件" locator "一"
+rule 重大推定 :
+  params x : 人
+  premise 损害 x
+  conclude 重大 x
+  source text "测试" locator "二"
+rule 严重推定 :
+  params x : 人
+  premise 损害 x
+  conclude 情节严重 x
+  source text "测试" locator "三"
+rule 从重 :
+  params x : 人
+  premise 重大 x
+  premise 情节严重 x
+  conclude 从重处罚 x
+  source text "测试" locator "四"
+"#;
+
+#[test]
+fn one_obligation_names_every_open_concept_in_name_order() {
+    let temp = TempDir::new("multi");
+    let theory = temp.write("case.std", OPEN_CONCEPT_MULTI_CASE);
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            theory.display().to_string(),
+            ":cert 从重处罚 甲".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+    let certificate = certificate_json(&exported);
+    assert_eq!(certificate.open_obligations.len(), 1);
+    let obligation = &certificate.open_obligations[0];
+    assert_eq!(
+        obligation.description, "开放概念 `情节严重`、`重大` 需要人判断，不得当作已证明",
+        "concepts are joined with 、 in name order, independent of node order"
+    );
+    let mut expected = [
+        certificate
+            .nodes
+            .iter()
+            .position(
+                |node| matches!(node, CertNode::RuleApplication { rule, .. } if rule == "严重推定"),
+            )
+            .expect("the 「情节严重」 step is a proof node"),
+        certificate
+            .nodes
+            .iter()
+            .position(
+                |node| matches!(node, CertNode::RuleApplication { rule, .. } if rule == "重大推定"),
+            )
+            .expect("the 「重大」 step is a proof node"),
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        obligation.nodes, expected,
+        "both dependency nodes are listed in ascending node order"
+    );
+}
+
+/// A nullary open predicate (`pred P : Prop`) takes the same path: the head of
+/// `P` is the constant itself, and the certificate/verification round trip
+/// reports the obligation.
+const OPEN_CONCEPT_ZERO_CASE: &str = r#"pred P : Prop
+open P
+rule 推出P :
+  conclude P
+  source text "测试" locator "一"
+"#;
+
+#[test]
+fn a_nullary_open_predicate_round_trips_through_cert_and_verify() {
+    let temp = TempDir::new("nullary");
+    let theory = temp.write("case.std", OPEN_CONCEPT_ZERO_CASE);
+    let path = theory.display().to_string();
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":cert P".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+    let certificate = certificate_json(&exported);
+    let root = certificate.root.expect("the root is recorded");
+    assert_eq!(certificate.open_obligations.len(), 1);
+    assert_eq!(certificate.open_obligations[0].nodes, vec![root]);
+    assert_eq!(
+        certificate.open_obligations[0].description,
+        "开放概念 `P` 需要人判断，不得当作已证明"
+    );
+
+    let file = temp.write("certificate.json", &certificate.to_json_pretty().unwrap());
+    check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            format!(":verify-cert {}", file.display()),
+        ]),
+        GAP,
+        &["逻辑校验：通过", "此处需人判断：`P`"],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A tampered obligation must be recomputed, not trusted
+// ---------------------------------------------------------------------------
+
+/// Export the open-concept fixture's certificate for `重大 甲` and write it
+/// next to the theory. The obligation is assumed to be the generated one.
+fn exported_open_certificate(temp: &TempDir, theory: &Path) -> (PathBuf, Certificate) {
+    let exported = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            theory.display().to_string(),
+            ":cert 重大 甲".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+    let certificate = certificate_json(&exported);
+    let file = temp.write("certificate.json", &certificate.to_json_pretty().unwrap());
+    (file, certificate)
+}
+
+/// Verify one certificate file against the loaded theory.
+fn verify_certificate(theory: &Path, file: &Path) -> Output {
+    run(&[
+        "--no-default-packs".to_owned(),
+        theory.display().to_string(),
+        format!(":verify-cert {}", file.display()),
+    ])
+}
+
+/// Assert that a `:verify-cert` run failed the logical layer (exit `2`) and,
+/// on stderr, names what could be located from the certificate.
+fn assert_verify_rejected(output: Output, needles: &[&str]) {
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    let err = stderr(&output);
+    assert!(
+        out.contains("逻辑校验：失败"),
+        "expected a logical failure:\n{out}\n{err}"
+    );
+    for needle in needles {
+        assert!(err.contains(needle), "stderr lacks {needle:?}:\n{err}");
+    }
+}
+
+#[test]
+fn an_open_concept_obligation_with_a_different_id_is_rejected() {
+    let temp = TempDir::new("forged-id");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let (_, mut certificate) = exported_open_certificate(&temp, &theory);
+    certificate.open_obligations[0].id = "open-concept-forged".to_owned();
+    let file = temp.write("forged.json", &certificate.to_json_pretty().unwrap());
+    assert_verify_rejected(
+        verify_certificate(&theory, &file),
+        &["不一致", "open-concept-forged"],
+    );
+}
+
+#[test]
+fn an_open_concept_obligation_with_an_edited_description_is_rejected() {
+    let temp = TempDir::new("forged-description");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let (_, mut certificate) = exported_open_certificate(&temp, &theory);
+    certificate.open_obligations[0].description =
+        "开放概念 `重大` 需要人判断\n伪造：推导已通过独立校验。\u{1B}[31m".to_owned();
+    let file = temp.write("forged.json", &certificate.to_json_pretty().unwrap());
+    let output = verify_certificate(&theory, &file);
+    let err = stderr(&output);
+    assert_verify_rejected(output, &["不一致"]);
+    assert!(
+        !err.contains("\n伪造：推导已通过独立校验。"),
+        "an injected newline in the description must not become its own line:\n{err}"
+    );
+    assert!(
+        err.contains("\\n"),
+        "the description must be escaped in the error message:\n{err}"
+    );
+}
+
+#[test]
+fn an_open_concept_obligation_with_different_nodes_is_rejected() {
+    let temp = TempDir::new("forged-nodes");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let (_, mut certificate) = exported_open_certificate(&temp, &theory);
+    certificate.open_obligations[0].nodes.clear();
+    let file = temp.write("forged.json", &certificate.to_json_pretty().unwrap());
+    assert_verify_rejected(verify_certificate(&theory, &file), &["不一致", "节点"]);
+}
+
+#[test]
+fn two_open_concept_obligations_are_rejected() {
+    let temp = TempDir::new("duplicate");
+    let theory = temp.write("case.std", OPEN_CONCEPT_CASE);
+    let (_, mut certificate) = exported_open_certificate(&temp, &theory);
+    let duplicate = certificate.open_obligations[0].clone();
+    certificate.open_obligations.push(duplicate);
+    let file = temp.write("forged.json", &certificate.to_json_pretty().unwrap());
+    assert_verify_rejected(verify_certificate(&theory, &file), &["只能记录一条"]);
 }

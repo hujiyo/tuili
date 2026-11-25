@@ -85,6 +85,16 @@
 //! environment. That is the intended direction: refuse a false green rather
 //! than certify an omitted blocker.
 //!
+//! Open obligations are otherwise reported, not judged: they set
+//! [`CheckReport::requires_human`] and leave `root_proved` alone. The exception
+//! is the `open_concept` obligation, which is derived data rather than a note.
+//! It is recomputed from the environment's `open` markers and the proof graph
+//! reachable from the root ([`crate::open::dependency`]), and a certificate that
+//! records a different one — or none, or several — is rejected. A rule step
+//! concluding an open concept (`重大`, `情节严重`), or a root that is such a
+//! predicate, depends on a human judgement; the certificate must not report it
+//! as unconditional.
+//!
 //! A [`Node::Gap`] proves nothing, so it cannot be a premise. It may be the
 //! root; the report then says `root_proved = false`.
 //!
@@ -140,8 +150,10 @@
 //! is trusted to be the actual instance. Conflicts the certificate omits are
 //! not reconstructed, so a truncated certificate can hide a conflict; the
 //! derivation layer is what records them. Citations are compared as data, and
-//! their legal effect is not judged. Open obligations do not fail the check;
-//! they set `requires_human`. Whether the root is proved depends only on the
+//! their legal effect is not judged. Open obligations other than the
+//! `open_concept` one do not fail the check; they set `requires_human`. The
+//! `open_concept` obligation is recomputed instead, as described above.
+//! Whether the root is proved depends only on the
 //! conflicts the root takes part in; a conflict elsewhere is validated but does
 //! not change `root_proved`.
 
@@ -149,7 +161,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use std_deduce_kernel::conv::convertible;
-use std_deduce_kernel::env::{DeclKind, RuleDecl};
+use std_deduce_kernel::env::{escape_control, DeclKind, RuleDecl};
 use std_deduce_kernel::norm::normalize;
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::is_closed;
@@ -159,8 +171,9 @@ use crate::closure;
 use crate::expr::CertExpr;
 use crate::key::expression_key;
 use crate::model::{
-    Certificate, Conflict, FactIdentity, InterpretationDirection, Node, NodeId, PriorityClause,
-    PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
+    Certificate, Conflict, FactIdentity, InterpretationDirection, Node, NodeId, ObligationKind,
+    OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution,
+    ResolutionBasis, Side, UnresolvedReason,
 };
 use crate::source::Source;
 
@@ -676,6 +689,13 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
         validate_provenance(env, cert, &facts, index, conflict)?;
         priority_edges_checked += validate_resolution(&priority, cert, index, conflict)?;
     }
+
+    // An `open_concept` obligation is not free text: it is recomputed from the
+    // environment's markers and the proof graph reachable from the root. The
+    // check refuses a certificate that dropped it, invented it or edited its
+    // node list or description, so an open concept can never be certified as
+    // an unconditional conclusion by deleting one obligation.
+    validate_open_concept_obligations(env, cert)?;
 
     let root_proved = cert
         .root
@@ -1253,6 +1273,77 @@ fn validate_interpretations(env: &Env, cert: &Certificate) -> Result<(), CheckEr
         }
     }
     Ok(())
+}
+
+/// Recompute the certificate's `open_concept` obligation and compare it with
+/// what the certificate records.
+///
+/// An `open` marker says a predicate such as 「重大」 needs a human judgement.
+/// A rule step that concludes it, or a root that is itself such a predicate,
+/// therefore cannot be certified as an unconditional proof. The obligation is
+/// derived data, not a free-text note: [`crate::open::dependency`] rebuilds it
+/// from the environment's markers and the proof graph reachable from the root,
+/// and this check requires exactly that obligation. Deleting it makes the open
+/// concept look proved; adding one to an unrelated conclusion would be just as
+/// dishonest. Both are rejected.
+fn validate_open_concept_obligations(env: &Env, cert: &Certificate) -> Result<(), CheckError> {
+    let expected = crate::open::dependency(env, cert)
+        .map_err(|message| CheckError {
+            node: None,
+            message,
+        })?
+        .map(|dependency| dependency.obligation());
+    let recorded: Vec<&OpenObligation> = cert
+        .open_obligations
+        .iter()
+        .filter(|obligation| obligation.kind == ObligationKind::OpenConcept)
+        .collect();
+    let Some(expected) = expected else {
+        if recorded.is_empty() {
+            return Ok(());
+        }
+        return Err(CheckError {
+            node: None,
+            message: format!(
+                "证书记录了开放概念义务 `{}`，但按当前环境的 open 标记与证明节点重算，\
+                 根推导不依赖任何开放概念：开放概念义务不能手工添加",
+                escape_control(&recorded[0].id)
+            ),
+        });
+    };
+    match recorded.as_slice() {
+        [] => Err(CheckError {
+            node: None,
+            message: format!(
+                "根推导依赖开放概念，但证书没有记录开放概念义务（应为：{}）；\
+                 删掉该义务会把带开放概念的结论伪装成无保留的证明",
+                expected.description
+            ),
+        }),
+        [only] if *only == &expected => Ok(()),
+        [only] => Err(CheckError {
+            node: None,
+            message: format!(
+                "证书记录的开放概念义务与按环境与节点重算的结果不一致：\
+                 id、描述与节点必须逐字段相同（记录：id `{}`，节点 {:?}，描述「{}」；\
+                 重算：id `{}`，节点 {:?}，描述「{}」）",
+                escape_control(&only.id),
+                only.nodes,
+                escape_control(&only.description),
+                escape_control(&expected.id),
+                expected.nodes,
+                expected.description
+            ),
+        }),
+        many => Err(CheckError {
+            node: None,
+            message: format!(
+                "证书记录了 {} 条开放概念义务：一条根推导只能记录一条（{}）",
+                many.len(),
+                expected.description
+            ),
+        }),
+    }
 }
 
 /// One environment fact, with the normalized proposition and its comparison key.

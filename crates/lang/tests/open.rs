@@ -188,9 +188,9 @@ fn a_module_open_reference_must_be_fully_qualified() {
     assert!(msg.contains("未限定"), "{msg}");
 }
 
-/// The marker is inert: it declares no proposition, so no derivation can cite
-/// it. The environment method is the only reader needed by the declaration
-/// layer.
+/// The marker asserts nothing: it declares no proposition, so no derivation can
+/// cite it as a premise and no rule fires on it. The inference layer reads the
+/// marker through `Env::open_predicates`, never through a ledger node.
 #[test]
 fn an_open_declaration_is_metadata_not_a_proposition() {
     let lib = load("sort 人\npred 重大 : 人 → Prop\nopen 重大\n").expect("loads");

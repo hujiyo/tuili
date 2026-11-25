@@ -99,7 +99,12 @@
 //! two facts must be either both strict or both claims, and the
 //! non-strict-fact reason may name only `user_asserted` or `assumed`, exactly
 //! as the assumption table records it. Open obligations are reported through
-//! [`CheckReport::requires_human`] without failing the check. The checker does
+//! [`CheckReport::requires_human`] without failing the check, with one
+//! exception: the `open_concept` obligation is recomputed from the environment's
+//! `open` markers and the proof graph, and a certificate that dropped, invented
+//! or edited it is rejected. A root derivation that turns an open concept
+//! (`重大`, `情节严重`) into a proved proposition is never presented as
+//! unconditional. The checker does
 //! not re-derive the rule instances named by `left_by` / `right_by`, does not
 //! judge conflicts a certificate omits, and does not judge the legal effect of
 //! a citation.
@@ -125,6 +130,7 @@ pub mod environment;
 pub mod expr;
 pub mod model;
 pub mod narrative;
+pub mod open;
 pub mod proof;
 pub mod render;
 pub mod source;
@@ -144,7 +150,10 @@ pub use model::{
     UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES, MAX_CERT_JSON_BYTES,
     MAX_CERT_NODES,
 };
-pub use narrative::render_narrative;
+pub use narrative::{render_narrative, render_narrative_with_open_concepts};
+pub use open::{
+    dependency as open_concept_dependency, OpenConceptDependency, OPEN_CONCEPT_OBLIGATION_ID,
+};
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
 pub use render::render;
 pub use source::Source;
