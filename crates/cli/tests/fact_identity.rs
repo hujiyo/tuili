@@ -378,7 +378,7 @@ axiom 违法事实 : 违法 张三
     let generated = check(session(&theory, &[":cert 违法 张三"]), PROVED, &[]);
     let certificate = certificate_json(&generated);
     let json = certificate.to_json_pretty().unwrap();
-    let old = json.replacen("\"format_version\": 7", "\"format_version\": 4", 1);
+    let old = json.replacen("\"format_version\": 8", "\"format_version\": 4", 1);
     assert_ne!(old, json, "the generated certificate must be version 6");
     let file = TempFile::new("version-4", "json", &old);
 
@@ -388,7 +388,7 @@ axiom 违法事实 : 违法 张三
         ERROR,
         &["环境校验：未运行（证书 JSON 无效）", "逻辑校验：未运行"],
     );
-    check_stderr(checked, ERROR, &["不是有效的证书 JSON", "supports 7"]);
+    check_stderr(checked, ERROR, &["不是有效的证书 JSON", "supports 8"]);
 }
 
 /// Changing a claim's recorded identity to a strict one is caught by the

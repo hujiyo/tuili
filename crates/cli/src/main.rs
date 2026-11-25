@@ -50,7 +50,7 @@
 //! while a rule judged *unchecked* (no evidence at all) keeps firing and every
 //! conclusion line it produces carries `适用性未判定（…）`. The verdict and
 //! the event times/places it relied on are printed on the conclusion line; a
-//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v7
+//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v8
 //! records the verdict, its basis and its reason on every rule application and
 //! gap candidate, and `:verify-cert` recomputes it from the environment
 //! declaration and the certificate's own inputs.
@@ -80,7 +80,7 @@
 //! without affecting explicit imports; `--profile` selects a profile by name or
 //! alias. The preload lines are printed only after the whole load commits, so a
 //! failed file never claims that the environment loaded. The profile and the
-//! packs it loaded are session objects, but a certificate v7 records the
+//! packs it loaded are session objects, but a certificate v8 records the
 //! environment identity it was produced in: the profile, the as-of date, the
 //! jurisdiction code and the loaded packs/corpora. `:cert` stamps it before
 //! writing, and `:verify-cert` compares it with the current environment before
@@ -96,6 +96,21 @@
 //! there is no interpretation chain. A `:gap` or `:why` that is only missing an
 //! unenabled interpretation prints `存在未启用解释 ...` instead of leaving the
 //! declaration invisible.
+//!
+//! Universal elimination is demand-driven. A `Fact` declaration whose type is a
+//! telescope of named `∀` binders ending in a predicate-headed proposition can
+//! be instantiated with closed values: a queried goal that no rule or fact
+//! proves demands one instance, and a rule premise that is already closed under
+//! the bindings collected so far demands one during saturation. Every instance
+//! is a derived `axiom_instance` step in certificate v8, never an assumption;
+//! `:why` prints the universal fact, its identity and the binding, and
+//! `:verify-cert` recomputes the conclusion from the declaration. `:gap` lists
+//! the universal facts that unify with a goal, with the values an instance
+//! would need and the reason it was refused. The bounds are explicit: at most
+//! 64 universal facts are tried per goal, 1024 instances are derived per query
+//! and 4096 distinct goals are probed; exceeding one is an error, never a
+//! silently truncated derivation. Existential quantifiers, polymorphism and
+//! higher-order instantiation of function-typed facts are not implemented.
 //!
 //! A batch load uses the same path as `:load`, so it prints the same report. A
 //! file that does not pass its checks prints `path:line:col: error: ...` on
@@ -306,7 +321,7 @@
 //! certificate proves the root under strict facts and leaves no root-relevant
 //! obligation — it is not a claim that the conclusion is legally correct.
 //! `:cert` JSON is unchanged: the labels are not a certificate field and the
-//! format stays v7.
+//! format stays v8.
 //!
 //! `:why` and `:explain` also report the `open` concept marker. A rule step
 //! whose conclusion head is an open predicate, or a root that is one, makes the
@@ -1553,9 +1568,9 @@ impl Session {
         let mut r = self.reasoner()?;
         // Every axiom whose declared type is a proposition is usable as an
         // assumption. This is how a corpus of facts enters. See
-        // `Reasoner::assume_ledger_axioms`.
-        r.assume_ledger_axioms()?;
-        r.saturate()?;
+        // `Reasoner::assume_ledger_axioms`. A goal that only a universal fact
+        // can prove is demanded after the first pass fails to derive it.
+        saturate_with_goal(&mut r, Some(&goal))?;
 
         // A cycle disables every edge inside it. Say so before the query
         // prints anything: a result that fell back to "no usable priority"
@@ -1576,11 +1591,12 @@ impl Session {
             if reachable {
                 d.root = r.root_for(&goal);
             } else {
-                let ex = r.explain(&goal);
+                let ex = r.explain(&goal)?;
                 let id = d.nodes.len();
                 d.nodes.push(std_deduce_reason::Node::Gap {
                     prop: goal.clone(),
                     candidates: ex.candidates,
+                    axiom_candidates: ex.axiom_candidates,
                     note: ex.note,
                 });
                 d.root = Some(id);
@@ -1660,10 +1676,22 @@ impl Session {
         if cmd == "gap" {
             if reachable {
                 writeln!(out, "目标可以推出。").ok();
+                // A goal proved by universal elimination names the universal
+                // fact and the values it was instantiated with, so the reader
+                // sees that the conclusion is an instance, not a bare fact.
+                if let Some(instance) = r.axiom_instance_for(&goal) {
+                    writeln!(
+                        out,
+                        "  由全称公理 ⟨{}⟩ 实例化（{}）",
+                        escape_control(&instance.axiom),
+                        instance_bindings_text(&instance.bindings)
+                    )
+                    .ok();
+                }
                 return Ok(Outcome::Proved);
             }
             let limits = GapLimits::default();
-            let tree = r.gap_tree_with(&goal, &limits);
+            let tree = r.gap_tree_with(&goal, &limits)?;
             writeln!(
                 out,
                 "无法推出 {}。缺口树（最大深度 {}，最多 {} 个节点，每条规则最多尝试 {} 次）：",
@@ -1696,7 +1724,7 @@ impl Session {
         // annotation is rendered from the derivation's judgement.
         let annotations = derivation_annotations(&d);
         // The burden/standard declarations the narrative prints come from the
-        // environment, not from the certificate: certificate v7 does not record
+        // environment, not from the certificate: certificate v8 does not record
         // them. The map is built once by the reasoner from the same rule
         // declarations the gap tree reads, so `:explain` and `:gap` report the
         // same values.
@@ -1846,12 +1874,11 @@ impl Session {
             );
         }
         let mut r = self.reasoner()?;
-        r.assume_ledger_axioms()?;
-        r.saturate()?;
+        saturate_with_goal(&mut r, None)?;
         write_priority_cycle_warning(out, &r.priority_cycles());
 
         let limits = GapLimits::default();
-        let scan = r.issues_with(&limits);
+        let scan = r.issues_with(&limits)?;
         if scan.issues.is_empty() {
             writeln!(out, "没有可争的结论。").ok();
         } else {
@@ -1978,11 +2005,10 @@ impl Session {
             return Ok(Outcome::Proved);
         }
 
-        let mut r = self.reasoner()?;
-        r.assume_ledger_axioms()?;
-        r.saturate()?;
-
         let goal = self.goal(arg)?;
+        let mut r = self.reasoner()?;
+        saturate_with_goal(&mut r, Some(&goal))?;
+
         let mut verdicts = BTreeSet::new();
         if r.knows(&goal) {
             let mut d = r.derivation();
@@ -2010,9 +2036,9 @@ impl Session {
                 }
             }
         } else {
-            let tree = r.gap_tree(&goal);
+            let tree = r.gap_tree(&goal)?;
             collect_gap_verdicts(&tree, &mut verdicts);
-        }
+        };
         writeln!(out, "时空适用性（目标：{}）：", print_expr(&goal)).ok();
         if verdicts.is_empty() {
             writeln!(
@@ -2064,19 +2090,19 @@ impl Session {
         self.require_jurisdiction()?;
         let goal = self.goal(arg)?;
         let mut r = self.reasoner()?;
-        r.assume_ledger_axioms()?;
-        r.saturate()?;
+        saturate_with_goal(&mut r, Some(&goal))?;
 
         let reachable = r.knows(&goal);
         let mut d = r.derivation();
         if reachable {
             d.root = r.root_for(&goal);
         } else {
-            let ex = r.explain(&goal);
+            let ex = r.explain(&goal)?;
             let id = d.nodes.len();
             d.nodes.push(std_deduce_reason::Node::Gap {
                 prop: goal.clone(),
                 candidates: ex.candidates,
+                axiom_candidates: ex.axiom_candidates,
                 note: ex.note,
             });
             d.root = Some(id);
@@ -2118,8 +2144,7 @@ impl Session {
         self.require_jurisdiction()?;
         let goal = self.goal(arg)?;
         let mut r = self.reasoner()?;
-        r.assume_ledger_axioms()?;
-        r.saturate()?;
+        saturate_with_goal(&mut r, Some(&goal))?;
         write_priority_cycle_warning(out, &r.priority_cycles());
 
         let reachable = r.knows(&goal);
@@ -2127,11 +2152,12 @@ impl Session {
         if reachable {
             d.root = r.root_for(&goal);
         } else {
-            let ex = r.explain(&goal);
+            let ex = r.explain(&goal)?;
             let id = d.nodes.len();
             d.nodes.push(std_deduce_reason::Node::Gap {
                 prop: goal.clone(),
                 candidates: ex.candidates,
+                axiom_candidates: ex.axiom_candidates,
                 note: ex.note,
             });
             d.root = Some(id);
@@ -2560,6 +2586,7 @@ impl Session {
                     }
                 }
                 Some(CertNode::RuleApplication { conclusion, .. }) => Expr::from(conclusion),
+                Some(CertNode::AxiomInstance { conclusion, .. }) => Expr::from(conclusion),
                 Some(CertNode::InterpretationApplication { conclusion, .. }) => {
                     Expr::from(conclusion)
                 }
@@ -3922,6 +3949,9 @@ fn root_summary(certificate: &Certificate, report: &CheckReport) -> String {
                 {
                     "解释推导"
                 }
+                Some(root) if matches!(certificate.nodes[root], CertNode::AxiomInstance { .. }) => {
+                    "公理实例推导"
+                }
                 _ => "规则推导",
             };
             format!(
@@ -4443,6 +4473,7 @@ fn collect_derivation_verdicts(
         ReasonNode::InterpretationApplication { premise, .. } => {
             collect_derivation_verdicts(derivation, *premise, out);
         }
+        ReasonNode::AxiomInstance { .. } => {}
         ReasonNode::Gap { candidates, .. } => {
             for candidate in candidates {
                 out.insert((
@@ -4529,6 +4560,25 @@ fn write_interpretation_hints(
     Ok(())
 }
 
+/// Register the ledger facts, saturate, and — when the goal is still unproved —
+/// demand a universal-elimination instance for it and saturate again.
+///
+/// The second pass runs only when the first one did not prove the goal, so an
+/// existing rule derivation is never displaced by an axiom instance. Demanding
+/// a goal is the query-level trigger; premise-driven instantiation already
+/// happens inside the saturation itself.
+fn saturate_with_goal(r: &mut Reasoner<'_>, goal: Option<&Expr>) -> Result<(), String> {
+    r.assume_ledger_axioms()?;
+    r.saturate()?;
+    if let Some(goal) = goal {
+        if !r.knows(goal) {
+            r.demand(goal)?;
+            r.saturate()?;
+        }
+    }
+    Ok(())
+}
+
 /// Build a reasoner with the given enabled interpretations.
 ///
 /// This is the only place the CLI turns the session's set into reasoner state;
@@ -4609,12 +4659,28 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
         }
         GapStatus::Unreachable => {}
     }
-    if tree.candidates.is_empty() && tree.limit.is_none() {
+    if tree.candidates.is_empty() && tree.axiom_candidates.is_empty() && tree.limit.is_none() {
         writeln!(
             out,
             "{pad}没有任何规则以它为结论：要么补一条规则，要么把它作为已知事实登记。"
         )
         .ok();
+    }
+    for candidate in &tree.axiom_candidates {
+        // A universal fact that unifies with the goal, with the bindings an
+        // instance would need. A successful instance would have closed the
+        // goal, so every listed candidate either was refused or was not
+        // demanded on this path.
+        let bindings = if candidate.bindings.is_empty() {
+            String::new()
+        } else {
+            format!("（绑定：{}）", instance_bindings_text(&candidate.bindings))
+        };
+        writeln!(out, "{pad}公理候选 ⟨{}⟩{bindings}", candidate.axiom).ok();
+        match &candidate.problem {
+            Some(problem) => writeln!(out, "{pad}  未实例化：{problem}").ok(),
+            None => writeln!(out, "{pad}  可由该全称公理实例化；当前推导没有触发它").ok(),
+        };
     }
     for candidate in &tree.candidates {
         // Every candidate carries its per-instance verdict and the event
@@ -4729,6 +4795,18 @@ fn gap_limit_text(limit: &GapLimit) -> String {
         GapLimit::Issues { limit } => format!("可争的结论已达到上限（{limit} 条）"),
         GapLimit::Excluded { limit } => format!("被排除的规则已达到上限（{limit} 条）"),
     }
+}
+
+/// `p := 张三，q := 李四` for one universal instance.
+///
+/// The bindings are printed in binder order; a non-ASCII name is escaped
+/// nowhere here because it comes from a declaration, not from free text.
+fn instance_bindings_text(bindings: &[(Name, Expr)]) -> String {
+    bindings
+        .iter()
+        .map(|(parameter, value)| format!("{parameter} := {}", print_expr(value)))
+        .collect::<Vec<_>>()
+        .join("，")
 }
 
 /// `⟨a⟩、⟨b⟩` for a rule list, with the first eight names and a total count.
@@ -4866,6 +4944,7 @@ fn describe(p: &Provenance, identity: Option<FactIdentity>) -> String {
                 .collect::<Vec<_>>()
                 .join("、")
         ),
+        Provenance::Axiom(axiom) => format!("公理实例 ⟨{axiom}⟩"),
         Provenance::Interpretation(interpretation) => {
             format!("解释⟨{}⟩", escape_control(interpretation))
         }

@@ -187,6 +187,7 @@ fn renders_a_gap_with_candidates_and_blockers() {
         vec![Node::Gap {
             proposition: atom("可复议", "甲"),
             note: Some("目标处于冲突中".to_owned()),
+            axiom_candidates: Vec::new(),
             candidates: vec![
                 GapCandidate {
                     rule: "规则一".to_owned(),
@@ -242,6 +243,7 @@ fn without_a_root_prints_unused_nodes_then_gaps_separated_by_blank_lines() {
             Node::Gap {
                 proposition: atom("可复议", "甲"),
                 note: None,
+                axiom_candidates: Vec::new(),
                 candidates: Vec::new(),
             },
         ],
@@ -369,6 +371,7 @@ fn a_gap_note_and_candidate_rule_cannot_forge_a_derivation_line() {
         vec![Node::Gap {
             proposition: atom("可复议", "甲"),
             note: Some("x\n▸ 已证成 甲".to_owned()),
+            axiom_candidates: Vec::new(),
             candidates: vec![GapCandidate {
                 rule: "候选\n▸ 已证成 甲".to_owned(),
                 bindings: Vec::new(),

@@ -8,8 +8,12 @@
 //! its label and its first source. A rule application is printed as
 //! `▸ <conclusion>  ⟨<rule>⟩`, followed by its first source, that source's
 //! note and the parameter bindings, then its premises indented by two more
-//! spaces. A gap is printed as `? <proposition>  【未闭合】` with its
-//! candidates, missing premises and blocking conditions.
+//! spaces. A universal elimination is printed as
+//! `▸ <conclusion>  〈公理 <declaration>〔<identity>〕〉`, followed by its first
+//! source and the binding variables. A gap is printed as
+//! `? <proposition>  【未闭合】` with its candidates, the universal facts that
+//! could instantiate it (with their bindings and refusal reasons), missing
+//! premises and blocking conditions.
 //!
 //! A certificate with no root prints, in node order, every assumption or rule
 //! application that is not a premise of a rule step, and every gap, with one
@@ -83,7 +87,7 @@ pub(crate) fn root_nodes(certificate: &Certificate) -> Vec<NodeId> {
             Node::InterpretationApplication { premise, .. } => {
                 used.insert(*premise);
             }
-            Node::Assumption { .. } | Node::Gap { .. } => {}
+            Node::Assumption { .. } | Node::AxiomInstance { .. } | Node::Gap { .. } => {}
         }
     }
     let mut roots = Vec::new();
@@ -91,7 +95,8 @@ pub(crate) fn root_nodes(certificate: &Certificate) -> Vec<NodeId> {
         match node {
             Node::Assumption { .. }
             | Node::RuleApplication { .. }
-            | Node::InterpretationApplication { .. } => {
+            | Node::InterpretationApplication { .. }
+            | Node::AxiomInstance { .. } => {
                 if !used.contains(&id) {
                     roots.push(id);
                 }
@@ -150,7 +155,7 @@ pub(crate) fn validate(certificate: &Certificate) -> Result<(), String> {
                     ));
                 }
             }
-            Node::Gap { .. } => {}
+            Node::AxiomInstance { .. } | Node::Gap { .. } => {}
         }
     }
     detect_cycle(certificate)
@@ -199,7 +204,7 @@ fn detect_cycle(certificate: &Certificate) -> Result<(), String> {
             Node::InterpretationApplication { premise, .. } => {
                 visit(certificate, *premise, state, path)?;
             }
-            Node::Assumption { .. } | Node::Gap { .. } => {}
+            Node::Assumption { .. } | Node::AxiomInstance { .. } | Node::Gap { .. } => {}
         }
         path.pop();
         state[id] = State::Done;
@@ -293,6 +298,43 @@ fn render_node(
                 render_node(certificate, *premise, depth + 1, annotations, out)?;
             }
         }
+        Node::AxiomInstance {
+            axiom,
+            identity,
+            bindings,
+            conclusion,
+            sources,
+        } => {
+            out.push_str(&format!(
+                "{pad}▸ {}  〈公理 {}〔{}〕〉",
+                print_expr(&Expr::from(conclusion)),
+                escape_control(axiom),
+                identity.label_zh()
+            ));
+            if let Some(source) = sources.first() {
+                out.push_str(&format!(" ← {}", source.one_line()));
+            }
+            out.push('\n');
+            if let Some(source) = sources.first() {
+                if !source.note.is_empty() {
+                    out.push_str(&format!("{pad}  注：{}\n", escape_control(&source.note)));
+                }
+            }
+            if !bindings.is_empty() {
+                let instance = bindings
+                    .iter()
+                    .map(|binding| {
+                        format!(
+                            "{} ↦ {}",
+                            escape_control(&binding.parameter),
+                            print_expr(&Expr::from(&binding.value))
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("，");
+                out.push_str(&format!("{pad}  实例：{instance}\n"));
+            }
+        }
         Node::InterpretationApplication {
             interpretation,
             premise,
@@ -324,6 +366,7 @@ fn render_node(
         Node::Gap {
             proposition,
             candidates,
+            axiom_candidates,
             note,
         } => {
             out.push_str(&format!(
@@ -332,6 +375,36 @@ fn render_node(
             ));
             if let Some(note) = note {
                 out.push_str(&format!("{pad}  {}\n", escape_control(note)));
+            }
+            for candidate in axiom_candidates {
+                out.push_str(&format!(
+                    "{pad}  公理候选 ⟨{}⟩",
+                    escape_control(&candidate.axiom)
+                ));
+                if !candidate.bindings.is_empty() {
+                    let bindings = candidate
+                        .bindings
+                        .iter()
+                        .map(|binding| {
+                            format!(
+                                "{} ↦ {}",
+                                escape_control(&binding.parameter),
+                                print_expr(&Expr::from(&binding.value))
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("，");
+                    out.push_str(&format!("（绑定：{bindings}）"));
+                }
+                out.push('\n');
+                match &candidate.problem {
+                    Some(problem) => {
+                        out.push_str(&format!("{pad}    未实例化：{}\n", escape_control(problem)))
+                    }
+                    None => out.push_str(&format!(
+                        "{pad}    可由该公理实例化，但本次推导没有触发它\n"
+                    )),
+                }
             }
             for candidate in candidates {
                 out.push_str(&format!(

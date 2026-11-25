@@ -849,6 +849,49 @@ impl Env {
     }
 }
 
+/// The named universal binders of a declared type, outermost first, and the
+/// body those binders scope.
+///
+/// The type is weak-head normalized, then every leading *named* `Pi` is
+/// stripped. An anonymous `Pi` ends the telescope: `A → B` binds no variable a
+/// caller could name, so it stays part of the body. `None` means the type has
+/// no named universal binder at all.
+///
+/// The binder names must be usable as the value names of an instantiation: a
+/// repeated name cannot be distinguished in a recorded binding, and a name
+/// starting with `?` would collide with the reasoner's open-pattern encoding.
+/// Such a declaration is refused (`None`) rather than renamed silently. The
+/// same holds for an empty name.
+///
+/// This is a syntactic view of the declaration for universal elimination; it
+/// performs no type checking of its own.
+pub fn named_binders(env: &Env, ty: &Expr) -> Result<Option<(Vec<Name>, Expr)>> {
+    let mut binders = Vec::new();
+    let mut head = ty.clone();
+    loop {
+        head = crate::norm::whnf(env, &head)?;
+        match head {
+            Expr::Pi {
+                name: Some(binder),
+                codomain,
+                ..
+            } => {
+                if binder.is_empty() || binder.starts_with('?') || binders.contains(&binder) {
+                    return Ok(None);
+                }
+                binders.push(binder);
+                head = *codomain;
+            }
+            other => {
+                if binders.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some((binders, other)));
+            }
+        }
+    }
+}
+
 /// Build `∀ (p1 : t1) ... (pn : tn), body` from a telescope, outermost first.
 pub fn telescope(params: &[(Name, Expr)], body: Expr) -> Expr {
     params

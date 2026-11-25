@@ -514,6 +514,7 @@ fn gap_candidate_certificate(held: Vec<CertExpr>, applicability: RuleApplicabili
         Vec::new(),
         vec![Node::Gap {
             proposition: atom("结论", "甲"),
+            axiom_candidates: Vec::new(),
             candidates: vec![GapCandidate {
                 rule: "后规".to_owned(),
                 bindings: vec![binding("x", constant("甲"))],

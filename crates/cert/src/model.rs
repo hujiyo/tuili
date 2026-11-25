@@ -290,12 +290,41 @@ impl Certificate {
                 Node::InterpretationApplication { conclusion, .. } => {
                     check_expression(conclusion, &format!("{place}的结论"))?;
                 }
+                Node::AxiomInstance {
+                    conclusion,
+                    bindings,
+                    ..
+                } => {
+                    check_expression(conclusion, &format!("{place}的结论"))?;
+                    for binding in bindings {
+                        check_expression(
+                            &binding.value,
+                            &format!(
+                                "{place}的绑定变量 `{}` 取值",
+                                escape_control(&binding.parameter)
+                            ),
+                        )?;
+                    }
+                }
                 Node::Gap {
                     proposition,
                     candidates,
+                    axiom_candidates,
                     ..
                 } => {
                     check_expression(proposition, &format!("{place}的缺口命题"))?;
+                    for candidate in axiom_candidates {
+                        for binding in &candidate.bindings {
+                            check_expression(
+                                &binding.value,
+                                &format!(
+                                    "{place}的缺口公理候选 `{}` 的绑定变量 `{}` 取值",
+                                    escape_control(&candidate.axiom),
+                                    escape_control(&binding.parameter)
+                                ),
+                            )?;
+                        }
+                    }
                     for candidate in candidates {
                         for binding in &candidate.bindings {
                             check_expression(
@@ -509,7 +538,7 @@ pub struct Interpretation {
 /// One node of the proof graph.
 ///
 /// The `kind` tag is stable: `assumption`, `rule_application`,
-/// `interpretation_application`, `gap`.
+/// `interpretation_application`, `axiom_instance`, `gap`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
@@ -551,6 +580,32 @@ pub enum Node {
         /// The instantiated conclusion, which must be the entry's `to`.
         conclusion: CertExpr,
     },
+    /// One universal elimination: the universal fact `axiom` is instantiated
+    /// with the recorded closed values of its binding variables.
+    ///
+    /// The step has no premise node; the universal statement is the axiom
+    /// declaration itself. `identity` records who asserts that declaration, so
+    /// the derivation cannot hide whether it rests on a court finding, a
+    /// stipulation or a mere claim. The conclusion is derived, not assumed:
+    /// it is not an [`Assumption`] and carries no identity of its own.
+    AxiomInstance {
+        /// The universal fact declaration's name in the environment.
+        axiom: String,
+        /// The identity the universal fact is registered under.
+        identity: FactIdentity,
+        /// The binding variable's name and the closed value substituted for
+        /// it, in the declaration's binder order (outermost first).
+        bindings: Vec<Binding>,
+        /// The instantiated conclusion, which must be the universal
+        /// declaration's body with the bindings substituted.
+        conclusion: CertExpr,
+        /// Where the universal declaration comes from. The checker compares
+        /// every field (count and order included) with the environment
+        /// declaration's sources; the reasoner copies them verbatim, so a
+        /// reader can audit which article the instance cites.
+        #[serde(default)]
+        sources: Vec<Source>,
+    },
     /// An unclosed goal: the explicit replacement for `sorry`.
     Gap {
         /// The proposition that could not be proved.
@@ -558,6 +613,12 @@ pub enum Node {
         /// Rules that could have concluded it, with what they lack.
         #[serde(default)]
         candidates: Vec<GapCandidate>,
+        /// Universal facts whose body unifies with the proposition, with the
+        /// binding values an instance would need and, for a refused instance,
+        /// why it was refused. They are diagnostics; an instance that
+        /// succeeds closes the goal and leaves no gap.
+        #[serde(default)]
+        axiom_candidates: Vec<GapAxiomCandidate>,
         /// A human-readable explanation of the gap.
         #[serde(default)]
         note: Option<String>,
@@ -605,6 +666,20 @@ pub struct GapCandidate {
     pub applicability: RuleApplicability,
 }
 
+/// A universal fact that could instantiate a gap proposition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GapAxiomCandidate {
+    /// The universal fact declaration's name in the environment.
+    pub axiom: String,
+    /// The binding variables the unified instance would use, in the
+    /// declaration's binder order.
+    pub bindings: Vec<Binding>,
+    /// Why the instance was not produced, or `None` when it was legal but the
+    /// current derivation did not trigger it.
+    pub problem: Option<String>,
+}
+
 /// Where a conflicting conclusion came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -615,6 +690,10 @@ pub enum Provenance {
     /// The conclusion was derived by these rules. An empty list means it was
     /// derived but its witnesses can no longer be rebuilt.
     Rules { rules: Vec<String> },
+    /// The conclusion was derived by instantiating the named universal fact.
+    /// A universal fact is not a rule: no priority orders it, and it never
+    /// counts as a lost rule witness.
+    Axiom { axiom: String },
     /// The conclusion was licensed by an enabled interpretation. The index
     /// names the entry in [`Certificate::interpretations`]; the witness is a
     /// declared permission, not an inferred fact.

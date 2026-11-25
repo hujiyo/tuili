@@ -35,7 +35,7 @@
 //!
 //! ## Stable wire names
 //!
-//! The enum tags and field names are part of format version 7 and never hold
+//! The enum tags and field names are part of format version 8 and never hold
 //! free-form conclusions: every value can be rechecked against the rule's
 //! environment declaration and the fact occurrence records. A reason also
 //! carries its rendered explanation, which [`ApplicabilityReason::new`]

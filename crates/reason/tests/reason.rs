@@ -174,7 +174,7 @@ rule r :
     let goal = Expr::apps(p("不受侵犯"), [p("张三"), p("甲宅")]);
     let mut r = Reasoner::new(&lib.env);
     r.saturate().unwrap();
-    let ex = r.explain(&goal);
+    let ex = r.explain(&goal).unwrap();
     assert!(!ex.candidates.is_empty(), "some rule heads should match");
     assert!(
         !ex.candidates[0].missing.is_empty(),
@@ -763,7 +763,7 @@ rule 下游 :
     ));
     // A defeated conclusion is still inspectable, for audit.
     assert!(r.derivation_for(&refused).is_some());
-    let loser = r.explain(&refused);
+    let loser = r.explain(&refused).unwrap();
     let loser_note = loser.note.as_deref().unwrap_or("");
     assert!(
         loser_note.contains("已被否决"),
@@ -773,7 +773,7 @@ rule 下游 :
         !loser_note.contains("需要人工裁决"),
         "a decided conflict does not need a human decision: {loser_note}"
     );
-    let winner = r.explain(&approved);
+    let winner = r.explain(&approved).unwrap();
     let winner_note = winner.note.as_deref().unwrap_or("");
     assert!(
         winner_note.contains("胜出"),
@@ -1116,7 +1116,7 @@ rule 免责 :
     );
 
     // The gap explanation must name the blocker, not just say "no".
-    let ex = r.explain(&exempt);
+    let ex = r.explain(&exempt).unwrap();
     let cand = ex
         .candidates
         .iter()
@@ -1163,7 +1163,7 @@ rule r :
         !r.knows(&goal),
         "an alpha-variant of the blocker is the same proposition"
     );
-    let ex = r.explain(&goal);
+    let ex = r.explain(&goal).unwrap();
     let cand = ex
         .candidates
         .iter()

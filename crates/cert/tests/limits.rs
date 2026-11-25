@@ -12,7 +12,7 @@ use std_deduce_cert::{
 };
 use std_deduce_kernel::env::Env;
 
-const FIXTURE: &str = include_str!("fixtures/certificate_v7.json");
+const FIXTURE: &str = include_str!("fixtures/certificate_v8.json");
 
 /// A recorded environment with no profile, packs, corpora or dates.
 fn empty_environment() -> Value {
@@ -22,7 +22,7 @@ fn empty_environment() -> Value {
 /// A syntactically complete certificate around the given assumptions and nodes.
 fn certificate_json(assumptions: Value, nodes: Value, root: Value) -> String {
     json!({
-        "format_version": 7,
+        "format_version": 8,
         "environment": empty_environment(),
         "assumptions": assumptions,
         "interpretations": [],
@@ -94,7 +94,7 @@ fn application_tree(leaves: usize) -> Value {
 
 #[test]
 fn the_reference_certificate_still_parses() {
-    Certificate::from_json(FIXTURE).expect("the v7 fixture must remain valid");
+    Certificate::from_json(FIXTURE).expect("the v8 fixture must remain valid");
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn a_wrongly_typed_field_is_rejected() {
 /// not be read as a number.
 #[test]
 fn a_nan_number_is_rejected() {
-    let text = FIXTURE.replacen("\"format_version\": 7", "\"format_version\": NaN", 1);
+    let text = FIXTURE.replacen("\"format_version\": 8", "\"format_version\": NaN", 1);
     assert_ne!(text, FIXTURE, "the fixture must contain format_version");
     let error = rejected(&text, "NaN");
     assert!(
@@ -148,7 +148,7 @@ fn a_deeply_nested_expression_is_rejected() {
         ",\"arg\":{\"kind\":\"const\",\"name\":\"x\"}}".repeat(depth)
     );
     let text = format!(
-        "{{\"format_version\":7,\"environment\":{},\"assumptions\":[],\"interpretations\":[],\
+        "{{\"format_version\":8,\"environment\":{},\"assumptions\":[],\"interpretations\":[],\
          \"nodes\":[{{\"kind\":\"gap\",\"proposition\":{expression}}}],\"root\":null,\
          \"conflicts\":[],\"open_obligations\":[],\"metadata\":{{}}}}",
         empty_environment()
@@ -308,6 +308,7 @@ fn an_oversized_certificate_is_not_serialized() {
                 proposition: CertExpr::Const {
                     name: "命题".to_owned()
                 },
+                axiom_candidates: Vec::new(),
                 candidates: Vec::new(),
                 note: None,
             };

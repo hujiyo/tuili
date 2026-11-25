@@ -36,15 +36,23 @@
 //!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 7. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 8. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
-//! Version 7 records the temporal/spatial applicability of every rule
-//! application and gap candidate (verdict, reference dates and places, rule
-//! scope, session fallback values, reason code and explanation) and each
-//! assumption's recorded `occurred_at` / `occurred_in`; version 6 records the
+//! Version 8 records universal elimination: an `axiom_instance` node naming the
+//! universal fact, the identity it is asserted under, the closed value of each
+//! binding variable, the substituted conclusion and the declaration's sources,
+//! and each gap node's universal candidates with their bindings and refusal
+//! reasons. The checker recomputes the identity, the binder types, the
+//! substituted conclusion and the sources of every instance: a node whose
+//! citation differs from the environment declaration in any field — or adds or
+//! drops a source — is rejected. Version 7
+//! records the temporal/spatial applicability of every rule application and
+//! gap candidate (verdict, reference dates and places, rule scope, session
+//! fallback values, reason code and explanation) and each assumption's
+//! recorded `occurred_at` / `occurred_in`; version 6 records the
 //! enabled interpretations: a mandatory `interpretations` table, the
 //! `interpretation_application` node and the interpretation witness of a
 //! conflict; version 5 records the fact identity
@@ -90,7 +98,7 @@
 //! step; it does not inspect `unless`. The crate depends on the kernel only;
 //! it never depends on the reasoner.
 //!
-//! Version 7's applicability records are recomputed, never trusted. For a
+//! Version 8's applicability records are recomputed, never trusted. For a
 //! rule application the checker looks up the environment's registered
 //! `occurred_at` / `occurred_in` by each cited premise **proposition's** key —
 //! a premise proved by a derived conclusion therefore still reads the
@@ -155,7 +163,7 @@
 //! five labels are `已验证`, `依赖假设`, `事实待举证`, `争点未决` and
 //! `需律师判断`; [`trust`](mod@trust) documents the exact field-to-label
 //! mapping. The labels are a derived view: they are never serialized into the
-//! certificate, so `:cert` JSON and the v7 format are unchanged. `:why`,
+//! certificate, so `:cert` JSON and the v8 format are unchanged. `:why`,
 //! `:explain` and `:labels` all print the same [`TrustReport::summary`] and the
 //! same evidence, so a conclusion cannot be labelled differently by different
 //! renderers. A label never asserts legal correctness: `已验证` means the
@@ -190,8 +198,8 @@ pub use environment::{
 pub use expr::{CertExpr, ExprEncodeError};
 pub use key::expression_key;
 pub use model::{
-    Assumption, Binding, Certificate, Conflict, Explicit, FactIdentity, GapCandidate,
-    Interpretation, InterpretationDirection, Metadata, Node, NodeId, ObligationKind,
+    Assumption, Binding, Certificate, Conflict, Explicit, FactIdentity, GapAxiomCandidate,
+    GapCandidate, Interpretation, InterpretationDirection, Metadata, Node, NodeId, ObligationKind,
     OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution,
     ResolutionBasis, Side, UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES,
     MAX_CERT_JSON_BYTES, MAX_CERT_NODES,

@@ -80,6 +80,32 @@
 //! missing" hint likewise covers only the root goal, and only when the
 //! interpretation's `from` holds before any application would run.
 //!
+//! ## Universal facts are instantiated on demand
+//!
+//! A `Fact` declaration whose type is a telescope of named `∀` binders ending
+//! in a predicate-headed proposition is a universal fact. Its instances are
+//! derived, never assumed: a closed goal or a rule premise that is already
+//! closed under the bindings collected so far supplies one value per binder,
+//! and the conclusion is the declaration's body with those values substituted.
+//! The search is never an enumeration over objects: candidates are filtered by
+//! the normalized predicate head of the goal against the normalized head of
+//! each declaration's body, a structural match is attempted first and a
+//! normalization fallback after it, and each (declaration, goal) pair is
+//! probed once (misses are cached). Binding values must be closed, every binder
+//! must be bound, the kernel checks each value against its instantiated binder
+//! domain, and a conclusion that is not the substitution of the body is
+//! refused.
+//!
+//! The bounds are explicit constants: [`MAX_AXIOM_CANDIDATES_PER_GOAL`],
+//! [`MAX_AXIOM_INSTANCES_PER_QUERY`] and [`MAX_AXIOM_PROBES_PER_QUERY`].
+//! Exceeding one is an error naming the bound, never a truncated derivation.
+//! Existential quantifiers, polymorphism and higher-order instantiation of
+//! function-typed facts are not implemented; a declaration whose body is an
+//! implication or a quantified form is not a candidate. An instance that takes
+//! part in a conflict is recorded as [`Provenance::Axiom`]: a universal fact is
+//! not a rule, so no priority orders it, and a strict fact defeats it exactly
+//! as it defeats a rule conclusion; an unresolved conflict stays unresolved.
+//!
 //! ## Temporal and spatial applicability
 //!
 //! A rule's recorded scope (`effective` / `repealed` / `jurisdiction` /
@@ -101,7 +127,7 @@
 //! function over the rule's [`Scope`](std_deduce_kernel::meta::Scope) and
 //! the instance's anchor (the premise facts' occurrence records plus the
 //! session fallback values). The reasoner only supplies those records; the
-//! CLI only renders the recorded verdict. Certificate v7 records the verdict,
+//! CLI only renders the recorded verdict. Certificate v8 records the verdict,
 //! basis, declared scope and reason on every rule application and gap
 //! candidate, and `:verify-cert` recomputes them independently.
 //!
@@ -143,10 +169,11 @@ use std::rc::Rc;
 use std_deduce_cert::CertExpr;
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{
-    Decl, DeclKind, Env, FactIdentity, RuleDecl, RulePleading, SourceRef,
+    named_binders, Decl, DeclKind, Env, FactIdentity, RuleDecl, RulePleading, SourceRef,
 };
 use std_deduce_kernel::norm::{normalize, spine};
 use std_deduce_kernel::pretty::print_expr;
+use std_deduce_kernel::term::{instantiate_telescope, is_closed};
 use std_deduce_kernel::{check, Ctx, Expr, Name};
 
 // ---------------------------------------------------------------- nodes
@@ -188,12 +215,75 @@ pub enum Node {
         conclusion: Expr,
         premise: usize,
     },
+    /// One universal elimination: the declared universal fact `axiom` is
+    /// instantiated with the recorded values of its binders. The step has no
+    /// premise because the universal statement itself is a declaration, not a
+    /// fact of the case; the certificate records the declaration's identity
+    /// separately, so the proof never hides whose assertion it rests on.
+    AxiomInstance {
+        axiom: Name,
+        /// The identity of the universal fact the instance rests on.
+        identity: FactIdentity,
+        /// The binder names and the closed values substituted for them,
+        /// outermost binder first.
+        bindings: Vec<(Name, Expr)>,
+        conclusion: Expr,
+        sources: Vec<SourceRef>,
+    },
     /// An unclosed goal. The honest replacement for `sorry`.
     Gap {
         prop: Expr,
         candidates: Vec<GapCandidate>,
+        /// Universal facts whose body unifies with the goal, with the values
+        /// the instance would need and, when no instance was produced, why.
+        /// They are diagnostics: an instantiation that succeeded closes the
+        /// goal and never leaves a gap.
+        axiom_candidates: Vec<AxiomCandidate>,
         note: Option<String>,
     },
+}
+
+/// One universal fact that could instantiate a gap goal.
+#[derive(Debug, Clone)]
+pub struct AxiomCandidate {
+    /// The universal fact's declaration name.
+    pub axiom: Name,
+    /// The binder values the unified instance would use, outermost first.
+    pub bindings: Vec<(Name, Expr)>,
+    /// Why the instance was not produced, or `None` when it was legal but this
+    /// path did not trigger it.
+    pub problem: Option<String>,
+}
+
+/// One universal elimination step, as the derivation records it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AxiomInstance {
+    /// The universal fact's declaration name.
+    pub axiom: Name,
+    /// The identity the universal fact is registered under. It is evidence,
+    /// not an assumption: the instantiated conclusion is derived.
+    pub identity: FactIdentity,
+    /// The binder names and the closed values substituted for them, outermost
+    /// binder first.
+    pub bindings: Vec<(Name, Expr)>,
+    /// The conclusion, which is the declaration's body with the bindings
+    /// substituted.
+    pub conclusion: Expr,
+    pub sources: Vec<SourceRef>,
+}
+
+impl AxiomInstance {
+    /// A stable order for the steps of one derivation: axiom name, then the
+    /// structural keys of the binding values in binder order.
+    fn sort_key(&self, env: &Env) -> (String, String) {
+        let values = self
+            .bindings
+            .iter()
+            .map(|(parameter, value)| format!("{parameter}={}", key(env, value)))
+            .collect::<Vec<_>>()
+            .join("，");
+        (self.axiom.to_string(), values)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -260,6 +350,10 @@ pub enum Provenance {
     /// registered under decides whether it wins.
     Assumption,
     Rules(Vec<Name>),
+    /// The conclusion was derived by instantiating the named universal fact.
+    /// It is a derived conclusion: no identity of the instance itself, and no
+    /// priority orders it (a universal fact is not a rule).
+    Axiom(Name),
     /// The conclusion was licensed by the named interpretation. It is a
     /// defeasible conclusion, not a fact: no priority orders it, and it never
     /// counts as a lost rule witness.
@@ -489,6 +583,8 @@ struct Instance {
 enum Support {
     Fact(FactIdentity),
     Rules(Vec<Name>),
+    /// Derived by instantiating the named universal fact.
+    Axiom(Name),
     Interpretation(Name),
 }
 
@@ -498,10 +594,170 @@ impl Support {
         match self {
             Support::Fact(_) => Provenance::Assumption,
             Support::Rules(rules) => Provenance::Rules(rules.clone()),
+            Support::Axiom(axiom) => Provenance::Axiom(axiom.clone()),
             Support::Interpretation(interpretation) => {
                 Provenance::Interpretation(interpretation.clone())
             }
         }
+    }
+}
+
+// ------------------------------------------------------- universal facts
+
+/// Collect the environment's instantiable universal facts, grouped by the
+/// normalized predicate head of their body.
+///
+/// A universal fact is a `Fact` declaration whose proposition is a telescope of
+/// named `∀` binders ending in a predicate-headed proposition. Its identity must
+/// seed a derivation: a `disputed` declaration asserts only what the other side
+/// claims, so instantiating it would smuggle an unasserted claim into the fact
+/// base. Declarations without a named universal binder (a bare proposition, an
+/// anonymous arrow), with a repeated binder name, or with a body whose head is
+/// not a predicate (an implication, a quantified form, a proposition variable)
+/// are not instantiable and are left out: no goal can name the values they
+/// would need.
+///
+/// The grouping is the candidate filter: a goal's normalized head selects one
+/// group, so instantiation is never a scan over every declaration.
+fn axiom_declarations(env: &Env) -> Result<BTreeMap<Name, Vec<AxiomDecl>>, String> {
+    let mut by_head: BTreeMap<Name, Vec<AxiomDecl>> = BTreeMap::new();
+    for decl in env.iter() {
+        let DeclKind::Fact { identity } = &decl.kind else {
+            continue;
+        };
+        if !identity.seeds_derivation() {
+            continue;
+        }
+        // The declaration's type must itself be a universal proposition. The
+        // environment checks this on insertion, but a directly built ledger is
+        // part of the reasoner's input too, so it is checked here.
+        check::check(env, &Ctx::new(), &decl.ty, &Expr::Sort(0)).map_err(|error| {
+            format!(
+                "无法把 `{}` 当作全称公理：它的类型不是命题：{error}",
+                decl.name
+            )
+        })?;
+        let binders_and_body = named_binders(env, &decl.ty)
+            .map_err(|error| format!("无法解析全称公理 `{}` 的类型：{error}", decl.name))?;
+        let Some((binders, body)) = binders_and_body else {
+            continue;
+        };
+        let normalized_body = normalize(env, &Ctx::new(), &body)
+            .map_err(|error| format!("无法规范化全称公理 `{}` 的命题体：{error}", decl.name))?;
+        let Some(head) = normalized_body.head_const() else {
+            continue;
+        };
+        by_head.entry(head).or_default().push(AxiomDecl {
+            name: decl.name.clone(),
+            identity: *identity,
+            binders,
+            body,
+            normalized_body,
+            sources: decl.sources.clone(),
+        });
+    }
+    for group in by_head.values_mut() {
+        group.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    Ok(by_head)
+}
+
+/// First-order match of a universal body against a closed goal.
+///
+/// The only variables of `pattern` are the universal's own binders, which are
+/// free de Bruijn indices (`index >= depth`). A free index is bound once to the
+/// corresponding goal subterm; a repeated binder must meet an identical term.
+/// A value that mentions one of the goal's own binders is rejected: every
+/// recorded binding must be closed, so a bound-variable value would be a
+/// capture rather than an instance. Binders of the body itself (`index <
+/// depth`) must agree structurally; the goal's constants are never generalized
+/// into variables, so matching only instantiates the declaration's binders.
+fn match_axiom_body(
+    pattern: &Expr,
+    goal: &Expr,
+    depth: usize,
+    binders: usize,
+    binding: &mut Vec<(usize, Expr)>,
+) -> bool {
+    match (pattern, goal) {
+        (Expr::Sort(left), Expr::Sort(right)) => left == right,
+        (Expr::Const(left), Expr::Const(right)) => left == right,
+        (Expr::Var(left), Expr::Var(right)) if left < &depth || right < &depth => *left == *right,
+        (Expr::Var(left), other) if *left >= depth => {
+            // `position` counts from the outermost binder; `0` is de Bruijn
+            // index `binders - 1`.
+            let position = binders - 1 - (*left - depth);
+            if !is_closed(other) {
+                return false;
+            }
+            match binding.iter().find(|(bound, _)| *bound == position) {
+                Some((_, previous)) => previous == other,
+                None => {
+                    binding.push((position, other.clone()));
+                    true
+                }
+            }
+        }
+        (Expr::Var(_), _) => false,
+        (
+            Expr::App {
+                func: pattern_func,
+                arg: pattern_arg,
+            },
+            Expr::App {
+                func: goal_func,
+                arg: goal_arg,
+            },
+        ) => {
+            match_axiom_body(pattern_func, goal_func, depth, binders, binding)
+                && match_axiom_body(pattern_arg, goal_arg, depth, binders, binding)
+        }
+        (
+            Expr::Pi {
+                domain: pattern_domain,
+                codomain: pattern_codomain,
+                ..
+            },
+            Expr::Pi {
+                domain: goal_domain,
+                codomain: goal_codomain,
+                ..
+            },
+        ) => {
+            match_axiom_body(pattern_domain, goal_domain, depth, binders, binding)
+                && match_axiom_body(pattern_codomain, goal_codomain, depth + 1, binders, binding)
+        }
+        (
+            Expr::Lam {
+                domain: pattern_domain,
+                body: pattern_body,
+                ..
+            },
+            Expr::Lam {
+                domain: goal_domain,
+                body: goal_body,
+                ..
+            },
+        ) => {
+            match_axiom_body(pattern_domain, goal_domain, depth, binders, binding)
+                && match_axiom_body(pattern_body, goal_body, depth + 1, binders, binding)
+        }
+        (
+            Expr::Let {
+                value: pattern_value,
+                body: pattern_body,
+                ..
+            },
+            Expr::Let {
+                value: goal_value,
+                body: goal_body,
+                ..
+            },
+        ) => {
+            match_axiom_body(pattern_value, goal_value, depth, binders, binding)
+                && match_axiom_body(pattern_body, goal_body, depth + 1, binders, binding)
+        }
+        _ => false,
     }
 }
 
@@ -524,6 +780,75 @@ struct Fixed {
     /// Interpretation conclusion key -> interpretation id, for the applications
     /// that produced the settled fact base.
     applications: BTreeMap<String, Name>,
+}
+
+/// How many universal facts one goal may be tried against.
+///
+/// The candidates are first filtered by the normalized predicate head of the
+/// declaration's body, so this bounds a pathological environment that declares
+/// many universal facts about the same predicate. Exceeding it is an error that
+/// names the bound; no candidate is silently skipped.
+pub const MAX_AXIOM_CANDIDATES_PER_GOAL: usize = 64;
+
+/// The largest number of universal-elimination instances one query may derive.
+///
+/// Every instance is keyed by its conclusion, so this is also the bound on the
+/// conclusions universal elimination can add to one fact base. Exceeding it is
+/// an error naming the bound, never a truncated derivation.
+pub const MAX_AXIOM_INSTANCES_PER_QUERY: usize = 1024;
+
+/// The largest number of distinct goals one query may try to instantiate.
+///
+/// A probe that finds no instance is remembered as well as one that finds an
+/// instance, so repeated premises do not recompute the match. The bound keeps a
+/// runaway premise demand finite; exceeding it is an error, never a silent
+/// stop.
+pub const MAX_AXIOM_PROBES_PER_QUERY: usize = 4096;
+
+/// One universal fact declaration, prepared for demand-driven instantiation.
+///
+/// Only a `Fact` declaration whose declared type is a telescope of *named*
+/// universal binders ending in a predicate-headed proposition is instantiable.
+/// The proposition is the fact's whole declaration (`Decl::ty`), so the
+/// declaration's identity is the evidence the instance rests on.
+#[derive(Debug, Clone)]
+struct AxiomDecl {
+    name: Name,
+    identity: FactIdentity,
+    /// Binder names, outermost first.
+    binders: Vec<Name>,
+    /// The declaration's proposition body, written in the context of `binders`.
+    body: Expr,
+    /// `body` normalized once (beta, `def` delta, zeta). It is what the
+    /// matching fallback compares.
+    normalized_body: Expr,
+    sources: Vec<SourceRef>,
+}
+
+/// The per-query state of universal elimination.
+#[derive(Debug, Default)]
+struct AxiomState {
+    /// Instances keyed by the conclusion's structural key, so a conclusion
+    /// demanded twice is derived once. When two universal facts can produce
+    /// the same conclusion, the first in axiom-name order wins.
+    instances: BTreeMap<String, AxiomInstance>,
+    /// Goals already probed, successful or not. Probing is a pure function of
+    /// the environment and the goal, so a miss is remembered as well.
+    probed: BTreeSet<String>,
+}
+
+/// A universal fact tried against one goal.
+#[derive(Debug, Clone)]
+enum AxiomTrial {
+    /// The body unified and the instance is legal.
+    Instantiated(AxiomInstance),
+    /// The body unified, but no instance was produced. The unified bindings
+    /// are kept so a gap report can say which value the instance would need.
+    Refused {
+        axiom: Name,
+        bindings: Vec<(Name, Expr)>,
+        problem: String,
+    },
 }
 
 // ---------------------------------------------------------------- reasoner
@@ -562,6 +887,15 @@ pub struct Reasoner<'a> {
     /// an instance judgement does not scan the whole assumption table for
     /// every premise. The `Rc` is cloned per lookup, not the strings.
     occurrence_index: RefCell<Option<Rc<OccurrenceIndex>>>,
+    /// Universal facts grouped by the normalized predicate head of their body.
+    /// This is the candidate filter: instantiation never scans the whole
+    /// ledger, only the declarations that can conclude the goal's predicate.
+    axioms: BTreeMap<Name, Vec<AxiomDecl>>,
+    /// A failure while preparing the universal facts. It is reported by the
+    /// first query that needs them, instead of being swallowed into an empty
+    /// candidate set.
+    axiom_error: Option<String>,
+    axiom_state: RefCell<AxiomState>,
     fixed: Option<Fixed>,
     max_rounds: usize,
 }
@@ -579,6 +913,10 @@ impl<'a> Reasoner<'a> {
         for (pred, index) in env.unique_positions() {
             uniques.entry(pred).or_default().insert(index);
         }
+        let (axioms, axiom_error) = match axiom_declarations(env) {
+            Ok(axioms) => (axioms, None),
+            Err(error) => (BTreeMap::new(), Some(error)),
+        };
         Reasoner {
             env,
             assumptions: Vec::new(),
@@ -592,6 +930,9 @@ impl<'a> Reasoner<'a> {
             as_of: None,
             jurisdiction: None,
             occurrence_index: RefCell::new(None),
+            axioms,
+            axiom_error,
+            axiom_state: RefCell::new(AxiomState::default()),
             fixed: None,
             max_rounds: 256,
         }
@@ -895,6 +1236,263 @@ impl<'a> Reasoner<'a> {
         Ok(out)
     }
 
+    /// Demand a universal-elimination instance for `goal`.
+    ///
+    /// This is the query-level trigger: the goal itself is a closed
+    /// proposition, so an environment universal fact whose body unifies with it
+    /// yields one instance that proves the goal without any rule. The
+    /// instance is derived, not assumed: it is not registered as a fact and it
+    /// carries the universal declaration's identity, not a case fact's.
+    ///
+    /// The call must happen before [`Reasoner::saturate`], which includes the
+    /// demanded instances in the fact base and records them as derivation
+    /// nodes. Repeated demands are idempotent. `Ok(None)` means no universal
+    /// fact produced a legal instance; the goal stays unproved and the gap
+    /// report says why.
+    pub fn demand(&self, goal: &Expr) -> Result<Option<AxiomInstance>, String> {
+        self.demand_axiom(goal)
+    }
+
+    /// The universal-elimination instance already demanded for `goal`, if any.
+    ///
+    /// It answers without deriving anything: `None` means no instance was
+    /// demanded, not that no instance is possible.
+    pub fn axiom_instance_for(&self, goal: &Expr) -> Option<AxiomInstance> {
+        self.axiom_state
+            .borrow()
+            .instances
+            .get(&self.key_of(goal))
+            .cloned()
+    }
+
+    /// Derive at most one instance of the universal facts that can conclude
+    /// `goal`, caching both hits and misses.
+    ///
+    /// Candidates are filtered by the normalized head of the goal against the
+    /// normalized head of each declaration's body, then tried in axiom-name
+    /// order. Matching is deterministic and single-valued: the goal is closed,
+    /// so each binder has exactly one possible value, and a repeated binder
+    /// must meet an identical term. There is therefore at most one attempt per
+    /// declaration per goal; the per-goal candidate and per-query probe and
+    /// instance bounds are the explicit limits.
+    fn demand_axiom(&self, goal: &Expr) -> Result<Option<AxiomInstance>, String> {
+        if let Some(error) = &self.axiom_error {
+            return Err(error.clone());
+        }
+        if self.axioms.is_empty() || has_open_pattern(goal) || !is_closed(goal) {
+            return Ok(None);
+        }
+        if check::check(self.env, &Ctx::new(), goal, &Expr::Sort(0)).is_err() {
+            return Ok(None);
+        }
+        let key = self.key_of(goal);
+        {
+            let state = self.axiom_state.borrow();
+            if let Some(instance) = state.instances.get(&key) {
+                return Ok(Some(instance.clone()));
+            }
+            if state.probed.contains(&key) {
+                return Ok(None);
+            }
+            if state.probed.len() >= MAX_AXIOM_PROBES_PER_QUERY {
+                return Err(format!(
+                    "公理实例化在本次查询中探测的目标超过 {MAX_AXIOM_PROBES_PER_QUERY} 个上限"
+                ));
+            }
+        }
+        let trials = self.axiom_trials(goal)?;
+        let mut state = self.axiom_state.borrow_mut();
+        state.probed.insert(key);
+        for trial in trials {
+            let AxiomTrial::Instantiated(instance) = trial else {
+                continue;
+            };
+            let conclusion_key = self.key_of(&instance.conclusion);
+            if !state.instances.contains_key(&conclusion_key)
+                && state.instances.len() >= MAX_AXIOM_INSTANCES_PER_QUERY
+            {
+                return Err(format!(
+                    "公理实例化的结论超过本次查询 {MAX_AXIOM_INSTANCES_PER_QUERY} 个上限"
+                ));
+            }
+            let stored = state
+                .instances
+                .entry(conclusion_key)
+                .or_insert_with(|| instance.clone());
+            // The instance stored under this conclusion may have been derived
+            // from an earlier axiom; the cached one is the stable answer.
+            return Ok(Some(stored.clone()));
+        }
+        Ok(None)
+    }
+
+    /// Every universal fact whose body unifies with `goal`, with the unified
+    /// bindings and either the instance or the reason it was refused.
+    ///
+    /// This never changes the derivation: the gap report uses it to explain
+    /// that a goal is only obtainable by instantiating a universal fact and
+    /// which values that would need.
+    fn axiom_trials(&self, goal: &Expr) -> Result<Vec<AxiomTrial>, String> {
+        if let Some(error) = &self.axiom_error {
+            return Err(error.clone());
+        }
+        if self.axioms.is_empty() || has_open_pattern(goal) || !is_closed(goal) {
+            return Ok(Vec::new());
+        }
+        let normalized_goal = normalize(self.env, &Ctx::new(), goal).map_err(|error| {
+            format!(
+                "无法规范化目标「{}」以尝试公理实例化：{error}",
+                print_expr(goal)
+            )
+        })?;
+        let Some(head) = normalized_goal.head_const() else {
+            return Ok(Vec::new());
+        };
+        let Some(candidates) = self.axioms.get(&head) else {
+            return Ok(Vec::new());
+        };
+        if candidates.len() > MAX_AXIOM_CANDIDATES_PER_GOAL {
+            return Err(format!(
+                "目标「{}」的谓词 `{head}` 有 {} 条全称公理候选，超过每个目标 {MAX_AXIOM_CANDIDATES_PER_GOAL} 条的上限",
+                print_expr(goal),
+                candidates.len()
+            ));
+        }
+        let mut trials = Vec::new();
+        for axiom in candidates {
+            let mut binding = Vec::new();
+            let matched = match_axiom_body(&axiom.body, goal, 0, axiom.binders.len(), &mut binding)
+                || match_axiom_body(
+                    &axiom.normalized_body,
+                    &normalized_goal,
+                    0,
+                    axiom.binders.len(),
+                    &mut binding,
+                );
+            if !matched {
+                continue;
+            }
+            trials.push(self.instantiate_trial(axiom, binding, goal)?);
+        }
+        Ok(trials)
+    }
+
+    /// Turn one successful structural match into an instance, or explain why
+    /// the match cannot be a legal elimination step.
+    fn instantiate_trial(
+        &self,
+        axiom: &AxiomDecl,
+        binding: Vec<(usize, Expr)>,
+        goal: &Expr,
+    ) -> Result<AxiomTrial, String> {
+        let mut values: Vec<Option<Expr>> = vec![None; axiom.binders.len()];
+        for (position, value) in binding {
+            values[position] = Some(value);
+        }
+        let complete: Option<Vec<Expr>> = values.into_iter().collect();
+        let Some(values) = complete else {
+            return Ok(AxiomTrial::Refused {
+                axiom: axiom.name.clone(),
+                bindings: Vec::new(),
+                problem: "公理体的绑定没有覆盖每个绑定变量，无法形成完整实例".to_owned(),
+            });
+        };
+        let ordered: Vec<(Name, Expr)> = axiom
+            .binders
+            .iter()
+            .cloned()
+            .zip(values.iter().cloned())
+            .collect();
+        for (name, value) in &ordered {
+            if !is_closed(value) {
+                return Ok(AxiomTrial::Refused {
+                    axiom: axiom.name.clone(),
+                    bindings: ordered.clone(),
+                    problem: format!(
+                        "绑定变量 `{name}` 的值 `{}` 不是闭合项（会捕获变量）",
+                        print_expr(value)
+                    ),
+                });
+            }
+        }
+        let conclusion = instantiate_telescope(&axiom.body, &values);
+        // Applying the declaration to the values makes the kernel check every
+        // value against its binder domain and confirms the substituted body is
+        // the instance's type. Checking the application against the computed
+        // body ties both sides together.
+        let applied = Expr::apps(Expr::constant(&axiom.name), values.iter().cloned());
+        if let Err(error) = check::check(self.env, &Ctx::new(), &applied, &conclusion) {
+            return Ok(AxiomTrial::Refused {
+                axiom: axiom.name.clone(),
+                bindings: ordered,
+                problem: format!("绑定值不满足公理的参数类型：{error}"),
+            });
+        }
+        if !is_closed(&conclusion) {
+            return Ok(AxiomTrial::Refused {
+                axiom: axiom.name.clone(),
+                bindings: ordered,
+                problem: "实例化后的结论不是闭合命题（绑定不足或发生变量捕获）".to_owned(),
+            });
+        }
+        let same = convertible(self.env, &Ctx::new(), &conclusion, goal).map_err(|error| {
+            format!(
+                "无法判定公理 `{}` 的实例结论「{}」与目标「{}」是否等价：{error}",
+                axiom.name,
+                print_expr(&conclusion),
+                print_expr(goal)
+            )
+        })?;
+        if !same {
+            return Ok(AxiomTrial::Refused {
+                axiom: axiom.name.clone(),
+                bindings: ordered,
+                problem: format!(
+                    "实例化后的结论「{}」与目标「{}」在内核下不等价",
+                    print_expr(&conclusion),
+                    print_expr(goal)
+                ),
+            });
+        }
+        Ok(AxiomTrial::Instantiated(AxiomInstance {
+            axiom: axiom.name.clone(),
+            identity: axiom.identity,
+            bindings: ordered,
+            conclusion,
+            sources: axiom.sources.clone(),
+        }))
+    }
+
+    /// The universal facts that could instantiate `goal`, as gap diagnostics.
+    ///
+    /// Only declarations whose body unifies with the goal are listed; an
+    /// instantiated one has no problem, a refused one carries the reason. An
+    /// instance that succeeds closes the goal and never appears in a real gap,
+    /// so the `None` case is what a gap normally shows for a nested premise the
+    /// current derivation did not demand.
+    fn axiom_candidates(&self, goal: &Expr) -> Result<Vec<AxiomCandidate>, String> {
+        let mut out = Vec::new();
+        for trial in self.axiom_trials(goal)? {
+            match trial {
+                AxiomTrial::Instantiated(instance) => out.push(AxiomCandidate {
+                    axiom: instance.axiom,
+                    bindings: instance.bindings,
+                    problem: None,
+                }),
+                AxiomTrial::Refused {
+                    axiom,
+                    bindings,
+                    problem,
+                } => out.push(AxiomCandidate {
+                    axiom,
+                    bindings,
+                    problem: Some(problem),
+                }),
+            }
+        }
+        Ok(out)
+    }
+
     /// Register an assumption together with the identity of the fact it
     /// records. Its type must be a proposition.
     ///
@@ -1117,8 +1715,14 @@ impl<'a> Reasoner<'a> {
                     contested.insert(self.key_of(&c.left), c.clone());
                     contested.insert(self.key_of(&c.right), c.clone());
                 }
-                let fixed =
-                    self.build_nodes(facts, rule_facts, conflicts, contested, applications)?;
+                let fixed = self.build_nodes(
+                    facts,
+                    rule_facts,
+                    conflicts,
+                    contested,
+                    applications,
+                    self.axiom_state.borrow().instances.clone(),
+                )?;
                 self.fixed = Some(fixed);
                 return Ok(());
             }
@@ -1174,10 +1778,12 @@ impl<'a> Reasoner<'a> {
             .filter(|(k, _)| !removed.contains(k))
             .collect();
         let mut k = seeds.clone();
+        self.add_demanded_instances(&mut k, removed);
         let mut previous: Option<BTreeMap<String, Expr>> = None;
 
         for _round in 0..self.max_rounds {
             let mut next = seeds.clone();
+            self.add_demanded_instances(&mut next, removed);
             for decl in self.ordered_rules() {
                 let DeclKind::Rule(rule) = &decl.kind else {
                     continue;
@@ -1186,7 +1792,7 @@ impl<'a> Reasoner<'a> {
                 // at all. It is not merely hidden later: it must never seed a
                 // premise, an `unless` blocker or a conflict side. The verdict
                 // is per instance because it depends on the facts it consumes.
-                for inst in self.enumerate(rule, &k) {
+                for inst in self.enumerate_demanding(rule, &k, removed)? {
                     if blocked(&inst.unlesses, &k, self.env) {
                         continue;
                     }
@@ -1200,6 +1806,10 @@ impl<'a> Reasoner<'a> {
                         .or_insert_with(|| inst.conclusion.clone());
                 }
             }
+            // Premises probed while enumerating may have demanded new
+            // universal instances; they join the next set in the same round,
+            // so the rule that needed them fires on the next one.
+            self.add_demanded_instances(&mut next, removed);
             next.retain(|key, _| !removed.contains(key));
             if same_keys(&k, &next) {
                 return Ok(next);
@@ -1217,6 +1827,64 @@ impl<'a> Reasoner<'a> {
             k = next;
         }
         Err("推理在 256 轮内未收敛：可能存在规则环".into())
+    }
+
+    /// Add every demanded universal-elimination instance to `facts`.
+    ///
+    /// Instances are keyed by their conclusion and are added only when no
+    /// assumption already holds the same conclusion: an asserted proposition is
+    /// supported by the fact, not by an instantiation. A conclusion removed by
+    /// a conflict is not re-added.
+    fn add_demanded_instances(
+        &self,
+        facts: &mut BTreeMap<String, Expr>,
+        removed: &BTreeSet<String>,
+    ) {
+        let instances = self.axiom_state.borrow();
+        for (key, instance) in &instances.instances {
+            if removed.contains(key) {
+                continue;
+            }
+            facts
+                .entry(key.clone())
+                .or_insert_with(|| instance.conclusion.clone());
+        }
+    }
+
+    /// Enumerate instances of `rule` against `facts`, demanding a universal
+    /// instance for a premise that no fact satisfies but which is closed and
+    /// has a matching universal fact.
+    ///
+    /// Instantiation is premise-driven: the premise's own argument terms
+    /// determine every binder value, so nothing is enumerated object by object.
+    /// Only a premise that is already closed under the bindings collected so
+    /// far can drive it; a premise that still mentions an undetermined rule
+    /// parameter is reported as a gap instead of guessed.
+    fn enumerate_demanding(
+        &self,
+        rule: &RuleDecl,
+        facts: &BTreeMap<String, Expr>,
+        removed: &BTreeSet<String>,
+    ) -> Result<Vec<Instance>, String> {
+        let mut out = Vec::new();
+        let mut binding: Vec<(Name, Expr)> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        let matching = Matching {
+            env: self.env,
+            rule,
+            facts,
+            unless_len: rule.unlesses.len(),
+        };
+        backtrack_demanding(
+            self,
+            &matching,
+            0,
+            &mut binding,
+            &mut keys,
+            removed,
+            &mut out,
+        )?;
+        Ok(out)
     }
 
     /// Every rule declaration of the environment, ordered by name, so that
@@ -1303,8 +1971,13 @@ impl<'a> Reasoner<'a> {
     }
 
     /// How one side of a conflict is supported: a fact recorded in the
-    /// assumption table, with its identity, an interpretation application, or
-    /// a conclusion with the rules that can still be rebuilt as its witnesses.
+    /// assumption table, with its identity, an interpretation application, a
+    /// rule conclusion with the rules that can still be rebuilt as its
+    /// witnesses, or a universal-elimination instance.
+    ///
+    /// A rule witness is preferred over a universal instance when both can
+    /// conclude the proposition: the certificate records one step per
+    /// conclusion, and the rule chain is the fuller argument.
     fn support(
         &self,
         target: &str,
@@ -1317,7 +1990,14 @@ impl<'a> Reasoner<'a> {
         if let Some(interpretation) = applications.get(target) {
             return Support::Interpretation(interpretation.clone());
         }
-        Support::Rules(self.derivers(target, facts))
+        let derivers = self.derivers(target, facts);
+        if !derivers.is_empty() {
+            return Support::Rules(derivers);
+        }
+        if let Some(instance) = self.axiom_state.borrow().instances.get(target) {
+            return Support::Axiom(instance.axiom.clone());
+        }
+        Support::Rules(Vec::new())
     }
 
     /// Every rule that has an unblocked instance concluding `target`, with all
@@ -1384,6 +2064,7 @@ impl<'a> Reasoner<'a> {
                 }
             }
             (Support::Fact(identity), Support::Rules(_))
+            | (Support::Fact(identity), Support::Axiom(_))
             | (Support::Fact(identity), Support::Interpretation(_)) => {
                 if identity.is_strict() {
                     Resolution::Defeated {
@@ -1399,6 +2080,7 @@ impl<'a> Reasoner<'a> {
                 }
             }
             (Support::Rules(_), Support::Fact(identity))
+            | (Support::Axiom(_), Support::Fact(identity))
             | (Support::Interpretation(_), Support::Fact(identity)) => {
                 if identity.is_strict() {
                     Resolution::Defeated {
@@ -1413,13 +2095,18 @@ impl<'a> Reasoner<'a> {
                     }
                 }
             }
-            // A priority orders rules only. Nothing can order an
-            // interpretation conclusion, so a conflict with one on either side
-            // has no declared priority to decide it — and it is emphatically
-            // not a lost rule witness (`UnknownWitnesses`).
-            (Support::Interpretation(_), Support::Interpretation(_))
+            // A priority orders rules only. A universal fact is not a rule,
+            // so it cannot carry a declared priority either; a conflict
+            // between a universal instance and a rule or another instance
+            // stays unresolved for want of an order.
+            (Support::Axiom(_), Support::Axiom(_))
+            | (Support::Axiom(_), Support::Rules(_))
+            | (Support::Rules(_), Support::Axiom(_))
+            | (Support::Interpretation(_), Support::Interpretation(_))
             | (Support::Interpretation(_), Support::Rules(_))
-            | (Support::Rules(_), Support::Interpretation(_)) => Resolution::Unresolved {
+            | (Support::Rules(_), Support::Interpretation(_))
+            | (Support::Interpretation(_), Support::Axiom(_))
+            | (Support::Axiom(_), Support::Interpretation(_)) => Resolution::Unresolved {
                 reason: UnresolvedReason::NoPriority,
             },
             (Support::Rules(l), Support::Rules(r)) => {
@@ -1530,6 +2217,7 @@ impl<'a> Reasoner<'a> {
         conflicts: Vec<Conflict>,
         contested: BTreeMap<String, Conflict>,
         applications: BTreeMap<String, Name>,
+        axiom_instances: BTreeMap<String, AxiomInstance>,
     ) -> Result<Fixed, String> {
         let mut nodes: Vec<Node> = Vec::new();
         let mut ids: BTreeMap<String, usize> = BTreeMap::new();
@@ -1583,6 +2271,21 @@ impl<'a> Reasoner<'a> {
                     ids.insert(target, id);
                     pending.remove(i);
                     progressed = true;
+                } else if let Some(instance) = axiom_instances.get(&target) {
+                    // A conclusion no rule can witness is proved by universal
+                    // elimination. The step is preferred over a rule when both
+                    // exist, which is why the rule witness is tried first.
+                    let id = nodes.len();
+                    nodes.push(Node::AxiomInstance {
+                        axiom: instance.axiom.clone(),
+                        identity: instance.identity,
+                        bindings: instance.bindings.clone(),
+                        conclusion: instance.conclusion.clone(),
+                        sources: instance.sources.clone(),
+                    });
+                    ids.insert(target, id);
+                    pending.remove(i);
+                    progressed = true;
                 } else {
                     i += 1;
                 }
@@ -1593,6 +2296,30 @@ impl<'a> Reasoner<'a> {
                     pending.join("，")
                 ));
             }
+        }
+
+        // A conclusion that lost an unresolved conflict is not in `facts`, but
+        // the conflict records it as a universal instance; the certificate
+        // needs that node so both sides of the conflict can be inspected.
+        let mut contested_instances: Vec<&AxiomInstance> = axiom_instances
+            .iter()
+            .filter(|(key, _)| {
+                contested.contains_key((*key).as_str()) && !ids.contains_key((*key).as_str())
+            })
+            .map(|(_, instance)| instance)
+            .collect();
+        contested_instances.sort_by_key(|instance| instance.sort_key(self.env));
+        for instance in contested_instances {
+            let key = self.key_of(&instance.conclusion);
+            let id = nodes.len();
+            nodes.push(Node::AxiomInstance {
+                axiom: instance.axiom.clone(),
+                identity: instance.identity,
+                bindings: instance.bindings.clone(),
+                conclusion: instance.conclusion.clone(),
+                sources: instance.sources.clone(),
+            });
+            ids.insert(key, id);
         }
 
         // Interpretation steps come after the facts and rule conclusions they
@@ -1734,7 +2461,7 @@ impl<'a> Reasoner<'a> {
 
     /// Every declared rule's burden/standard, keyed by rule name.
     ///
-    /// Certificate v7 does not record these declarations (adding them would
+    /// Certificate v8 does not record these declarations (adding them would
     /// change the format), so `:explain` supplies this map when it narrates a
     /// certificate gap. The values come from the environment declaration, the
     /// same one the derivation used.
@@ -1838,7 +2565,14 @@ impl<'a> Reasoner<'a> {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         let fixed = self
-            .build_nodes(facts, rule_facts, Vec::new(), BTreeMap::new(), applications)
+            .build_nodes(
+                facts,
+                rule_facts,
+                Vec::new(),
+                BTreeMap::new(),
+                applications,
+                self.axiom_state.borrow().instances.clone(),
+            )
             .ok()?;
         Some(Derivation {
             root: fixed.ids.get(&k).copied(),
@@ -1877,7 +2611,8 @@ impl<'a> Reasoner<'a> {
     }
 
     /// Why is `goal` unreachable? List candidate rules with what each is
-    /// missing and what is blocking it.
+    /// missing, what is blocking it, and every universal fact whose body
+    /// unifies with it.
     ///
     /// A goal that took part in a conflict gets a note that follows the
     /// recorded resolution: an unresolved conflict needs a human decision, a
@@ -1887,7 +2622,7 @@ impl<'a> Reasoner<'a> {
     /// This is the one-level explanation used where a recursive tree would not
     /// fit (the gap node of a certificate). `:gap` uses
     /// [`Reasoner::gap_tree`], which expands the same candidates recursively.
-    pub fn explain(&self, goal: &Expr) -> GapExplanation {
+    pub fn explain(&self, goal: &Expr) -> Result<GapExplanation, String> {
         let note = match self.gap_status(goal) {
             GapStatus::Proved => Some(match self.conflict_for(goal) {
                 Some(conflict) => match &conflict.resolution {
@@ -1914,16 +2649,17 @@ impl<'a> Reasoner<'a> {
             GapStatus::NotAProposition => Some("目标不是命题".to_string()),
             GapStatus::Unreachable | GapStatus::OpenPattern | GapStatus::Cycle => None,
         };
-        let candidates = if note.is_some() {
-            Vec::new()
+        let (candidates, axiom_candidates) = if note.is_some() {
+            (Vec::new(), Vec::new())
         } else {
-            self.gap_candidates(goal)
+            (self.gap_candidates(goal), self.axiom_candidates(goal)?)
         };
-        GapExplanation {
+        Ok(GapExplanation {
             goal: goal.clone(),
             candidates,
+            axiom_candidates,
             note,
-        }
+        })
     }
 
     /// Why is `goal` unreachable, expanded into a recursive gap tree?
@@ -1939,7 +2675,7 @@ impl<'a> Reasoner<'a> {
     /// is recorded on the node or candidate that stopped it; nothing is
     /// silently cut off, and the recursion cannot run away: the depth cap is
     /// checked before a child is built and the node cap before it is created.
-    pub fn gap_tree(&self, goal: &Expr) -> GapTree {
+    pub fn gap_tree(&self, goal: &Expr) -> Result<GapTree, String> {
         self.gap_tree_with(goal, &GapLimits::default())
     }
 
@@ -1949,18 +2685,19 @@ impl<'a> Reasoner<'a> {
     /// (`max_nodes == 0`), a stub that carries the node limit and lists no
     /// candidate is returned: a `GapTree` is always a tree, so the limit is
     /// reported instead of silently expanding a root the budget refuses.
-    pub fn gap_tree_with(&self, goal: &Expr, limits: &GapLimits) -> GapTree {
+    pub fn gap_tree_with(&self, goal: &Expr, limits: &GapLimits) -> Result<GapTree, String> {
         let mut budget = GapBudget::new(limits);
         let mut path = Vec::new();
         if budget.nodes >= limits.max_nodes {
-            return GapTree {
+            return Ok(GapTree {
                 goal: goal.clone(),
                 status: self.gap_status(goal),
                 candidates: Vec::new(),
+                axiom_candidates: Vec::new(),
                 limit: Some(GapLimit::Nodes {
                     limit: limits.max_nodes,
                 }),
-            };
+            });
         }
         self.expand_gap(goal, 0, &mut path, &mut budget)
     }
@@ -1978,12 +2715,12 @@ impl<'a> Reasoner<'a> {
     /// The scan reports what it could not enumerate — rules whose parameter
     /// types have no declared constant — instead of pretending the list is
     /// complete. The list and every tree are bounded by [`GapLimits`].
-    pub fn issues(&self) -> IssueScan {
+    pub fn issues(&self) -> Result<IssueScan, String> {
         self.issues_with(&GapLimits::default())
     }
 
     /// [`Reasoner::issues`] with explicit limits.
-    pub fn issues_with(&self, limits: &GapLimits) -> IssueScan {
+    pub fn issues_with(&self, limits: &GapLimits) -> Result<IssueScan, String> {
         let mut scan = IssueScan {
             issues: Vec::new(),
             limits: Vec::new(),
@@ -2119,7 +2856,7 @@ impl<'a> Reasoner<'a> {
             entries.truncate(limits.max_issues);
         }
         for (_, _, goal) in entries {
-            let tree = self.gap_tree_with(&goal, limits);
+            let tree = self.gap_tree_with(&goal, limits)?;
             scan.issues.push(tree);
         }
         scan.limits.sort();
@@ -2128,7 +2865,7 @@ impl<'a> Reasoner<'a> {
         scan.uninstantiable.dedup();
         scan.excluded.sort_by(|a, b| a.rule.cmp(&b.rule));
         scan.excluded.dedup();
-        scan
+        Ok(scan)
     }
 
     /// Expand one gap node.
@@ -2142,21 +2879,28 @@ impl<'a> Reasoner<'a> {
         depth: usize,
         path: &mut Vec<GapPathEntry>,
         budget: &mut GapBudget,
-    ) -> GapTree {
+    ) -> Result<GapTree, String> {
         budget.nodes += 1;
         let status = self.gap_status(goal);
         let mut tree = GapTree {
             goal: goal.clone(),
             status,
             candidates: Vec::new(),
+            axiom_candidates: Vec::new(),
             limit: None,
         };
         if status != GapStatus::Unreachable {
-            return tree;
+            return Ok(tree);
         }
+        // A universal fact can prove this goal outright; if it does, the goal
+        // is not a gap. The candidates listed here are the ones the current
+        // derivation did not demand, or the ones refused (a binding value of
+        // the wrong type, an incomplete match). They are diagnostics, bounded
+        // by the same per-goal candidate cap as instantiation.
+        tree.axiom_candidates = self.axiom_candidates(goal)?;
         let candidates = self.gap_candidates(goal);
         if candidates.is_empty() {
-            return tree;
+            return Ok(tree);
         }
         if depth >= budget.limits.max_depth {
             for candidate in candidates {
@@ -2165,7 +2909,7 @@ impl<'a> Reasoner<'a> {
             tree.limit = Some(GapLimit::Depth {
                 limit: budget.limits.max_depth,
             });
-            return tree;
+            return Ok(tree);
         }
 
         path.push(GapPathEntry {
@@ -2210,7 +2954,7 @@ impl<'a> Reasoner<'a> {
                 limit: None,
             };
             for premise in candidate.missing {
-                let Some(child) = self.expand_premise(&premise, depth, path, budget) else {
+                let Some(child) = self.expand_premise(&premise, depth, path, budget)? else {
                     tree.limit = Some(GapLimit::Nodes {
                         limit: budget.limits.max_nodes,
                     });
@@ -2225,7 +2969,7 @@ impl<'a> Reasoner<'a> {
             tree.candidates.push(rule);
         }
         path.pop();
-        tree
+        Ok(tree)
     }
 
     /// Build the gap node for one missing premise, or `None` when the node
@@ -2236,21 +2980,22 @@ impl<'a> Reasoner<'a> {
         depth: usize,
         path: &mut Vec<GapPathEntry>,
         budget: &mut GapBudget,
-    ) -> Option<GapTree> {
+    ) -> Result<Option<GapTree>, String> {
         if budget.nodes >= budget.limits.max_nodes {
-            return None;
+            return Ok(None);
         }
         if self.gap_on_path(premise, path) {
             // A cycle marker is a node of the output too, so it counts.
             budget.nodes += 1;
-            return Some(GapTree {
+            return Ok(Some(GapTree {
                 goal: premise.clone(),
                 status: GapStatus::Cycle,
                 candidates: Vec::new(),
+                axiom_candidates: Vec::new(),
                 limit: None,
-            });
+            }));
         }
-        Some(self.expand_gap(premise, depth + 1, path, budget))
+        Ok(Some(self.expand_gap(premise, depth + 1, path, budget)?))
     }
 
     /// The status of a proposition as a gap node.
@@ -2708,6 +3453,66 @@ fn backtrack(
     }
 }
 
+/// [`backtrack`] with universal elimination: a premise no fact satisfies but
+/// which is closed asks the reasoner for a universal instance.
+///
+/// The instance is a derived proposition, so it may satisfy this premise even
+/// before the next fixed-point round carries it into the fact set. The
+/// conclusion key is recorded as the premise key so the node graph can cite the
+/// `axiom_instance` node; [`Reasoner::fixed_point`] adds the instance to the
+/// next set in the same round. A removed conclusion never satisfies a premise.
+fn backtrack_demanding(
+    reasoner: &Reasoner<'_>,
+    matching: &Matching,
+    idx: usize,
+    binding: &mut Vec<(Name, Expr)>,
+    keys: &mut Vec<String>,
+    removed: &BTreeSet<String>,
+    out: &mut Vec<Instance>,
+) -> Result<(), String> {
+    let rule = matching.rule;
+    if idx == rule.premises.len() {
+        let conclusion = close_pattern(&rule.open_conclusion(), binding);
+        let unlesses: Vec<Expr> = (0..matching.unless_len)
+            .map(|i| close_pattern(&rule.open_unless_text(&rule.unlesses[i]), binding))
+            .collect();
+        out.push(Instance {
+            conclusion,
+            premise_keys: keys.clone(),
+            unlesses,
+            bindings: binding.clone(),
+        });
+        return Ok(());
+    }
+
+    let pattern = close_pattern(&rule.open_premise(idx), binding);
+    let mut matched = false;
+    for (k, fact) in matching.facts {
+        let before = binding.len();
+        let mut b = binding.clone();
+        if !match_premise(matching.env, &pattern, fact, &mut b) {
+            continue;
+        }
+        matched = true;
+        *binding = b;
+        keys.push(k.clone());
+        backtrack_demanding(reasoner, matching, idx + 1, binding, keys, removed, out)?;
+        keys.pop();
+        binding.truncate(before);
+    }
+    if !matched && !has_open_pattern(&pattern) {
+        if let Some(instance) = reasoner.demand_axiom(&pattern)? {
+            let key = reasoner.key_of(&instance.conclusion);
+            if !removed.contains(&key) && !matching.facts.contains_key(&key) {
+                keys.push(key);
+                backtrack_demanding(reasoner, matching, idx + 1, binding, keys, removed, out)?;
+                keys.pop();
+            }
+        }
+    }
+    Ok(())
+}
+
 fn blocked(unlesses: &[Expr], facts: &BTreeMap<String, Expr>, env: &Env) -> bool {
     unlesses.iter().any(|u| {
         // A comparison that could not be decided is not evidence that the
@@ -2982,6 +3787,10 @@ fn key(env: &Env, e: &Expr) -> String {
 pub struct GapExplanation {
     pub goal: Expr,
     pub candidates: Vec<GapCandidate>,
+    /// Universal facts whose body unifies with the goal, with the bindings an
+    /// instance would need. Empty when the goal is proved or when no universal
+    /// fact matches it.
+    pub axiom_candidates: Vec<AxiomCandidate>,
     pub note: Option<String>,
 }
 
@@ -3077,6 +3886,11 @@ pub struct GapTree {
     pub status: GapStatus,
     /// Rules whose head matches `goal`, in rule-name order.
     pub candidates: Vec<GapRule>,
+    /// Universal facts whose body unifies with `goal`, in axiom-name order.
+    /// A successful instance closes the goal and never leaves a gap; these
+    /// candidates are the ones the derivation did not demand or refused, with
+    /// the values an instance would need.
+    pub axiom_candidates: Vec<AxiomCandidate>,
     /// Set when this node's candidates are listed but their missing premises
     /// were not expanded, because a node limit was reached.
     pub limit: Option<GapLimit>,
@@ -3387,6 +4201,11 @@ pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
                     .map_err(|e| format!("节点 {id}：结论不是命题：{e}"))?;
                 proved.insert(key(env, conclusion), conclusion.clone());
             }
+            Node::AxiomInstance { conclusion, .. } => {
+                check::check(env, &Ctx::new(), conclusion, &Expr::Sort(0))
+                    .map_err(|e| format!("节点 {id}：公理实例的结论不是命题：{e}"))?;
+                proved.insert(key(env, conclusion), conclusion.clone());
+            }
             Node::Gap { .. } => {}
         }
     }
@@ -3435,6 +4254,82 @@ pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
                 return Err(format!(
                     "节点 {id}：解释 `{interpretation}` 的 to 是 `{}`，而本步写的是 `{}`",
                     print_expr(&declared.to),
+                    print_expr(conclusion)
+                ));
+            }
+            continue;
+        }
+        if let Node::AxiomInstance {
+            axiom,
+            identity,
+            bindings,
+            conclusion,
+            ..
+        } = node
+        {
+            let decl = env
+                .get(axiom)
+                .ok_or_else(|| format!("节点 {id}：未知全称公理 `{axiom}`"))?;
+            let DeclKind::Fact {
+                identity: declared_identity,
+            } = &decl.kind
+            else {
+                return Err(format!("节点 {id}：`{axiom}` 不是断言命题的事实声明"));
+            };
+            if !declared_identity.seeds_derivation() {
+                return Err(format!(
+                    "节点 {id}：`{axiom}` 登记为对方争议，不能作为公理实例化的依据"
+                ));
+            }
+            if declared_identity != identity {
+                return Err(format!(
+                    "节点 {id}：公理 `{axiom}` 的事实身份是{}，而本步记录的是{}",
+                    declared_identity.label_zh(),
+                    identity.label_zh()
+                ));
+            }
+            let Some((binders, body)) = named_binders(env, &decl.ty)
+                .map_err(|e| format!("节点 {id}：无法解析公理 `{axiom}` 的类型：{e}"))?
+            else {
+                return Err(format!(
+                    "节点 {id}：`{axiom}` 的类型不是带命名绑定变量的全称命题"
+                ));
+            };
+            if bindings.len() != binders.len() {
+                return Err(format!(
+                    "节点 {id}：公理 `{axiom}` 有 {} 个绑定变量，本步记录了 {} 个绑定",
+                    binders.len(),
+                    bindings.len()
+                ));
+            }
+            let mut values = Vec::with_capacity(binders.len());
+            for (index, (binder, (parameter, value))) in
+                binders.iter().zip(bindings.iter()).enumerate()
+            {
+                if binder != parameter {
+                    return Err(format!(
+                        "节点 {id}：第 {} 个绑定变量应是 `{binder}`，本步记录的是 `{parameter}`",
+                        index + 1
+                    ));
+                }
+                if !is_closed(value) {
+                    return Err(format!("节点 {id}：绑定变量 `{binder}` 的值不是闭合项"));
+                }
+                values.push(value.clone());
+            }
+            let expected = instantiate_telescope(&body, &values);
+            let applied = Expr::apps(Expr::constant(axiom), values.iter().cloned());
+            check::check(env, &Ctx::new(), &applied, &expected)
+                .map_err(|e| format!("节点 {id}：公理 `{axiom}` 的实例不满足其绑定类型：{e}"))?;
+            if !is_closed(&expected) {
+                return Err(format!(
+                    "节点 {id}：公理 `{axiom}` 的实例结论不是闭合命题（绑定不足或发生变量捕获）"
+                ));
+            }
+            if key(env, &expected) != key(env, conclusion) {
+                return Err(format!(
+                    "节点 {id}：公理 `{axiom}` 按绑定得到的结论是 `{}`，而本步写的是 `{}`",
+                    print_expr(&expected),
                     print_expr(conclusion)
                 ));
             }
@@ -3534,6 +4429,7 @@ fn node_prop(n: &Node) -> Option<&Expr> {
         Node::Assumption { prop, .. } => Some(prop),
         Node::RuleApplication { conclusion, .. } => Some(conclusion),
         Node::InterpretationApplication { conclusion, .. } => Some(conclusion),
+        Node::AxiomInstance { conclusion, .. } => Some(conclusion),
         Node::Gap { .. } => None,
     }
 }
@@ -3696,9 +4592,38 @@ pub fn certificate(
                     conclusion: cert_expr(conclusion, Some(id), "结论")?,
                 });
             }
+            Node::AxiomInstance {
+                axiom,
+                identity,
+                bindings,
+                conclusion,
+                sources,
+            } => {
+                let converted = bindings
+                    .iter()
+                    .map(|(parameter, value)| {
+                        Ok(std_deduce_cert::Binding {
+                            parameter: parameter.to_string(),
+                            value: cert_expr(
+                                value,
+                                Some(id),
+                                &format!("绑定变量 `{parameter}` 的取值"),
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                nodes.push(std_deduce_cert::Node::AxiomInstance {
+                    axiom: axiom.to_string(),
+                    identity: std_deduce_cert::FactIdentity::from(identity),
+                    bindings: converted,
+                    conclusion: cert_expr(conclusion, Some(id), "公理实例的结论")?,
+                    sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
+                });
+            }
             Node::Gap {
                 prop,
                 candidates,
+                axiom_candidates,
                 note,
             } => {
                 let mut converted = Vec::with_capacity(candidates.len());
@@ -3778,9 +4703,37 @@ pub fn certificate(
                         ),
                     });
                 }
+                let converted_axioms = axiom_candidates
+                    .iter()
+                    .map(|candidate| {
+                        let bindings = candidate
+                            .bindings
+                            .iter()
+                            .map(|(variable, value)| {
+                                Ok(std_deduce_cert::Binding {
+                                    parameter: variable.to_string(),
+                                    value: cert_expr(
+                                        value,
+                                        Some(id),
+                                        &format!(
+                                            "缺口公理候选 `{}` 的绑定变量 `{variable}` 取值",
+                                            candidate.axiom
+                                        ),
+                                    )?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        Ok(std_deduce_cert::GapAxiomCandidate {
+                            axiom: candidate.axiom.to_string(),
+                            bindings,
+                            problem: candidate.problem.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
                 nodes.push(std_deduce_cert::Node::Gap {
                     proposition: cert_expr(prop, Some(id), "缺口命题")?,
                     candidates: converted,
+                    axiom_candidates: converted_axioms,
                     note: note.clone(),
                 });
                 open_obligations.push(std_deduce_cert::OpenObligation {
@@ -3985,6 +4938,9 @@ fn cert_provenance(
         Provenance::Assumption => std_deduce_cert::Provenance::Assumption,
         Provenance::Rules(rules) => std_deduce_cert::Provenance::Rules {
             rules: rules.iter().map(ToString::to_string).collect(),
+        },
+        Provenance::Axiom(axiom) => std_deduce_cert::Provenance::Axiom {
+            axiom: axiom.to_string(),
         },
         Provenance::Interpretation(interpretation) => {
             let Some(index) = interpretation_index.get(interpretation) else {

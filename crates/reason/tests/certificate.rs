@@ -40,11 +40,12 @@ fn derive(lib: &Library, goal: &Expr) -> (Derivation, PriorityOrder) {
     if r.knows(goal) {
         d.root = r.root_for(goal);
     } else {
-        let ex = r.explain(goal);
+        let ex = r.explain(goal).unwrap();
         let id = d.nodes.len();
         d.nodes.push(ReasonNode::Gap {
             prop: goal.clone(),
             candidates: ex.candidates,
+            axiom_candidates: ex.axiom_candidates,
             note: ex.note,
         });
         d.root = Some(id);
@@ -185,6 +186,7 @@ fn an_unencodable_expression_is_a_clear_error() {
         nodes: vec![ReasonNode::Gap {
             prop: Expr::var(index),
             candidates: Vec::new(),
+            axiom_candidates: Vec::new(),
             note: None,
         }],
         root: Some(0),

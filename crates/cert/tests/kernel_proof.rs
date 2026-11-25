@@ -132,6 +132,7 @@ fn rule_node(
 fn gap_node(proposition: CertExpr) -> Node {
     Node::Gap {
         proposition,
+        axiom_candidates: Vec::new(),
         candidates: Vec::new(),
         note: None,
     }

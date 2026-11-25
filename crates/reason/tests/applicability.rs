@@ -62,7 +62,7 @@ fn an_inapplicable_rule_never_fires_and_the_gap_still_lists_it() {
     let target = goal("结论", "甲");
     assert!(!r.knows(&target), "an inapplicable rule must not conclude");
 
-    let tree = r.gap_tree(&target);
+    let tree = r.gap_tree(&target).unwrap();
     let candidate = tree
         .candidates
         .iter()
@@ -186,7 +186,7 @@ fn moving_the_asof_date_moves_the_fallback_verdict() {
     // Before the rule starts: the fallback date is outside, inapplicable.
     let before = reasoner(&lib, Some("2019-06-01"), None);
     assert!(!before.knows(&target));
-    let tree = before.gap_tree(&target);
+    let tree = before.gap_tree(&target).unwrap();
     assert!(matches!(
         tree.candidates[0].applicability,
         Applicability::Inapplicable {
@@ -225,7 +225,7 @@ fn an_undecidable_rule_is_reported_as_excluded_by_the_issue_scan() {
     // containment relation is undeclared, so the verdict is undecidable and
     // the rule must not be scanned as a live candidate.
     let r = reasoner(&lib, None, Some("CN-HN"));
-    let scan = r.issues();
+    let scan = r.issues().unwrap();
     let excluded = scan
         .excluded
         .iter()
@@ -299,7 +299,7 @@ fn the_excluded_rule_list_is_capped_and_reports_the_limit() {
         max_excluded: 1,
         ..GapLimits::default()
     };
-    let scan = r.issues_with(&limits);
+    let scan = r.issues_with(&limits).unwrap();
     assert_eq!(scan.excluded.len(), 1, "the excluded list is capped");
     assert!(
         scan.limits.contains(&GapLimit::Excluded { limit: 1 }),
@@ -314,7 +314,7 @@ fn a_territory_mismatch_excludes_the_rule() {
     let r = reasoner(&lib, None, Some("CN"));
     let target = goal("北京规则适用", "甲");
     assert!(!r.knows(&target));
-    let tree = r.gap_tree(&target);
+    let tree = r.gap_tree(&target).unwrap();
     assert!(matches!(
         tree.candidates[0].applicability,
         Applicability::Inapplicable {
