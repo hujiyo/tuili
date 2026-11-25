@@ -16,12 +16,14 @@ pub mod check;
 pub mod conv;
 pub mod env;
 pub mod error;
+pub mod meta;
 pub mod norm;
 pub mod pretty;
 pub mod term;
 
 pub use env::{Ctx, Decl, DeclKind, Env, FactIdentity, InterpretationDirection, RuleDecl};
 pub use error::{Error, Result};
+pub use meta::{Scope, ScopeOrigin};
 pub use term::{name, Expr, Level, Name};
 
 pub const PROP: u32 = 0;

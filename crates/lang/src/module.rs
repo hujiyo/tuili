@@ -6,9 +6,10 @@
 //! which is what keeps the trusted core small.
 
 use std_deduce_kernel::env::{Decl, Env, SourceRef};
+use std_deduce_kernel::meta::{validate_date, validate_jurisdiction_code, Scope, ScopeOrigin};
 use std_deduce_kernel::{Error, Expr, FactIdentity};
 
-use crate::ast::{Defeater, Item, Term};
+use crate::ast::{Defeater, Item, ScopeSpec, Term};
 use crate::elab;
 use crate::parser;
 
@@ -33,6 +34,26 @@ pub struct Library {
     pub env: Env,
 }
 
+/// How one file is loaded: what scope a rule inherits and whether its rules are
+/// case-local extensions.
+///
+/// The default is a plain file: no pack defaults and no case-local marking.
+/// A package loader passes the manifest's scope; the CLI passes
+/// `case_local = true` only for a case file in `--closed-env
+/// --allow-case-rules`. The kernel still stores the values only; it never uses
+/// them to decide applicability.
+#[derive(Debug, Clone, Default)]
+pub struct LoadOptions {
+    /// The containing law pack's manifest scope, inherited field by field by a
+    /// rule that does not write that field itself. `origin` is ignored here;
+    /// the loader sets [`ScopeOrigin::PackDefault`] when it inherits.
+    pub pack_scope: Option<Scope>,
+    /// Rules declared by this file are case-local extensions: they never
+    /// inherit the pack manifest and are recorded as
+    /// [`ScopeOrigin::CaseLocal`].
+    pub case_local: bool,
+}
+
 impl Library {
     pub fn new() -> Self {
         Library::default()
@@ -46,7 +67,25 @@ impl Library {
     /// on the first error the library is left unchanged (we work on a clone
     /// and only commit at the end).
     pub fn load(&mut self, name: &str, src: &str) -> Result<LoadReport, LoadError> {
+        self.load_with_options(name, src, &LoadOptions::default())
+    }
+
+    /// Load source text with an explicit rule-scope context.
+    ///
+    /// See [`LoadOptions`]. The scope values are validated here, so a bad date
+    /// or code is refused with the same rule a manifest or `--as-of` uses; an
+    /// inherited manifest scope is validated once per load as well, because a
+    /// caller may build the defaults by hand instead of parsing a manifest.
+    pub fn load_with_options(
+        &mut self,
+        name: &str,
+        src: &str,
+        options: &LoadOptions,
+    ) -> Result<LoadReport, LoadError> {
         let items = parser::parse(src).map_err(|e| LoadError::at(e.msg, e.line, e.col))?;
+        if let Some(scope) = &options.pack_scope {
+            validate_pack_scope(scope).map_err(LoadError::new)?;
+        }
         // Imports name packages, not files: every imported namespace must
         // already be in this session. This is checked before any declaration
         // is inserted, so an import failure cannot leave a partial theory.
@@ -116,6 +155,9 @@ impl Library {
                         kind: std_deduce_kernel::DeclKind::Sort,
                         ty: std_deduce_kernel::Expr::Sort(1),
                         sources: source.into_iter().map(to_source).collect(),
+                        scope: Scope::default(),
+                        occurred_at: None,
+                        occurred_in: None,
                         index: 0,
                     };
                     next.env
@@ -147,6 +189,9 @@ impl Library {
                         kind: std_deduce_kernel::DeclKind::Obj,
                         ty: ety,
                         sources: source.into_iter().map(to_source).collect(),
+                        scope: Scope::default(),
+                        occurred_at: None,
+                        occurred_in: None,
                         index: 0,
                     };
                     next.env
@@ -167,6 +212,9 @@ impl Library {
                         kind: std_deduce_kernel::DeclKind::Pred,
                         ty: ety,
                         sources: source.into_iter().map(to_source).collect(),
+                        scope: Scope::default(),
+                        occurred_at: None,
+                        occurred_in: None,
                         index: 0,
                     };
                     next.env
@@ -180,6 +228,8 @@ impl Library {
                     ty,
                     source,
                     identity,
+                    occurred_at,
+                    occurred_in,
                 } => {
                     // An asserted fact without provenance is not auditable: it
                     // would enter the fact base as if it had been proved. A
@@ -204,7 +254,7 @@ impl Library {
                         &Expr::Sort(0),
                     )
                     .is_ok();
-                    let kind = if is_proposition {
+                    let (kind, occurred_at, occurred_in) = if is_proposition {
                         // A case file (no namespace) states what its user
                         // says; a module states what the package assumes.
                         // `verified` and `stipulated` are never a default:
@@ -214,20 +264,44 @@ impl Library {
                         } else {
                             FactIdentity::UserAsserted
                         });
-                        std_deduce_kernel::DeclKind::Fact { identity }
+                        // An occurrence record belongs to a fact. The values
+                        // are validated here with the same calendar/code rules
+                        // as every other surface; nothing defaults them from a
+                        // query date, so an unrecorded fact stays `None`.
+                        if let Some(date) = &occurred_at {
+                            validate_date(&format!("事实 `{n}` 的 occurred_at"), date)
+                                .map_err(LoadError::new)?;
+                        }
+                        if let Some(code) = &occurred_in {
+                            validate_jurisdiction_code(&format!("事实 `{n}` 的 occurred_in"), code)
+                                .map_err(LoadError::new)?;
+                        }
+                        (
+                            std_deduce_kernel::DeclKind::Fact { identity },
+                            occurred_at,
+                            occurred_in,
+                        )
                     } else {
                         if identity.is_some() {
                             return Err(LoadError::new(format!(
                                 "`axiom {n}` 声明的不是命题，不能有事实身份；命题常量请用 `axiom`（不带 identity）"
                             )));
                         }
-                        std_deduce_kernel::DeclKind::Axiom
+                        if occurred_at.is_some() || occurred_in.is_some() {
+                            return Err(LoadError::new(format!(
+                                "`axiom {n}` 声明的不是命题，不能有 occurred_at / occurred_in；发生记录只属于事实（命题断言）"
+                            )));
+                        }
+                        (std_deduce_kernel::DeclKind::Axiom, None, None)
                     };
                     let decl = Decl {
                         name: std_deduce_kernel::name(&n),
                         kind,
                         ty: ety,
                         sources: source.into_iter().map(to_source).collect(),
+                        scope: Scope::default(),
+                        occurred_at,
+                        occurred_in,
                         index: 0,
                     };
                     next.env
@@ -251,6 +325,9 @@ impl Library {
                         kind: std_deduce_kernel::DeclKind::Def { body: ebody },
                         ty: ety,
                         sources: source.into_iter().map(to_source).collect(),
+                        scope: Scope::default(),
+                        occurred_at: None,
+                        occurred_in: None,
                         index: 0,
                     };
                     next.env
@@ -300,6 +377,9 @@ impl Library {
                         kind: std_deduce_kernel::DeclKind::Contrary { left: l, right: r },
                         ty: Expr::Sort(0),
                         sources: source.into_iter().map(to_source).collect(),
+                        scope: Scope::default(),
+                        occurred_at: None,
+                        occurred_in: None,
                         index: 0,
                     };
                     next.env
@@ -349,6 +429,9 @@ impl Library {
                         },
                         ty: Expr::Sort(0),
                         sources: source.into_iter().map(to_source).collect(),
+                        scope: Scope::default(),
+                        occurred_at: None,
+                        occurred_in: None,
                         index: 0,
                     };
                     next.env
@@ -408,6 +491,9 @@ impl Library {
                         },
                         ty: Expr::Sort(0),
                         sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
+                        scope: Scope::default(),
+                        occurred_at: None,
+                        occurred_in: None,
                         index: 0,
                     };
                     next.env
@@ -428,7 +514,12 @@ impl Library {
                     conclusion,
                     defeaters,
                     sources,
+                    scope: scope_spec,
                 } => {
+                    // The scope clauses are metadata; validate them before any
+                    // elaboration so a bad date is reported as such and not as
+                    // a type error in the rule.
+                    let scope = rule_scope(&n, &scope_spec, options).map_err(LoadError::new)?;
                     // A rule is the bridge from a legal provision to a
                     // conclusion; without a source the bridge cannot be
                     // audited. A source made only of whitespace names nothing
@@ -556,6 +647,9 @@ impl Library {
                         kind: std_deduce_kernel::DeclKind::Rule(Box::new(rdecl)),
                         ty,
                         sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
+                        scope,
+                        occurred_at: None,
+                        occurred_in: None,
                         index: 0,
                     };
                     next.env
@@ -628,6 +722,9 @@ impl Library {
                         // proves nothing on its own.
                         ty: Expr::pi(efrom, eto),
                         sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
+                        occurred_at: None,
+                        occurred_in: None,
+                        scope: Default::default(),
                         index: 0,
                     };
                     next.env
@@ -1214,6 +1311,121 @@ fn pred_arity(env: &Env, name: &std_deduce_kernel::Name) -> Option<usize> {
 /// non-empty but are not provenance.
 fn usable_source(source: &crate::ast::SourceSpec) -> bool {
     !source.text.trim().is_empty() && !source.locator.trim().is_empty()
+}
+
+/// Validate the pack-manifest scope a package loader passes in.
+///
+/// The manifest already validated these values, but [`Library::load_with_options`]
+/// is public: a caller that builds a [`Scope`] by hand must not be able to put
+/// an impossible date or code into the ledger. The check is structural only; it
+/// does not judge whether the range makes legal sense.
+fn validate_pack_scope(scope: &Scope) -> Result<(), String> {
+    if let Some(date) = &scope.effective_from {
+        validate_date("法律包清单的 effective_from", date)?;
+    }
+    if let Some(date) = &scope.effective_to {
+        validate_date("法律包清单的 effective_to", date)?;
+    }
+    if let Some(code) = &scope.jurisdiction {
+        validate_jurisdiction_code("法律包清单的 jurisdiction", code)?;
+    }
+    if let Some(code) = &scope.territory {
+        validate_jurisdiction_code("法律包清单的 territory", code)?;
+    }
+    Ok(())
+}
+
+/// Combine a rule's written scope clauses with the containing pack's manifest.
+///
+/// Values are decided field by field: a written clause wins, and a missing one
+/// falls back to the manifest for a pack rule. Case-local rules never inherit.
+/// A written `repealed` may take its start from the manifest as well, so the
+/// range is validated **after** merging: it must have a start and the end must
+/// be later than it. The comparison is a plain string compare, which is correct
+/// for validated `YYYY-MM-DD` values.
+///
+/// Each present field keeps its own origin (`Rule` if the rule wrote it,
+/// `PackDefault` if it came from the manifest), so `:inspect` can distinguish a
+/// written value from an inherited one. The record-level [`Scope::origin`]
+/// remains the summary the original scope contract asked for.
+fn rule_scope(name: &str, written: &ScopeSpec, options: &LoadOptions) -> Result<Scope, String> {
+    if let Some(date) = &written.effective_from {
+        validate_date(&format!("`rule {name}` 的 effective"), date)?;
+    }
+    if let Some(date) = &written.effective_to {
+        validate_date(&format!("`rule {name}` 的 repealed"), date)?;
+    }
+    if let Some(code) = &written.jurisdiction {
+        validate_jurisdiction_code(&format!("`rule {name}` 的 jurisdiction"), code)?;
+    }
+    if let Some(code) = &written.territory {
+        validate_jurisdiction_code(&format!("`rule {name}` 的 territory"), code)?;
+    }
+
+    let inherited = if options.case_local {
+        None
+    } else {
+        options.pack_scope.as_ref()
+    };
+    let effective_from = written
+        .effective_from
+        .clone()
+        .or_else(|| inherited.and_then(|scope| scope.effective_from.clone()));
+    let effective_to = written
+        .effective_to
+        .clone()
+        .or_else(|| inherited.and_then(|scope| scope.effective_to.clone()));
+    let jurisdiction = written
+        .jurisdiction
+        .clone()
+        .or_else(|| inherited.and_then(|scope| scope.jurisdiction.clone()));
+    let territory = written
+        .territory
+        .clone()
+        .or_else(|| inherited.and_then(|scope| scope.territory.clone()));
+
+    // The merged range must be well formed even when one endpoint was
+    // inherited: a rule's own `effective 2005` with a manifest end of 2001 is
+    // not a record of any interval that can exist.
+    if let Some(to) = &effective_to {
+        let Some(from) = &effective_from else {
+            return Err(format!(
+                "`rule {name}`：失效日 `{to}` 没有生效起点；请写 `effective`，或由包清单提供 `effective_from`（案件本地规则不继承清单）"
+            ));
+        };
+        if to <= from {
+            return Err(format!(
+                "`rule {name}`：合并后的生效区间无效：生效起点 `{from}` 必须早于失效日 `{to}`（`repealed` 不含当天，必须更晚）"
+            ));
+        }
+    }
+
+    let field_origin = |explicit: &Option<String>, merged: &Option<String>| match (explicit, merged)
+    {
+        (Some(_), _) => merged.as_ref().map(|_| ScopeOrigin::Rule),
+        (None, Some(_)) => Some(ScopeOrigin::PackDefault),
+        (None, None) => None,
+    };
+    let origin = if options.case_local {
+        ScopeOrigin::CaseLocal
+    } else if !written.is_empty() {
+        ScopeOrigin::Rule
+    } else if options.pack_scope.is_some() {
+        ScopeOrigin::PackDefault
+    } else {
+        ScopeOrigin::Unspecified
+    };
+    Ok(Scope {
+        effective_from_origin: field_origin(&written.effective_from, &effective_from),
+        effective_to_origin: field_origin(&written.effective_to, &effective_to),
+        jurisdiction_origin: field_origin(&written.jurisdiction, &jurisdiction),
+        territory_origin: field_origin(&written.territory, &territory),
+        effective_from,
+        effective_to,
+        jurisdiction,
+        territory,
+        origin,
+    })
 }
 
 fn to_source(s: crate::ast::SourceSpec) -> SourceRef {

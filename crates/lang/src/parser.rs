@@ -9,7 +9,8 @@
 //! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | priority | command
 //! sort     := 'sort' IDENT source?
 //! pred     := 'pred' IDENT ':' term source?
-//! axiom    := 'axiom' IDENT ':' term (source | identity)*
+//! axiom    := 'axiom' IDENT ':' term
+//!             (source | 'identity' KEYWORD | 'occurred_at' DATE | 'occurred_in' CODE)*
 //!             -- source and identity each at most once, in either order;
 //!             -- identity must start its own line: 'identity' KEYWORD
 //! def      := 'def' IDENT ':' term ':=' term source?
@@ -21,6 +22,8 @@
 //!           | 'defeated_by' IDENT
 //!           | 'prefer' IDENT
 //!           | 'source' (source_key STRING)+
+//!           | 'effective' DATE | 'repealed' DATE
+//!           | 'jurisdiction' CODE | 'territory' CODE
 //! interpret := 'interpret' IDENT ':' application '→' application
 //!              'direction' DIRECTION 'source' (source_key STRING)+
 //!           -- `direction` is required and must start its own line, as must
@@ -31,6 +34,8 @@
 //! DIRECTION := 'literal' | 'expand' | 'narrow' | 'analogy'
 //! source_key := 'text' | 'locator' | 'version' | 'effective' | 'quote' | 'url'
 //!           | 'jurisdiction' | 'retrieved_at' | 'hash' | 'note'
+//! DATE     := IDENT matching YYYY-MM-DD (validated on load)
+//! CODE     := IDENT matching the manifest jurisdiction/territory code
 //! term     := arrow
 //! arrow    := app ('→' term)?
 //! app      := atom atom*
@@ -121,6 +126,11 @@ const SOURCE_KEYS: &[&str] = &[
 
 fn is_source_key(name: &str) -> bool {
     SOURCE_KEYS.contains(&name)
+}
+
+/// A rule-body scope clause keyword that also happens to be a `source` key.
+fn is_scope_clause_key(name: &str) -> bool {
+    matches!(name, "effective" | "jurisdiction" | "territory")
 }
 
 /// Why a namespace is malformed, or `None` when it is well formed.
@@ -395,23 +405,73 @@ impl Parser {
                 let name = self.ident()?;
                 self.expect(&Tok::Colon, "`:`")?;
                 let ty = self.term()?;
-                // The identity clause may come before or after `source`.
-                let source = self.optional_source()?;
-                let identity = self.optional_identity()?;
-                let source = match source {
-                    Some(source) => Some(source),
-                    None => self.optional_source()?,
-                };
-                if identity.is_some() && self.identity_clause_follows() {
-                    return self.err(format!(
-                        "`axiom {name}` 的 identity 子句重复：一个事实只能有一个身份"
-                    ));
+                // The clauses after the type are order-free: `source`,
+                // `identity`, `occurred_at` and `occurred_in` may appear in any
+                // order, each at most once. `effective` / `repealed` /
+                // `jurisdiction` / `territory` are rule scope, not fact
+                // metadata, and are refused below with a pointed message.
+                let mut source: Option<SourceSpec> = None;
+                let mut identity: Option<FactIdentity> = None;
+                let mut occurred_at: Option<String> = None;
+                let mut occurred_in: Option<String> = None;
+                loop {
+                    if let Some(next) = self.optional_source()? {
+                        if source.is_some() {
+                            return self.err(format!("`axiom {name}` 的 source 子句重复"));
+                        }
+                        source = Some(next);
+                        continue;
+                    }
+                    if let Some(next) = self.optional_identity()? {
+                        if identity.is_some() {
+                            return self.err(format!(
+                                "`axiom {name}` 的 identity 子句重复：一个事实只能有一个身份"
+                            ));
+                        }
+                        identity = Some(next);
+                        continue;
+                    }
+                    if let Some(next) = self.optional_occurrence("occurred_at")? {
+                        if occurred_at.is_some() {
+                            return self.err(format!(
+                                "`axiom {name}` 的 occurred_at 子句重复：事实只能有一个发生日期"
+                            ));
+                        }
+                        occurred_at = Some(next);
+                        continue;
+                    }
+                    if let Some(next) = self.optional_occurrence("occurred_in")? {
+                        if occurred_in.is_some() {
+                            return self.err(format!(
+                                "`axiom {name}` 的 occurred_in 子句重复：事实只能有一个发生地"
+                            ));
+                        }
+                        occurred_in = Some(next);
+                        continue;
+                    }
+                    break;
+                }
+                // A scope clause belongs to a rule. Leave it to the next item
+                // when it starts a declaration; a clause that clearly tries to
+                // annotate this fact is reported here.
+                self.skip_newlines();
+                if let Tok::Ident(keyword) = self.peek().clone() {
+                    if matches!(
+                        keyword.as_str(),
+                        "effective" | "repealed" | "jurisdiction" | "territory"
+                    ) {
+                        return self.err(format!(
+                            "`axiom {name}`：`{keyword}` 只能写在规则（rule）上；事实只能写 occurred_at / occurred_in"
+                        ));
+                    }
                 }
                 Ok(Item::Axiom {
                     name,
                     ty,
                     source,
                     identity,
+                    occurred_at,
+                    occurred_in,
                 })
             }
             "def" => {
@@ -775,9 +835,15 @@ impl Parser {
         let mut conclusion = None;
         let mut defeaters = Vec::new();
         let mut sources = Vec::new();
+        let mut scope = ScopeSpec::default();
 
         loop {
+            // Whether the next clause starts on a fresh line. Scope clauses
+            // require it, like `identity`: a clause crammed onto the previous
+            // line is refused instead of silently accepted.
+            let save = self.pos;
             self.skip_newlines();
+            let on_new_line = self.pos > save;
             if matches!(self.peek(), Tok::Eof) {
                 break;
             }
@@ -844,7 +910,38 @@ impl Parser {
                     defeaters.push(Defeater::Prefer(self.ident()?));
                 }
                 "source" => {
-                    sources.push(self.source_spec()?);
+                    // A source clause inside a rule body names the rule in its
+                    // diagnostics, so a malformed quote or a misplaced scope
+                    // keyword points at which rule must be fixed.
+                    let spec = self.source_spec().map_err(|mut error| {
+                        error.msg = format!("`rule {name}` 的 source 子句：{}", error.msg);
+                        error
+                    })?;
+                    sources.push(spec);
+                }
+                // Scope clauses are metadata on the rule, one clause per line.
+                // The values are validated when the theory is loaded; the
+                // parser only refuses duplicates and wrong clause kinds.
+                "effective" => {
+                    self.require_clause_new_line(&name, "effective", on_new_line)?;
+                    self.scope_clause(&name, "effective", &mut scope.effective_from)?;
+                }
+                "repealed" => {
+                    self.require_clause_new_line(&name, "repealed", on_new_line)?;
+                    self.scope_clause(&name, "repealed", &mut scope.effective_to)?;
+                }
+                "jurisdiction" => {
+                    self.require_clause_new_line(&name, "jurisdiction", on_new_line)?;
+                    self.scope_clause(&name, "jurisdiction", &mut scope.jurisdiction)?;
+                }
+                "territory" => {
+                    self.require_clause_new_line(&name, "territory", on_new_line)?;
+                    self.scope_clause(&name, "territory", &mut scope.territory)?;
+                }
+                "occurred_at" | "occurred_in" => {
+                    return self.err(format!(
+                        "`rule {name}` 的 `{kw}`：它只能写在事实（axiom 命题）上；规则不能声明发生时间或发生地"
+                    ));
                 }
                 // Another item starts here. `#` covers every sigiled command:
                 // the lexer splits the sigil from the command name, so the
@@ -864,7 +961,75 @@ impl Parser {
             conclusion,
             defeaters,
             sources,
+            scope,
         })
+    }
+
+    /// Refuse a rule scope clause that does not start its own line.
+    ///
+    /// Every new clause is line-oriented: `effective 1999-10-01 repealed
+    /// 2021-01-01` on one line is refused rather than read as a clause plus a
+    /// stray token. Ordinary identifiers after a scope value are still left to
+    /// the regular unknown-clause diagnostic.
+    fn require_clause_new_line(&self, rule: &str, keyword: &str, on_new_line: bool) -> PResult<()> {
+        if on_new_line {
+            return Ok(());
+        }
+        self.err(format!(
+            "`rule {rule}` 的 `{keyword}` 子句必须另起一行；每个作用域子句独占一行"
+        ))
+    }
+
+    /// Parse the value of one scope clause and store it, refusing a repeat.
+    ///
+    /// The value is a bare token; dates and codes are checked by the loader so
+    /// a malformed date and a malformed `--as-of` share one error message. The
+    /// messages name the rule: the loader's errors do too, so both stages point
+    /// at the declaration that must be fixed.
+    fn scope_clause(
+        &mut self,
+        rule: &str,
+        keyword: &str,
+        slot: &mut Option<String>,
+    ) -> PResult<()> {
+        let (line, col) = {
+            let token = self.here();
+            (token.line, token.col)
+        };
+        self.bump(); // the keyword
+        let value = match self.peek().clone() {
+            Tok::Ident(value) => {
+                self.bump();
+                value
+            }
+            Tok::Newline | Tok::Eof => {
+                return Err(ParseError {
+                    msg: format!(
+                        "`rule {rule}` 的 `{keyword}` 缺少值（用法：`{keyword} <日期或代码>`）"
+                    ),
+                    line,
+                    col,
+                })
+            }
+            other => {
+                return Err(ParseError {
+                    msg: format!(
+                        "`rule {rule}` 的 `{keyword}` 之后必须是裸值（日期或代码），\
+                         实际是 `{other:?}`；不要写成字符串字面量"
+                    ),
+                    line,
+                    col,
+                })
+            }
+        };
+        if slot.replace(value).is_some() {
+            return Err(ParseError {
+                msg: format!("`rule {rule}` 的 `{keyword}` 子句重复：一个作用域字段只能写一次"),
+                line,
+                col,
+            });
+        }
+        Ok(())
     }
 
     fn skip_newlines_in_list(&mut self) {
@@ -948,17 +1113,47 @@ impl Parser {
         }
     }
 
-    /// Whether another complete `identity <known keyword>` clause follows on
-    /// the next line. Only a complete clause counts: a declaration-shaped
-    /// line is not ours to consume, and the duplicate check must not turn it
-    /// into an identity error.
-    fn identity_clause_follows(&mut self) -> bool {
+    /// Parse an optional `occurred_at <date>` / `occurred_in <code>` clause.
+    ///
+    /// Like `identity`, the clause must start its own line: the fact's type
+    /// would otherwise swallow the keyword as an application argument. The
+    /// value is a bare token (a date or a jurisdiction code), validated when
+    /// the theory is loaded. The position is restored when the keyword is not
+    /// present, so the caller can try the other clauses and the next item.
+    fn optional_occurrence(&mut self, keyword: &str) -> PResult<Option<String>> {
         let save = self.pos;
         self.skip_newlines_in_list();
-        let follows = self.keyword("identity")
-            && matches!(self.peek_at(1), Tok::Ident(keyword) if FactIdentity::from_keyword(keyword).is_some());
-        self.pos = save;
-        follows
+        let on_new_line = self.pos > save;
+        if !self.keyword(keyword) {
+            self.pos = save;
+            return Ok(None);
+        }
+        let (line, col) = {
+            let token = self.here();
+            (token.line, token.col)
+        };
+        if !on_new_line {
+            return Err(ParseError {
+                msg: format!("`{keyword}` 子句必须另起一行"),
+                line,
+                col,
+            });
+        }
+        self.bump(); // the keyword
+        match self.peek().clone() {
+            Tok::Ident(value) => {
+                self.bump();
+                Ok(Some(value))
+            }
+            other => Err(ParseError {
+                msg: format!(
+                    "`{keyword}` 之后必须是裸值（日期或代码），实际是 `{other:?}`；\
+                     不要写成字符串字面量"
+                ),
+                line,
+                col,
+            }),
+        }
     }
 
     /// `source text "宪法" locator "第三十九条" version "2018"`
@@ -992,6 +1187,22 @@ impl Parser {
                 let key_token = self.here();
                 (key_token.line, key_token.col)
             };
+            // `effective`, `jurisdiction` and `territory` are also rule scope
+            // clause keywords. A scope clause writes a bare value on its own
+            // line, while a source field always writes a quoted string; so a
+            // key that starts a new line but is not followed by a string ends
+            // the source clause and is left for the rule body. On the same
+            // line the old source-field rule still applies, so a missing quote
+            // is still an error instead of a silently different clause.
+            let starts_new_line = self.pos > save;
+            if !first
+                && starts_new_line
+                && is_scope_clause_key(&key)
+                && !matches!(self.peek_at(1), Tok::Str(_))
+            {
+                self.pos = save;
+                break;
+            }
             self.bump();
             if seen.contains(&key) {
                 return Err(ParseError {
@@ -1005,6 +1216,22 @@ impl Parser {
                 Tok::Str(value) => {
                     self.bump();
                     value
+                }
+                // `effective`, `jurisdiction` and `territory` are also rule
+                // scope clause keywords with bare values. Reaching this branch
+                // means a scope clause was misplaced inside a source (same
+                // line, or before any source field); say so instead of
+                // claiming a source value must be quoted.
+                other if is_scope_clause_key(&key) => {
+                    return Err(ParseError {
+                        msg: format!(
+                            "`source` 的键 `{key}` 需要双引号字符串；\
+                             规则作用域子句 `{key} <日期或代码>` 必须单独占一行，写在 source 子句之外\
+                             （实际是 `{other:?}`）"
+                        ),
+                        line: key_line,
+                        col: key_col,
+                    })
                 }
                 other => {
                     return self.err(format!(

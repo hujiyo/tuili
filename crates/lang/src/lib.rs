@@ -9,5 +9,5 @@ pub mod lexer;
 pub mod module;
 pub mod parser;
 
-pub use module::{Library, LoadError, LoadReport, Theory};
+pub use module::{Library, LoadError, LoadOptions, LoadReport, Theory};
 pub use parser::Parser;

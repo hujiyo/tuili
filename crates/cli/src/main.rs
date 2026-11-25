@@ -23,11 +23,21 @@
 //! never accepts an `official` claim the registry's whitelist does not cover),
 //! `--closed-env` enables the closed environment, `--allow-case-rules` lifts
 //! its case-declaration check (only together with `--closed-env`), and
-//! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` record the
-//! certificate's legal as-of date and jurisdiction code. The last two are
-//! identity fields only: they are validated at parse time, stamped into a
-//! `:cert` certificate and compared exactly by `:verify-cert`; they never affect
-//! preparation or reasoning.
+//! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` set the session's legal
+//! as-of date and jurisdiction code; `:asof` / `:jurisdiction` print or replace
+//! the same session values and report whether they came from the command line
+//! or a session command. They are identity fields only: stamped into a `:cert`
+//! certificate and compared exactly by `:verify-cert`; they never affect
+//! preparation or reasoning. If the loaded rules name two or more
+//! jurisdictions and the session has no jurisdiction, `:why` and `:cert` refuse
+//! with exit `2` instead of silently picking one; `:gap` and `:inspect` are not
+//! gated, and a chosen jurisdiction does not filter any rule.
+//!
+//! Rule scope (`effective` / `repealed` / `jurisdiction` / `territory`) and a
+//! fact's occurrence (`occurred_at` / `occurred_in`) are recorded metadata: a
+//! pack rule inherits the manifest's scope field by field, `:inspect` displays
+//! what is recorded, and the reasoner ignores all of it. Applicability is not
+//! judged here (M2-20).
 //!
 //! In the closed environment a top-level `:load` accepts only a case file (no
 //! `namespace`): modules are legal packs and must be imported. The case may
@@ -73,7 +83,9 @@
 //!
 //! ```text
 //! :load <file>            load a theory file (imports resolve loaded namespaces first)
-//! :inspect                dump the ledger
+//! :inspect                dump the ledger, including recorded scope and occurrence
+//! :asof [date]            show or set the session's legal as-of date
+//! :jurisdiction [code]    show or set the session's jurisdiction code
 //! :why <term>             derive, print the certificate's tree, and check it
 //! :explain <term>         derive, print a Chinese because-so explanation, and
 //!                         check the same certificate
@@ -251,12 +263,12 @@
 //! stdout; a gap becomes a `MissingPremise` obligation and an unresolved
 //! conflict becomes an `UnresolvedConflict` obligation in that JSON. Before
 //! serialization the certificate is stamped with the environment identity:
-//! the canonical profile name, the `--as-of` date and `--jurisdiction` code
-//! (explicit `null` when the option was not given), every loaded pack's
-//! version, lock hash and trust level, and the hash of every corpus file a
-//! loaded pack links. An identity error writes no JSON; the argv entry points
-//! report it on stderr, while the REPL keeps its convention of reporting
-//! command errors on stdout.
+//! the canonical profile name, the session's as-of date and jurisdiction code
+//! (from `--as-of`/`--jurisdiction` or `:asof`/`:jurisdiction`; explicit `null`
+//! when never set), every loaded pack's version, lock hash and trust level, and
+//! the hash of every corpus file a loaded pack links. An identity error writes
+//! no JSON; the argv entry points report it on stderr, while the REPL keeps its
+//! convention of reporting command errors on stdout.
 //!
 //! `:verify-cert` requires a loaded theory and first compares the
 //! certificate's recorded environment identity with the current one. A
@@ -323,11 +335,12 @@ use std_deduce_cert::{
     PriorityEdge, PriorityOrigin, ResolutionBasis, Source, TrustLevel,
 };
 use std_deduce_kernel::conv::convertible;
-use std_deduce_kernel::env::{escape_control, Ctx, DeclKind, Env, FactIdentity, SourceRef};
+use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
+use std_deduce_kernel::meta::{validate_date, validate_jurisdiction_code, Scope, ScopeOrigin};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Expr, Name};
 use std_deduce_lang::module::escape_path;
-use std_deduce_lang::{elab, Library, LoadReport};
+use std_deduce_lang::{elab, Library, LoadOptions, LoadReport};
 use std_deduce_lawpack::corpus::{self, Audit, Citation, Corpus, CoverageStatus};
 use std_deduce_lawpack::{
     read_whitelist, AuditStatus, PackError, PackInfo, Trust, Whitelist, LOCK_FILE, MANIFEST_FILE,
@@ -547,6 +560,26 @@ fn extra_argument_error(argument: &str, usage: &str) -> String {
     }
 }
 
+/// Where the session's recorded as-of date or jurisdiction came from.
+///
+/// The value itself lives in the environment so `:cert` and `:verify-cert`
+/// read exactly one source; this only records whether the process arguments or
+/// a session command set it, which `:asof` / `:jurisdiction` report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionValueSource {
+    CommandLine,
+    SessionCommand,
+}
+
+impl SessionValueSource {
+    fn label(self) -> &'static str {
+        match self {
+            SessionValueSource::CommandLine => "命令行",
+            SessionValueSource::SessionCommand => "会话命令",
+        }
+    }
+}
+
 struct Session {
     lib: Library,
     /// Whether a theory has been loaded. `:verify-cert` needs an environment,
@@ -562,16 +595,30 @@ struct Session {
     case_extensions: BTreeMap<String, &'static str>,
     /// The lazily prepared default legal environment.
     environment: environment::Environment,
+    /// Where the session's as-of date came from; `None` when no value is set.
+    as_of_source: Option<SessionValueSource>,
+    /// Where the session's jurisdiction came from; `None` when no value is set.
+    jurisdiction_source: Option<SessionValueSource>,
 }
 
 impl Session {
     fn new(options: environment::Options) -> Self {
+        let as_of_source = options
+            .as_of
+            .as_ref()
+            .map(|_| SessionValueSource::CommandLine);
+        let jurisdiction_source = options
+            .jurisdiction
+            .as_ref()
+            .map(|_| SessionValueSource::CommandLine);
         Session {
             lib: Library::new(),
             loaded: false,
             packs: Vec::new(),
             case_extensions: BTreeMap::new(),
             environment: environment::Environment::new(options),
+            as_of_source,
+            jurisdiction_source,
         }
     }
 
@@ -695,8 +742,15 @@ impl Session {
 
         // The case/module file itself is loaded last, after its dependencies.
         // If it fails, the cloned library and package list are dropped and the
-        // pending preload report is never printed.
-        let report = match lib.load(path, &src) {
+        // pending preload report is never printed. Only the closed environment
+        // with `--allow-case-rules` marks this file's rules as case-local; a
+        // package's theory files are loaded by the package loader with the
+        // manifest's scope instead.
+        let load_options = LoadOptions {
+            pack_scope: None,
+            case_local: environment.closed_env() && environment.allow_case_rules(),
+        };
+        let report = match lib.load_with_options(path, &src, &load_options) {
             Ok(report) => report,
             Err(error) => {
                 let error = error.render(path);
@@ -836,6 +890,11 @@ impl Session {
                             }
                             _ => String::new(),
                         };
+                        // Recorded scope and occurrence are shown next to the
+                        // identity; an undeclared field prints nothing, never a
+                        // "default" placeholder.
+                        let scope = declared_scope_text(&decl.scope);
+                        let occurrence = declared_occurrence_text(decl);
                         // A priority has no user-written name: its ledger name
                         // is a synthetic key. Print the surface declaration the
                         // module wrote, the same way the load report does.
@@ -861,7 +920,7 @@ impl Session {
                         };
                         writeln!(
                             out,
-                            "  {kind} {name} : {}{identity}{extra}{namespace}",
+                            "  {kind} {name} : {}{identity}{extra}{scope}{occurrence}{namespace}",
                             print_expr(&decl.ty)
                         )
                         .ok();
@@ -883,7 +942,17 @@ impl Session {
                     Ok(Outcome::Proved)
                 }
                 "fact" => self.fact_command(arg, out),
-                "why" | "gap" | "explain" => self.query(cmd, arg, out),
+                "asof" => self.as_of_command(arg, out),
+                "jurisdiction" => self.jurisdiction_command(arg, out),
+                "why" => {
+                    // A multi-jurisdiction environment without a chosen
+                    // jurisdiction is ambiguous: refusing here is the gate,
+                    // not an applicability judgement.
+                    self.require_jurisdiction()?;
+                    self.query(cmd, arg, out)
+                }
+                "gap" => self.query(cmd, arg, out),
+                "explain" => self.query(cmd, arg, out),
                 "issues" => self.issues_command(arg, out),
                 "cert" => self.export_certificate(arg, out),
                 "verify-cert" => self.verify_certificate(arg, out),
@@ -961,6 +1030,11 @@ impl Session {
                 locator: "交互会话".into(),
                 ..Default::default()
             }],
+            // A session fact records no occurrence. It is not defaulted from
+            // the session's as-of date: the query date is not the fact's date.
+            scope: Scope::default(),
+            occurred_at: None,
+            occurred_in: None,
             index: 0,
         };
         let mut lib = self.lib.clone();
@@ -1088,6 +1162,117 @@ impl Session {
         Ok(Outcome::Proved)
     }
 
+    /// `:asof [YYYY-MM-DD]` — show or set the session's legal as-of date.
+    ///
+    /// The date is an identity field: `:cert` records it and `:verify-cert`
+    /// compares it. It never changes which rules load or how a goal is derived;
+    /// whether a rule applies on a date is M2-20's judgement.
+    fn as_of_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if arg.is_empty() {
+            let line = match (self.environment.as_of(), self.as_of_source) {
+                (Some(value), Some(source)) => {
+                    format!("基准日：{value}（{}）", source.label())
+                }
+                (Some(value), None) => format!("基准日：{value}（未设置）"),
+                (None, _) => "基准日：未设置".to_owned(),
+            };
+            writeln!(out, "{line}").ok();
+            return Ok(Outcome::Proved);
+        }
+        validate_date(":asof", arg)?;
+        self.environment.set_as_of(arg.to_owned());
+        self.as_of_source = Some(SessionValueSource::SessionCommand);
+        writeln!(out, "基准日：{arg}（会话命令）").ok();
+        Ok(Outcome::Proved)
+    }
+
+    /// `:jurisdiction [CODE]` — show or set the session's jurisdiction.
+    ///
+    /// The code is an identity field and answers the multi-jurisdiction gate.
+    /// It is not an applicability judgement: a chosen code does not filter rules.
+    fn jurisdiction_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if arg.is_empty() {
+            let line = match (self.environment.jurisdiction(), self.jurisdiction_source) {
+                (Some(value), Some(source)) => {
+                    format!("管辖：{value}（{}）", source.label())
+                }
+                (Some(value), None) => format!("管辖：{value}（未设置）"),
+                (None, _) => "管辖：未设置".to_owned(),
+            };
+            writeln!(out, "{line}").ok();
+            return Ok(Outcome::Proved);
+        }
+        validate_jurisdiction_code(":jurisdiction", arg)?;
+        self.environment.set_jurisdiction(arg.to_owned());
+        self.jurisdiction_source = Some(SessionValueSource::SessionCommand);
+        writeln!(out, "管辖：{arg}（会话命令）").ok();
+        Ok(Outcome::Proved)
+    }
+
+    /// Refuse `:why` / `:cert` when the loaded rules name two or more
+    /// jurisdictions and the session has not chosen one.
+    ///
+    /// This is a gate on ambiguity, not an applicability judgment: with one
+    /// jurisdiction the query proceeds unchanged, and a chosen jurisdiction
+    /// never filters a rule out (that is M2-20). The codes are listed sorted.
+    fn require_jurisdiction(&self) -> Result<(), String> {
+        if self.environment.jurisdiction().is_some() {
+            return Ok(());
+        }
+        let codes: BTreeSet<&str> = self
+            .lib
+            .env
+            .iter()
+            .filter(|decl| matches!(decl.kind, DeclKind::Rule(_)))
+            .filter_map(|decl| decl.scope.jurisdiction.as_deref())
+            .collect();
+        if codes.len() < 2 {
+            return Ok(());
+        }
+        Err(format!(
+            "必须用 --jurisdiction 或 :jurisdiction 选择管辖：候选规则涉及 {}",
+            codes.into_iter().collect::<Vec<_>>().join("、")
+        ))
+    }
+
+    /// The warning line for one rule whose recorded jurisdiction differs from
+    /// the session's chosen jurisdiction, if it does.
+    ///
+    /// M2-6/M2-7 do not judge applicability, so a differing code is reported
+    /// instead of filtering the rule. The note never changes an exit code or a
+    /// conclusion; M2-20 owns the actual applicability decision.
+    fn jurisdiction_note(&self, rule: &str) -> Option<String> {
+        let query = self.environment.jurisdiction()?;
+        let code = self.lib.env.get(rule)?.scope.jurisdiction.as_deref()?;
+        if code == query {
+            return None;
+        }
+        Some(format!(
+            "注：规则 {} 的管辖 {code} 与查询管辖 {query} 不同；本步不判定适用性，M2-20 做适用性判定。",
+            escape_control(rule)
+        ))
+    }
+
+    /// One note per distinct applied or candidate rule in a certificate.
+    fn certificate_jurisdiction_notes(&self, certificate: &Certificate) -> Vec<String> {
+        let mut rules: BTreeSet<&str> = BTreeSet::new();
+        for node in &certificate.nodes {
+            match node {
+                CertNode::RuleApplication { rule, .. } => {
+                    rules.insert(rule.as_str());
+                }
+                CertNode::Gap { candidates, .. } => {
+                    rules.extend(candidates.iter().map(|candidate| candidate.rule.as_str()));
+                }
+                CertNode::Assumption { .. } => {}
+            }
+        }
+        rules
+            .into_iter()
+            .filter_map(|rule| self.jurisdiction_note(rule))
+            .collect()
+    }
+
     fn query(&mut self, cmd: &str, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let goal = self.goal(arg)?;
         let mut r = Reasoner::new(&self.lib.env);
@@ -1148,6 +1333,16 @@ impl Session {
             )
             .ok();
             render_gap_tree(out, &tree, &r, 2, "缺口");
+            // Candidates from another jurisdiction are called out, including
+            // nested ones; this is a warning, never a filter (M2-20 decides
+            // applicability).
+            let mut rules = BTreeSet::new();
+            collect_gap_rules(&tree, &mut rules);
+            for rule in rules {
+                if let Some(note) = self.jurisdiction_note(&rule) {
+                    writeln!(out, "  {note}").ok();
+                }
+            }
             return Ok(Outcome::Gap);
         }
 
@@ -1177,6 +1372,11 @@ impl Session {
             render(&certificate)?
         };
         writeln!(out, "{rendered}").ok();
+        // Applied or candidate rules from another jurisdiction are called out;
+        // this is a warning, not a filter, and it never changes the exit code.
+        for note in self.certificate_jurisdiction_notes(&certificate) {
+            writeln!(out, "{note}").ok();
+        }
 
         let checked = std_deduce_cert::check(&self.lib.env, &certificate);
         let kernel = std_deduce_cert::kernel_proof(&self.lib.env, &certificate);
@@ -1367,6 +1567,10 @@ impl Session {
         if arg.is_empty() {
             return Err("用法：:cert <目标命题>".into());
         }
+        // Same ambiguity gate as `:why`: a two-jurisdiction environment cannot
+        // stamp a certificate until the session says which legal system it is
+        // speaking about. Choosing one only records it; no rule is filtered.
+        self.require_jurisdiction()?;
         let goal = self.goal(arg)?;
         let mut r = Reasoner::new(&self.lib.env);
         r.assume_ledger_axioms()?;
@@ -2789,6 +2993,91 @@ fn effective_range(info: &PackInfo) -> String {
     }
 }
 
+/// Render one field's provenance as a compact `（规则）` / `（继承）` / `（案件）`
+/// marker, or nothing for a value with no recorded origin.
+fn scope_origin_marker(origin: Option<ScopeOrigin>) -> String {
+    match origin {
+        Some(origin) => format!("（{}）", origin.label_zh()),
+        None => String::new(),
+    }
+}
+
+/// Render the range's provenance in endpoint order, collapsing equal origins.
+///
+/// A range that mixes an explicit start with an inherited end reads
+/// `（规则/继承）`, so a reader does not have to guess which endpoint came from
+/// the rule and which from the manifest.
+fn scope_range_marker(scope: &Scope) -> String {
+    let mut origins: Vec<ScopeOrigin> = Vec::new();
+    for origin in [scope.effective_from_origin, scope.effective_to_origin]
+        .into_iter()
+        .flatten()
+    {
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    match origins.as_slice() {
+        [] => String::new(),
+        [one] => format!("（{}）", one.label_zh()),
+        many => format!(
+            "（{}）",
+            many.iter()
+                .map(|origin| origin.label_zh())
+                .collect::<Vec<_>>()
+                .join("/")
+        ),
+    }
+}
+
+/// Render a declaration's recorded scope for `:inspect`.
+///
+/// Only declared or inherited fields are shown; an absent field prints nothing
+/// (never a `默认` placeholder, and never a guessed value). Each value carries
+/// its provenance: `（规则）` for a value written on the rule, `（继承）` for a
+/// pack-manifest default, and `（案件）` for a case-local rule. The effective
+/// range is `from..to` with an open endpoint left empty.
+fn declared_scope_text(scope: &Scope) -> String {
+    let mut parts = Vec::new();
+    let range = match (&scope.effective_from, &scope.effective_to) {
+        (Some(from), Some(to)) => format!("{from}..{to}"),
+        (Some(from), None) => format!("{from}.."),
+        (None, Some(to)) => format!("..{to}"),
+        (None, None) => String::new(),
+    };
+    if !range.is_empty() {
+        parts.push(format!("〔生效 {range}{}〕", scope_range_marker(scope)));
+    }
+    if let Some(code) = &scope.jurisdiction {
+        parts.push(format!(
+            "〔管辖 {code}{}〕",
+            scope_origin_marker(scope.jurisdiction_origin)
+        ));
+    }
+    if let Some(code) = &scope.territory {
+        parts.push(format!(
+            "〔地域 {code}{}〕",
+            scope_origin_marker(scope.territory_origin)
+        ));
+    }
+    parts.concat()
+}
+
+/// Render a fact's recorded occurrence for `:inspect`.
+///
+/// Only facts carry occurred fields, and an unrecorded one prints nothing; the
+/// session's as-of date is not copied into it.
+fn declared_occurrence_text(decl: &Decl) -> String {
+    let mut parts = Vec::new();
+    if let Some(date) = &decl.occurred_at {
+        parts.push(format!("〔发生 {date}〕"));
+    }
+    if let Some(code) = &decl.occurred_in {
+        parts.push(format!("〔发生地 {code}〕"));
+    }
+    parts.concat()
+}
+
 /// Print the five labelled lines when `:verify-cert` cannot reach any check.
 fn write_verify_cert_not_run(out: &mut impl Write, reason: &str) {
     writeln!(out, "环境校验：未运行（{reason}）").ok();
@@ -3408,6 +3697,19 @@ fn report_conflicts(out: &mut impl Write, certificate: &Certificate) {
     }
 }
 
+/// Collect every rule named anywhere in a gap tree, including nested
+/// candidates, so the cross-jurisdiction warning covers the whole tree.
+fn collect_gap_rules(tree: &GapTree, out: &mut BTreeSet<String>) {
+    for rule in &tree.candidates {
+        out.insert(rule.rule.to_string());
+        for premise in &rule.missing {
+            if let Some(child) = &premise.gap {
+                collect_gap_rules(child, out);
+            }
+        }
+    }
+}
+
 /// Render one gap tree, with `label` on its root line.
 ///
 /// The tree is the reasoner's own recursion: every missing premise with a
@@ -3707,12 +4009,12 @@ fn print_help(out: &mut impl Write) {
     .ok();
     writeln!(
         out,
-        "  --as-of <YYYY-MM-DD>         记录证书的法律基准日（只影响 :cert / :verify-cert，不参与推理）"
+        "  --as-of <YYYY-MM-DD>         会话的法律基准日（:asof 可改；:cert 记录它，不参与推理）"
     )
     .ok();
     writeln!(
         out,
-        "  --jurisdiction <代码>        记录证书的管辖代码（只影响 :cert / :verify-cert，不参与推理）"
+        "  --jurisdiction <代码>        会话的管辖代码（:jurisdiction 可改；:cert 记录它，不参与推理）"
     )
     .ok();
     writeln!(
@@ -3744,7 +4046,13 @@ fn print_help(out: &mut impl Write) {
     .ok();
     writeln!(
         out,
-        "--as-of / --jurisdiction 只写进证书环境身份，:verify-cert 比对同值；不参与推理。"
+        ":asof / :jurisdiction 与 --as-of / --jurisdiction 写同一组会话值；\
+         不参与推理，只由 :cert / :verify-cert 记录并比对。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "环境里的规则涉及两个及以上 jurisdiction 且未选管辖时，:why 与 :cert 退出 2。"
     )
     .ok();
     writeln!(
@@ -3811,6 +4119,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
             writeln!(
                 out,
                 ":load <文件>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
+                 :asof [YYYY-MM-DD]  :jurisdiction [代码]  \
                  :why <命题>  :explain <命题>  :gap <命题>  :issues  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )
