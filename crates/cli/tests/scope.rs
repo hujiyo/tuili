@@ -57,6 +57,25 @@ fn certificate_json(out: &str) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("the certificate is not JSON: {error}\n{}", &out[start..]))
 }
 
+/// Remove every `applicability` member from a certificate JSON value, so two
+/// certificates can be compared by their proof structure alone.
+fn strip_applicability(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.remove("applicability");
+            for child in object.values_mut() {
+                strip_applicability(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_applicability(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn line_containing<'a>(out: &'a str, needle: &str) -> &'a str {
     out.lines()
         .find(|line| line.contains(needle))
@@ -665,8 +684,9 @@ fn event_time_drives_applicability_and_an_unchecked_rule_still_fires() {
         stdout(&report)
     );
 
-    // `:cert` records the date by design, but an applicable date leaves the
-    // proof (assumptions, nodes, root) untouched.
+    // `:cert` records the judgement and the session values by design; the
+    // proof structure itself (assumptions, premises, root, conflicts) stays the
+    // same once the applicability records are removed.
     let plain_cert = run_in(
         temp.root(),
         &[
@@ -687,12 +707,32 @@ fn event_time_drives_applicability_and_an_unchecked_rule_still_fires() {
     assert_exit(&dated_cert, PROVED);
     let plain_json = certificate_json(&stdout(&plain_cert));
     let dated_json = certificate_json(&stdout(&dated_cert));
-    for field in ["assumptions", "nodes", "root", "conflicts"] {
+    let mut plain_nodes = plain_json["nodes"].clone();
+    let mut dated_nodes = dated_json["nodes"].clone();
+    strip_applicability(&mut plain_nodes);
+    strip_applicability(&mut dated_nodes);
+    assert_eq!(
+        plain_nodes, dated_nodes,
+        "an applicable date must not change the proof's nodes"
+    );
+    for field in ["assumptions", "root", "conflicts"] {
         assert_eq!(
             plain_json[field], dated_json[field],
             "an applicable date must not change the certificate's {field}"
         );
     }
+    assert_eq!(
+        plain_json["nodes"][1]["applicability"]["verdict"], "unchecked",
+        "without a jurisdiction the rule is unchecked:\n{plain_json}"
+    );
+    assert_eq!(
+        dated_json["nodes"][1]["applicability"]["verdict"], "applicable",
+        "the event time is inside the range:\n{dated_json}"
+    );
+    assert!(
+        dated_json["nodes"][1]["applicability"]["basis"]["session"]["as_of"].is_null(),
+        "the event time, not :asof, is the reference:\n{dated_json}"
+    );
     assert!(plain_json["environment"]["as_of"].is_null());
     assert_eq!(dated_json["environment"]["as_of"], "2020-01-01");
 }
@@ -1619,12 +1659,12 @@ rule C :
     );
 }
 
-/// The first step does not record applicability in the certificate: the JSON
-/// has no verdict, and `:verify-cert` still passes after the fact's date moves
-/// outside the rule's range.
+/// The certificate records the applicability verdict and its event time; a
+/// fact date the environment registers differently from the certificate's
+/// assumption is rejected instead of silently re-judged.
 #[test]
-fn the_certificate_records_no_applicability_and_ignores_a_fact_date_change() {
-    let temp = TempRoot::new("cert-no-applicability");
+fn the_certificate_records_the_verdict_and_rejects_a_changed_fact_date() {
+    let temp = TempRoot::new("cert-applicability");
     let source = r#"
 sort 人
 pred 行为 : 人 → Prop
@@ -1653,13 +1693,25 @@ rule 规则 :
     assert_exit(&output, PROVED);
     let out = stdout(&output);
     let json = &out[out.find('{').expect("the certificate JSON starts")..];
-    assert!(
-        !json.contains("\"applicability\"") && !json.contains("适用性"),
-        "the v6 certificate must not record an applicability verdict:\n{json}"
+    let value: serde_json::Value = serde_json::from_str(json).expect("the certificate is JSON");
+    assert_eq!(value["format_version"], 7);
+    let record = &value["nodes"][1]["applicability"];
+    assert_eq!(record["verdict"], "applicable");
+    assert_eq!(
+        record["basis"]["dates"][0]["date"], "2019-05-01",
+        "the event time is recorded:\n{json}"
+    );
+    assert_eq!(record["basis"]["dates"][0]["query_date_fallback"], false);
+    assert!(record["basis"]["session"]["as_of"].is_null());
+    assert_eq!(
+        record["basis"]["scope"]["effective_from"], "1999-01-01",
+        "the rule's declared range is quoted:\n{json}"
     );
     let cert_path = temp.write("cert.json", json);
 
-    // Move the fact outside the rule's range and verify the old certificate.
+    // The environment now registers a different occurred_at for the same
+    // fact. The certificate's assumption and reference date no longer match
+    // it, so the logical check must fail rather than re-judge and pass.
     let changed = source.replace("occurred_at 2019-05-01", "occurred_at 2022-06-01");
     temp.write("case.std", &changed);
     let verify = run_in(
@@ -1669,14 +1721,16 @@ rule 规则 :
             format!(":verify-cert {}", cert_path.display()),
         ],
     );
-    assert_exit(&verify, PROVED);
+    assert_exit(&verify, ERROR);
     let verify_out = stdout(&verify);
-    for needle in ["环境校验：通过", "逻辑校验：通过", "内核证明：通过"] {
-        assert!(
-            verify_out.contains(needle),
-            "verification must not re-judge applicability ({needle}):\n{verify_out}"
-        );
-    }
+    assert!(verify_out.contains("环境校验：通过"), "{verify_out}");
+    assert!(verify_out.contains("逻辑校验：失败"), "{verify_out}");
+    assert!(
+        !verify_out.contains("内核证明：通过"),
+        "no kernel layer may pass after a failed logical check:\n{verify_out}"
+    );
+    let err = stderr(&verify);
+    assert!(err.contains("假设") && err.contains("事件时间"), "{err}");
 }
 
 /// Without a goal, `:applicability` lists declarations and does not saturate:

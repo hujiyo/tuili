@@ -256,6 +256,7 @@ fn render_node(
             premises,
             bindings,
             sources,
+            ..
         } => {
             out.push_str(&format!(
                 "{pad}▸ {}  ⟨{}⟩",

@@ -373,7 +373,7 @@ fn gap_and_cert_do_not_apply_a_loaded_interpretation() {
         "the interpretation must not be applied:\n{out}"
     );
 
-    // `:cert` records the gap root. Its v6 interpretations table is empty:
+    // `:cert` records the gap root. Its v7 interpretations table is empty:
     // the declaration is not an assumption, a rule step, or a candidate.
     let output = run(&[
         "--no-default-packs".to_owned(),
@@ -387,7 +387,7 @@ fn gap_and_cert_do_not_apply_a_loaded_interpretation() {
         "the certificate applies the inert interpretation:\n{json}"
     );
     let value: serde_json::Value = serde_json::from_str(&json).expect("certificate JSON parses");
-    assert_eq!(value["format_version"], 6);
+    assert_eq!(value["format_version"], 7);
     assert_eq!(
         value["interpretations"].as_array().map(Vec::len),
         Some(0),

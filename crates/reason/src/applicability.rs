@@ -1,11 +1,14 @@
-//! A pure temporal and spatial applicability judgement.
+//! The temporal and spatial applicability judgement, in the display form.
 //!
 //! The judgement is data in, data out: a rule's recorded [`Scope`], the
 //! occurrence records of the premise facts a rule instance references, and
-//! the session's legal as-of date and jurisdiction. It does not read the
-//! environment, the derivation or the CLI, so it can be tested on its own and
-//! the same judgement is used by the reasoner, `:gap`, `:why` and
-//! `:applicability`.
+//! the session's legal as-of date and jurisdiction. The pure function lives in
+//! the certificate crate ([`std_deduce_cert::judge_applicability`]), where the
+//! independent checker can recompute it from a certificate; this module builds
+//! the anchor and converts the result into the types the reasoner, `:gap`,
+//! `:why` and `:applicability` print. It does not read the environment, the
+//! derivation or the CLI, so it can be tested on its own, and the same
+//! judgement is recorded in a version 7 certificate.
 //!
 //! ## The reference point is the event, not the query date
 //!
@@ -43,7 +46,9 @@
 //!
 //! A missing input outranks an undecidable one, and a clear non-application
 //! outranks both. Every verdict carries a [`Basis`] naming the dates and places
-//! it looked at, so the display can be checked against the facts.
+//! it looked at, the occurrence gaps and the session values actually used, so
+//! the display can be checked against the facts and a certificate can record
+//! the same evidence.
 //!
 //! ## Which verdicts may fire
 //!
@@ -57,7 +62,7 @@
 //! needs an explicit reference time, which is not implemented yet.
 
 use std_deduce_kernel::env::escape_control;
-use std_deduce_kernel::meta::{validate_date, Scope};
+use std_deduce_kernel::meta::Scope;
 
 /// The outcome of judging one rule instance against its event time and place.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -104,6 +109,14 @@ pub struct Basis {
     pub dates: Vec<DatedEvidence>,
     /// Event places, in premise order; duplicates are not repeated.
     pub places: Vec<PlaceEvidence>,
+    /// Whether some referenced premise fact recorded no event time.
+    pub missing_event_date: bool,
+    /// Whether some referenced premise fact recorded no event place.
+    pub missing_event_place: bool,
+    /// The session `:asof` date that stood in for an event time, if it did.
+    pub session_as_of: Option<String>,
+    /// The session jurisdiction the judgement compared, if it did.
+    pub session_jurisdiction: Option<String>,
 }
 
 /// One reference date and whether the rule's range covers it.
@@ -550,310 +563,412 @@ impl UndecidableReason {
 }
 
 /// Judge one rule instance's recorded scope against its event time and place.
-pub fn judge(scope: &Scope, case: &InstanceAnchor) -> Applicability {
-    if scope.is_unscoped() {
-        return Applicability::Unchecked {
-            missing: MissingInput::RuleHasNoScope,
-            basis: Basis::default(),
-        };
-    }
-
-    let mut basis = Basis::default();
-    let mut missing: Option<MissingInput> = None;
-    let mut undecidable: Option<UndecidableReason> = None;
-
-    if scope.effective_from.is_some() || scope.effective_to.is_some() {
-        match judge_dates(scope, case, &mut basis) {
-            DateVerdict::Inside => {}
-            DateVerdict::Inapplicable(reason) => {
-                return Applicability::Inapplicable { reason, basis };
-            }
-            DateVerdict::Unchecked(missing_input) => missing = Some(missing_input),
-            DateVerdict::Undecidable(reason) => undecidable = Some(reason),
-        }
-    }
-
-    if let Some(rule_code) = scope.jurisdiction.as_deref() {
-        match case.jurisdiction.as_deref() {
-            None => missing = missing.or(Some(MissingInput::NoQueryJurisdiction)),
-            Some(case_code) => match compare_codes(rule_code, case_code) {
-                CodeRelation::Equal => {}
-                CodeRelation::Disjoint => {
-                    return Applicability::Inapplicable {
-                        reason: InapplicableReason::JurisdictionMismatch {
-                            rule: rule_code.to_owned(),
-                            case: case_code.to_owned(),
-                        },
-                        basis,
-                    };
-                }
-                CodeRelation::Nested => {
-                    undecidable = undecidable.or(Some(UndecidableReason::IncomparableCode {
-                        dimension: CodeDimension::Jurisdiction,
-                        rule: rule_code.to_owned(),
-                        case: case_code.to_owned(),
-                    }));
-                }
-            },
-        }
-    }
-
-    if let Some(rule_code) = scope.territory.as_deref() {
-        match judge_places(rule_code, case, &mut basis) {
-            PlaceVerdict::Inside => {}
-            PlaceVerdict::Inapplicable(reason) => {
-                return Applicability::Inapplicable { reason, basis };
-            }
-            PlaceVerdict::Unchecked(missing_input) => missing = missing.or(Some(missing_input)),
-            PlaceVerdict::Undecidable(reason) => undecidable = undecidable.or(Some(reason)),
-        }
-    }
-
-    if let Some(missing) = missing {
-        Applicability::Unchecked { missing, basis }
-    } else if let Some(reason) = undecidable {
-        Applicability::Undecidable { reason, basis }
-    } else {
-        Applicability::Applicable { basis }
-    }
-}
-
-/// The temporal verdict before the spatial dimensions are folded in.
-enum DateVerdict {
-    /// Every reference date lies inside the rule's range.
-    Inside,
-    /// Every reference date is outside the range.
-    Inapplicable(InapplicableReason),
-    /// There is no reference date, or one referenced fact has none.
-    Unchecked(MissingInput),
-    /// The stored dates cannot be compared, or coverage is partial.
-    Undecidable(UndecidableReason),
-}
-
-/// Check every reference date against the rule's effective range.
 ///
-/// The reference dates are the `occurred_at` values of the premise facts the
-/// instance references. The session's as-of date is used only when no such
-/// event time exists; the basis records that substitution. Both endpoints may
-/// be absent; the range is then open on that side.
-fn judge_dates(scope: &Scope, case: &InstanceAnchor, basis: &mut Basis) -> DateVerdict {
-    let from = scope.effective_from.as_deref();
-    let to = scope.effective_to.as_deref();
-
-    for (field, value) in [
-        (DateField::EffectiveFrom, from),
-        (DateField::EffectiveTo, to),
-    ] {
-        if let Some(value) = value {
-            if validate_date(field.label_zh(), value).is_err() {
-                return DateVerdict::Undecidable(UndecidableReason::InvalidDate {
-                    field,
-                    value: value.to_owned(),
-                });
-            }
-        }
-    }
-    if let (Some(from), Some(to)) = (from, to) {
-        if from >= to {
-            return DateVerdict::Undecidable(UndecidableReason::InvertedInterval {
-                from: from.to_owned(),
-                to: to.to_owned(),
-            });
-        }
-    }
-
-    // Collect the reference dates. A fact without `occurred_at` is never
-    // replaced by another fact's date; the query date only stands in when the
-    // instance has no event time at all.
-    let partial = !case.event_dates.is_empty() && case.missing_event_date;
-    let mut references: Vec<(String, bool)> = Vec::new();
-    if case.event_dates.is_empty() {
-        let Some(as_of) = case.as_of.as_deref() else {
-            return DateVerdict::Unchecked(MissingInput::NoCaseDate);
-        };
-        references.push((as_of.to_owned(), true));
-    } else {
-        for date in &case.event_dates {
-            if !references.iter().any(|(known, _)| known == date) {
-                references.push(((*date).to_owned(), false));
-            }
-        }
-    }
-
-    let mut covered = Vec::new();
-    let mut outside = Vec::new();
-    for (day, query_date_fallback) in &references {
-        let field = if *query_date_fallback {
-            DateField::AsOf
-        } else {
-            DateField::OccurredAt
-        };
-        if validate_date(field.label_zh(), day).is_err() {
-            return DateVerdict::Undecidable(UndecidableReason::InvalidDate {
-                field,
-                value: day.clone(),
-            });
-        }
-        let in_range =
-            from.is_none_or(|from| day.as_str() >= from) && to.is_none_or(|to| day.as_str() < to);
-        basis.dates.push(DatedEvidence {
-            date: day.clone(),
-            query_date_fallback: *query_date_fallback,
-            covered: in_range,
-        });
-        if in_range {
-            covered.push(day.clone());
-        } else {
-            outside.push(day.clone());
-        }
-    }
-
-    if partial {
-        // A referenced fact has no occurrence date: the known dates cannot
-        // stand in for it, whatever their own coverage is.
-        return DateVerdict::Unchecked(MissingInput::PartialCaseDate);
-    }
-    if outside.is_empty() {
-        return DateVerdict::Inside;
-    }
-    if covered.is_empty() {
-        return DateVerdict::Inapplicable(outside_reason(from, to, outside));
-    }
-    DateVerdict::Undecidable(UndecidableReason::PartialDateCoverage {
-        covered,
-        outside,
-        effective_from: from.map(ToOwned::to_owned),
-        effective_to: to.map(ToOwned::to_owned),
-    })
+/// The judgement itself lives in the certificate crate
+/// ([`std_deduce_cert::judge_applicability`]), because the certificate checker
+/// must recompute it from the certificate's own inputs without calling the
+/// reasoner. This function only supplies the anchor built from the premise
+/// facts' occurrence records and converts the result into the display type the
+/// reasoner, `:why`, `:gap` and `:applicability` print.
+pub fn judge(scope: &Scope, case: &InstanceAnchor) -> Applicability {
+    let anchor = std_deduce_cert::ApplicabilityAnchor {
+        as_of: case.as_of.clone(),
+        jurisdiction: case.jurisdiction.clone(),
+        event_dates: case.event_dates.clone(),
+        missing_event_date: case.missing_event_date,
+        event_places: case.event_places.clone(),
+        missing_event_place: case.missing_event_place,
+    };
+    from_certificate(std_deduce_cert::judge_applicability(scope, &anchor))
 }
 
-/// The concrete reason when every reference date is outside the range.
-fn outside_reason(from: Option<&str>, to: Option<&str>, dates: Vec<String>) -> InapplicableReason {
-    let before_start = from.is_some_and(|from| dates.iter().all(|date| date.as_str() < from));
-    let after_end = to.is_some_and(|to| dates.iter().all(|date| date.as_str() >= to));
-    if before_start && !after_end {
+/// Convert the certificate-side judgement into the display type.
+fn from_certificate(value: std_deduce_cert::RuleApplicability) -> Applicability {
+    let basis = basis_from_certificate(&value.basis);
+    match value.verdict {
+        std_deduce_cert::ApplicabilityVerdict::Applicable => Applicability::Applicable { basis },
+        std_deduce_cert::ApplicabilityVerdict::Inapplicable => Applicability::Inapplicable {
+            reason: inapplicable_reason(value.reason(), &value.verdict),
+            basis,
+        },
+        std_deduce_cert::ApplicabilityVerdict::Unchecked => Applicability::Unchecked {
+            missing: missing_input(value.reason(), &value.verdict),
+            basis,
+        },
+        std_deduce_cert::ApplicabilityVerdict::Undecidable => Applicability::Undecidable {
+            reason: undecidable_reason(value.reason(), &value.verdict),
+            basis,
+        },
+    }
+}
+
+/// The certificate-side basis in the display form.
+fn basis_from_certificate(basis: &std_deduce_cert::ApplicabilityBasis) -> Basis {
+    Basis {
+        dates: basis
+            .dates
+            .iter()
+            .map(|dated| DatedEvidence {
+                date: dated.date.clone(),
+                query_date_fallback: dated.query_date_fallback,
+                covered: dated.covered,
+            })
+            .collect(),
+        places: basis
+            .places
+            .iter()
+            .map(|place| PlaceEvidence {
+                place: place.place.clone(),
+                covered: place.covered,
+            })
+            .collect(),
+        missing_event_date: basis.missing_event_date,
+        missing_event_place: basis.missing_event_place,
+        session_as_of: basis.session.as_of.as_ref().cloned(),
+        session_jurisdiction: basis.session.jurisdiction.as_ref().cloned(),
+    }
+}
+
+/// The certificate-side reason, which a non-applicable verdict always carries.
+fn required_reason(
+    reason: Option<&std_deduce_cert::ApplicabilityReason>,
+) -> &std_deduce_cert::ApplicabilityReason {
+    match reason {
+        Some(reason) => reason,
+        None => panic!("内部状态不一致：非适用的适用性判定没有记录原因"),
+    }
+}
+
+fn missing_input(
+    reason: Option<&std_deduce_cert::ApplicabilityReason>,
+    verdict: &std_deduce_cert::ApplicabilityVerdict,
+) -> MissingInput {
+    let reason = required_reason(reason);
+    match &reason.detail {
+        std_deduce_cert::ApplicabilityReasonKind::RuleHasNoScope => MissingInput::RuleHasNoScope,
+        std_deduce_cert::ApplicabilityReasonKind::NoCaseDate => MissingInput::NoCaseDate,
+        std_deduce_cert::ApplicabilityReasonKind::PartialCaseDate => MissingInput::PartialCaseDate,
+        std_deduce_cert::ApplicabilityReasonKind::NoCasePlace => MissingInput::NoCasePlace,
+        std_deduce_cert::ApplicabilityReasonKind::PartialCasePlace => {
+            MissingInput::PartialCasePlace
+        }
+        std_deduce_cert::ApplicabilityReasonKind::NoQueryJurisdiction => {
+            MissingInput::NoQueryJurisdiction
+        }
+        other => panic!(
+            "内部状态不一致：{} 的未判定原因 `{}` 不是缺失输入",
+            verdict.keyword(),
+            other.code()
+        ),
+    }
+}
+
+fn inapplicable_reason(
+    reason: Option<&std_deduce_cert::ApplicabilityReason>,
+    verdict: &std_deduce_cert::ApplicabilityVerdict,
+) -> InapplicableReason {
+    let reason = required_reason(reason);
+    match &reason.detail {
+        std_deduce_cert::ApplicabilityReasonKind::NotYetInForce {
+            dates,
+            effective_from,
+        } => InapplicableReason::NotYetInForce {
+            dates: dates.clone(),
+            effective_from: effective_from.clone(),
+        },
+        std_deduce_cert::ApplicabilityReasonKind::Repealed { dates, repealed } => {
+            InapplicableReason::Repealed {
+                dates: dates.clone(),
+                repealed: repealed.clone(),
+            }
+        }
+        std_deduce_cert::ApplicabilityReasonKind::OutsideRange {
+            dates,
+            effective_from,
+            effective_to,
+        } => InapplicableReason::OutsideRange {
+            dates: dates.clone(),
+            effective_from: effective_from.as_ref().cloned(),
+            effective_to: effective_to.as_ref().cloned(),
+        },
+        std_deduce_cert::ApplicabilityReasonKind::JurisdictionMismatch { rule, case } => {
+            InapplicableReason::JurisdictionMismatch {
+                rule: rule.clone(),
+                case: case.clone(),
+            }
+        }
+        std_deduce_cert::ApplicabilityReasonKind::TerritoryMismatch { rule, places } => {
+            InapplicableReason::TerritoryMismatch {
+                rule: rule.clone(),
+                places: places.clone(),
+            }
+        }
+        other => panic!(
+            "内部状态不一致：{} 的不适用原因 `{}` 不是排除理由",
+            verdict.keyword(),
+            other.code()
+        ),
+    }
+}
+
+fn undecidable_reason(
+    reason: Option<&std_deduce_cert::ApplicabilityReason>,
+    verdict: &std_deduce_cert::ApplicabilityVerdict,
+) -> UndecidableReason {
+    let reason = required_reason(reason);
+    match &reason.detail {
+        std_deduce_cert::ApplicabilityReasonKind::InvalidDate { field, value } => {
+            UndecidableReason::InvalidDate {
+                field: date_field(*field),
+                value: value.clone(),
+            }
+        }
+        std_deduce_cert::ApplicabilityReasonKind::InvertedInterval { from, to } => {
+            UndecidableReason::InvertedInterval {
+                from: from.clone(),
+                to: to.clone(),
+            }
+        }
+        std_deduce_cert::ApplicabilityReasonKind::PartialDateCoverage {
+            covered,
+            outside,
+            effective_from,
+            effective_to,
+        } => UndecidableReason::PartialDateCoverage {
+            covered: covered.clone(),
+            outside: outside.clone(),
+            effective_from: effective_from.as_ref().cloned(),
+            effective_to: effective_to.as_ref().cloned(),
+        },
+        std_deduce_cert::ApplicabilityReasonKind::IncomparableCode {
+            dimension,
+            rule,
+            case,
+        } => UndecidableReason::IncomparableCode {
+            dimension: code_dimension(*dimension),
+            rule: rule.clone(),
+            case: case.clone(),
+        },
+        std_deduce_cert::ApplicabilityReasonKind::PartialPlaceCoverage {
+            covered,
+            uncovered,
+            rule,
+        } => UndecidableReason::PartialPlaceCoverage {
+            covered: covered.clone(),
+            uncovered: uncovered.clone(),
+            rule: rule.clone(),
+        },
+        other => panic!(
+            "内部状态不一致：{} 的无法判定原因 `{}` 不是判定理由",
+            verdict.keyword(),
+            other.code()
+        ),
+    }
+}
+
+fn date_field(field: std_deduce_cert::DateField) -> DateField {
+    match field {
+        std_deduce_cert::DateField::EffectiveFrom => DateField::EffectiveFrom,
+        std_deduce_cert::DateField::EffectiveTo => DateField::EffectiveTo,
+        std_deduce_cert::DateField::AsOf => DateField::AsOf,
+        std_deduce_cert::DateField::OccurredAt => DateField::OccurredAt,
+    }
+}
+
+fn code_dimension(dimension: std_deduce_cert::CodeDimension) -> CodeDimension {
+    match dimension {
+        std_deduce_cert::CodeDimension::Jurisdiction => CodeDimension::Jurisdiction,
+        std_deduce_cert::CodeDimension::Territory => CodeDimension::Territory,
+    }
+}
+
+/// Convert the display judgement into the certificate's record for one rule
+/// application or gap candidate.
+///
+/// `scope` is the applied rule's environment declaration; it is the only part
+/// of the record the reasoner's judgement does not already carry.
+pub(crate) fn certificate_applicability(
+    scope: &Scope,
+    value: &Applicability,
+) -> std_deduce_cert::RuleApplicability {
+    let basis = std_deduce_cert::ApplicabilityBasis {
+        dates: value
+            .basis()
+            .dates
+            .iter()
+            .map(|dated| std_deduce_cert::DatedEvidence {
+                date: dated.date.clone(),
+                query_date_fallback: dated.query_date_fallback,
+                covered: dated.covered,
+            })
+            .collect(),
+        places: value
+            .basis()
+            .places
+            .iter()
+            .map(|place| std_deduce_cert::PlaceEvidence {
+                place: place.place.clone(),
+                covered: place.covered,
+            })
+            .collect(),
+        missing_event_date: value.basis().missing_event_date,
+        missing_event_place: value.basis().missing_event_place,
+        scope: std_deduce_cert::ScopeEvidence::of(scope),
+        session: std_deduce_cert::SessionEvidence {
+            as_of: explicit_option(value.basis().session_as_of.clone()),
+            jurisdiction: explicit_option(value.basis().session_jurisdiction.clone()),
+        },
+    };
+    let (verdict, reason) = match value {
+        Applicability::Applicable { .. } => {
+            (std_deduce_cert::ApplicabilityVerdict::Applicable, None)
+        }
+        Applicability::Inapplicable { reason, .. } => (
+            std_deduce_cert::ApplicabilityVerdict::Inapplicable,
+            Some(inapplicable_kind(reason)),
+        ),
+        Applicability::Unchecked { missing, .. } => (
+            std_deduce_cert::ApplicabilityVerdict::Unchecked,
+            Some(missing_kind(*missing)),
+        ),
+        Applicability::Undecidable { reason, .. } => (
+            std_deduce_cert::ApplicabilityVerdict::Undecidable,
+            Some(undecidable_kind(reason)),
+        ),
+    };
+    std_deduce_cert::RuleApplicability {
+        verdict,
+        basis,
+        reason: match reason {
+            Some(kind) => {
+                std_deduce_cert::Explicit::some(std_deduce_cert::ApplicabilityReason::new(kind))
+            }
+            None => std_deduce_cert::Explicit::none(),
+        },
+    }
+}
+
+fn explicit_option(value: Option<String>) -> std_deduce_cert::Explicit<String> {
+    match value {
+        Some(value) => std_deduce_cert::Explicit::some(value),
+        None => std_deduce_cert::Explicit::none(),
+    }
+}
+
+fn missing_kind(missing: MissingInput) -> std_deduce_cert::ApplicabilityReasonKind {
+    match missing {
+        MissingInput::RuleHasNoScope => std_deduce_cert::ApplicabilityReasonKind::RuleHasNoScope,
+        MissingInput::NoCaseDate => std_deduce_cert::ApplicabilityReasonKind::NoCaseDate,
+        MissingInput::PartialCaseDate => std_deduce_cert::ApplicabilityReasonKind::PartialCaseDate,
+        MissingInput::NoCasePlace => std_deduce_cert::ApplicabilityReasonKind::NoCasePlace,
+        MissingInput::PartialCasePlace => {
+            std_deduce_cert::ApplicabilityReasonKind::PartialCasePlace
+        }
+        MissingInput::NoQueryJurisdiction => {
+            std_deduce_cert::ApplicabilityReasonKind::NoQueryJurisdiction
+        }
+    }
+}
+
+fn inapplicable_kind(reason: &InapplicableReason) -> std_deduce_cert::ApplicabilityReasonKind {
+    match reason {
         InapplicableReason::NotYetInForce {
             dates,
-            effective_from: from.unwrap_or_default().to_owned(),
+            effective_from,
+        } => std_deduce_cert::ApplicabilityReasonKind::NotYetInForce {
+            dates: dates.clone(),
+            effective_from: effective_from.clone(),
+        },
+        InapplicableReason::Repealed { dates, repealed } => {
+            std_deduce_cert::ApplicabilityReasonKind::Repealed {
+                dates: dates.clone(),
+                repealed: repealed.clone(),
+            }
         }
-    } else if after_end && !before_start {
-        InapplicableReason::Repealed {
-            dates,
-            repealed: to.unwrap_or_default().to_owned(),
-        }
-    } else {
         InapplicableReason::OutsideRange {
             dates,
-            effective_from: from.map(ToOwned::to_owned),
-            effective_to: to.map(ToOwned::to_owned),
+            effective_from,
+            effective_to,
+        } => std_deduce_cert::ApplicabilityReasonKind::OutsideRange {
+            dates: dates.clone(),
+            effective_from: explicit_option(effective_from.clone()),
+            effective_to: explicit_option(effective_to.clone()),
+        },
+        InapplicableReason::JurisdictionMismatch { rule, case } => {
+            std_deduce_cert::ApplicabilityReasonKind::JurisdictionMismatch {
+                rule: rule.clone(),
+                case: case.clone(),
+            }
+        }
+        InapplicableReason::TerritoryMismatch { rule, places } => {
+            std_deduce_cert::ApplicabilityReasonKind::TerritoryMismatch {
+                rule: rule.clone(),
+                places: places.clone(),
+            }
         }
     }
 }
 
-/// The territorial verdict before it is folded into the overall judgement.
-enum PlaceVerdict {
-    /// Every event place is covered.
-    Inside,
-    /// Every event place is outside the rule's territory.
-    Inapplicable(InapplicableReason),
-    /// No place is recorded, or some referenced fact has none.
-    Unchecked(MissingInput),
-    /// Some places are covered and some are not, or a comparison cannot
-    /// decide.
-    Undecidable(UndecidableReason),
-}
-
-/// Check every event place against the rule's territory.
-///
-/// A fact without `occurred_in` is missing input; the rule's own territory is
-/// never used to infer where the event happened. Partial coverage is
-/// undecidable, never rounded to either side.
-fn judge_places(rule: &str, case: &InstanceAnchor, basis: &mut Basis) -> PlaceVerdict {
-    let partial = !case.event_places.is_empty() && case.missing_event_place;
-    let mut references: Vec<&str> = Vec::new();
-    for place in &case.event_places {
-        let place = place.as_str();
-        if !references.contains(&place) {
-            references.push(place);
+fn undecidable_kind(reason: &UndecidableReason) -> std_deduce_cert::ApplicabilityReasonKind {
+    match reason {
+        UndecidableReason::InvalidDate { field, value } => {
+            std_deduce_cert::ApplicabilityReasonKind::InvalidDate {
+                field: cert_date_field(*field),
+                value: value.clone(),
+            }
         }
-    }
-    if references.is_empty() {
-        return PlaceVerdict::Unchecked(MissingInput::NoCasePlace);
-    }
-
-    let mut covered = Vec::new();
-    let mut uncovered = Vec::new();
-    let mut nested = None;
-    for place in references {
-        let relation = compare_codes(rule, place);
-        let covered_flag = match relation {
-            CodeRelation::Equal => Some(true),
-            CodeRelation::Disjoint => Some(false),
-            CodeRelation::Nested => None,
-        };
-        basis.places.push(PlaceEvidence {
-            place: place.to_owned(),
-            covered: covered_flag,
-        });
-        match covered_flag {
-            Some(true) => covered.push(place.to_owned()),
-            Some(false) => uncovered.push(place.to_owned()),
-            None => nested = nested.or(Some(place)),
+        UndecidableReason::InvertedInterval { from, to } => {
+            std_deduce_cert::ApplicabilityReasonKind::InvertedInterval {
+                from: from.clone(),
+                to: to.clone(),
+            }
         }
-    }
-
-    if partial {
-        // A referenced fact has no place: the known places cannot represent it.
-        return PlaceVerdict::Unchecked(MissingInput::PartialCasePlace);
-    }
-    if let Some(place) = nested {
-        return PlaceVerdict::Undecidable(UndecidableReason::IncomparableCode {
-            dimension: CodeDimension::Territory,
-            rule: rule.to_owned(),
-            case: place.to_owned(),
-        });
-    }
-    if uncovered.is_empty() {
-        return PlaceVerdict::Inside;
-    }
-    if covered.is_empty() {
-        return PlaceVerdict::Inapplicable(InapplicableReason::TerritoryMismatch {
-            rule: rule.to_owned(),
-            places: uncovered,
-        });
-    }
-    PlaceVerdict::Undecidable(UndecidableReason::PartialPlaceCoverage {
-        covered,
-        uncovered,
-        rule: rule.to_owned(),
-    })
-}
-
-/// How two opaque codes relate.
-enum CodeRelation {
-    /// The same code.
-    Equal,
-    /// One is a `-`-separated prefix of the other.
-    Nested,
-    /// Neither contains the other.
-    Disjoint,
-}
-
-fn compare_codes(rule: &str, case: &str) -> CodeRelation {
-    if rule == case {
-        CodeRelation::Equal
-    } else if is_nested(rule, case) || is_nested(case, rule) {
-        CodeRelation::Nested
-    } else {
-        CodeRelation::Disjoint
+        UndecidableReason::PartialDateCoverage {
+            covered,
+            outside,
+            effective_from,
+            effective_to,
+        } => std_deduce_cert::ApplicabilityReasonKind::PartialDateCoverage {
+            covered: covered.clone(),
+            outside: outside.clone(),
+            effective_from: explicit_option(effective_from.clone()),
+            effective_to: explicit_option(effective_to.clone()),
+        },
+        UndecidableReason::IncomparableCode {
+            dimension,
+            rule,
+            case,
+        } => std_deduce_cert::ApplicabilityReasonKind::IncomparableCode {
+            dimension: cert_code_dimension(*dimension),
+            rule: rule.clone(),
+            case: case.clone(),
+        },
+        UndecidableReason::PartialPlaceCoverage {
+            covered,
+            uncovered,
+            rule,
+        } => std_deduce_cert::ApplicabilityReasonKind::PartialPlaceCoverage {
+            covered: covered.clone(),
+            uncovered: uncovered.clone(),
+            rule: rule.clone(),
+        },
     }
 }
 
-/// Is `prefix` a `-`-separated leading segment of `whole`?
-fn is_nested(prefix: &str, whole: &str) -> bool {
-    whole.len() > prefix.len()
-        && whole.starts_with(prefix)
-        && whole.as_bytes()[prefix.len()] == b'-'
+fn cert_date_field(field: DateField) -> std_deduce_cert::DateField {
+    match field {
+        DateField::EffectiveFrom => std_deduce_cert::DateField::EffectiveFrom,
+        DateField::EffectiveTo => std_deduce_cert::DateField::EffectiveTo,
+        DateField::AsOf => std_deduce_cert::DateField::AsOf,
+        DateField::OccurredAt => std_deduce_cert::DateField::OccurredAt,
+    }
+}
+
+fn cert_code_dimension(dimension: CodeDimension) -> std_deduce_cert::CodeDimension {
+    match dimension {
+        CodeDimension::Jurisdiction => std_deduce_cert::CodeDimension::Jurisdiction,
+        CodeDimension::Territory => std_deduce_cert::CodeDimension::Territory,
+    }
 }
 
 fn escape_dates(dates: &[String]) -> String {

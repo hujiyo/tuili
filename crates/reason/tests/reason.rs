@@ -7,8 +7,8 @@ use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{name, Decl, Env, Expr};
 use std_deduce_lang::Library;
 use std_deduce_reason::{
-    verify, Applicability, Conflict, PriorityClause, PriorityOrigin, Provenance, Reasoner,
-    Resolution, ResolutionBasis, Side, UnresolvedReason,
+    verify, Applicability, Conflict, MissingInput, PriorityClause, PriorityOrigin, Provenance,
+    Reasoner, Resolution, ResolutionBasis, Side, UnresolvedReason,
 };
 
 fn load(src: &str) -> Library {
@@ -208,7 +208,8 @@ rule r :
         premises: vec![],
         bindings: vec![],
         sources: vec![SourceRef::new("测试", "一")],
-        applicability: Applicability::Applicable {
+        applicability: Applicability::Unchecked {
+            missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
         },
     });
@@ -224,7 +225,8 @@ rule r :
         premises: vec![],
         bindings: vec![],
         sources: vec![],
-        applicability: Applicability::Applicable {
+        applicability: Applicability::Unchecked {
+            missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
         },
     });
@@ -256,6 +258,8 @@ rule r :
         identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
+        occurred_at: None,
+        occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
         rule: name("r"),
@@ -263,7 +267,8 @@ rule r :
         premises: vec![0],
         bindings: vec![],
         sources: vec![],
-        applicability: Applicability::Applicable {
+        applicability: Applicability::Unchecked {
+            missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
         },
     });
@@ -297,6 +302,8 @@ rule r :
         identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
+        occurred_at: None,
+        occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
         rule: name("r"),
@@ -304,7 +311,8 @@ rule r :
         premises: vec![0],
         bindings: vec![],
         sources: vec![],
-        applicability: Applicability::Applicable {
+        applicability: Applicability::Unchecked {
+            missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
         },
     });
@@ -339,12 +347,16 @@ rule r :
         identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
+        occurred_at: None,
+        occurred_in: None,
     });
     d.nodes.push(Node::Assumption {
         prop: Expr::app(p("例外"), p("张三")),
         identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
+        occurred_at: None,
+        occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
         rule: name("r"),
@@ -352,7 +364,8 @@ rule r :
         premises: vec![0],
         bindings: vec![],
         sources: vec![],
-        applicability: Applicability::Applicable {
+        applicability: Applicability::Unchecked {
+            missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
         },
     });
@@ -387,6 +400,8 @@ rule r :
         identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
+        occurred_at: None,
+        occurred_in: None,
     });
     d.nodes.push(Node::Assumption {
         prop: Expr::app(
@@ -396,6 +411,8 @@ rule r :
         identity: FactIdentity::Verified,
         sources: vec![],
         label: None,
+        occurred_at: None,
+        occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
         rule: name("r"),
@@ -403,7 +420,8 @@ rule r :
         premises: vec![0],
         bindings: vec![(name("p"), p("张三"))],
         sources: vec![],
-        applicability: Applicability::Applicable {
+        applicability: Applicability::Unchecked {
+            missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
         },
     });

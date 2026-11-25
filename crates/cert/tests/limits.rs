@@ -12,7 +12,7 @@ use std_deduce_cert::{
 };
 use std_deduce_kernel::env::Env;
 
-const FIXTURE: &str = include_str!("fixtures/certificate_v6.json");
+const FIXTURE: &str = include_str!("fixtures/certificate_v7.json");
 
 /// A recorded environment with no profile, packs, corpora or dates.
 fn empty_environment() -> Value {
@@ -22,7 +22,7 @@ fn empty_environment() -> Value {
 /// A syntactically complete certificate around the given assumptions and nodes.
 fn certificate_json(assumptions: Value, nodes: Value, root: Value) -> String {
     json!({
-        "format_version": 6,
+        "format_version": 7,
         "environment": empty_environment(),
         "assumptions": assumptions,
         "interpretations": [],
@@ -49,7 +49,9 @@ fn gap_node() -> Value {
 fn self_asserted_assumption() -> Value {
     json!({
         "proposition": { "kind": "const", "name": "命题" },
-        "identity": "user_asserted"
+        "identity": "user_asserted",
+        "occurred_at": null,
+        "occurred_in": null
     })
 }
 
@@ -92,7 +94,7 @@ fn application_tree(leaves: usize) -> Value {
 
 #[test]
 fn the_reference_certificate_still_parses() {
-    Certificate::from_json(FIXTURE).expect("the v6 fixture must remain valid");
+    Certificate::from_json(FIXTURE).expect("the v7 fixture must remain valid");
 }
 
 #[test]
@@ -124,7 +126,7 @@ fn a_wrongly_typed_field_is_rejected() {
 /// not be read as a number.
 #[test]
 fn a_nan_number_is_rejected() {
-    let text = FIXTURE.replacen("\"format_version\": 6", "\"format_version\": NaN", 1);
+    let text = FIXTURE.replacen("\"format_version\": 7", "\"format_version\": NaN", 1);
     assert_ne!(text, FIXTURE, "the fixture must contain format_version");
     let error = rejected(&text, "NaN");
     assert!(
@@ -146,7 +148,7 @@ fn a_deeply_nested_expression_is_rejected() {
         ",\"arg\":{\"kind\":\"const\",\"name\":\"x\"}}".repeat(depth)
     );
     let text = format!(
-        "{{\"format_version\":6,\"environment\":{},\"assumptions\":[],\"interpretations\":[],\
+        "{{\"format_version\":7,\"environment\":{},\"assumptions\":[],\"interpretations\":[],\
          \"nodes\":[{{\"kind\":\"gap\",\"proposition\":{expression}}}],\"root\":null,\
          \"conflicts\":[],\"open_obligations\":[],\"metadata\":{{}}}}",
         empty_environment()
@@ -183,6 +185,60 @@ fn a_certificate_over_the_node_limit_is_rejected() {
     assert!(
         error.contains("节点数量超过上限"),
         "the error must name the node limit, got: {error}"
+    );
+}
+
+/// One gap candidate with the mandatory applicability record.
+fn gap_candidate() -> Value {
+    json!({
+        "rule": "r",
+        "bindings": [],
+        "held": [],
+        "missing": [],
+        "blocked_by": [],
+        "sources": [],
+        "applicability": {
+            "verdict": "unchecked",
+            "basis": {
+                "dates": [],
+                "places": [],
+                "missing_event_date": false,
+                "missing_event_place": false,
+                "scope": {
+                    "effective_from": null,
+                    "effective_to": null,
+                    "jurisdiction": null,
+                    "territory": null,
+                    "effective_from_origin": null,
+                    "effective_to_origin": null,
+                    "jurisdiction_origin": null,
+                    "territory_origin": null
+                },
+                "session": { "as_of": null, "jurisdiction": null }
+            },
+            "reason": {
+                "detail": { "kind": "rule_has_no_scope" },
+                "text": "规则没有声明任何范围"
+            }
+        }
+    })
+}
+
+/// One gap candidate carries one applicability record; the record count is
+/// bounded by the certificate's node bound.
+#[test]
+fn applicability_records_are_bounded_by_the_node_limit() {
+    let candidates: Vec<Value> = (0..MAX_CERT_NODES + 1).map(|_| gap_candidate()).collect();
+    let nodes = json!([{
+        "kind": "gap",
+        "proposition": { "kind": "const", "name": "命题" },
+        "candidates": candidates
+    }]);
+    let text = certificate_json(json!([]), nodes, Value::Null);
+    let error = rejected(&text, "too many applicability records");
+    assert!(
+        error.contains("适用性记录数量超过上限"),
+        "the error must name the record limit, got: {error}"
     );
 }
 

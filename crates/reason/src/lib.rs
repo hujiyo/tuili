@@ -97,12 +97,13 @@
 //! verdict and evidence wherever a rule is shown, so missing input and partial
 //! coverage are visible instead of silently ignored.
 //!
-//! The judgement itself is [`applicability::judge`]: a pure function over the
-//! rule's [`Scope`](std_deduce_kernel::meta::Scope) and the instance's
-//! [`InstanceAnchor`] (the premise facts' occurrence records plus the session
-//! fallback values). The reasoner only supplies those records; the CLI only
-//! renders the recorded verdict. A certificate still records no applicability
-//! judgement (the format is unchanged), so `:verify-cert` does not re-judge it.
+//! The judgement itself is [`std_deduce_cert::judge_applicability`]: a pure
+//! function over the rule's [`Scope`](std_deduce_kernel::meta::Scope) and
+//! the instance's anchor (the premise facts' occurrence records plus the
+//! session fallback values). The reasoner only supplies those records; the
+//! CLI only renders the recorded verdict. Certificate v7 records the verdict,
+//! basis, declared scope and reason on every rule application and gap
+//! candidate, and `:verify-cert` recomputes them independently.
 //!
 //! ## Certificates
 //!
@@ -157,6 +158,12 @@ pub enum Node {
         identity: FactIdentity,
         sources: Vec<SourceRef>,
         label: Option<String>,
+        /// The environment fact's recorded `occurred_at`, if any. It is
+        /// evidence about the case and travels with the assumption so a
+        /// certificate can record it; it is never defaulted.
+        occurred_at: Option<String>,
+        /// The environment fact's recorded `occurred_in`, if any.
+        occurred_in: Option<String>,
     },
     RuleApplication {
         rule: Name,
@@ -166,8 +173,8 @@ pub enum Node {
         bindings: Vec<(Name, Expr)>,
         sources: Vec<SourceRef>,
         /// The temporal/spatial judgement under which this instance fired,
-        /// with the event times/places it relied on. It is part of the
-        /// derivation's report; the certificate format does not record it.
+        /// with the event times/places it relied on. The certificate records it
+        /// together with the rule's declared scope.
         applicability: Applicability,
     },
     /// One application of an enabled interpretation. It is a separate step,
@@ -190,6 +197,14 @@ pub enum Node {
 #[derive(Debug, Clone)]
 pub struct GapCandidate {
     pub rule: Name,
+    /// The parameter bindings that produced this candidate instance. A
+    /// certificate records them so a checker can re-instantiate the rule's
+    /// premises instead of trusting the printed gap tree.
+    pub bindings: Vec<(Name, Expr)>,
+    /// The rule premises that already hold, in the rule's premise order. Their
+    /// propositions are how the certificate checker rebuilds the
+    /// applicability anchor from the environment's occurrence records.
+    pub held: Vec<Expr>,
     /// Premises that are not known.
     pub missing: Vec<Expr>,
     /// `unless` conditions that *are* known, i.e. why this rule is blocked.
@@ -698,17 +713,19 @@ impl<'a> Reasoner<'a> {
         &self,
         premises: &[Expr],
         facts: &BTreeMap<String, Expr>,
-    ) -> (Vec<String>, Vec<Expr>) {
+    ) -> (Vec<String>, Vec<Expr>, Vec<Expr>) {
         let mut held_keys = Vec::new();
+        let mut held = Vec::new();
         let mut missing = Vec::new();
         for premise in premises {
             if premise_satisfied(self.env, facts, premise) {
                 held_keys.push(self.key_of(premise));
+                held.push(premise.clone());
             } else {
                 missing.push(premise.clone());
             }
         }
-        (held_keys, missing)
+        (held_keys, held, missing)
     }
 
     /// The priority cycles of the environment: every strongly connected
@@ -1530,6 +1547,8 @@ impl<'a> Reasoner<'a> {
                 identity: a.identity,
                 sources: a.sources.clone(),
                 label: a.label.clone(),
+                occurred_at: a.occurred_at.clone(),
+                occurred_in: a.occurred_in.clone(),
             });
             ids.insert(k, id);
         }
@@ -1994,7 +2013,7 @@ impl<'a> Reasoner<'a> {
                 let premises: Vec<Expr> = (0..rule.premises.len())
                     .map(|index| close_pattern(&rule.open_premise(index), &binding))
                     .collect();
-                let (held_keys, _) = self.premise_status(&premises, &facts);
+                let (held_keys, _, _) = self.premise_status(&premises, &facts);
                 let verdict = self.judge_instance(&decl.scope, &held_keys);
                 // The conclusion is an issue even when this instance is
                 // excluded: the gap tree must show why the rule did not fire.
@@ -2276,7 +2295,7 @@ impl<'a> Reasoner<'a> {
             // reports as missing. The candidate's instance references only the
             // premise facts that already hold; a still-missing premise is not
             // a fact yet, so it does not contribute an event record.
-            let (held_keys, missing) = self.premise_status(&premises, &facts);
+            let (held_keys, held, missing) = self.premise_status(&premises, &facts);
             let blocked_by: Vec<Expr> = rule
                 .unlesses
                 .iter()
@@ -2285,6 +2304,8 @@ impl<'a> Reasoner<'a> {
                 .collect();
             candidates.push(GapCandidate {
                 rule: decl.name.clone(),
+                bindings: binding,
+                held,
                 missing,
                 blocked_by,
                 sources: decl.sources.clone(),
@@ -3584,6 +3605,8 @@ pub fn certificate(
                 identity,
                 sources,
                 label,
+                occurred_at,
+                occurred_in,
             } => {
                 let assumption = assumptions.len();
                 assumptions.push(std_deduce_cert::Assumption {
@@ -3591,6 +3614,8 @@ pub fn certificate(
                     identity: std_deduce_cert::FactIdentity::from(identity),
                     sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
                     label: label.clone(),
+                    occurred_at: explicit_option(occurred_at.clone()),
+                    occurred_in: explicit_option(occurred_in.clone()),
                 });
                 nodes.push(std_deduce_cert::Node::Assumption { assumption });
             }
@@ -3600,7 +3625,7 @@ pub fn certificate(
                 premises,
                 bindings,
                 sources,
-                ..
+                applicability,
             } => {
                 let mut converted = Vec::with_capacity(bindings.len());
                 for (parameter, value) in bindings {
@@ -3609,12 +3634,17 @@ pub fn certificate(
                         value: cert_expr(value, Some(id), &format!("参数 `{parameter}` 的绑定值"))?,
                     });
                 }
+                let scope = rule_scope(env, rule, id)?;
                 nodes.push(std_deduce_cert::Node::RuleApplication {
                     rule: rule.to_string(),
                     conclusion: cert_expr(conclusion, Some(id), "结论")?,
                     premises: premises.clone(),
                     bindings: converted,
                     sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
+                    applicability: Box::new(applicability::certificate_applicability(
+                        &scope,
+                        applicability,
+                    )),
                 });
             }
             Node::InterpretationApplication {
@@ -3640,6 +3670,39 @@ pub fn certificate(
             } => {
                 let mut converted = Vec::with_capacity(candidates.len());
                 for candidate in candidates {
+                    let bindings = candidate
+                        .bindings
+                        .iter()
+                        .map(|(parameter, value)| {
+                            Ok(std_deduce_cert::Binding {
+                                parameter: parameter.to_string(),
+                                value: cert_expr(
+                                    value,
+                                    Some(id),
+                                    &format!(
+                                        "候选规则 `{}` 的参数 `{parameter}` 绑定值",
+                                        candidate.rule
+                                    ),
+                                )?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    let held = candidate
+                        .held
+                        .iter()
+                        .enumerate()
+                        .map(|(i, expr)| {
+                            cert_expr(
+                                expr,
+                                Some(id),
+                                &format!(
+                                    "候选规则 `{}` 的第 {} 个已持有前提",
+                                    candidate.rule,
+                                    i + 1
+                                ),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
                     let missing = candidate
                         .missing
                         .iter()
@@ -3664,8 +3727,11 @@ pub fn certificate(
                             )
                         })
                         .collect::<Result<Vec<_>, String>>()?;
+                    let scope = rule_scope(env, &candidate.rule, id)?;
                     converted.push(std_deduce_cert::GapCandidate {
                         rule: candidate.rule.to_string(),
+                        bindings,
+                        held,
                         missing,
                         blocked_by,
                         sources: candidate
@@ -3673,6 +3739,10 @@ pub fn certificate(
                             .iter()
                             .map(std_deduce_cert::Source::from)
                             .collect(),
+                        applicability: applicability::certificate_applicability(
+                            &scope,
+                            &candidate.applicability,
+                        ),
                     });
                 }
                 nodes.push(std_deduce_cert::Node::Gap {
@@ -3818,6 +3888,38 @@ pub fn certificate(
         certificate.open_obligations.push(dependency.obligation());
     }
     Ok(certificate)
+}
+
+/// The recorded scope of the rule a derivation step applies.
+///
+/// The applicability record must quote the environment's declaration, so the
+/// checker can compare it field by field. A step that names a declaration this
+/// environment no longer holds cannot be converted rather than being exported
+/// with a guessed scope.
+fn rule_scope(
+    env: &Env,
+    rule: &Name,
+    node: usize,
+) -> Result<std_deduce_kernel::meta::Scope, String> {
+    let Some(decl) = env.get(rule) else {
+        return Err(format!(
+            "节点 {node} 引用的规则 `{rule}` 不在当前环境中，无法记录其适用范围"
+        ));
+    };
+    let DeclKind::Rule(_) = &decl.kind else {
+        return Err(format!(
+            "节点 {node} 引用的 `{rule}` 不是规则，无法记录其适用范围"
+        ));
+    };
+    Ok(decl.scope.clone())
+}
+
+/// An optional string in the certificate's explicit form: a value or `null`.
+fn explicit_option(value: Option<String>) -> std_deduce_cert::Explicit<String> {
+    match value {
+        Some(value) => std_deduce_cert::Explicit::some(value),
+        None => std_deduce_cert::Explicit::none(),
+    }
 }
 
 /// Encode one kernel expression, naming its location on failure.
