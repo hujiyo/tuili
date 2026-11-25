@@ -21,7 +21,14 @@
 //!           | 'defeated_by' IDENT
 //!           | 'prefer' IDENT
 //!           | 'source' (source_key STRING)+
+//! interpret := 'interpret' IDENT ':' application '→' application
+//!              'direction' DIRECTION 'source' (source_key STRING)+
+//!           -- `direction` is required and must start its own line, as must
+//!           -- every source clause (at least one is required and text,
+//!           -- locator and version must be non-empty). Both sides are
+//!           -- application terms: an arrow inside one needs parentheses.
 //! priority := 'priority' IDENT 'over' IDENT source*
+//! DIRECTION := 'literal' | 'expand' | 'narrow' | 'analogy'
 //! source_key := 'text' | 'locator' | 'version' | 'effective' | 'quote' | 'url'
 //!           | 'jurisdiction' | 'retrieved_at' | 'hash' | 'note'
 //! term     := arrow
@@ -35,7 +42,7 @@
 //! clause unless a term is syntactically incomplete. This keeps rule blocks
 //! looking like prose, which is what a legal reader needs.
 
-use std_deduce_kernel::FactIdentity;
+use std_deduce_kernel::{FactIdentity, InterpretationDirection};
 
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
@@ -142,6 +149,16 @@ impl Parser {
             msg: msg.into(),
             line: self.here().line,
             col: self.here().col,
+        })
+    }
+    /// An error reported at an earlier, caller-chosen position. Used when the
+    /// parser has already moved past the token that caused the problem (for
+    /// example, an interpretation's header once a clause is missing).
+    fn err_at<T>(&self, line: usize, col: usize, msg: impl Into<String>) -> PResult<T> {
+        Err(ParseError {
+            msg: msg.into(),
+            line,
+            col,
         })
     }
     fn expect(&mut self, t: &Tok, what: &str) -> PResult<()> {
@@ -451,27 +468,7 @@ impl Parser {
                     sources,
                 })
             }
-            "interpret" | "interpretation" => {
-                self.bump();
-                let name = self.ident()?;
-                self.expect(&Tok::Colon, "`:`")?;
-                // `term` consumes a top-level `→` itself, so the source side
-                // is parsed at application level; a source-side function
-                // type needs parentheses. The target side may be any term.
-                let from = self.application()?;
-                self.expect(&Tok::Arrow, "`→`")?;
-                let to = self.term()?;
-                let mut sources = Vec::new();
-                while self.keyword("source") {
-                    sources.push(self.source_spec()?);
-                }
-                Ok(Item::Interpretation {
-                    name,
-                    from,
-                    to,
-                    sources,
-                })
-            }
+            "interpret" | "interpretation" => self.interpretation(),
             "#check" | "check" => {
                 self.bump();
                 Ok(Item::Check(self.term()?))
@@ -495,6 +492,235 @@ impl Parser {
             }
             _ => self.err(format!("未知声明关键字 `{kw}`")),
         }
+    }
+
+    /// `interpret <id> : <from> → <to>`, then required `direction` and
+    /// `source` clauses on their own lines.
+    ///
+    /// `from` and `to` are parsed at application level. This is what keeps the
+    /// header on one line: a component that is itself an arrow must be
+    /// parenthesized, and the clause keywords `direction` / `source` end the
+    /// application instead of being swallowed as arguments.
+    fn interpretation(&mut self) -> PResult<Item> {
+        let (header_line, header_col) = {
+            let token = self.here();
+            (token.line, token.col)
+        };
+        self.bump();
+        let name = self.ident()?;
+        if !self.eat(&Tok::Colon) {
+            return self.err(format!(
+                "`interpret {name}` 缺少 `:`；应写成 `interpret {name} : <from> → <to>`，实际是 `{:?}`",
+                self.peek()
+            ));
+        }
+        let from = self.application_until_interpret_clause()?;
+        // A clause keyword after `from` is still on the header line; report it
+        // as a line-placement error rather than as a missing arrow, so the
+        // syntax stays line-oriented in both directions.
+        if let Tok::Ident(clause) = self.peek().clone() {
+            if (clause == "direction" || clause == "source") && self.here().line == header_line {
+                return self.err_at(
+                    header_line,
+                    header_col,
+                    format!(
+                        "`interpret {name}` 的 `{clause}` 子句必须另起一行；\
+                         头行只写 `interpret {name} : <from> → <to>`"
+                    ),
+                );
+            }
+        }
+        if !self.eat(&Tok::Arrow) {
+            return self.err(format!(
+                "`interpret {name}` 的 from 之后缺少 `→`；应写成 `interpret {name} : <from> → <to>`，实际是 `{:?}`",
+                self.peek()
+            ));
+        }
+        let to = self.application_until_interpret_clause()?;
+        // `direction` and `source` are line-oriented clauses. Writing one on
+        // the header line is refused here, before it can be mistaken for an
+        // application argument.
+        if let Tok::Ident(clause) = self.peek().clone() {
+            if (clause == "direction" || clause == "source") && self.here().line == header_line {
+                return self.err_at(
+                    header_line,
+                    header_col,
+                    format!(
+                        "`interpret {name}` 的 `{clause}` 子句必须另起一行；\
+                         头行只写 `interpret {name} : <from> → <to>`"
+                    ),
+                );
+            }
+        }
+        // A leftover arrow means a component was not parenthesized, e.g.
+        // `interpret i : P → Q → R` — the `to` side ends at `Q`.
+        if self.peek() == &Tok::Arrow {
+            return self.err_at(
+                header_line,
+                header_col,
+                format!(
+                    "`interpret {name}` 的 from/to 只能是应用项：类型里的 `→` 必须用括号括起，例如 `(P → Q)`"
+                ),
+            );
+        }
+
+        let mut direction: Option<InterpretationDirection> = None;
+        let mut sources: Vec<SourceSpec> = Vec::new();
+        loop {
+            let save = self.pos;
+            self.skip_newlines();
+            if matches!(self.peek(), Tok::Eof) {
+                self.pos = save;
+                break;
+            }
+            let Tok::Ident(keyword) = self.peek().clone() else {
+                self.pos = save;
+                break;
+            };
+            match keyword.as_str() {
+                "direction" => {
+                    let (line, col) = {
+                        let token = self.here();
+                        (token.line, token.col)
+                    };
+                    self.bump();
+                    if direction.is_some() {
+                        return self.err_at(
+                            line,
+                            col,
+                            format!("`interpret {name}` 的 direction 子句重复：一个解释只能声明一个方向"),
+                        );
+                    }
+                    let direction_keyword = match self.peek().clone() {
+                        Tok::Ident(keyword) => {
+                            self.bump();
+                            keyword
+                        }
+                        other => {
+                            return self.err_at(
+                                line,
+                                col,
+                                format!(
+                                    "`interpret {name}` 的 direction 缺少方向关键字；\
+                                     可选：literal / expand / narrow / analogy，实际是 `{other:?}`"
+                                ),
+                            )
+                        }
+                    };
+                    let Some(parsed) = InterpretationDirection::from_keyword(&direction_keyword)
+                    else {
+                        return self.err_at(
+                            line,
+                            col,
+                            format!(
+                                "`interpret {name}` 的未知方向 `{direction_keyword}`；\
+                                 可选：literal / expand / narrow / analogy"
+                            ),
+                        );
+                    };
+                    direction = Some(parsed);
+                    if !matches!(self.peek(), Tok::Newline | Tok::Eof) {
+                        return self.err_at(
+                            line,
+                            col,
+                            format!(
+                                "`interpret {name}` 的 direction 子句之后必须是换行；\
+                                 direction 与 source 必须各占一行"
+                            ),
+                        );
+                    }
+                }
+                "source" => {
+                    let (line, col) = {
+                        let token = self.here();
+                        (token.line, token.col)
+                    };
+                    // Every source error names the interpretation, so a
+                    // missing text/locator is not just "a source clause".
+                    let source = self.source_spec().map_err(|error| ParseError {
+                        msg: format!("`interpret {name}` 的 source 子句：{}", error.msg),
+                        line: error.line,
+                        col: error.col,
+                    })?;
+                    for (field, value) in [
+                        ("text", source.text.as_str()),
+                        ("locator", source.locator.as_str()),
+                        ("version", source.version.as_str()),
+                    ] {
+                        if value.trim().is_empty() {
+                            return self.err_at(
+                                line,
+                                col,
+                                format!(
+                                    "`interpret {name}` 的 source 缺少非空的 `{field}`：\
+                                     解释的出处必须写明文本、条号与版本"
+                                ),
+                            );
+                        }
+                    }
+                    sources.push(source);
+                    if !matches!(self.peek(), Tok::Newline | Tok::Eof) {
+                        let next = match self.peek().clone() {
+                            Tok::Ident(keyword) => keyword,
+                            _ => String::new(),
+                        };
+                        let message = match next.as_str() {
+                            "source" => format!(
+                                "`interpret {name}` 的 `source` 子句必须另起一行：每个来源写一条 source"
+                            ),
+                            "direction" => format!(
+                                "`interpret {name}` 的 `direction` 子句必须另起一行"
+                            ),
+                            _ => format!(
+                                "`interpret {name}` 的 source 子句之后必须是换行，实际是 `{:?}`",
+                                self.peek()
+                            ),
+                        };
+                        return self.err_at(line, col, message);
+                    }
+                }
+                other if is_item_keyword(other) => {
+                    self.pos = save;
+                    break;
+                }
+                other => {
+                    return self.err_at(
+                        header_line,
+                        header_col,
+                        format!(
+                            "`interpret {name}` 里未知的子句 `{other}`；direction 与 source 必须各占一行"
+                        ),
+                    )
+                }
+            }
+        }
+        let Some(direction) = direction else {
+            return self.err_at(
+                header_line,
+                header_col,
+                format!(
+                    "`interpret {name}` 缺少 direction 子句；\
+                     必须另起一行写 `direction literal|expand|narrow|analogy`（没有默认方向）"
+                ),
+            );
+        };
+        if sources.is_empty() {
+            return self.err_at(
+                header_line,
+                header_col,
+                format!(
+                    "`interpret {name}` 缺少 source 子句；解释必须至少有一条出处，\
+                     另起一行写 `source text \"…\" locator \"…\" version \"…\"`"
+                ),
+            );
+        }
+        Ok(Item::Interpretation {
+            name,
+            from,
+            to,
+            direction,
+            sources,
+        })
     }
 
     fn rule_body(&mut self, name: String) -> PResult<Item> {
@@ -799,6 +1025,26 @@ impl Parser {
         Ok(t)
     }
 
+    /// Application parsing for an interpretation's `to` side.
+    ///
+    /// `direction` and `source` are reserved clause keywords there: stopping
+    /// before them lets the caller report "must start its own line" instead of
+    /// silently turning the clause into an application argument.
+    fn application_until_interpret_clause(&mut self) -> PResult<Term> {
+        let mut t = self.atom()?;
+        loop {
+            match self.peek() {
+                Tok::LParen => {}
+                Tok::Ident(next) if next == "direction" || next == "source" => break,
+                Tok::Ident(_) => {}
+                _ => break,
+            }
+            let a = self.atom()?;
+            t = Term::App(Box::new(t), Box::new(a));
+        }
+        Ok(t)
+    }
+
     fn atom(&mut self) -> PResult<Term> {
         if self.peek() == &Tok::Ident("#".into()) {
             // `#check foo` used as a command wrapper: consume the sigil.
@@ -873,6 +1119,35 @@ impl Parser {
             self.err::<(String, Term)>(format!("绑定 `{n}` 缺少类型，请写成 `({n} : T)`"))
         }
     }
+}
+
+/// Whether a keyword starts a top-level declaration or command. Used to end a
+/// clause block without swallowing the next item.
+fn is_item_keyword(keyword: &str) -> bool {
+    matches!(
+        keyword,
+        "#" | "import"
+            | "namespace"
+            | "rule"
+            | "sort"
+            | "pred"
+            | "axiom"
+            | "def"
+            | "interpret"
+            | "interpretation"
+            | "contrary"
+            | "unique"
+            | "priority"
+            | "obj"
+            | "object"
+            | "individual"
+            | "check"
+            | "why"
+            | "gap"
+            | "proposition"
+            | "assert"
+            | "show"
+    )
 }
 
 /// Parse a whole program.

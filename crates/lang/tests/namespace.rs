@@ -194,7 +194,7 @@ fn module_loads_declarations_under_its_namespace() {
 }
 
 #[test]
-fn every_non_interpretation_declaration_kind_loads_when_qualified() {
+fn every_supported_declaration_kind_loads_when_qualified() {
     let src = r#"
 namespace a
 sort a.公民
@@ -233,39 +233,42 @@ unique a.违法 1
     assert_eq!(
         lib.env.interpretations().len(),
         0,
-        "an interpretation must never reach the ledger"
+        "this fixture declares no interpretation"
     );
 }
 
 #[test]
-fn interpretation_parses_but_is_rejected_at_load() {
-    let src = "namespace a\npred a.P : Prop\npred a.Q : Prop\ninterpret a.i : a.P → a.Q\n";
+fn an_interpretation_follows_the_same_namespace_rules() {
+    // A module interpretation loads when its name and references are
+    // qualified and it carries the required clauses.
+    let src = "namespace a\npred a.P : Prop\npred a.Q : Prop\n\
+               interpret a.i : a.P → a.Q\n  direction narrow\n\
+               \x20 source text \"测试\" locator \"一\" version \"2020\"\n";
     let items = parse(src).expect("the interpret syntax must parse");
     assert!(
         matches!(items.last(), Some(Item::Interpretation { .. })),
-        "the parser must still build an interpretation item for M2-8"
+        "the parser must build an interpretation item"
     );
+    let lib = load(src).expect("a qualified interpretation must load");
+    assert_eq!(lib.env.interpretations().len(), 1);
 
-    let err = load(src)
-        .expect_err("an interpretation must not reach the ledger")
-        .to_string();
-    assert!(err.contains("a.i"), "got: {err}");
-    assert!(err.contains("解释语义尚未实现（M2-8）"), "got: {err}");
-    assert!(err.contains("推理器不消费解释"), "got: {err}");
-
-    // A qualified declaration name does not bypass the check, but an
-    // unqualified reference is still reported first by the module pre-pass.
-    let err = load("namespace a\npred a.P : Prop\npred a.Q : Prop\ninterpret a.i : P → a.Q\n")
-        .expect_err("the unqualified reference must be refused")
-        .to_string();
+    // An unqualified reference is still reported by the module pre-pass.
+    let err = load(
+        "namespace a\npred a.P : Prop\npred a.Q : Prop\ninterpret a.i : P → a.Q\n\
+         \x20 direction narrow\n  source text \"测试\" locator \"一\" version \"2020\"\n",
+    )
+    .expect_err("the unqualified reference must be refused")
+    .to_string();
     assert!(err.contains("未限定"), "got: {err}");
     assert!(err.contains("`P`"), "got: {err}");
 
-    // Case files reject interpretations too, even without any namespace.
-    let err = load("pred P : Prop\ninterpret 解释 : P → P\n")
-        .expect_err("a case-file interpretation must not load")
-        .to_string();
-    assert!(err.contains("解释语义尚未实现（M2-8）"), "got: {err}");
+    // A case file has no namespace, so its declaration name is unqualified.
+    let lib = load(
+        "pred P : Prop\npred Q : Prop\ninterpret 解释 : P → Q\n\
+         \x20 direction literal\n  source text \"测试\" locator \"二\" version \"2020\"\n",
+    )
+    .expect("a case-file interpretation must load");
+    assert!(lib.env.get("解释").is_some());
 }
 
 #[test]
@@ -321,7 +324,8 @@ fn module_declaration_names_must_carry_the_namespace_prefix() {
             "`rule 规则`",
         ),
         (
-            "namespace a\ninterpret 解释 : a.P → a.Q\n",
+            "namespace a\ninterpret 解释 : a.P → a.Q\n\
+             \x20 direction literal\n  source text \"t\" locator \"l\" version \"1\"\n",
             "`interpret 解释`",
         ),
         (
@@ -415,7 +419,8 @@ fn module_references_must_be_fully_qualified() {
             "P",
         ),
         (
-            "namespace a\npred a.P : Prop\npred a.Q : Prop\ninterpret a.i : P → a.Q\n",
+            "namespace a\npred a.P : Prop\npred a.Q : Prop\ninterpret a.i : P → a.Q\n\
+             \x20 direction literal\n  source text \"t\" locator \"l\" version \"1\"\n",
             "a.i",
             "P",
         ),
@@ -518,7 +523,11 @@ fn a_case_file_cannot_declare_a_dotted_name_but_may_reference_one() {
             "rule a.规则 :\n  premise Prop\n  conclude Prop\n  source text \"t\" locator \"l\"\n",
             "`rule a.规则`",
         ),
-        ("interpret a.解释 : Prop → Prop\n", "`interpret a.解释`"),
+        (
+            "interpret a.解释 : Prop → Prop\n  direction literal\n\
+             \x20 source text \"t\" locator \"l\" version \"1\"\n",
+            "`interpret a.解释`",
+        ),
     ] {
         let err = load(src).expect_err("a case file must not declare a dotted name");
         assert!(

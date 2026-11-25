@@ -565,15 +565,91 @@ impl Library {
                     theory.rules.push(n.clone());
                     report.declared.push(n);
                 }
-                Item::Interpretation { name: n, .. } => {
-                    // The parser accepts an interpretation declaration, but
-                    // nothing in the reasoner or the certificate layer reads
-                    // it. Letting it into the ledger would make `:why` show a
-                    // gap while `:inspect` claims an interpretation exists;
-                    // refuse it explicitly until M2-8 implements the semantics.
-                    return Err(LoadError::new(format!(
-                        "`interpret {n}`：解释语义尚未实现（M2-8），推理器不消费解释"
-                    )));
+                Item::Interpretation {
+                    name: n,
+                    from,
+                    to,
+                    direction,
+                    sources,
+                } => {
+                    // An interpretation is a named, sourced claim, but in this
+                    // step it is deliberately inert: it enters the ledger as
+                    // an opaque constant of type `from → to`, and neither the
+                    // reasoner nor the certificate layer inspects it. This is
+                    // what makes "loaded but not enabled" checkable instead of
+                    // letting a half-implemented syntax look supported.
+                    if sources.is_empty() {
+                        return Err(LoadError::new(format!(
+                            "`interpret {n}` 缺少 source 子句；解释必须至少有一条出处"
+                        )));
+                    }
+                    for source in &sources {
+                        for (field, value) in [
+                            ("text", source.text.as_str()),
+                            ("locator", source.locator.as_str()),
+                            ("version", source.version.as_str()),
+                        ] {
+                            if value.trim().is_empty() {
+                                return Err(LoadError::new(format!(
+                                    "`interpret {n}` 的 source 缺少非空的 `{field}`：\
+                                     解释的出处必须写明文本、条号与版本"
+                                )));
+                            }
+                        }
+                    }
+                    let efrom = elab::elab_top(&next.env, &from).map_err(|e| {
+                        LoadError::new(format!("`interpret {n}` 的 from 无法精化：{}", e.msg))
+                    })?;
+                    std_deduce_kernel::check::check(
+                        &next.env,
+                        &std_deduce_kernel::Ctx::new(),
+                        &efrom,
+                        &Expr::Sort(0),
+                    )
+                    .map_err(|e| {
+                        LoadError::new(format!(
+                            "`interpret {n}` 的 from 不是命题（必须是 `Sort 0`）：{e}；\
+                             概念到概念的解释尚未支持"
+                        ))
+                    })?;
+                    let eto = elab::elab_top(&next.env, &to).map_err(|e| {
+                        LoadError::new(format!("`interpret {n}` 的 to 无法精化：{}", e.msg))
+                    })?;
+                    std_deduce_kernel::check::check(
+                        &next.env,
+                        &std_deduce_kernel::Ctx::new(),
+                        &eto,
+                        &Expr::Sort(0),
+                    )
+                    .map_err(|e| {
+                        LoadError::new(format!(
+                            "`interpret {n}` 的 to 不是命题（必须是 `Sort 0`）：{e}；\
+                             概念到概念的解释尚未支持"
+                        ))
+                    })?;
+                    let interpretation = std_deduce_kernel::env::Interpretation {
+                        name: std_deduce_kernel::name(&n),
+                        from: efrom.clone(),
+                        to: eto.clone(),
+                        direction,
+                        sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
+                    };
+                    let decl = Decl {
+                        name: std_deduce_kernel::name(&n),
+                        kind: std_deduce_kernel::DeclKind::Interpretation(Box::new(interpretation)),
+                        // The readable type of the opaque constant. It is a
+                        // proposition (`from → to` in `Sort 0`), so the
+                        // kernel's sort check accepts it; being opaque, it
+                        // proves nothing on its own.
+                        ty: Expr::pi(efrom, eto),
+                        sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
+                        index: 0,
+                    };
+                    next.env
+                        .insert(decl, &std_deduce_kernel::Ctx::new())
+                        .map_err(|e| LoadError::new(format!("`interpret {n}`：{e}")))?;
+                    theory.decls.push(n.clone());
+                    report.declared.push(n);
                 }
                 Item::Check(t) => {
                     let e = elab::elab_top(&next.env, &t).map_err(|e| LoadError::new(e.msg))?;

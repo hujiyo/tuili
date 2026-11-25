@@ -238,7 +238,10 @@ pub enum DeclKind {
     Def { body: Expr },
     /// A rule; opaque under conversion, driving the reasoner instead.
     Rule(Box<RuleDecl>),
-    /// A marked interpretation: it turns a premise into another premise.
+    /// A marked interpretation: it turns a premise into another premise. The
+    /// declaration is opaque and *inert*: the reasoner does not apply it, and
+    /// no certificate node cites it yet. It is kept so a later branch can opt
+    /// into a semantics without inventing identities retroactively.
     Interpretation(Box<Interpretation>),
     /// Two predicates whose facts cannot both hold: any pair with these heads
     /// and identical arguments is a conflict. Declared, never guessed, because
@@ -298,6 +301,46 @@ pub struct PriorityDecl {
     pub sources: Vec<SourceRef>,
 }
 
+/// How an interpretation moves between the two propositions it relates.
+///
+/// The direction is declared data, not an inferred property: a legal
+/// interpretation is a choice someone makes and must be able to audit. This
+/// step stores the keyword but assigns it no reasoning behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InterpretationDirection {
+    /// The words are applied as written.
+    Literal,
+    /// The proposition is read more broadly than its wording.
+    Expand,
+    /// The proposition is read more narrowly than its wording.
+    Narrow,
+    /// The proposition is carried over to a similar case.
+    Analogy,
+}
+
+impl InterpretationDirection {
+    /// The surface keyword, or `None` for an unknown word.
+    pub fn from_keyword(keyword: &str) -> Option<Self> {
+        match keyword {
+            "literal" => Some(Self::Literal),
+            "expand" => Some(Self::Expand),
+            "narrow" => Some(Self::Narrow),
+            "analogy" => Some(Self::Analogy),
+            _ => None,
+        }
+    }
+
+    /// The canonical surface keyword, as `:inspect` prints it.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Literal => "literal",
+            Self::Expand => "expand",
+            Self::Narrow => "narrow",
+            Self::Analogy => "analogy",
+        }
+    }
+}
+
 /// An interpretation before/after pair, with an explicit identity.
 ///
 /// The point of making this a named object is auditability: a derivation can
@@ -307,6 +350,9 @@ pub struct Interpretation {
     pub name: Name,
     pub from: Expr,
     pub to: Expr,
+    /// The declared direction. It is metadata in this step; nothing in the
+    /// reasoner or certificate layer reads it yet.
+    pub direction: InterpretationDirection,
     pub sources: Vec<SourceRef>,
 }
 
