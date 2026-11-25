@@ -26,15 +26,16 @@
 //! `--interpret <id>` enables one declared interpretation for the session (it
 //! may be repeated; two interpretations with kernel-equivalent `to`
 //! conclusions are refused), and
-//! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` set the session's legal
-//! as-of date and jurisdiction code; `:asof` / `:jurisdiction` print or replace
+//! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` set the session's date
+//! value (a fallback only when a judged instance has no event time) and
+//! jurisdiction code; `:asof` / `:jurisdiction` print or replace
 //! the same session values and report whether they came from the command line
 //! or a session command. They are stamped into a `:cert` certificate and
 //! compared exactly by `:verify-cert`. `:jurisdiction` is the case's legal
 //! system in the applicability judgement; `:asof` is only a fallback when the
 //! judged rule instance references no fact with an occurrence time. If the
 //! loaded rules name two or more jurisdictions and the session has no
-//! jurisdiction, `:why` and `:cert` refuse with exit `2` instead of silently
+//! jurisdiction, `:why` / `:explain` / `:cert` refuse with exit `2` instead of silently
 //! picking one; `:gap`, `:issues`, `:applicability` and `:inspect` are not
 //! gated.
 //!
@@ -1082,7 +1083,13 @@ impl Session {
                     self.query(cmd, arg, out)
                 }
                 "gap" => self.query(cmd, arg, out),
-                "explain" => self.query(cmd, arg, out),
+                "explain" => {
+                    // The narrative uses the same certificate and the same
+                    // two proof layers as `:why`, so the multi-jurisdiction
+                    // ambiguity gate applies to it as well.
+                    self.require_jurisdiction()?;
+                    self.query(cmd, arg, out)
+                }
                 "applicability" => self.applicability_command(arg, out),
                 "issues" => self.issues_command(arg, out),
                 "cert" => self.export_certificate(arg, out),
@@ -1296,9 +1303,10 @@ impl Session {
     /// `:asof [YYYY-MM-DD]` — show or set the session's legal as-of date.
     ///
     /// The date is an identity field (`:cert` records it and `:verify-cert`
-    /// compares it) and a reference date of the applicability judgement: a
-    /// rule whose effective range does not contain it is inapplicable and does
-    /// not fire. It never changes which rules load.
+    /// compares it) and a fallback date of the applicability judgement: it is
+    /// used only for an instance whose premise facts record no event time.
+    /// It never overrides a recorded `occurred_at` and never changes which
+    /// rules load.
     fn as_of_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if arg.is_empty() {
             let line = match (self.environment.as_of(), self.as_of_source) {
@@ -1439,8 +1447,8 @@ impl Session {
         }
     }
 
-    /// Refuse `:why` / `:cert` when the loaded rules name two or more
-    /// jurisdictions and the session has not chosen one.
+    /// Refuse `:why` / `:explain` / `:cert` when the loaded rules name two or
+    /// more jurisdictions and the session has not chosen one.
     ///
     /// This is a gate on ambiguity, not an applicability judgment: it runs
     /// before the reasoner, because without a case jurisdiction the judgement
@@ -1754,24 +1762,24 @@ impl Session {
         if !scan.excluded.is_empty() {
             writeln!(
                 out,
-                "  另有 {} 条规则因时空适用性被排除而未扫描：",
+                "  另有 {} 条规则因所有可枚举实例都被时空适用性排除而未扫描：",
                 scan.excluded.len()
             )
             .ok();
             let mut has_undecidable = false;
-            for (rule, verdict) in &scan.excluded {
-                if matches!(
-                    verdict,
-                    std_deduce_reason::Applicability::Undecidable { .. }
-                ) {
-                    has_undecidable = true;
+            for excluded in &scan.excluded {
+                writeln!(out, "    ⟨{}⟩：", excluded.rule).ok();
+                for verdict in &excluded.verdicts {
+                    if matches!(verdict, Applicability::Undecidable { .. }) {
+                        has_undecidable = true;
+                    }
+                    writeln!(out, "      {}", verdict.summary_zh()).ok();
                 }
-                writeln!(out, "    ⟨{rule}⟩：{}", verdict.summary_zh()).ok();
             }
             if has_undecidable {
                 writeln!(
                     out,
-                    "    提示：无法判定的规则需要为该争点显式指定引用时间（尚未实现）。"
+                    "    提示：无法判定的实例需要为该争点显式指定引用时间（尚未实现）。"
                 )
                 .ok();
             }
@@ -1802,25 +1810,49 @@ impl Session {
                     .into(),
             );
         }
+        if arg.is_empty() {
+            // Without a goal there is no instance to judge: the command only
+            // reports the declarations. It must not judge an empty instance
+            // with `:asof` (that would present the query date as the event
+            // time), and it must not saturate the theory (oscillation would
+            // otherwise turn a report into an error).
+            let mut rules: Vec<&Decl> = self.lib.env.rules().into_iter().collect();
+            rules.sort_by(|a, b| a.name.cmp(&b.name));
+            writeln!(
+                out,
+                "时空适用性（未给定目标：不做判定，只列声明范围，共 {} 条规则）：",
+                rules.len()
+            )
+            .ok();
+            if rules.is_empty() {
+                writeln!(out, "  环境中没有规则。").ok();
+            }
+            for decl in rules {
+                let scope = declared_scope_text(&decl.scope);
+                let scope = if scope.is_empty() {
+                    "（无范围声明）".to_owned()
+                } else {
+                    scope
+                };
+                let sources = decl
+                    .sources
+                    .iter()
+                    .map(|source| source.one_line())
+                    .collect::<Vec<_>>()
+                    .join("；");
+                if sources.is_empty() {
+                    writeln!(out, "  ⟨{}⟩：{scope}", decl.name).ok();
+                } else {
+                    writeln!(out, "  ⟨{}⟩：{scope}  ← {sources}", decl.name).ok();
+                }
+            }
+            writeln!(out, "未判定：需要目标命题或带发生时间/地点的事实。").ok();
+            return Ok(Outcome::Proved);
+        }
+
         let mut r = self.reasoner()?;
         r.assume_ledger_axioms()?;
         r.saturate()?;
-        if arg.is_empty() {
-            let all = r.rule_applicability();
-            writeln!(
-                out,
-                "时空适用性（规则级；未给定目标，按空实例与 :asof 判定，共 {} 条规则）：",
-                all.len()
-            )
-            .ok();
-            if all.is_empty() {
-                writeln!(out, "  环境中没有规则。").ok();
-            }
-            for (rule, verdict) in &all {
-                writeln!(out, "  ⟨{rule}⟩：{}", verdict.summary_zh()).ok();
-            }
-            return Ok(Outcome::Proved);
-        }
 
         let goal = self.goal(arg)?;
         let mut verdicts = BTreeSet::new();
@@ -4312,6 +4344,13 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
             )
             .ok();
         }
+        if !candidate.missing.is_empty() {
+            writeln!(
+                out,
+                "{pad}  判定口径：按已持有事实；补上缺失前提后判定可能变化。"
+            )
+            .ok();
+        }
         for source in &candidate.sources {
             writeln!(out, "{pad}  ← {}", source.one_line()).ok();
         }
@@ -4364,6 +4403,7 @@ fn gap_limit_text(limit: &GapLimit) -> String {
             format!("规则 ⟨{rule}⟩ 的尝试次数已达上限（{limit} 次）")
         }
         GapLimit::Issues { limit } => format!("可争的结论已达到上限（{limit} 条）"),
+        GapLimit::Excluded { limit } => format!("被排除的规则已达到上限（{limit} 条）"),
     }
 }
 
@@ -4578,7 +4618,7 @@ fn print_help(out: &mut impl Write) {
     .ok();
     writeln!(
         out,
-        "  --as-of <YYYY-MM-DD>         会话的法律基准日（:asof 可改；:cert 记录它，也是适用性判定的日期）"
+        "  --as-of <YYYY-MM-DD>         实例完全没有事件时间时的兜底日期（:asof 可改；:cert 记录它）"
     )
     .ok();
     writeln!(
@@ -4628,12 +4668,12 @@ fn print_help(out: &mut impl Write) {
     writeln!(
         out,
         "时空适用性：按实例前提事实的发生时间/地点判定（事件时优先；无事件时间才用 :asof 兜底）；\
-         不适用与部分覆盖（无法判定）不触发；无证据的未判定仍触发但每条结论行都会标注。:applicability [命题] 列出判定与依据。"
+         不适用与部分覆盖（无法判定）不触发；无证据的未判定仍触发但每条结论行都会标注。:applicability [命题] 有目标列实例判定与依据，无目标只列声明范围。"
     )
     .ok();
     writeln!(
         out,
-        "环境里的规则涉及两个及以上 jurisdiction 且未选管辖时，:why 与 :cert 退出 2。"
+        "环境里的规则涉及两个及以上 jurisdiction 且未选管辖时，:why / :explain / :cert 退出 2。"
     )
     .ok();
     writeln!(

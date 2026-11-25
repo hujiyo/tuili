@@ -5,7 +5,9 @@
 
 use std_deduce_kernel::Expr;
 use std_deduce_lang::Library;
-use std_deduce_reason::{Applicability, InapplicableReason, MissingInput, Reasoner};
+use std_deduce_reason::{
+    Applicability, GapLimit, GapLimits, InapplicableReason, MissingInput, Reasoner,
+};
 
 fn load(src: &str) -> Library {
     let mut lib = Library::new();
@@ -24,6 +26,17 @@ fn reasoner<'a>(lib: &'a Library, as_of: Option<&str>, jurisdiction: Option<&str
 
 fn goal(head: &str, arg: &str) -> Expr {
     Expr::apps(Expr::constant(head), [Expr::constant(arg)])
+}
+
+/// The verdict recorded on the rule application that proves `goal`.
+fn root_verdict(r: &Reasoner<'_>, goal: &Expr) -> Applicability {
+    let mut d = r.derivation();
+    d.root = r.root_for(goal);
+    let root = d.root.expect("the goal has a root");
+    match &d.nodes[root] {
+        std_deduce_reason::Node::RuleApplication { applicability, .. } => applicability.clone(),
+        other => panic!("the root is not a rule application: {other:?}"),
+    }
 }
 
 const LATE_RULE: &str = r#"
@@ -127,12 +140,7 @@ fn an_unscoped_rule_fires_but_is_recorded_as_unchecked() {
     let r = reasoner(&lib, None, None);
     let target = goal("结论", "甲");
     assert!(r.knows(&target), "an unchecked rule keeps firing");
-    let verdict = r
-        .rule_applicability()
-        .into_iter()
-        .find(|(rule, _)| rule.as_ref() == "规则")
-        .map(|(_, verdict)| verdict)
-        .expect("every rule is judged");
+    let verdict = root_verdict(&r, &target);
     assert!(matches!(
         verdict,
         Applicability::Unchecked {
@@ -166,17 +174,13 @@ fn moving_the_asof_date_moves_the_fallback_verdict() {
     // No event time and no as-of: unchecked, old firing behaviour.
     let plain = reasoner(&lib, None, None);
     assert!(plain.knows(&target));
-    let verdict = plain
-        .rule_applicability()
-        .into_iter()
-        .find(|(rule, _)| rule.as_ref() == "二〇二一年规则")
-        .map(|(_, verdict)| verdict);
+    let verdict = root_verdict(&plain, &target);
     assert!(matches!(
         verdict,
-        Some(Applicability::Unchecked {
+        Applicability::Unchecked {
             missing: MissingInput::NoCaseDate,
             ..
-        })
+        }
     ));
 
     // Before the rule starts: the fallback date is outside, inapplicable.
@@ -194,12 +198,8 @@ fn moving_the_asof_date_moves_the_fallback_verdict() {
     // Inside the range: applicable, with the as-of fallback recorded.
     let inside = reasoner(&lib, Some("2022-01-01"), None);
     assert!(inside.knows(&target));
-    let verdict = inside
-        .rule_applicability()
-        .into_iter()
-        .find(|(rule, _)| rule.as_ref() == "二〇二一年规则")
-        .map(|(_, verdict)| verdict);
-    let Applicability::Applicable { basis } = verdict.expect("a verdict") else {
+    let verdict = root_verdict(&inside, &target);
+    let Applicability::Applicable { basis } = verdict else {
         panic!("expected applicable");
     };
     assert!(basis.dates[0].query_date_fallback);
@@ -226,12 +226,15 @@ fn an_undecidable_rule_is_reported_as_excluded_by_the_issue_scan() {
     // the rule must not be scanned as a live candidate.
     let r = reasoner(&lib, None, Some("CN-HN"));
     let scan = r.issues();
-    let (rule, verdict) = scan
+    let excluded = scan
         .excluded
         .iter()
-        .find(|(rule, _)| rule.as_ref() == "规则")
+        .find(|excluded| excluded.rule.as_ref() == "规则")
         .expect("the undecidable rule is reported as excluded");
-    assert_eq!(rule.as_ref(), "规则");
+    let verdict = excluded
+        .verdicts
+        .first()
+        .expect("the excluded rule carries its instance verdict");
     assert!(matches!(
         verdict,
         Applicability::Undecidable {
@@ -258,6 +261,52 @@ rule 北京规则 :
   territory CN-BJ
   source text "北京市条例" locator "第一条"
 "#;
+
+const TWO_EXCLUDED_RULES: &str = r#"
+sort 人
+pred 前提一 : 人 → Prop
+pred 前提二 : 人 → Prop
+pred 结论一 : 人 → Prop
+pred 结论二 : 人 → Prop
+obj 甲 : 人
+axiom 一 : 前提一 甲
+  source text "材料" locator "一"
+  occurred_at 2022-01-01
+axiom 二 : 前提二 甲
+  source text "材料" locator "二"
+  occurred_at 2022-01-01
+rule 规则一 :
+  params x : 人
+  premise 前提一 x
+  conclude 结论一 x
+  effective 2019-01-01
+  repealed 2021-01-01
+  source text "旧法" locator "第一条"
+rule 规则二 :
+  params x : 人
+  premise 前提二 x
+  conclude 结论二 x
+  effective 2019-01-01
+  repealed 2021-01-01
+  source text "旧法" locator "第二条"
+"#;
+
+#[test]
+fn the_excluded_rule_list_is_capped_and_reports_the_limit() {
+    let lib = load(TWO_EXCLUDED_RULES);
+    let r = reasoner(&lib, None, None);
+    let limits = GapLimits {
+        max_excluded: 1,
+        ..GapLimits::default()
+    };
+    let scan = r.issues_with(&limits);
+    assert_eq!(scan.excluded.len(), 1, "the excluded list is capped");
+    assert!(
+        scan.limits.contains(&GapLimit::Excluded { limit: 1 }),
+        "the cap is reported: {:?}",
+        scan.limits
+    );
+}
 
 #[test]
 fn a_territory_mismatch_excludes_the_rule() {

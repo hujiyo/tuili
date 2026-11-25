@@ -984,8 +984,8 @@ rule 旧规则 :
         stdout(&report)
     );
 
-    // Without a goal, `:applicability` uses an empty instance: the rule's
-    // range is judged against `:asof` and the fallback is labelled.
+    // Without a goal, `:applicability` does not judge at all: it lists the
+    // declaration's recorded scope and says an instance is needed.
     let all = run_in(
         temp.root(),
         &[
@@ -997,14 +997,20 @@ rule 旧规则 :
     assert_exit(&all, PROVED);
     let all_out = stdout(&all);
     assert!(
-        all_out.contains("时空适用性（规则级；未给定目标，按空实例与 :asof 判定，共 1 条规则）："),
+        all_out.contains("时空适用性（未给定目标：不做判定，只列声明范围，共 1 条规则）："),
         "{all_out}"
     );
     assert!(
-        all_out.contains(
-            "⟨旧规则⟩：不适用（事件时间 2021-01-01 已达到规则废止日 2021-01-01，规则已经失效）；依据：以查询基准日 2021-01-01 代替行为时（区间外）"
-        ),
+        all_out.contains("⟨旧规则⟩：〔生效 2019-01-01..2021-01-01（规则）〕"),
+        "the declared scope is listed:\n{all_out}"
+    );
+    assert!(
+        all_out.contains("未判定：需要目标命题或带发生时间/地点的事实。"),
         "{all_out}"
+    );
+    assert!(
+        !all_out.contains("以查询基准日") && !all_out.contains("不适用（"),
+        "no verdict may be invented without an instance:\n{all_out}"
     );
 }
 
@@ -1374,9 +1380,367 @@ rule 河南规则 :
     );
 }
 
-/// With two jurisdictions in the environment and no session choice, `:cert`
-/// and `:why` refuse with exit 2 and list the codes sorted; `:gap` and
-/// `:inspect` are not gated. Choosing a jurisdiction unblocks them.
+/// `:issues` must judge each instance from the premise facts it actually holds.
+/// The same fact set and the same instance must produce the same issue and the
+/// same verdict whether `:asof` is inside or outside the rule's range.
+#[test]
+fn issues_judges_held_event_times_and_is_unchanged_by_asof() {
+    let temp = TempRoot::new("issues-per-instance");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred 前提甲 : 人 → Prop
+pred 前提乙 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 一 : 前提甲 甲
+  source text "材料" locator "一"
+  occurred_at 2019-05-01
+axiom 二 : 前提乙 甲
+  source text "材料" locator "二"
+  occurred_at 2021-01-01
+rule 跨期规则 :
+  params x : 人
+  premise 前提甲 x
+  premise 前提乙 x
+  conclude 结论 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  source text "旧法" locator "第一条"
+"#,
+    );
+
+    let report = |out: &str| {
+        let start = out
+            .find("当前事实集下可争的结论")
+            .unwrap_or_else(|| panic!("no issue scan:\n{out}"));
+        out[start..].to_owned()
+    };
+    let mut scans = Vec::new();
+    for as_of in ["2020-01-01", "2022-01-01"] {
+        let output = run_in(
+            temp.root(),
+            &[
+                format!(":load {}", theory.display()),
+                format!(":asof {as_of}"),
+                ":issues".to_string(),
+            ],
+        );
+        assert_exit(&output, GAP);
+        let out = stdout(&output);
+        assert!(
+            !out.contains("没有可争的结论"),
+            "a partially covered rule is still a contestable issue with :asof {as_of}:\n{out}"
+        );
+        assert!(
+            out.contains("跨期规则"),
+            "the partially covered rule is listed with :asof {as_of}:\n{out}"
+        );
+        assert!(
+            out.contains("2019-05-01") && out.contains("2021-01-01"),
+            "the issue names the held event times with :asof {as_of}:\n{out}"
+        );
+        scans.push(report(&out));
+    }
+    assert_eq!(
+        scans[0], scans[1],
+        "the issue scan must not depend on :asof when event times are held"
+    );
+}
+
+/// A held premise event inside the range plus one missing premise is still an
+/// issue; the candidate's verdict is the one from the held fact, not `:asof`.
+#[test]
+fn issues_lists_an_issue_with_a_held_event_time_and_a_missing_premise() {
+    let temp = TempRoot::new("issues-held-and-missing");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred 前提 : 人 → Prop
+pred 另一前提 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 事实 : 前提 甲
+  source text "材料" locator "一"
+  occurred_at 2019-05-01
+rule 规则 :
+  params x : 人
+  premise 前提 x
+  premise 另一前提 x
+  conclude 结论 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  source text "旧法" locator "第一条"
+"#,
+    );
+
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":asof 2022-01-01".to_string(),
+            ":issues".to_string(),
+        ],
+    );
+    assert_exit(&output, GAP);
+    let out = stdout(&output);
+    assert!(!out.contains("没有可争的结论"), "{out}");
+    assert!(
+        out.contains("候选 ⟨规则⟩〔适用（事件时间 2019-05-01（区间内））〕"),
+        "the held fact decides the candidate verdict, not :asof:\n{out}"
+    );
+    assert!(
+        out.contains("缺 ⟨另一前提 甲⟩"),
+        "the missing premise is listed:\n{out}"
+    );
+    assert!(
+        out.contains("判定口径：按已持有事实；补上缺失前提后判定可能变化。"),
+        "the candidate verdict is labelled as a held-facts verdict:\n{out}"
+    );
+}
+
+/// Two declarations of the same proposition with different event times are
+/// two events for the instance consuming that proposition. Covering only one
+/// is partial coverage, not a silent pick.
+#[test]
+fn two_facts_of_the_same_proposition_contribute_both_event_times() {
+    let temp = TempRoot::new("same-proposition-dates");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred 事件 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 记录一 : 事件 甲
+  source text "材料" locator "一"
+  occurred_at 2019-05-01
+axiom 记录二 : 事件 甲
+  source text "材料" locator "二"
+  occurred_at 2022-06-01
+rule 规则 :
+  params x : 人
+  premise 事件 x
+  conclude 结论 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  source text "旧法" locator "第一条"
+"#,
+    );
+
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":why 结论 甲".to_string(),
+        ],
+    );
+    assert_exit(&output, GAP);
+    let out = stdout(&output);
+    assert!(
+        !out.contains("▸ 结论 甲"),
+        "partial coverage must not fire:\n{out}"
+    );
+    assert!(
+        out.contains("事件时间 2019-05-01")
+            && out.contains("2022-06-01")
+            && out.contains("部分覆盖不能当作适用"),
+        "both recorded events are reported:\n{out}"
+    );
+}
+
+/// An inapplicable rule must not act as a priority witness on the side of a
+/// conflict: A applies and beats C, B is inapplicable, and C beats B. With B
+/// correctly excluded A wins; if B were counted, the side would not uniformly
+/// beat C and the conflict would stay unresolved.
+#[test]
+fn an_inapplicable_rule_is_not_a_conflict_or_priority_witness() {
+    let temp = TempRoot::new("conflict-witness");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred 前提甲 : 人 → Prop
+pred 前提乙 : 人 → Prop
+pred 前提丙 : 人 → Prop
+pred 批准 : 人 → Prop
+pred 不批准 : 人 → Prop
+obj 甲 : 人
+contrary 批准 不批准
+axiom 事实甲 : 前提甲 甲
+  source text "材料" locator "甲"
+  occurred_at 2019-05-01
+axiom 事实乙 : 前提乙 甲
+  source text "材料" locator "乙"
+  occurred_at 2022-01-01
+axiom 事实丙 : 前提丙 甲
+  source text "材料" locator "丙"
+  occurred_at 2019-05-01
+rule A :
+  params x : 人
+  premise 前提甲 x
+  conclude 批准 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  source text "法A" locator "第一条"
+rule B :
+  params x : 人
+  premise 前提乙 x
+  conclude 批准 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  defeated_by C
+  source text "法B" locator "第一条"
+rule C :
+  params x : 人
+  premise 前提丙 x
+  conclude 不批准 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  defeated_by A
+  source text "法C" locator "第一条"
+"#,
+    );
+
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":why 批准 甲".to_string(),
+        ],
+    );
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("▸ 批准 甲") && out.contains("冲突（已裁决）"),
+        "A must win because the inapplicable B is not a witness:\n{out}"
+    );
+}
+
+/// The first step does not record applicability in the certificate: the JSON
+/// has no verdict, and `:verify-cert` still passes after the fact's date moves
+/// outside the rule's range.
+#[test]
+fn the_certificate_records_no_applicability_and_ignores_a_fact_date_change() {
+    let temp = TempRoot::new("cert-no-applicability");
+    let source = r#"
+sort 人
+pred 行为 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 事实 : 行为 甲
+  source text "材料" locator "一"
+  occurred_at 2019-05-01
+rule 规则 :
+  params x : 人
+  premise 行为 x
+  conclude 结论 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  source text "旧法" locator "第一条"
+"#;
+    let theory = temp.write("case.std", source);
+
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":cert 结论 甲".to_string(),
+        ],
+    );
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    let json = &out[out.find('{').expect("the certificate JSON starts")..];
+    assert!(
+        !json.contains("\"applicability\"") && !json.contains("适用性"),
+        "the v6 certificate must not record an applicability verdict:\n{json}"
+    );
+    let cert_path = temp.write("cert.json", json);
+
+    // Move the fact outside the rule's range and verify the old certificate.
+    let changed = source.replace("occurred_at 2019-05-01", "occurred_at 2022-06-01");
+    temp.write("case.std", &changed);
+    let verify = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            format!(":verify-cert {}", cert_path.display()),
+        ],
+    );
+    assert_exit(&verify, PROVED);
+    let verify_out = stdout(&verify);
+    for needle in ["环境校验：通过", "逻辑校验：通过", "内核证明：通过"] {
+        assert!(
+            verify_out.contains(needle),
+            "verification must not re-judge applicability ({needle}):\n{verify_out}"
+        );
+    }
+}
+
+/// Without a goal, `:applicability` lists declarations and does not saturate:
+/// an oscillating theory is a report, not an error.
+#[test]
+fn applicability_without_a_goal_does_not_saturate_or_judge() {
+    let temp = TempRoot::new("applicability-no-saturate");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+obj 甲 : 人
+axiom 种子 : P 甲
+  source text "材料" locator "一"
+rule 规则一 :
+  params x : 人
+  premise P x
+  conclude Q x
+  unless Q x
+  source text "法一" locator "第一条"
+rule 规则二 :
+  params x : 人
+  premise Q x
+  conclude P x
+  unless P x
+  source text "法二" locator "第二条"
+"#,
+    );
+
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":applicability".to_string(),
+        ],
+    );
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("未判定：需要目标命题或带发生时间/地点的事实。"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("不适用（") && !out.contains("以查询基准日"),
+        "the no-goal report must not invent a verdict:\n{out}"
+    );
+
+    // The oscillation is still an error when a goal is actually queried.
+    let why = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":why Q 甲".to_string(),
+        ],
+    );
+    assert_exit(&why, ERROR);
+    assert!(stderr(&why).contains("振荡"), "{}", stderr(&why));
+}
+
+/// With two jurisdictions in the environment and no session choice, `:cert`,
+/// `:why` and `:explain` refuse with exit 2 and list the codes sorted; `:gap`
+/// and `:inspect` are not gated. Choosing a jurisdiction unblocks them.
 #[test]
 fn two_jurisdictions_require_an_explicit_choice() {
     let temp = TempRoot::new("gate");
@@ -1431,6 +1795,22 @@ rule 中国规则 :
     );
     assert_exit(&output, ERROR);
     assert!(stderr(&output).contains(expected), "{}", stderr(&output));
+
+    // `:explain` uses the same certificate and checks, so the same ambiguity
+    // gate applies; the README promises the same exit codes as `:why`.
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":explain Q 甲".to_string(),
+        ],
+    );
+    assert_exit(&output, ERROR);
+    assert!(
+        stderr(&output).contains(expected),
+        ":explain must be gated like :why:\n{}",
+        stderr(&output)
+    );
 
     // `:gap` is not gated: it reports what is missing instead of choosing law.
     let output = run_in(

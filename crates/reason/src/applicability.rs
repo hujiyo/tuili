@@ -298,19 +298,20 @@ impl CodeDimension {
 /// `event_dates` and `event_places` are the records of the premise facts
 /// actually bound by the instance. The `missing_*` flags say whether some
 /// referenced fact did not record one; a fact that records no occurrence never
-/// gets a guessed value.
+/// gets a guessed value. The fields are owned so an anchor can be built from a
+/// cached occurrence index without borrowing the reasoner.
 #[derive(Debug, Clone, Default)]
-pub struct InstanceAnchor<'a> {
+pub struct InstanceAnchor {
     /// The session's legal as-of date, used only when no event time exists.
-    pub as_of: Option<&'a str>,
+    pub as_of: Option<String>,
     /// The session's jurisdiction code, when set.
-    pub jurisdiction: Option<&'a str>,
+    pub jurisdiction: Option<String>,
     /// `occurred_at` values of the referenced premise facts.
-    pub event_dates: Vec<&'a str>,
+    pub event_dates: Vec<String>,
     /// Whether some referenced premise fact records no `occurred_at`.
     pub missing_event_date: bool,
     /// `occurred_in` values of the referenced premise facts.
-    pub event_places: Vec<&'a str>,
+    pub event_places: Vec<String>,
     /// Whether some referenced premise fact records no `occurred_in`.
     pub missing_event_place: bool,
 }
@@ -521,13 +522,19 @@ impl UndecidableReason {
                 dimension,
                 rule,
                 case,
-            } => format!(
-                "规则{} {} 与事件{} {} 是上下位关系但未声明层级，无法比较",
-                dimension.label_zh(),
-                escape_control(rule),
-                dimension.label_zh(),
-                escape_control(case)
-            ),
+            } => {
+                let other = match dimension {
+                    CodeDimension::Jurisdiction => "案件管辖",
+                    CodeDimension::Territory => "事件地域",
+                };
+                format!(
+                    "规则{} {} 与{} {} 是上下位关系但未声明层级，无法比较",
+                    dimension.label_zh(),
+                    escape_control(rule),
+                    other,
+                    escape_control(case)
+                )
+            }
             UndecidableReason::PartialPlaceCoverage {
                 covered,
                 uncovered,
@@ -543,7 +550,7 @@ impl UndecidableReason {
 }
 
 /// Judge one rule instance's recorded scope against its event time and place.
-pub fn judge(scope: &Scope, case: &InstanceAnchor<'_>) -> Applicability {
+pub fn judge(scope: &Scope, case: &InstanceAnchor) -> Applicability {
     if scope.is_unscoped() {
         return Applicability::Unchecked {
             missing: MissingInput::RuleHasNoScope,
@@ -567,7 +574,7 @@ pub fn judge(scope: &Scope, case: &InstanceAnchor<'_>) -> Applicability {
     }
 
     if let Some(rule_code) = scope.jurisdiction.as_deref() {
-        match case.jurisdiction {
+        match case.jurisdiction.as_deref() {
             None => missing = missing.or(Some(MissingInput::NoQueryJurisdiction)),
             Some(case_code) => match compare_codes(rule_code, case_code) {
                 CodeRelation::Equal => {}
@@ -629,7 +636,7 @@ enum DateVerdict {
 /// instance references. The session's as-of date is used only when no such
 /// event time exists; the basis records that substitution. Both endpoints may
 /// be absent; the range is then open on that side.
-fn judge_dates(scope: &Scope, case: &InstanceAnchor<'_>, basis: &mut Basis) -> DateVerdict {
+fn judge_dates(scope: &Scope, case: &InstanceAnchor, basis: &mut Basis) -> DateVerdict {
     let from = scope.effective_from.as_deref();
     let to = scope.effective_to.as_deref();
 
@@ -661,7 +668,7 @@ fn judge_dates(scope: &Scope, case: &InstanceAnchor<'_>, basis: &mut Basis) -> D
     let partial = !case.event_dates.is_empty() && case.missing_event_date;
     let mut references: Vec<(String, bool)> = Vec::new();
     if case.event_dates.is_empty() {
-        let Some(as_of) = case.as_of else {
+        let Some(as_of) = case.as_of.as_deref() else {
             return DateVerdict::Unchecked(MissingInput::NoCaseDate);
         };
         references.push((as_of.to_owned(), true));
@@ -761,12 +768,13 @@ enum PlaceVerdict {
 /// A fact without `occurred_in` is missing input; the rule's own territory is
 /// never used to infer where the event happened. Partial coverage is
 /// undecidable, never rounded to either side.
-fn judge_places(rule: &str, case: &InstanceAnchor<'_>, basis: &mut Basis) -> PlaceVerdict {
+fn judge_places(rule: &str, case: &InstanceAnchor, basis: &mut Basis) -> PlaceVerdict {
     let partial = !case.event_places.is_empty() && case.missing_event_place;
     let mut references: Vec<&str> = Vec::new();
     for place in &case.event_places {
-        if !references.contains(place) {
-            references.push(*place);
+        let place = place.as_str();
+        if !references.contains(&place) {
+            references.push(place);
         }
     }
     if references.is_empty() {
@@ -776,7 +784,7 @@ fn judge_places(rule: &str, case: &InstanceAnchor<'_>, basis: &mut Basis) -> Pla
     let mut covered = Vec::new();
     let mut uncovered = Vec::new();
     let mut nested = None;
-    for place in &references {
+    for place in references {
         let relation = compare_codes(rule, place);
         let covered_flag = match relation {
             CodeRelation::Equal => Some(true),
@@ -784,13 +792,13 @@ fn judge_places(rule: &str, case: &InstanceAnchor<'_>, basis: &mut Basis) -> Pla
             CodeRelation::Nested => None,
         };
         basis.places.push(PlaceEvidence {
-            place: (*place).to_owned(),
+            place: place.to_owned(),
             covered: covered_flag,
         });
         match covered_flag {
-            Some(true) => covered.push((*place).to_owned()),
-            Some(false) => uncovered.push((*place).to_owned()),
-            None => nested = nested.or(Some(*place)),
+            Some(true) => covered.push(place.to_owned()),
+            Some(false) => uncovered.push(place.to_owned()),
+            None => nested = nested.or(Some(place)),
         }
     }
 
@@ -886,27 +894,27 @@ mod tests {
         }
     }
 
-    fn anchor<'a>(
-        as_of: Option<&'a str>,
-        jurisdiction: Option<&'a str>,
-        dates: &[&'a str],
-        places: &[&'a str],
-    ) -> InstanceAnchor<'a> {
+    fn anchor(
+        as_of: Option<&str>,
+        jurisdiction: Option<&str>,
+        dates: &[&str],
+        places: &[&str],
+    ) -> InstanceAnchor {
         InstanceAnchor {
-            as_of,
-            jurisdiction,
-            event_dates: dates.to_vec(),
+            as_of: as_of.map(ToOwned::to_owned),
+            jurisdiction: jurisdiction.map(ToOwned::to_owned),
+            event_dates: dates.iter().map(|date| (*date).to_owned()).collect(),
             missing_event_date: false,
-            event_places: places.to_vec(),
+            event_places: places.iter().map(|place| (*place).to_owned()).collect(),
             missing_event_place: false,
         }
     }
 
-    fn dated<'a>(as_of: Option<&'a str>, dates: &'a [&'a str]) -> InstanceAnchor<'a> {
+    fn dated(as_of: Option<&str>, dates: &[&str]) -> InstanceAnchor {
         anchor(as_of, None, dates, &[])
     }
 
-    fn applicable_dates<'a>(dates: &'a [&'a str]) -> InstanceAnchor<'a> {
+    fn applicable_dates(dates: &[&str]) -> InstanceAnchor {
         anchor(None, None, dates, &[])
     }
 
@@ -1144,6 +1152,11 @@ mod tests {
                 ..
             }
         ));
+        let message = judge(&s, &anchor(None, Some("CN-HN"), &[], &[])).summary_zh();
+        assert!(
+            message.contains("案件管辖 CN-HN"),
+            "the jurisdiction dimension names the case's jurisdiction: {message}"
+        );
         assert_eq!(
             judge(&s, &anchor(None, None, &[], &[])),
             Applicability::Unchecked {
@@ -1189,6 +1202,11 @@ mod tests {
                 ..
             }
         ));
+        let message = judge(&s, &anchor(None, None, &[], &["CN"])).summary_zh();
+        assert!(
+            message.contains("事件地域 CN"),
+            "the territory dimension names the event's place: {message}"
+        );
     }
 
     #[test]
