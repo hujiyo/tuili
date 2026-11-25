@@ -485,6 +485,13 @@ impl Parser {
                 })
             }
             "def" => {
+                // The definition is elaborated and kernel-checked after the
+                // parse, so keep the declaration's own position: a bad body
+                // must be reported at the source line that wrote it.
+                let (line, col) = {
+                    let token = self.here();
+                    (token.line, token.col)
+                };
                 self.bump();
                 let name = self.ident()?;
                 self.expect(&Tok::Colon, "`:`")?;
@@ -497,6 +504,8 @@ impl Parser {
                     ty,
                     body,
                     source,
+                    line,
+                    col,
                 })
             }
             "rule" => {

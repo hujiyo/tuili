@@ -1211,8 +1211,44 @@ unique 应适用 1                    -- 第 1 个参数单值：同一案件只
 #proposition 命题                  -- 只检查该项的类型是否为 Prop，不证明命题成立
 ```
 
-`#check` 打印项的类型，`#show` 打印声明的类型；`#proposition` 只做命题类型检查，
+`#check` 打印项的类型；`#show` 打印声明的类型（`def` 还打印定义体）；`#proposition` 只做命题类型检查，
 不证明命题成立——要断言成立，请用 `axiom` 写事实或用 `rule` 写规则。
+
+### 定义（`def`）：具名宏，展开走内核 delta
+
+`def` 本身就是具名、可带参数的宏，不需要另一套宏系统。参数写成 `λ`，绑定顺序就是参数顺序：
+
+```
+def 夫妻 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 配偶 a b
+```
+
+定义名可以按名字出现在任何项位置：规则的 `premise` / `conclude` / `unless`、`axiom` 的事实类型
+（类型是命题时）、`interpret` 的两侧与查询的目标。同一条公式片段只写一次，多处引用同一个名字。
+
+展开路径是**内核的 delta 规则**，没有第二套语法展开器：`crates/kernel/src/norm.rs` 的 `whnf`
+在 `def` 常量应用到参数后把定义体展开，再按 β 归约；`crates/kernel/src/conv.rs` 的 `convertible`
+用它判定等价。于是：
+
+- 加载期：内核按声明类型检查定义体，类型不匹配在加载时拒绝；
+- 推理与证书：规则匹配、冲突比较、`cert::check` 与 `cert::kernel_proof` 都在内核等价下比较；
+  证书里记的是内核项（`def` 常量本身，delta 归约发生在检查时），两层校验照常通过，不会因为
+  定义而变宽或变松；
+- 不做隐式改写：`:inspect` 在 `def` 行下面打印 `:= <定义体>`（名字 → 定义体，`λ` 绑定顺序即参数
+  顺序），`#show` 对 `def` 也打印定义体；错误信息给出用户写的名字与声明位置。
+
+加载期限制（错误都带定义名与 `文件:行:列`）：
+
+- **不能递归**：`def X` 的定义体不能引用 `X` 自己，也不能引用尚未声明的名字（前向互引用）；
+  定义只能引用加载到它之前的项，因此定义依赖关系始终有向无环；
+- **定义体的自由变量必须被参数覆盖**：每个名字要么由 `λ`/`∀` 绑定，要么是已声明的项，否则
+  加载失败；
+- **名字不能与已有声明冲突**：`def` 与 `sort` / `obj` / `pred` / `axiom` / `fact`（命题类型的
+  `axiom`）/ `rule` / `interpret` 等共用同一账本，重名即加载失败；
+- 定义体的类型必须匹配声明的类型，否则加载失败。
+
+定义是**一个项**，不是前提列表。表面语法没有合取连接词，所以「配偶关系且存在殴打行为」这样的
+多前提片段不能写成一个 `def` 名字再当作一条前提使用；需要多个前提时逐条写在规则里，或让一条
+规则先推出一个命名谓词再引用它。
 
 模块文件与案件/示例文件都可以以可选的 `import` 块开头，模块随后写 `namespace`：
 
@@ -1599,7 +1635,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 1033 个：kernel 25、lang 181、reason 90、cert 212、cli 362、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 1046 个：kernel 25、lang 187、reason 90、cert 212、cli 368、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（25）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -1612,7 +1648,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   `is_strict`/`seeds_derivation` 的表驱动用例；`Burden` / `Standard` 三个取值的关键字、
   `parse` 往返与允许集合；以及来源渲染的几条：
   `one_line` 保持旧格式并转义控制字符、字面反斜杠与不可见格式字符，`full` 逐行列出全部非空字段并转义。
-- `crates/lang/tests/lang.rs`（29）：最小规则和 `contrary` 声明能加载；`pred` 共域不是 `Prop` 时
+- `crates/lang/tests/lang.rs`（35）：最小规则和 `contrary` 声明能加载；`pred` 共域不是 `Prop` 时
   加载失败并指出声明名与类型，空/一阶/高阶谓词以及函数、类型别名的 `def` 不受影响；
   命题类型的 `axiom` 仍是 `Fact`、函数类型的 `axiom` 仍是常量；参数/前提 binder 重名、
   未命名前提生成的 `_p{i}` 重名、参数只出现在 `unless` 里、以及完全未使用的参数都拒绝加载；
@@ -1624,6 +1660,10 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   模块默认 `assumed`；未知身份关键字、缺关键字、重复子句、写在 source 同一行都报解析错误；
   非命题 `axiom` 无身份可加载、带身份被拒；声明形状的 `identity 定义 : …` 不被前一条事实吞掉，
   由项解析器在它自己的行列报错。
+  定义/宏一组：一个 `def` 可以出现在事实类型、前提、结论与 `unless` 里，内核按 delta 把
+  `夫妻 李四 张三` 归约成 `配偶 李四 张三`；自引用（`定义不能递归`）、定义体里未被 `λ`/`∀`
+  绑定且未声明的名字、与任意已有声明（sort/obj/pred/axiom/rule/def）重名、定义体类型不符
+  都在加载期拒绝，错误带 `文件:行:列` 与定义名、冲突名字；`#show` 对 `def` 打印定义体。
 - `crates/lang/tests/burden.rs`（12）：举证责任/证明标准的声明层——四个子句各自解析全部允许取值、
   任意顺序同时出现；省略即为 `None`、加载后仍是 `None`（不默认成 claimant/preponderance）；
   加载后四个字段原样进入 `RuleDecl`；非法取值与缺取值报错并给出规则名、字段名与允许集合；
@@ -1763,6 +1803,16 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   `:fact` 一组：`add`/`assumed`/`disputed` 的登记文案与 `list` 的身份标签/名称/来源、争议事实不参与
   推导（`:why` 为缺口）、`show` 按内核等价命中与未命中、`verified`/`stipulated` 被拒；
   `:inspect` 显示 `fact` 与中文身份标签（显式 `verified` 与案件文件默认 `user_asserted`）。
+- `crates/cli/tests/definitions.rs`（7）：`def` 作为具名宏的端到端用例——一个定义（`夫妻`）被两条
+  规则使用，两条都加载并各自推出结论；定义也出现在 `unless` 与事实类型里：事实账本记下写出的
+  名字，`unless` 阻断得出 `被阻断：「夫妻 张三 李四」`（阻断靠 delta 归约后的 `配偶` 事实证明）；
+  `:inspect` 在 `def` 行下打印
+  `:= λ (a : 人), λ (b : 人), 配偶 a b`，`#show` 打印同样的定义体；只改定义体
+  （`配偶 a b` → `配偶 b a`）就调换两个查询的答案，证明定义体没有被缓存进规则；把定义改名后
+  规则用新名、旧名是未知名称；自引用、定义体里未绑定的名字、与已声明谓词重名、定义体类型不符
+  都以 `路径:行:列` 与名字退出 `2`；`:cert` 导出的证书（假设头是 `def` 常量，不是展开后的机器项）
+  经独立的 `:verify-cert` 通过逻辑与内核两层；把假设身份改成 `verified` 后逻辑层仍拒绝，证明
+  定义没有放宽校验。
 - `crates/cli/tests/gap_tree.rs`（8）：递归缺口树与 `:issues` 端到端——两个缺失前提的 `:gap` 按前提
   逐层展开（缺口、候选、`缺 ⟨…⟩` 的缩进顺序可查，事实叶子重复两次），无上限时不出现“已截断”；
   `:issues` 列出未证明结论及其缺口，补齐前提后打印“没有可争的结论。”并退出 `0`，带参数是用法错误

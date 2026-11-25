@@ -81,11 +81,17 @@ pub enum Item {
         occurred_in: Option<String>,
     },
     /// `def 合法搜查 := ... : T`
+    ///
+    /// The position is recorded because a definition is elaborated and
+    /// kernel-checked after the item is parsed; those load errors still have
+    /// to point at this declaration instead of at the file as a whole.
     Def {
         name: String,
         ty: Term,
         body: Term,
         source: Option<SourceSpec>,
+        line: usize,
+        col: usize,
     },
     /// A defeasible rule, the centre of the system.
     Rule {

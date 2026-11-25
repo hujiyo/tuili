@@ -1002,6 +1002,14 @@ impl Session {
                             print_expr(&decl.ty)
                         )
                         .ok();
+                        // A definition is a named macro: `:inspect` must let a
+                        // reader see what the name expands to (the body and its
+                        // binder order), because the kernel unfolds it by delta
+                        // during conversion and that expansion is otherwise
+                        // invisible.
+                        if let DeclKind::Def { body } = &decl.kind {
+                            writeln!(out, "       := {}", print_expr(body)).ok();
+                        }
                         for s in &decl.sources {
                             writeln!(out, "       ← {}", s.one_line()).ok();
                             for line in s.full().lines() {
