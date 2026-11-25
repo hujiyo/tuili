@@ -39,6 +39,17 @@
 //!   retrieval time and hash) must equal the environment's `sources`; an added
 //!   or dropped citation is rejected, so a certificate cannot claim a
 //!   different article for the universal fact than the ledger declares.
+//! * The `alternatives` witness table is checked against the proof nodes: each
+//!   listed witness must be a rule application or universal instance that
+//!   concludes the group's proposition under kernel conversion; a group is not
+//!   empty, does not repeat a node, and does not list the same rule (or the
+//!   same universal fact) with the same binding values twice, because that is
+//!   one argument, not two. Binding values are compared by the collision-free
+//!   structural key of their normal forms. A group marked as truncated must
+//!   record exactly the per-conclusion bound. The root, when it is a derivation
+//!   step, must appear among the witnesses of its own conclusion. Groups are
+//!   optional for a hand-written certificate, but a listed group is
+//!   authoritative and an inconsistent one is rejected.
 //! * The bindings name only rule parameters, bind each parameter exactly once
 //!   and are closed terms.
 //! * Instantiating the rule's premises with those bindings yields exactly the
@@ -220,7 +231,7 @@ use crate::key::expression_key;
 use crate::model::{
     Certificate, Conflict, Explicit, FactIdentity, InterpretationDirection, Node, NodeId,
     ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
-    Resolution, ResolutionBasis, Side, UnresolvedReason,
+    Resolution, ResolutionBasis, Side, UnresolvedReason, MAX_CERT_WITNESSES_PER_CONCLUSION,
 };
 use crate::source::Source;
 
@@ -908,6 +919,12 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
             }
         }
     }
+
+    // The witness table is checked after every step is rebuilt: each listed
+    // witness must be a derivation step whose conclusion is the group's
+    // proposition, witnesses in one group must be independent, and the root,
+    // when it is a derivation step, must be one of its conclusion's witnesses.
+    validate_alternatives(env, cert)?;
 
     // A gap candidate's applicability record explains why the rule cannot
     // supply the missing conclusion. It is recomputed from the candidate's own
@@ -2331,6 +2348,242 @@ fn environment_facts(env: &Env) -> Result<Vec<EnvironmentFact>, CheckError> {
         });
     }
     Ok(facts)
+}
+
+/// Validate the certificate's per-conclusion witness table.
+///
+/// Each group names a conclusion and the nodes that independently derive it.
+/// A witness node must be a derivation step (`rule_application` or
+/// `axiom_instance`), must conclude the group's proposition under kernel
+/// conversion, and no two witnesses of one group may be the same argument:
+/// identical node ids are rejected, and so are two steps of the same rule (or
+/// the same universal fact) with the same binding values. Binding values are
+/// compared by the collision-free structural key of their normal forms, never
+/// by printed text. A group must list at least one witness; a truncated group
+/// must have exactly the per-conclusion bound, so the limit cannot be applied
+/// silently. The root, when it is a derivation step, must be listed among the
+/// witnesses of its own conclusion.
+///
+/// The table does not have to list every derivation node: a certificate
+/// without a witness table is still checked node by node. A listed group,
+/// however, is authoritative: a step it names is accepted only under the
+/// checks above, and a root whose conclusion has a group must be in it.
+fn validate_alternatives(env: &Env, cert: &Certificate) -> Result<(), CheckError> {
+    let mut group_keys: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, group) in cert.alternatives.iter().enumerate() {
+        let fail = |message: String| CheckError {
+            node: None,
+            message: format!("第 {} 条结论见证：{message}", index + 1),
+        };
+        let proposition = Expr::from(&group.proposition);
+        kernel_check::check(env, &Ctx::new(), &proposition, &Expr::Sort(0))
+            .map_err(|error| fail(format!("命题不是命题：{error}")))?;
+        let proposition_key = normalized_key(env, &proposition).map_err(fail)?;
+        if let Some(previous) = group_keys.insert(proposition_key, index) {
+            return Err(fail(format!(
+                "同一个结论出现了不止一次（此前是第 {} 条结论见证）",
+                previous + 1
+            )));
+        }
+        if group.witnesses.is_empty() {
+            return Err(fail(format!(
+                "结论「{}」没有任何见证节点：结论无见证",
+                print_expr(&proposition)
+            )));
+        }
+        if group.witnesses.len() > MAX_CERT_WITNESSES_PER_CONCLUSION {
+            return Err(fail(format!(
+                "见证数量超过每个结论 {MAX_CERT_WITNESSES_PER_CONCLUSION} 条上限：实际 {} 条",
+                group.witnesses.len()
+            )));
+        }
+        if group.truncated && group.witnesses.len() != MAX_CERT_WITNESSES_PER_CONCLUSION {
+            return Err(fail(format!(
+                "标记为已截断，但只记录了 {} 条见证；截断应恰好达到上限 \
+                 {MAX_CERT_WITNESSES_PER_CONCLUSION} 条",
+                group.witnesses.len()
+            )));
+        }
+        let mut seen_nodes: BTreeSet<NodeId> = BTreeSet::new();
+        for witness in &group.witnesses {
+            if *witness >= cert.nodes.len() {
+                return Err(CheckError::at(
+                    *witness,
+                    format!(
+                        "第 {} 条结论见证引用的节点 {witness} 越界：证书只有 {} 个节点",
+                        index + 1,
+                        cert.nodes.len()
+                    ),
+                ));
+            }
+            if !seen_nodes.insert(*witness) {
+                return Err(CheckError::at(
+                    *witness,
+                    format!(
+                        "第 {} 条结论见证把同一个节点 {witness} 列了不止一次：\
+                         重复节点不算独立见证",
+                        index + 1
+                    ),
+                ));
+            }
+        }
+        let mut identities: Vec<(NodeId, (u8, String, String))> = Vec::new();
+        for witness in &group.witnesses {
+            let node = &cert.nodes[*witness];
+            let Some(conclusion) = node_prop(cert, node) else {
+                return Err(CheckError::at(
+                    *witness,
+                    format!(
+                        "第 {} 条结论见证引用了不推导任何命题的节点：缺口节点不能是见证",
+                        index + 1
+                    ),
+                ));
+            };
+            let same = convertible(env, &Ctx::new(), &Expr::from(conclusion), &proposition)
+                .map_err(|error| {
+                    CheckError::at(
+                        *witness,
+                        format!(
+                            "第 {} 条结论见证无法判定节点结论是否与命题等价：{error}",
+                            index + 1
+                        ),
+                    )
+                })?;
+            if !same {
+                return Err(CheckError::at(
+                    *witness,
+                    format!(
+                        "第 {} 条结论见证：节点 {witness} 证明的是「{}」，不是该结论「{}」",
+                        index + 1,
+                        print_expr(&Expr::from(conclusion)),
+                        print_expr(&proposition)
+                    ),
+                ));
+            }
+            let identity = witness_identity(env, node).map_err(|message| {
+                CheckError::at(*witness, format!("第 {} 条结论见证：{message}", index + 1))
+            })?;
+            let Some(identity) = identity else {
+                return Err(CheckError::at(
+                    *witness,
+                    format!(
+                        "第 {} 条结论见证引用的节点不是规则应用或全称公理实例：\
+                         假设与解释应用不是推导见证",
+                        index + 1
+                    ),
+                ));
+            };
+            identities.push((*witness, identity));
+        }
+        for i in 0..identities.len() {
+            for j in (i + 1)..identities.len() {
+                if identities[i].1 == identities[j].1 {
+                    return Err(CheckError::at(
+                        identities[j].0,
+                        format!(
+                            "第 {} 条结论见证的节点 {} 与节点 {} 是同一条规则实例\
+                             （规则与绑定相同），不算独立见证",
+                            index + 1,
+                            identities[i].0,
+                            identities[j].0
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // The root's conclusion must be witnessed by the root itself. A group that
+    // claims to describe the root while omitting the root node would let a
+    // reader believe the shown path is only one alternative when the checked
+    // root is another.
+    if let Some(root) = cert.root {
+        let Some(node) = cert.nodes.get(root) else {
+            return Err(CheckError::at(
+                root,
+                format!(
+                    "根节点索引 {root} 越界：证书只有 {} 个节点",
+                    cert.nodes.len()
+                ),
+            ));
+        };
+        if witness_identity(env, node)
+            .map_err(|message| CheckError::at(root, message))?
+            .is_some()
+        {
+            let root_prop = node_prop(cert, node)
+                .ok_or_else(|| CheckError::at(root, "根节点推导不出任何命题".to_owned()))?;
+            let root_key = normalized_key(env, &Expr::from(root_prop)).map_err(|message| {
+                CheckError::at(root, format!("无法判定根命题的结构键：{message}"))
+            })?;
+            for (index, group) in cert.alternatives.iter().enumerate() {
+                let group_key =
+                    normalized_key(env, &Expr::from(&group.proposition)).map_err(|message| {
+                        CheckError::at(
+                            root,
+                            format!("无法判定第 {} 条结论见证的命题键：{message}", index + 1),
+                        )
+                    })?;
+                if group_key == root_key && !group.witnesses.contains(&root) {
+                    return Err(CheckError::at(
+                        root,
+                        format!(
+                            "根命题「{}」的见证表（第 {} 条）没有列出根节点 {root}：\
+                             结论命题与根不一致",
+                            print_expr(&Expr::from(root_prop)),
+                            index + 1
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The structural key of an expression's normal form.
+///
+/// It is the certificate's collision-free [`expression_key`] applied after
+/// kernel normalization, so a `def` alias and its expansion share a key. It is
+/// used for grouping and sorting, never as a substitute for
+/// [`convertible`] when equality is the claim being checked.
+fn normalized_key(env: &Env, expression: &Expr) -> Result<String, String> {
+    let normalized = normalize(env, &Ctx::new(), expression)
+        .map_err(|error| format!("无法规范化表达式：{error}"))?;
+    Ok(expression_key(&normalized))
+}
+
+/// The structural identity of a derivation step, if it is one.
+///
+/// A rule step is identified by its rule name and binding structure; a
+/// universal instance by its axiom name and binding structure. The two kinds
+/// never coincide, so a rule and a universal fact named alike remain distinct
+/// witnesses.
+fn witness_identity(env: &Env, node: &Node) -> Result<Option<(u8, String, String)>, String> {
+    Ok(match node {
+        Node::RuleApplication { rule, bindings, .. } => {
+            Some((0, rule.clone(), binding_structure(env, bindings)?))
+        }
+        Node::AxiomInstance {
+            axiom, bindings, ..
+        } => Some((1, axiom.clone(), binding_structure(env, bindings)?)),
+        Node::Assumption { .. } | Node::InterpretationApplication { .. } | Node::Gap { .. } => None,
+    })
+}
+
+/// The binding names and normalized value keys of one step.
+fn binding_structure(env: &Env, bindings: &[crate::model::Binding]) -> Result<String, String> {
+    let values = bindings
+        .iter()
+        .map(|binding| {
+            Ok::<_, String>(format!(
+                "{}={}",
+                binding.parameter,
+                normalized_key(env, &Expr::from(&binding.value))?
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(values.join(";"))
 }
 
 /// The identity the certificate's assumption table records for `proposition`.

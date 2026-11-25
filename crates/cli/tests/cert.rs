@@ -433,6 +433,7 @@ fn tampered_conclusion_or_binding_is_rejected() {
             },
         ],
         root: Some(1),
+        alternatives: Vec::new(),
         conflicts: Vec::new(),
         open_obligations: Vec::new(),
         metadata: Metadata::default(),
@@ -509,9 +510,9 @@ fn verify_cert_escapes_a_read_failure_path_onto_one_line() {
 #[test]
 fn verify_cert_requires_a_loaded_environment() {
     let certificate = Certificate::from_json(
-        r#"{"format_version": 8, "environment": {"profile": null, "packs": [],
+        r#"{"format_version": 9, "environment": {"profile": null, "packs": [],
             "corpora": [], "as_of": null, "jurisdiction": null},
-            "interpretations": [], "nodes": [], "root": null}"#,
+            "interpretations": [], "nodes": [], "root": null, "alternatives": []}"#,
     )
     .expect("a minimal valid certificate");
     let json = certificate.to_json_pretty().unwrap();

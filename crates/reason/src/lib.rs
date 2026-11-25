@@ -127,7 +127,7 @@
 //! function over the rule's [`Scope`](std_deduce_kernel::meta::Scope) and
 //! the instance's anchor (the premise facts' occurrence records plus the
 //! session fallback values). The reasoner only supplies those records; the
-//! CLI only renders the recorded verdict. Certificate v8 records the verdict,
+//! CLI only renders the recorded verdict. Certificate v9 records the verdict,
 //! basis, declared scope and reason on every rule application and gap
 //! candidate, and `:verify-cert` recomputes them independently.
 //!
@@ -143,6 +143,20 @@
 //! certificate records an `open_concept` obligation naming the concepts and
 //! the nodes that state them. An open concept is never exported as an
 //! unconditional conclusion.
+//!
+//! Every conclusion derived by rules or universal elimination keeps all of its
+//! independent witnesses. A witness is one rule instance (rule name plus
+//! binding values) or one universal instance (axiom name plus binding values);
+//! the same argument reached through different premise nodes is still one
+//! witness, and premise-level alternatives are recorded under the premise's
+//! own conclusion, never multiplied into the parent's witness list. Each
+//! conclusion keeps at most
+//! [`std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION`] witnesses; beyond it
+//! the group is marked truncated. Witnesses sort by rule name and binding
+//! structure (universal instances after rules), so repeated generation of the
+//! same case is byte-identical. Keeping them changes neither the fixed point
+//! nor conflict adjudication: the same rules win and lose, but both paths stay
+//! visible.
 //!
 //! ## Open concepts are not silently booleanised
 //!
@@ -315,9 +329,29 @@ pub struct Derivation {
     pub nodes: Vec<Node>,
     pub root: Option<usize>,
     pub conflicts: Vec<Conflict>,
+    /// Every derived conclusion with all of its independent witness nodes, in
+    /// proposition-key order. The main proof tree follows `root`; this table
+    /// records the other arguments that establish the same conclusions.
+    pub alternatives: Vec<WitnessGroup>,
     /// The interpretations enabled for this derivation, sorted by id. A
     /// certificate lists only the entries its nodes or conflicts cite.
     pub interpretations: Vec<InterpretationRecord>,
+}
+
+/// One derived conclusion and the nodes that each independently derive it.
+///
+/// The witness nodes are a subset of [`Derivation::nodes`]. A node that is
+/// already a premise of the main tree still counts as a witness; the table is
+/// what makes a second, third or later argument visible instead of silently
+/// dropped by the first one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WitnessGroup {
+    pub proposition: Expr,
+    /// Witness node ids, ordered by the deriving rule's name and the binding
+    /// structure of the instance, with universal instances after the rules.
+    pub witnesses: Vec<usize>,
+    /// More distinct witnesses exist than the per-conclusion bound allows.
+    pub truncated: bool,
 }
 
 /// One enabled interpretation declaration, as the derivation records it.
@@ -602,6 +636,61 @@ impl Support {
     }
 }
 
+/// One node that independently derives a conclusion.
+enum WitnessCandidate {
+    Rule {
+        rule: Name,
+        instance: Instance,
+        sources: Vec<SourceRef>,
+        applicability: Box<Applicability>,
+    },
+    Axiom {
+        instance: AxiomInstance,
+    },
+}
+
+impl WitnessCandidate {
+    /// The propositions a witness consumes; a universal instance consumes
+    /// none because its evidence is the declaration itself.
+    fn premise_keys(&self) -> &[String] {
+        match self {
+            WitnessCandidate::Rule { instance, .. } => &instance.premise_keys,
+            WitnessCandidate::Axiom { .. } => &[],
+        }
+    }
+
+    /// The stable structural identity of a witness: derivation kind, rule or
+    /// axiom name, and the binding values by structural key. Two records with
+    /// the same key are the same argument, not two independent ones.
+    fn identity_key(&self, env: &Env) -> (u8, String, String) {
+        match self {
+            WitnessCandidate::Rule { rule, instance, .. } => (
+                0,
+                rule.to_string(),
+                instance_binding_key(env, &instance.bindings),
+            ),
+            WitnessCandidate::Axiom { instance } => (
+                1,
+                instance.axiom.to_string(),
+                instance_binding_key(env, &instance.bindings),
+            ),
+        }
+    }
+}
+
+/// The binding structure of a rule or universal instance.
+///
+/// Values are compared by the collision-free structural encoding of their
+/// normal forms, so a `def` alias and its underlying term describe the same
+/// binding, and printed text is never the identity.
+fn instance_binding_key(env: &Env, bindings: &[(Name, Expr)]) -> String {
+    bindings
+        .iter()
+        .map(|(parameter, value)| format!("{parameter}={}", structural_key(env, value)))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 // ------------------------------------------------------- universal facts
 
 /// Collect the environment's instantiable universal facts, grouped by the
@@ -780,6 +869,9 @@ struct Fixed {
     /// Interpretation conclusion key -> interpretation id, for the applications
     /// that produced the settled fact base.
     applications: BTreeMap<String, Name>,
+    /// Every derived conclusion's independent witness node ids, keyed by the
+    /// same structural key as `facts`.
+    alternatives: BTreeMap<String, WitnessGroup>,
 }
 
 /// How many universal facts one goal may be tried against.
@@ -2249,46 +2341,110 @@ impl<'a> Reasoner<'a> {
             .cloned()
             .collect();
         pending.sort();
+        let mut alternatives: BTreeMap<String, WitnessGroup> = BTreeMap::new();
 
         while !pending.is_empty() {
             let mut progressed = false;
             let mut i = 0;
             while i < pending.len() {
                 let target = pending[i].clone();
-                if let Some((rule, inst, sources, applicability)) =
-                    self.witness(&target, &facts, &ids)
-                {
-                    let id = nodes.len();
-                    let premises: Vec<usize> = inst.premise_keys.iter().map(|pk| ids[pk]).collect();
-                    nodes.push(Node::RuleApplication {
-                        rule,
-                        conclusion: inst.conclusion,
-                        premises,
-                        bindings: inst.bindings,
-                        sources,
-                        applicability,
-                    });
-                    ids.insert(target, id);
-                    pending.remove(i);
-                    progressed = true;
-                } else if let Some(instance) = axiom_instances.get(&target) {
-                    // A conclusion no rule can witness is proved by universal
-                    // elimination. The step is preferred over a rule when both
-                    // exist, which is why the rule witness is tried first.
-                    let id = nodes.len();
-                    nodes.push(Node::AxiomInstance {
-                        axiom: instance.axiom.clone(),
-                        identity: instance.identity,
-                        bindings: instance.bindings.clone(),
-                        conclusion: instance.conclusion.clone(),
-                        sources: instance.sources.clone(),
-                    });
-                    ids.insert(target, id);
-                    pending.remove(i);
-                    progressed = true;
-                } else {
+                let candidates = self.witness_candidates(&target, &facts, &axiom_instances);
+                if candidates.is_empty() {
                     i += 1;
+                    continue;
                 }
+                // Every witness that will be recorded must have its premises
+                // already id'd; defer the whole conclusion until the slowest
+                // witness is ready, so the recorded set does not depend on the
+                // order the loop happens to visit conclusions in.
+                if !candidates
+                    .iter()
+                    .all(|c| c.premise_keys().iter().all(|pk| ids.contains_key(pk)))
+                {
+                    i += 1;
+                    continue;
+                }
+                // The first candidate in rule-declaration order (and, within
+                // one rule, the first matching instance) is the main witness:
+                // it is the node the rest of the proof tree refers to. It is
+                // kept even when the sorted witness list is truncated.
+                let primary = candidates[0].identity_key(self.env);
+                let mut sorted = candidates;
+                sorted.sort_by_key(|candidate| candidate.identity_key(self.env));
+                let truncated = sorted.len() > std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION;
+                while sorted.len() > std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION {
+                    let Some(last_other) = sorted
+                        .iter()
+                        .rposition(|candidate| candidate.identity_key(self.env) != primary)
+                    else {
+                        break;
+                    };
+                    sorted.remove(last_other);
+                }
+                let mut witnesses = Vec::with_capacity(sorted.len());
+                let mut main_id = None;
+                let mut main_prop = None;
+                for candidate in &sorted {
+                    let id = nodes.len();
+                    let conclusion = match candidate {
+                        WitnessCandidate::Rule {
+                            rule,
+                            instance,
+                            sources,
+                            applicability,
+                        } => {
+                            let premises: Vec<usize> =
+                                instance.premise_keys.iter().map(|pk| ids[pk]).collect();
+                            let conclusion = instance.conclusion.clone();
+                            nodes.push(Node::RuleApplication {
+                                rule: rule.clone(),
+                                conclusion: conclusion.clone(),
+                                premises,
+                                bindings: instance.bindings.clone(),
+                                sources: sources.clone(),
+                                applicability: (**applicability).clone(),
+                            });
+                            conclusion
+                        }
+                        WitnessCandidate::Axiom { instance } => {
+                            let conclusion = instance.conclusion.clone();
+                            nodes.push(Node::AxiomInstance {
+                                axiom: instance.axiom.clone(),
+                                identity: instance.identity,
+                                bindings: instance.bindings.clone(),
+                                conclusion: conclusion.clone(),
+                                sources: instance.sources.clone(),
+                            });
+                            conclusion
+                        }
+                    };
+                    if candidate.identity_key(self.env) == primary {
+                        main_id = Some(id);
+                        main_prop = Some(conclusion);
+                    }
+                    witnesses.push(id);
+                }
+                let (Some(main_id), Some(main_prop)) = (main_id, main_prop) else {
+                    return Err(format!(
+                        "内部状态错误：结论「{}」的主见证没有进入见证列表",
+                        print_expr(&facts[&target])
+                    ));
+                };
+                ids.insert(target.clone(), main_id);
+                alternatives.insert(
+                    target.clone(),
+                    WitnessGroup {
+                        // The main step's own conclusion: the root node and
+                        // the group speak about the same expression, so the
+                        // renderer finds the root's witness list without
+                        // comparing printed text.
+                        proposition: main_prop,
+                        witnesses,
+                        truncated,
+                    },
+                );
+                pending.remove(i);
+                progressed = true;
             }
             if !progressed {
                 return Err(format!(
@@ -2350,6 +2506,7 @@ impl<'a> Reasoner<'a> {
             rule_facts,
             nodes,
             ids,
+            alternatives,
             conflicts,
             contested,
             applications,
@@ -2386,21 +2543,32 @@ impl<'a> Reasoner<'a> {
         ))
     }
 
-    /// Find an unblocked rule application that concludes `target` and whose
-    /// premises already have node ids, together with the applicability verdict
-    /// the instance fired under.
-    fn witness(
+    /// Every independent witness that concludes `target` from `facts`.
+    ///
+    /// A witness is a rule instance whose premises all hold in `facts`, is not
+    /// blocked by an `unless`, fires under the case applicability judgement,
+    /// plus the demanded universal instance for the same conclusion. Instances
+    /// of the same rule with the same binding values are one witness (their
+    /// premises are the same propositions); a different rule, or the same rule
+    /// with different bindings, is another. Candidates are returned in
+    /// derivation order: rules in declaration order with their first matching
+    /// instance, then the universal instance. The caller sorts them for the
+    /// certificate by [`WitnessCandidate::identity_key`].
+    fn witness_candidates(
         &self,
         target: &str,
         facts: &BTreeMap<String, Expr>,
-        ids: &BTreeMap<String, usize>,
-    ) -> Option<(Name, Instance, Vec<SourceRef>, Applicability)> {
+        axiom_instances: &BTreeMap<String, AxiomInstance>,
+    ) -> Vec<WitnessCandidate> {
+        let mut out: Vec<WitnessCandidate> = Vec::new();
+        let mut seen: BTreeSet<(u8, String, String)> = BTreeSet::new();
         for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
-            // The witness is the argument shown to the reader, so it must be
-            // an instance that could actually fire under the case judgement.
+            // The witness is an argument the reader may be shown, so it must
+            // be an instance that could actually fire under the case
+            // judgement.
             for inst in self.enumerate(rule, facts) {
                 if self.key_of(&inst.conclusion) != target {
                     continue;
@@ -2408,16 +2576,42 @@ impl<'a> Reasoner<'a> {
                 if blocked(&inst.unlesses, facts, self.env) {
                     continue;
                 }
-                if inst.premise_keys.iter().all(|pk| ids.contains_key(pk)) {
-                    let verdict = self.judge_instance(&decl.scope, &inst.premise_keys);
-                    if !verdict.allows_firing() {
-                        continue;
-                    }
-                    return Some((decl.name.clone(), inst, decl.sources.clone(), verdict));
+                if !inst.premise_keys.iter().all(|pk| facts.contains_key(pk)) {
+                    continue;
                 }
+                let verdict = self.judge_instance(&decl.scope, &inst.premise_keys);
+                if !verdict.allows_firing() {
+                    continue;
+                }
+                let identity = (
+                    0,
+                    decl.name.to_string(),
+                    instance_binding_key(self.env, &inst.bindings),
+                );
+                if !seen.insert(identity) {
+                    continue;
+                }
+                out.push(WitnessCandidate::Rule {
+                    rule: decl.name.clone(),
+                    instance: inst,
+                    sources: decl.sources.clone(),
+                    applicability: Box::new(verdict),
+                });
             }
         }
-        None
+        if let Some(instance) = axiom_instances.get(target) {
+            let identity = (
+                1,
+                instance.axiom.to_string(),
+                instance_binding_key(self.env, &instance.bindings),
+            );
+            if seen.insert(identity) {
+                out.push(WitnessCandidate::Axiom {
+                    instance: instance.clone(),
+                });
+            }
+        }
+        out
     }
 
     /// Enumerate instances of `rule` against `facts`.
@@ -2461,7 +2655,7 @@ impl<'a> Reasoner<'a> {
 
     /// Every declared rule's burden/standard, keyed by rule name.
     ///
-    /// Certificate v8 does not record these declarations (adding them would
+    /// Certificate v9 does not record these declarations (adding them would
     /// change the format), so `:explain` supplies this map when it narrates a
     /// certificate gap. The values come from the environment declaration, the
     /// same one the derivation used.
@@ -2524,6 +2718,7 @@ impl<'a> Reasoner<'a> {
             Some(f) => Derivation {
                 nodes: f.nodes.clone(),
                 root: None,
+                alternatives: f.alternatives.values().cloned().collect(),
                 conflicts: f.conflicts.clone(),
                 interpretations: self.enabled_records(),
             },
@@ -2577,6 +2772,7 @@ impl<'a> Reasoner<'a> {
         Some(Derivation {
             root: fixed.ids.get(&k).copied(),
             nodes: fixed.nodes,
+            alternatives: fixed.alternatives.values().cloned().collect(),
             conflicts: Vec::new(),
             interpretations: self.enabled_records(),
         })
@@ -4756,6 +4952,45 @@ pub fn certificate(
         }
     }
 
+    // The certificate's witness table follows the derivation's: entries are
+    // ordered by the structural key of the conclusion and witnesses by the
+    // order the reasoner already fixed (rule name, then binding structure).
+    let mut groups: Vec<&WitnessGroup> = d.alternatives.iter().collect();
+    groups.sort_by_key(|group| structural_key(env, &group.proposition));
+    let mut alternatives = Vec::with_capacity(groups.len());
+    for (index, group) in groups.iter().enumerate() {
+        let label = format!("第 {} 条结论见证", index + 1);
+        if group.witnesses.len() > std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION {
+            return Err(format!(
+                "{label}的见证数量超过每个结论 {} 条上限：实际 {} 条",
+                std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION,
+                group.witnesses.len()
+            ));
+        }
+        if group.truncated
+            && group.witnesses.len() != std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION
+        {
+            return Err(format!(
+                "{label}标记为截断，但见证数量是 {} 条而不是上限 {} 条：截断标记与实际记录不符",
+                group.witnesses.len(),
+                std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION
+            ));
+        }
+        for witness in &group.witnesses {
+            if *witness >= d.nodes.len() {
+                return Err(format!(
+                    "{label}引用的见证节点 {witness} 越界：推导只有 {} 个节点",
+                    d.nodes.len()
+                ));
+            }
+        }
+        alternatives.push(std_deduce_cert::Alternative {
+            proposition: cert_expr(&group.proposition, None, &format!("{label}的命题"))?,
+            witnesses: group.witnesses.clone(),
+            truncated: group.truncated,
+        });
+    }
+
     let conflicts = d
         .conflicts
         .iter()
@@ -4865,6 +5100,7 @@ pub fn certificate(
         interpretations,
         nodes,
         root: d.root,
+        alternatives,
         conflicts,
         open_obligations,
         metadata: std_deduce_cert::Metadata {

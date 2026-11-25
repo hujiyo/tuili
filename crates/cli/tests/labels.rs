@@ -496,7 +496,7 @@ fn a_gap_root_is_never_reported_as_verified() {
 }
 
 #[test]
-fn cert_json_keeps_the_v8_top_level_fields_and_no_label_field() {
+fn cert_json_keeps_the_v9_top_level_fields_and_no_label_field() {
     let dir = TempDir::new("cert-shape");
     let verified = dir.write("verified.std", VERIFIED);
     let output = session(&verified, &[], &[":cert 受罚 张三"]);
@@ -513,6 +513,7 @@ fn cert_json_keeps_the_v8_top_level_fields_and_no_label_field() {
     assert_eq!(
         keys,
         [
+            "alternatives",
             "assumptions",
             "conflicts",
             "environment",
@@ -523,9 +524,9 @@ fn cert_json_keeps_the_v8_top_level_fields_and_no_label_field() {
             "open_obligations",
             "root",
         ],
-        "the certificate must keep exactly v8's top-level fields: {text}"
+        "the certificate must keep exactly v9's top-level fields: {text}"
     );
-    assert_eq!(object["format_version"], 8, "{text}");
+    assert_eq!(object["format_version"], 9, "{text}");
     for unexpected in ["trust", "labels", "label", "trust_labels"] {
         assert!(
             !object.contains_key(unexpected),

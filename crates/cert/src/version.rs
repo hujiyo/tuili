@@ -23,11 +23,15 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// `axiom_instance` node naming the universal fact, the identity it is
 /// asserted under, the closed value of every binding variable and the
 /// substituted conclusion, plus the universal facts a gap goal could be
-/// instantiated from and why they were refused. Older certificates are
+/// instantiated from and why they were refused. Version 9 records every
+/// independent witness of each derived conclusion: the `alternatives` table
+/// names a proposition and the nodes that derive it, in a stable order, with an
+/// explicit truncation flag for the per-conclusion bound.
+/// Older certificates are
 /// refused rather than read with guessed evidence: a proof that silently drops
-/// an applicability judgement, an interpretation step or a universal
-/// elimination step cannot be checked.
-pub const FORMAT_VERSION: u32 = 8;
+/// an applicability judgement, an interpretation step, a universal
+/// elimination step or an independent argument cannot be checked.
+pub const FORMAT_VERSION: u32 = 9;
 
 /// A certificate format version.
 ///
