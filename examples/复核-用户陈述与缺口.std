@@ -1,0 +1,30 @@
+-- 复核报告示例二：用户陈述 + 缺口。
+-- 「违法」只是用户陈述，规则还需要没有登记的「故意」；报告应显示「事实待举证」、
+-- 举证责任、证明标准与缺少的前提。把目标换成「警告 张三」时，同一理论给出
+-- 一个只用用户陈述闭合的证明，报告显示「依赖假设」。
+
+sort 人
+pred 违法 : 人 → Prop
+pred 故意 : 人 → Prop
+pred 受罚 : 人 → Prop
+pred 警告 : 人 → Prop
+obj 张三 : 人
+
+axiom 张三违法 : 违法 张三
+  identity user_asserted
+  source text "用户陈述" locator "会话" note "未经独立证明"
+
+rule 处罚 :
+  params p : 人
+  premise 违法 p
+  premise 故意 p
+  conclude 受罚 p
+  burden claimant
+  standard preponderance
+  source text "示例法" locator "第二条" version "2024" quote "故意违法者受罚"
+
+rule 警告规则 :
+  params p : 人
+  premise 违法 p
+  conclude 警告 p
+  source text "示例法" locator "第三条" version "2024"

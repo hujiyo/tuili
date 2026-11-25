@@ -35,9 +35,9 @@
 //! system in the applicability judgement; `:asof` is only a fallback when the
 //! judged rule instance references no fact with an occurrence time. If the
 //! loaded rules name two or more jurisdictions and the session has no
-//! jurisdiction, `:why` / `:explain` / `:cert` refuse with exit `2` instead of silently
-//! picking one; `:gap`, `:issues`, `:applicability` and `:inspect` are not
-//! gated.
+//! jurisdiction, `:why` / `:explain` / `:review` / `:cert` refuse with exit
+//! `2` instead of silently picking one; `:gap`, `:issues`, `:applicability`
+//! and `:inspect` are not gated.
 //!
 //! Rule scope (`effective` / `repealed` / `jurisdiction` / `territory`) and a
 //! fact's occurrence (`occurred_at` / `occurred_in`) are judged before a rule
@@ -323,6 +323,15 @@
 //! `:cert` JSON is unchanged: the labels are not a certificate field and the
 //! format stays v8.
 //!
+//! `:review` uses the same certificate and the same two proof layers as
+//! `:why`, then renders a Markdown review report from the certificate, the
+//! reasoner's gap trees, the rules' burden/standard declarations and the trust
+//! labels. It adds no inference of its own, never changes `:why` / `:cert`
+//! output, and is not legal advice. The report is written to stdout, or to a
+//! file with `--out` (the path is printed and the file is written through a
+//! temporary file, so a failed write leaves no partial report). Its exit code
+//! is `:why`'s; the sections and their ordering are documented in `README.md`.
+//!
 //! `:why` and `:explain` also report the `open` concept marker. A rule step
 //! whose conclusion head is an open predicate, or a root that is one, makes the
 //! derivation depend on a human judgement: the certificate records one
@@ -456,6 +465,7 @@
 mod environment;
 mod identity;
 mod packs;
+mod review;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -1180,6 +1190,7 @@ impl Session {
                 "applicability" => self.applicability_command(arg, out),
                 "issues" => self.issues_command(arg, out),
                 "labels" => self.labels_command(arg, out),
+                "review" => self.review_command(arg, out),
                 "cert" => self.export_certificate(arg, out),
                 "verify-cert" => self.verify_certificate(arg, out),
                 "check" => Err(
@@ -1535,8 +1546,8 @@ impl Session {
         }
     }
 
-    /// Refuse `:why` / `:explain` / `:cert` when the loaded rules name two or
-    /// more jurisdictions and the session has not chosen one.
+    /// Refuse `:why` / `:explain` / `:review` / `:cert` when the loaded rules
+    /// name two or more jurisdictions and the session has not chosen one.
     ///
     /// This is a gate on ambiguity, not an applicability judgment: it runs
     /// before the reasoner, because without a case jurisdiction the judgement
@@ -2182,6 +2193,118 @@ impl Session {
             && !trust.contains(TrustLabel::NeedsLawyerJudgment);
         Ok(if proved_without_open {
             Outcome::Proved
+        } else {
+            Outcome::Gap
+        })
+    }
+
+    /// `:review <命题> [--out <文件>]` — the Markdown review report.
+    ///
+    /// The report is rendered from the same certificate `:why` / `:cert` build
+    /// (checked by both layers first), the reasoner's gap trees and the
+    /// `:issues` scan, the declared burden/standard map, and the trust labels.
+    /// It adds no inference of its own and is not legal advice. Without `--out`
+    /// the report goes to stdout; with `--out` it is written to the named file
+    /// and only the path line is printed. The write happens after the complete
+    /// report string exists, through a temporary file in the destination's own
+    /// directory; an existing destination's permission bits are copied to the
+    /// temporary file before the rename, so the replacement keeps the target's
+    /// permissions. A failed write, permission copy or rename leaves no
+    /// half-written report and no partial destination.
+    ///
+    /// The exit code is `:why`'s: `0` only when the root is proved and no open
+    /// obligation or unresolved conflict is recorded; every other outcome is
+    /// `1`. A command, certificate or write error is `2`.
+    fn review_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if !self.loaded {
+            return Err(
+                "尚未加载理论：:review 需要已加载的环境才能生成复核报告，请先 :load <文件>".into(),
+            );
+        }
+        let (goal_text, report_path) = split_review_argument(arg)?;
+        // Same ambiguity gate as `:why` and `:cert`: a report about a
+        // multi-jurisdiction environment must say which legal system it is
+        // speaking about.
+        self.require_jurisdiction()?;
+        let goal = self.goal(goal_text)?;
+        let mut r = self.reasoner()?;
+        // The same query-level trigger as `:why` / `:cert`: when the first
+        // saturation pass does not prove the goal, demand a universal-elimination
+        // instance for it. Without this the report would describe a gap where
+        // the certificate layer can derive the conclusion.
+        saturate_with_goal(&mut r, Some(&goal))?;
+
+        let reachable = r.knows(&goal);
+        let mut derivation = r.derivation();
+        if reachable {
+            derivation.root = r.root_for(&goal);
+        } else {
+            let explanation = r.explain(&goal)?;
+            let id = derivation.nodes.len();
+            derivation.nodes.push(std_deduce_reason::Node::Gap {
+                prop: goal.clone(),
+                candidates: explanation.candidates,
+                axiom_candidates: explanation.axiom_candidates,
+                note: explanation.note,
+            });
+            derivation.root = Some(id);
+        }
+        let mut certificate = reason_certificate(&self.lib.env, &derivation, &r.priority_order())?;
+        self.mark_case_extensions(&mut certificate);
+
+        // A report is never generated from a certificate that does not pass
+        // both layers: the labels and the report would then describe an
+        // unchecked object.
+        self.certificate_layers(&certificate, out)?;
+        let trust = derive_trust(&certificate)?;
+        let dependency = std_deduce_cert::open_concept_dependency(&self.lib.env, &certificate)
+            .map_err(|error| format!("无法重算开放概念义务：{error}"))?;
+        let limits = GapLimits::default();
+        let issues = r.issues_with(&limits)?;
+        let pleadings = r.pleadings();
+        let root_gap = if reachable {
+            None
+        } else {
+            Some(r.gap_tree_with(&goal, &limits)?)
+        };
+        let report = crate::review::render_review(
+            &self.lib.env,
+            &certificate,
+            &trust,
+            dependency.as_ref(),
+            &issues,
+            root_gap.as_ref(),
+            &pleadings,
+        )?;
+
+        match report_path {
+            Some(path) => {
+                write_review_file(path, &report)?;
+                writeln!(out, "已写入复核报告：{}", escape_path(path)).ok();
+            }
+            None => {
+                // The report already ends with a newline; no extra blank line
+                // is appended, so the file and stdout forms are byte-identical.
+                write!(out, "{report}").ok();
+            }
+        }
+
+        let unresolved = certificate
+            .conflicts
+            .iter()
+            .filter(|conflict| {
+                matches!(
+                    conflict.resolution,
+                    std_deduce_cert::Resolution::Unresolved { .. }
+                )
+            })
+            .count();
+        let proved = trust.root_proved();
+        let clean = proved && certificate.open_obligations.is_empty() && unresolved == 0;
+        Ok(if clean {
+            Outcome::Proved
+        } else if proved && unresolved > 0 {
+            Outcome::Unresolved
         } else {
             Outcome::Gap
         })
@@ -3617,6 +3740,145 @@ fn split_verify_cert_argument(arg: &str) -> Result<(&str, Option<&str>), String>
         }
         None => Ok((arg, None)),
     }
+}
+
+/// Split `:review`'s argument into a goal and an optional output path.
+///
+/// The goal is everything before a standalone `--out` token; without `--out`
+/// the whole argument is the goal. The path after `--out` is the rest of the
+/// argument, so a path containing spaces needs no quotes; a path written in
+/// double quotes is accepted as well and must not be followed by more text.
+/// The `--out` token is recognised only at a whitespace boundary, so a
+/// proposition that happens to contain the letters cannot steal the option.
+fn split_review_argument(arg: &str) -> Result<(&str, Option<&str>), String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err("用法：:review <命题> [--out <文件>]".into());
+    }
+    let mut found: Option<(usize, usize)> = None;
+    for (position, _) in arg.match_indices("--out") {
+        let before_ok = position == 0
+            || arg[..position]
+                .chars()
+                .last()
+                .is_some_and(char::is_whitespace);
+        let after_position = position + "--out".len();
+        let after_ok = after_position == arg.len()
+            || arg[after_position..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace);
+        if before_ok && after_ok {
+            if found.is_some() {
+                return Err("用法错误：--out 只能使用一次".into());
+            }
+            found = Some((position, after_position));
+        }
+    }
+    let Some((option_start, option_end)) = found else {
+        return Ok((arg, None));
+    };
+    let goal = arg[..option_start].trim();
+    if goal.is_empty() {
+        return Err("用法：:review <命题> [--out <文件>]（--out 之前必须给出命题）".into());
+    }
+    let path = unquote_report_path(arg[option_end..].trim())?;
+    Ok((goal, Some(path)))
+}
+
+/// The path after `--out`, optionally double-quoted.
+fn unquote_report_path(path: &str) -> Result<&str, String> {
+    if path.is_empty() {
+        return Err("用法错误：--out 缺少文件路径".into());
+    }
+    if let Some(rest) = path.strip_prefix('"') {
+        let Some(end) = rest.find('"') else {
+            return Err("复核报告路径的引号未闭合".into());
+        };
+        let value = &rest[..end];
+        let trailing = rest[end + 1..].trim();
+        if !trailing.is_empty() {
+            return Err(format!(
+                "用法错误：--out 的路径后有多余内容 `{}`",
+                escape_control(trailing)
+            ));
+        }
+        if value.is_empty() {
+            return Err("用法错误：--out 的文件路径为空".into());
+        }
+        return Ok(value);
+    }
+    Ok(path)
+}
+
+/// Write the report through a temporary file next to the destination.
+///
+/// The whole report exists before this is called. The temporary file lives in
+/// the destination's own directory, so it is on the same file system and the
+/// rename is atomic. If the destination already exists, its permission bits are
+/// copied to the temporary file before the rename; a new destination gets the
+/// directory's default permissions, exactly as a file created at that path
+/// would. A failed write, permission copy or rename removes the temporary file
+/// and returns an error, so the destination never contains half a report.
+fn write_review_file(path: &str, report: &str) -> Result<(), String> {
+    let destination = Path::new(path);
+    let Some(file_name) = destination.file_name() else {
+        return Err(format!(
+            "写入复核报告 `{}` 失败：路径没有文件名",
+            escape_path(path)
+        ));
+    };
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let temporary = parent.join(format!(
+        ".{}.tmp-{}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    let existing_permissions = match fs::metadata(destination) {
+        Ok(meta) => {
+            if meta.permissions().readonly() {
+                return Err(format!(
+                    "写入复核报告 `{}` 失败：目标不可写（只读）",
+                    escape_path(path)
+                ));
+            }
+            Some(meta.permissions())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "写入复核报告 `{}` 失败：无法读取目标文件权限：{error}",
+                escape_path(path)
+            ));
+        }
+    };
+    if let Err(error) = fs::write(&temporary, report) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "写入复核报告 `{}` 失败：{error}",
+            escape_path(path)
+        ));
+    }
+    if let Some(permissions) = existing_permissions {
+        if let Err(error) = fs::set_permissions(&temporary, permissions) {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!(
+                "写入复核报告 `{}` 失败：无法设置报告文件权限：{error}",
+                escape_path(path)
+            ));
+        }
+    }
+    if let Err(error) = fs::rename(&temporary, destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "写入复核报告 `{}` 失败：{error}",
+            escape_path(path)
+        ));
+    }
+    Ok(())
 }
 
 /// Print the failed binding line and return the error that exits `2`.
@@ -5098,6 +5360,14 @@ fn print_help(out: &mut impl Write) {
          :interpret list 查看状态，:gap / :why 的缺口会提示未启用的解释。"
     )
     .ok();
+    writeln!(
+        out,
+        "律师复核报告：:review <命题> [--out <文件>]；报告只由证书、缺口树、举证元数据与信任标签生成，\
+         不是法律意见。不写 --out 时报告写到 stdout；写文件时只打印报告路径，文件内容与 stdout 形式逐字节相同。\
+         写文件采用同目录临时文件加原子改名的原子写语义，失败不留半份报告。\
+         退出码与 :why 一致：根已证明且无未决义务为 0，其余为 1。"
+    )
+    .ok();
 }
 
 fn print_version(out: &mut impl Write) {
@@ -5159,7 +5429,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
                 ":load <文件>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
                  :asof [YYYY-MM-DD]  :jurisdiction [代码]  \
                  :interpret [list|enable|disable <解释名>]  \
-                 :why <命题>  :explain <命题>  :labels <命题>  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
+                 :why <命题>  :explain <命题>  :labels <命题>  :review <命题> [--out <文件>]  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )
             .ok();
