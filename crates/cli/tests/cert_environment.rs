@@ -865,13 +865,45 @@ fn certificate_identity_options_do_not_affect_packs_env_or_why() {
     assert_exit(&dated, PROVED);
     assert_eq!(stdout(&plain), stdout(&dated), "`env` must not change");
 
-    // An ordinary `:why` does not stamp a certificate identity either.
+    // An ordinary `:why` does not stamp a certificate identity, but the
+    // session's as-of date and jurisdiction are inputs of the applicability
+    // judgement: the derivation is the same, while the labelled applicability
+    // state may differ (the pack rules inherit `jurisdiction = "CN"` and
+    // `territory = "CN"` from the manifest, and the case records no place).
     let why = vec![format!(":load {CASE}"), format!(":why {GOAL}")];
     let plain = root.session(&[], &why);
     let dated = root.session(&options, &why);
     assert_exit(&plain, PROVED);
     assert_exit(&dated, PROVED);
-    assert_eq!(stdout(&plain), stdout(&dated), "`:why` must not change");
+    let derivation = |out: &str| {
+        let start = out
+            .find('▸')
+            .unwrap_or_else(|| panic!("no derivation tree:\n{out}"));
+        out[start..]
+            .split("\n\n")
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(
+        derivation(&stdout(&plain)),
+        derivation(&stdout(&dated)),
+        "the identity options must not change the derivation itself"
+    );
+    let plain_out = stdout(&plain);
+    let dated_out = stdout(&dated);
+    assert!(
+        plain_out.contains(
+            "⟨test.law.侵占即侵犯⟩：适用性未判定（规则声明了管辖，但会话未设置 :jurisdiction）"
+        ),
+        "{plain_out}"
+    );
+    assert!(
+        dated_out.contains(
+            "⟨test.law.侵占即侵犯⟩：适用性未判定（规则声明了地域，但案件事实没有记录发生地点）"
+        ),
+        "{dated_out}"
+    );
 }
 
 #[test]

@@ -394,8 +394,12 @@ fn help_lists_the_certificate_identity_options() {
         assert!(out.contains("--as-of <YYYY-MM-DD>"), "{flag}: {out}");
         assert!(out.contains("--jurisdiction <代码>"), "{flag}: {out}");
         assert!(
-            out.contains("不参与推理"),
-            "the help must say the options do not affect reasoning:\n{flag}: {out}"
+            out.contains("适用性判定"),
+            "the help must say the options are applicability reference values:\n{flag}: {out}"
+        );
+        assert!(
+            out.contains(":applicability"),
+            "the help must name the applicability report:\n{flag}: {out}"
         );
         assert!(
             out.contains(":cert / :verify-cert"),

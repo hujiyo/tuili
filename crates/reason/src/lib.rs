@@ -69,6 +69,25 @@
 //! missing" hint likewise covers only the root goal, and only when the
 //! interpretation's `from` holds before any application would run.
 //!
+//! ## Temporal and spatial applicability
+//!
+//! A rule's recorded scope (`effective` / `repealed` / `jurisdiction` /
+//! `territory`) and a fact's occurrence (`occurred_at` / `occurred_in`) are
+//! judged before a rule may fire. [`Applicability`] keeps four outcomes apart:
+//! applicable, inapplicable (with the concrete date or code that excluded the
+//! rule), unchecked (a needed input is missing), and undecidable (the inputs
+//! are present but the data cannot decide). An inapplicable rule never fires
+//! and never becomes a conflict witness; unchecked and undecidable rules keep
+//! firing and are labelled wherever a rule is shown, so a missing scope
+//! record is visible instead of silently ignored.
+//!
+//! The judgement itself is [`applicability::judge`]: a pure function over the
+//! rule's [`Scope`](std_deduce_kernel::meta::Scope) and the case's
+//! [`CaseAnchor`]. The reasoner only supplies the session values and the
+//! occurrence records of the registered facts; the CLI only renders the
+//! recorded verdict. A certificate still records no applicability judgement
+//! (the format is unchanged), so `:verify-cert` does not re-judge it.
+//!
 //! ## Certificates
 //!
 //! [`certificate`] converts a derivation into the versioned certificate
@@ -77,6 +96,13 @@
 //! carried over unchanged. It does not decide anything the derivation did
 //! not already decide, and it refuses to drop an expression it cannot
 //! encode.
+
+mod applicability;
+
+pub use applicability::{
+    Applicability, CaseAnchor, CodeDimension, DateField, InapplicableReason, MissingInput,
+    UndecidableReason,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -132,6 +158,11 @@ pub struct GapCandidate {
     /// `unless` conditions that *are* known, i.e. why this rule is blocked.
     pub blocked_by: Vec<Expr>,
     pub sources: Vec<SourceRef>,
+    /// The rule's temporal/spatial judgement for this case. An inapplicable
+    /// candidate is still listed: `:gap` says why it cannot be used instead of
+    /// hiding it. Unchecked and undecidable candidates keep their missing
+    /// premises and are expanded like before.
+    pub applicability: Applicability,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -371,6 +402,12 @@ struct Assumption {
     identity: FactIdentity,
     sources: Vec<SourceRef>,
     label: Option<String>,
+    /// First day the fact occurred, copied from the ledger declaration. A
+    /// reasoner assumption registered by hand has none, so a missing
+    /// occurrence is not invented from the query date.
+    occurred_at: Option<String>,
+    /// Place the fact occurred in, copied from the ledger declaration.
+    occurred_in: Option<String>,
 }
 
 /// One instantiation of a rule against a set of known facts.
@@ -427,6 +464,9 @@ struct Fixed {
     /// Interpretation conclusion key -> interpretation id, for the applications
     /// that produced the settled fact base.
     applications: BTreeMap<String, Name>,
+    /// Every rule's temporal/spatial judgement for the case this derivation
+    /// settled. A rule that is not in this map does not exist.
+    applicability: BTreeMap<Name, Applicability>,
 }
 
 // ---------------------------------------------------------------- reasoner
@@ -454,6 +494,12 @@ pub struct Reasoner<'a> {
     /// Interpretations this query enabled, sorted by id. Empty means the
     /// default: every interpretation stays inert, and output is unchanged.
     enabled: BTreeSet<Name>,
+    /// The session's legal as-of date, if one was set. It is a reference date
+    /// of the applicability judgement, never copied onto a fact.
+    as_of: Option<String>,
+    /// The session's jurisdiction code, if one was set. It is compared with a
+    /// rule's recorded `jurisdiction`; it never filters a rule by itself.
+    jurisdiction: Option<String>,
     fixed: Option<Fixed>,
     max_rounds: usize,
 }
@@ -481,9 +527,81 @@ impl<'a> Reasoner<'a> {
             contraries,
             uniques,
             enabled: BTreeSet::new(),
+            as_of: None,
+            jurisdiction: None,
             fixed: None,
             max_rounds: 256,
         }
+    }
+
+    /// Anchor the reasoner's applicability judgement to the session's legal
+    /// as-of date and jurisdiction code.
+    ///
+    /// Call this before [`Reasoner::saturate`]: the settled derivation records
+    /// the verdicts it judged. `None` means "not set" and is reported as
+    /// missing input when a rule declares that dimension; it is never filled
+    /// in from a default. The values are validated by the command layer, and a
+    /// malformed stored value only ever makes a comparison undecidable — it is
+    /// not silently dropped.
+    pub fn set_session_scope(&mut self, as_of: Option<&str>, jurisdiction: Option<&str>) {
+        self.as_of = as_of.map(ToOwned::to_owned);
+        self.jurisdiction = jurisdiction.map(ToOwned::to_owned);
+    }
+
+    /// The case's time and place: the session values plus the occurrence
+    /// records of the registered facts. Derived conclusions do not inherit an
+    /// occurrence record from their premises.
+    fn case_anchor(&self) -> CaseAnchor<'_> {
+        let mut occurred_at = Vec::new();
+        let mut occurred_in = Vec::new();
+        for assumption in &self.assumptions {
+            if let Some(date) = assumption.occurred_at.as_deref() {
+                if !occurred_at.contains(&date) {
+                    occurred_at.push(date);
+                }
+            }
+            if let Some(place) = assumption.occurred_in.as_deref() {
+                if !occurred_in.contains(&place) {
+                    occurred_in.push(place);
+                }
+            }
+        }
+        CaseAnchor {
+            as_of: self.as_of.as_deref(),
+            jurisdiction: self.jurisdiction.as_deref(),
+            occurred_at,
+            occurred_in,
+        }
+    }
+
+    /// Judge one rule against the case anchor.
+    fn judge_rule(&self, scope: &std_deduce_kernel::meta::Scope) -> Applicability {
+        applicability::judge(scope, &self.case_anchor())
+    }
+
+    /// Judge every rule once for this case, keyed by rule name.
+    fn applicability_map(&self) -> BTreeMap<Name, Applicability> {
+        self.ordered_rules()
+            .into_iter()
+            .map(|decl| (decl.name.clone(), self.judge_rule(&decl.scope)))
+            .collect()
+    }
+
+    /// Every rule's judgement for the settled case, sorted by rule name. The
+    /// CLI prints the entries a derivation or gap actually used; the whole
+    /// list is available so nothing is hidden by a query that happens to use
+    /// only one rule.
+    pub fn rule_applicability(&self) -> Vec<(Name, Applicability)> {
+        self.fixed
+            .as_ref()
+            .map(|fixed| {
+                fixed
+                    .applicability
+                    .iter()
+                    .map(|(rule, verdict)| (rule.clone(), verdict.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The priority cycles of the environment: every strongly connected
@@ -667,6 +785,25 @@ impl<'a> Reasoner<'a> {
         sources: Vec<SourceRef>,
         label: Option<String>,
     ) -> Result<(), String> {
+        // A hand-registered assumption records no occurrence: only a ledger
+        // fact carries `occurred_at` / `occurred_in`, and a query date is not
+        // the fact's date.
+        self.assume_with_occurrence(prop, identity, sources, label, None, None)
+    }
+
+    /// Register an assumption together with the occurrence the ledger fact
+    /// records. The public [`Reasoner::assume`] delegates here with `None`; the
+    /// occurrence is evidence about the case, so it travels with the
+    /// assumption instead of being looked up from a printed name later.
+    fn assume_with_occurrence(
+        &mut self,
+        prop: &Expr,
+        identity: FactIdentity,
+        sources: Vec<SourceRef>,
+        label: Option<String>,
+        occurred_at: Option<String>,
+        occurred_in: Option<String>,
+    ) -> Result<(), String> {
         if identity == FactIdentity::Disputed {
             return Err("争议事实不能作为假设：它断言的是对方的主张，不是已证明的命题".into());
         }
@@ -708,6 +845,8 @@ impl<'a> Reasoner<'a> {
             identity,
             sources,
             label,
+            occurred_at,
+            occurred_in,
         });
         Ok(())
     }
@@ -774,11 +913,13 @@ impl<'a> Reasoner<'a> {
             let DeclKind::Fact { identity } = &decl.kind else {
                 continue;
             };
-            self.assume(
+            self.assume_with_occurrence(
                 &decl.ty,
                 *identity,
                 decl.sources.clone(),
                 Some(decl.name.to_string()),
+                decl.occurred_at.clone(),
+                decl.occurred_in.clone(),
             )?;
         }
         Ok(())
@@ -798,6 +939,11 @@ impl<'a> Reasoner<'a> {
     pub fn saturate(&mut self) -> Result<(), String> {
         let mut removed: BTreeSet<String> = BTreeSet::new();
         let mut seen: BTreeMap<(String, String), Conflict> = BTreeMap::new();
+        // The judgement is a property of the rule and the case, so it is
+        // computed once for the settled state and recorded with the derivation.
+        // Every firing path reads the same verdict; none recomputes a looser
+        // one.
+        let applicability = self.applicability_map();
 
         for _ in 0..self.max_rounds {
             let mut facts = self.fixed_point(&removed)?;
@@ -847,8 +993,14 @@ impl<'a> Reasoner<'a> {
                     contested.insert(self.key_of(&c.left), c.clone());
                     contested.insert(self.key_of(&c.right), c.clone());
                 }
-                let fixed =
-                    self.build_nodes(facts, rule_facts, conflicts, contested, applications)?;
+                let fixed = self.build_nodes(
+                    facts,
+                    rule_facts,
+                    conflicts,
+                    contested,
+                    applications,
+                    applicability,
+                )?;
                 self.fixed = Some(fixed);
                 return Ok(());
             }
@@ -908,8 +1060,16 @@ impl<'a> Reasoner<'a> {
 
         for _round in 0..self.max_rounds {
             let mut next = seeds.clone();
-            let rules = self.rules();
-            for (_name, rule) in &rules {
+            for decl in self.ordered_rules() {
+                let DeclKind::Rule(rule) = &decl.kind else {
+                    continue;
+                };
+                // A rule the case excludes contributes no conclusion at all.
+                // It is not merely hidden later: it must never seed a premise,
+                // an `unless` blocker or a conflict side.
+                if !self.judge_rule(&decl.scope).allows_firing() {
+                    continue;
+                }
                 for inst in self.enumerate(rule, &k) {
                     if blocked(&inst.unlesses, &k, self.env) {
                         continue;
@@ -935,16 +1095,6 @@ impl<'a> Reasoner<'a> {
             k = next;
         }
         Err("推理在 256 轮内未收敛：可能存在规则环".into())
-    }
-
-    fn rules(&self) -> Vec<(Name, RuleDecl)> {
-        self.ordered_rules()
-            .into_iter()
-            .filter_map(|d| match &d.kind {
-                DeclKind::Rule(r) => Some((d.name.clone(), (**r).clone())),
-                _ => None,
-            })
-            .collect()
     }
 
     /// Every rule declaration of the environment, ordered by name, so that
@@ -1035,10 +1185,16 @@ impl<'a> Reasoner<'a> {
     /// premises already in `facts`.
     fn derivers(&self, target: &str, facts: &BTreeMap<String, Expr>) -> Vec<Name> {
         let mut out = BTreeSet::new();
-        for decl in self.env.rules() {
+        for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
+            // A rule that does not apply is no witness. Counting it here would
+            // let a priority resolve a conflict through an inapplicable rule,
+            // and would make a rebuilt derivation cite a step that never fired.
+            if !self.judge_rule(&decl.scope).allows_firing() {
+                continue;
+            }
             for inst in self.enumerate(rule, facts) {
                 if self.key_of(&inst.conclusion) != target {
                     continue;
@@ -1231,6 +1387,7 @@ impl<'a> Reasoner<'a> {
         conflicts: Vec<Conflict>,
         contested: BTreeMap<String, Conflict>,
         applications: BTreeMap<String, Name>,
+        applicability: BTreeMap<Name, Applicability>,
     ) -> Result<Fixed, String> {
         let mut nodes: Vec<Node> = Vec::new();
         let mut ids: BTreeMap<String, usize> = BTreeMap::new();
@@ -1322,6 +1479,7 @@ impl<'a> Reasoner<'a> {
             conflicts,
             contested,
             applications,
+            applicability,
         })
     }
 
@@ -1367,6 +1525,11 @@ impl<'a> Reasoner<'a> {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
+            // The witness is the argument shown to the reader, so it must be
+            // a rule that could actually fire under the case judgement.
+            if !self.judge_rule(&decl.scope).allows_firing() {
+                continue;
+            }
             for inst in self.enumerate(rule, facts) {
                 if self.key_of(&inst.conclusion) != target {
                     continue;
@@ -1499,7 +1662,14 @@ impl<'a> Reasoner<'a> {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         let fixed = self
-            .build_nodes(facts, rule_facts, Vec::new(), BTreeMap::new(), applications)
+            .build_nodes(
+                facts,
+                rule_facts,
+                Vec::new(),
+                BTreeMap::new(),
+                applications,
+                self.applicability_map(),
+            )
             .ok()?;
         Some(Derivation {
             root: fixed.ids.get(&k).copied(),
@@ -1649,6 +1819,7 @@ impl<'a> Reasoner<'a> {
             issues: Vec::new(),
             limits: Vec::new(),
             uninstantiable: Vec::new(),
+            inapplicable: Vec::new(),
         };
         let values = constant_values(self.env);
         // Keyed by structural identity: two rules that conclude the same
@@ -1660,6 +1831,13 @@ impl<'a> Reasoner<'a> {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
+            // An inapplicable rule cannot conclude anything about this case,
+            // so its conclusions are not open issues. The skip is recorded and
+            // printed: an empty scan must not hide an excluded rule.
+            if !self.judge_rule(&decl.scope).allows_firing() {
+                scan.inapplicable.push(decl.name.clone());
+                continue;
+            }
             let mut instances = Vec::new();
             let mut truncated = false;
             collect_param_bindings(
@@ -1746,6 +1924,8 @@ impl<'a> Reasoner<'a> {
         scan.limits.dedup();
         scan.uninstantiable.sort();
         scan.uninstantiable.dedup();
+        scan.inapplicable.sort();
+        scan.inapplicable.dedup();
         scan
     }
 
@@ -1799,6 +1979,14 @@ impl<'a> Reasoner<'a> {
                 continue;
             }
             let attempts = budget.attempts.entry(candidate.rule.clone()).or_default();
+            if !candidate.applicability.allows_firing() {
+                // The rule cannot fire in this case, so its missing premises
+                // are not a place to dig deeper: the candidate, what it lacks
+                // and the reason it does not apply are listed together. It
+                // consumes no attempt and sets no limit — nothing was cut off.
+                tree.candidates.push(GapRule::unexpanded(candidate, None));
+                continue;
+            }
             if *attempts >= budget.limits.max_rule_attempts {
                 let rule = candidate.rule.clone();
                 tree.candidates.push(GapRule::unexpanded(
@@ -1813,6 +2001,7 @@ impl<'a> Reasoner<'a> {
             *attempts += 1;
             let mut rule = GapRule {
                 rule: candidate.rule,
+                applicability: candidate.applicability,
                 missing: Vec::new(),
                 blocked_by: candidate.blocked_by,
                 sources: candidate.sources,
@@ -1945,6 +2134,7 @@ impl<'a> Reasoner<'a> {
                 missing,
                 blocked_by,
                 sources: decl.sources.clone(),
+                applicability: self.judge_rule(&decl.scope),
             });
         }
         candidates
@@ -2484,6 +2674,11 @@ pub struct GapTree {
 #[derive(Debug, Clone)]
 pub struct GapRule {
     pub rule: Name,
+    /// The rule's temporal/spatial judgement for this case. An inapplicable
+    /// rule is still a candidate: the reader sees the rule, what it lacks and
+    /// the concrete reason it cannot apply. Unchecked/undecidable rules keep
+    /// being expanded because they may still fire.
+    pub applicability: Applicability,
     /// Missing premises in the rule's own premise order, each with the gap
     /// that explains why it is missing.
     pub missing: Vec<GapPremise>,
@@ -2518,6 +2713,10 @@ pub struct IssueScan {
     /// types have no declared constant, or because their conclusion depends on
     /// a premise proof and cannot be stated from facts.
     pub uninstantiable: Vec<Name>,
+    /// Rules skipped because the case judgement excludes them. An inapplicable
+    /// rule cannot conclude anything here, but the skip is reported so the
+    /// scan never looks more complete than it is.
+    pub inapplicable: Vec<Name>,
 }
 
 impl GapRule {
@@ -2525,6 +2724,7 @@ impl GapRule {
     fn unexpanded(candidate: GapCandidate, limit: Option<GapLimit>) -> Self {
         GapRule {
             rule: candidate.rule,
+            applicability: candidate.applicability,
             missing: candidate
                 .missing
                 .into_iter()

@@ -1,10 +1,13 @@
 //! Shared metadata validation and the declaration scope record.
 //!
 //! A rule declares when and where it is in force; a fact declares when and
-//! where it occurred. Both are *records*, not applicability judgements: the
-//! kernel stores the values, orders them for display, and never uses them to
-//! decide whether a rule may fire. The legal judgement lives in the reasoner's
-//! later work (M2-20).
+//! where it occurred. The kernel stores the values, orders them for display,
+//! and never uses them to decide whether a rule may fire: the judgement is the
+//! reasoner's `Applicability`, computed from these records plus the session's
+//! as-of date, jurisdiction and the case facts' occurrence. Keeping the
+//! records in the kernel lets the language layer check a rule's scope without
+//! depending on the package registry, while the judgement stays out of the
+//! trusted core.
 //!
 //! The date and jurisdiction/code validators live here rather than in the
 //! `lawpack` crate so the language layer can check a rule's scope without
@@ -85,7 +88,7 @@ fn decimal(bytes: &[u8]) -> u32 {
 /// Where a declaration's scope values came from.
 ///
 /// The kernel does not infer or filter by scope; this field only records how
-/// the values were determined, so a later applicability layer and a reader can
+/// the values were determined, so the applicability judgement and a reader can
 /// tell an explicit clause from a package default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum ScopeOrigin {
