@@ -206,6 +206,42 @@ fn moving_the_asof_date_moves_the_fallback_verdict() {
     assert_eq!(basis.dates[0].date, "2022-01-01");
 }
 
+const JURISDICTION_RULE: &str = r#"
+sort 人
+pred 结论 : 人 → Prop
+obj 甲 : 人
+rule 规则 :
+  params x : 人
+  premise 结论 x
+  conclude 结论 x
+  jurisdiction CN
+  source text "测试法" locator "第一条"
+"#;
+
+#[test]
+fn an_undecidable_rule_is_reported_as_excluded_by_the_issue_scan() {
+    let lib = load(JURISDICTION_RULE);
+    // The session code is a more specific code than the rule's: the
+    // containment relation is undeclared, so the verdict is undecidable and
+    // the rule must not be scanned as a live candidate.
+    let r = reasoner(&lib, None, Some("CN-HN"));
+    let scan = r.issues();
+    let (rule, verdict) = scan
+        .excluded
+        .iter()
+        .find(|(rule, _)| rule.as_ref() == "规则")
+        .expect("the undecidable rule is reported as excluded");
+    assert_eq!(rule.as_ref(), "规则");
+    assert!(matches!(
+        verdict,
+        Applicability::Undecidable {
+            reason: std_deduce_reason::UndecidableReason::IncomparableCode { .. },
+            ..
+        }
+    ));
+    assert!(!verdict.allows_firing());
+}
+
 const TERRITORY_RULE: &str = r#"
 sort 人
 pred 行为 : 人 → Prop

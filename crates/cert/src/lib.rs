@@ -144,8 +144,8 @@ pub use model::{
     UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES, MAX_CERT_JSON_BYTES,
     MAX_CERT_NODES,
 };
-pub use narrative::render_narrative;
+pub use narrative::{render_narrative, render_narrative_with_annotations};
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
-pub use render::render;
+pub use render::{render, render_with_annotations};
 pub use source::Source;
 pub use version::{FormatVersion, FORMAT_VERSION};

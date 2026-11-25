@@ -81,9 +81,10 @@
 //! unchecked (a needed input is missing), and undecidable (the inputs are
 //! present but the data cannot decide, including partial coverage). An
 //! inapplicable instance never fires and never becomes a conflict witness;
-//! unchecked and undecidable instances keep firing and carry their verdict and
-//! evidence wherever a rule is shown, so missing input and partial coverage are
-//! visible instead of silently ignored.
+//! an unchecked instance (no evidence at all) keeps firing; an undecidable
+//! instance (partial evidence) does not fire. Both excluded forms carry their
+//! verdict and evidence wherever a rule is shown, so missing input and partial
+//! coverage are visible instead of silently ignored.
 //!
 //! The judgement itself is [`applicability::judge`]: a pure function over the
 //! rule's [`Scope`](std_deduce_kernel::meta::Scope) and the instance's
@@ -166,10 +167,11 @@ pub struct GapCandidate {
     /// `unless` conditions that *are* known, i.e. why this rule is blocked.
     pub blocked_by: Vec<Expr>,
     pub sources: Vec<SourceRef>,
-    /// The rule's temporal/spatial judgement for this case. An inapplicable
+    /// The rule's temporal/spatial judgement for this case. An excluded
     /// candidate is still listed: `:gap` says why it cannot be used instead of
-    /// hiding it. Unchecked and undecidable candidates keep their missing
-    /// premises and are expanded like before.
+    /// hiding it. Unchecked candidates keep their missing premises and are
+    /// expanded; inapplicable/undecidable ones are listed but not expanded,
+    /// because adding a premise cannot make an excluded rule fire.
     pub applicability: Applicability,
 }
 
@@ -1838,7 +1840,7 @@ impl<'a> Reasoner<'a> {
             issues: Vec::new(),
             limits: Vec::new(),
             uninstantiable: Vec::new(),
-            inapplicable: Vec::new(),
+            excluded: Vec::new(),
         };
         let values = constant_values(self.env);
         // Keyed by structural identity: two rules that conclude the same
@@ -1850,13 +1852,15 @@ impl<'a> Reasoner<'a> {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
-            // An inapplicable rule cannot conclude anything about this case,
-            // so its conclusions are not open issues. The instance scan has no
+            // An excluded rule cannot conclude anything about this case, so
+            // its conclusions are not open issues. The instance scan has no
             // bound fact set, so the verdict is the empty-instance one (the
             // rule's declarations plus `:asof` when set). The skip is recorded
-            // and printed: an empty scan must not hide an excluded rule.
-            if !self.judge_instance(&decl.scope, &[]).allows_firing() {
-                scan.inapplicable.push(decl.name.clone());
+            // with its verdict and printed: an empty scan must not hide an
+            // excluded rule.
+            let verdict = self.judge_instance(&decl.scope, &[]);
+            if !verdict.allows_firing() {
+                scan.excluded.push((decl.name.clone(), verdict));
                 continue;
             }
             let mut instances = Vec::new();
@@ -1945,8 +1949,8 @@ impl<'a> Reasoner<'a> {
         scan.limits.dedup();
         scan.uninstantiable.sort();
         scan.uninstantiable.dedup();
-        scan.inapplicable.sort();
-        scan.inapplicable.dedup();
+        scan.excluded.sort_by(|a, b| a.0.cmp(&b.0));
+        scan.excluded.dedup();
         scan
     }
 
@@ -2706,10 +2710,11 @@ pub struct GapTree {
 #[derive(Debug, Clone)]
 pub struct GapRule {
     pub rule: Name,
-    /// The rule's temporal/spatial judgement for this case. An inapplicable
+    /// The rule's temporal/spatial judgement for this case. An excluded
     /// rule is still a candidate: the reader sees the rule, what it lacks and
-    /// the concrete reason it cannot apply. Unchecked/undecidable rules keep
-    /// being expanded because they may still fire.
+    /// the concrete reason it cannot apply. An unchecked rule is expanded
+    /// because it may still fire; an inapplicable/undecidable one is listed
+    /// but not expanded.
     pub applicability: Applicability,
     /// Missing premises in the rule's own premise order, each with the gap
     /// that explains why it is missing.
@@ -2745,10 +2750,11 @@ pub struct IssueScan {
     /// types have no declared constant, or because their conclusion depends on
     /// a premise proof and cannot be stated from facts.
     pub uninstantiable: Vec<Name>,
-    /// Rules skipped because the case judgement excludes them. An inapplicable
-    /// rule cannot conclude anything here, but the skip is reported so the
-    /// scan never looks more complete than it is.
-    pub inapplicable: Vec<Name>,
+    /// Rules skipped because the case judgement excludes them (`不适用` or
+    /// `无法判定`), with the verdict and its reason. A rule the judgement
+    /// cannot decide is not silently absent from the scan: an undecidable one
+    /// needs an explicit reference time that this version does not offer yet.
+    pub excluded: Vec<(Name, Applicability)>,
 }
 
 impl GapRule {

@@ -44,6 +44,17 @@
 //! A missing input outranks an undecidable one, and a clear non-application
 //! outranks both. Every verdict carries a [`Basis`] naming the dates and places
 //! it looked at, so the display can be checked against the facts.
+//!
+//! ## Which verdicts may fire
+//!
+//! Only [`Applicability::Applicable`] and [`Applicability::Unchecked`] may
+//! fire. An unchecked verdict is "we have no evidence at all", and excluding a
+//! rule without evidence would itself be a guess. [`Applicability::Inapplicable`]
+//! and [`Applicability::Undecidable`] must not fire: the latter already has
+//! evidence that the rule covers only part of the instance's events, and using
+//! it would turn a contradiction into a premise. Both are listed by `:gap` and
+//! `:issues` with their reason; an undecidable one also says that the dispute
+//! needs an explicit reference time, which is not implemented yet.
 
 use std_deduce_kernel::env::escape_control;
 use std_deduce_kernel::meta::{validate_date, Scope};
@@ -305,14 +316,19 @@ pub struct InstanceAnchor<'a> {
 }
 
 impl Applicability {
-    /// Whether the rule may fire under this judgement.
+    /// Whether the rule instance may fire under this judgement.
     ///
-    /// Only a confident non-application blocks a rule. An unchecked or
-    /// undecidable judgement keeps the old derivation behaviour and must be
-    /// reported by the caller; it is not silently downgraded to either
-    /// extreme.
+    /// Only `未判定` (no evidence at all) keeps the old firing behaviour: with
+    /// no evidence, excluding the rule would be a guess. `不适用` and
+    /// `无法判定` both block the instance — an undecidable partial coverage has
+    /// already shown that the rule does not wholly govern the referenced
+    /// events, so using it would turn a contradiction into a premise. Every
+    /// blocked instance is still listed by `:gap` / `:issues`.
     pub fn allows_firing(&self) -> bool {
-        !matches!(self, Applicability::Inapplicable { .. })
+        matches!(
+            self,
+            Applicability::Applicable { .. } | Applicability::Unchecked { .. }
+        )
     }
 
     /// Whether this is the positive decision.
@@ -992,7 +1008,7 @@ mod tests {
     fn partial_event_coverage_is_undecidable_and_lists_both_sides() {
         let s = scope(Some("2019-01-01"), Some("2021-01-01"), None, None);
         let verdict = judge(&s, &applicable_dates(&["2020-01-01", "2022-01-01"]));
-        assert!(verdict.allows_firing());
+        assert!(!verdict.allows_firing(), "partial coverage must not fire");
         let Applicability::Undecidable {
             reason:
                 UndecidableReason::PartialDateCoverage {
@@ -1179,7 +1195,7 @@ mod tests {
     fn partial_territory_coverage_is_undecidable_and_lists_both_sides() {
         let s = scope(None, None, None, Some("CN-HN"));
         let verdict = judge(&s, &anchor(None, None, &[], &["CN-HN", "CN-BJ"]));
-        assert!(verdict.allows_firing());
+        assert!(!verdict.allows_firing(), "partial coverage must not fire");
         let Applicability::Undecidable {
             reason:
                 UndecidableReason::PartialPlaceCoverage {
@@ -1248,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn every_non_inapplicable_verdict_allows_firing() {
+    fn only_applicable_and_unchecked_verdicts_allow_firing() {
         assert!(Applicability::Applicable {
             basis: Basis::default()
         }
@@ -1258,7 +1274,9 @@ mod tests {
             basis: Basis::default()
         }
         .allows_firing());
-        assert!(Applicability::Undecidable {
+        // A known partial exclusion already shows the rule does not wholly
+        // govern the instance; it must not fire.
+        assert!(!Applicability::Undecidable {
             reason: UndecidableReason::InvertedInterval {
                 from: "2021-01-01".into(),
                 to: "2020-01-01".into(),

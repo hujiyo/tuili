@@ -63,6 +63,25 @@ fn line_containing<'a>(out: &'a str, needle: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no output line contains {needle:?}\n{out}"))
 }
 
+/// Remove the inline `〔verdict〕` segment from every line, so a test can
+/// compare the derivation's structure independently of the applicability label.
+fn strip_verdicts(block: &str) -> String {
+    let mut stripped = String::new();
+    for line in block.lines() {
+        if let (Some(open), Some(close)) = (line.find('〔'), line.find('〕')) {
+            if close > open {
+                stripped.push_str(&line[..open]);
+                stripped.push_str(&line[close + '〕'.len_utf8()..]);
+                stripped.push('\n');
+                continue;
+            }
+        }
+        stripped.push_str(line);
+        stripped.push('\n');
+    }
+    stripped
+}
+
 /// A temporary tree holding the theory, the case and, when needed, a registry.
 struct TempRoot {
     path: PathBuf,
@@ -570,7 +589,7 @@ fn event_time_drives_applicability_and_an_unchecked_rule_still_fires() {
     );
     assert!(
         plain_out.contains(
-            "时空适用性：\n  ⟨已废止规则⟩：适用性未判定（规则声明了管辖，但会话未设置 :jurisdiction；已记录：事件时间 2020-05-06（区间内）；事件地点 CN-HN（覆盖））"
+            "⟨已废止规则⟩〔适用性未判定（规则声明了管辖，但会话未设置 :jurisdiction；已记录：事件时间 2020-05-06（区间内）；事件地点 CN-HN（覆盖））〕"
         ),
         "an unchecked judgement must be labelled with its evidence:\n{plain_out}"
     );
@@ -601,13 +620,13 @@ fn event_time_drives_applicability_and_an_unchecked_rule_still_fires() {
     let applicable_out = stdout(&applicable);
     assert!(
         applicable_out.contains(
-            "⟨已废止规则⟩：适用（事件时间 2020-05-06（区间内）；事件地点 CN-HN（覆盖））"
+            "⟨已废止规则⟩〔适用（事件时间 2020-05-06（区间内）；事件地点 CN-HN（覆盖））〕"
         ),
         "an applicable verdict prints the covered event time and place:\n{applicable_out}"
     );
     assert_eq!(
-        tree(&plain_out),
-        tree(&applicable_out),
+        strip_verdicts(&tree(&plain_out)),
+        strip_verdicts(&tree(&applicable_out)),
         "an applicable rule's derivation tree must be the old one"
     );
 
@@ -625,7 +644,7 @@ fn event_time_drives_applicability_and_an_unchecked_rule_still_fires() {
     assert_exit(&later, PROVED);
     let later_out = stdout(&later);
     assert!(
-        later_out.contains("⟨已废止规则⟩：适用（事件时间 2020-05-06（区间内）"),
+        later_out.contains("⟨已废止规则⟩〔适用（事件时间 2020-05-06（区间内）"),
         "a later query date must not override an event time:\n{later_out}"
     );
 
@@ -810,7 +829,7 @@ rule 二〇二一年规则 :
     let plain_out = stdout(&plain);
     assert!(
         plain_out.contains(
-            "⟨二〇二一年规则⟩：适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）"
+            "⟨二〇二一年规则⟩〔适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）〕"
         ),
         "{plain_out}"
     );
@@ -844,7 +863,7 @@ rule 二〇二一年规则 :
     let inside_out = stdout(&inside);
     assert!(
         inside_out
-            .contains("⟨二〇二一年规则⟩：适用（以查询基准日 2022-01-01 代替行为时（区间内））"),
+            .contains("⟨二〇二一年规则⟩〔适用（以查询基准日 2022-01-01 代替行为时（区间内））〕"),
         "the fallback date is labelled as a substitute for the event time:\n{inside_out}"
     );
 }
@@ -1034,7 +1053,7 @@ rule 新法 :
     assert_exit(&old, PROVED);
     let old_out = stdout(&old);
     assert!(
-        old_out.contains("⟨旧法⟩：适用（事件时间 2019-05-01（区间内））"),
+        old_out.contains("⟨旧法⟩〔适用（事件时间 2019-05-01（区间内））〕"),
         "the old law covers the event time:\n{old_out}"
     );
 
@@ -1111,9 +1130,15 @@ rule 新规则 :
     assert!(plain_out.contains("冲突未决：批准 甲"), "{plain_out}");
     assert!(
         plain_out.contains(
-            "⟨旧规则⟩：适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）"
+            "⟨旧规则⟩〔适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）〕"
         ),
         "each conflict side labels its unchecked state:\n{plain_out}"
+    );
+    assert!(
+        plain_out.contains(
+            "⟨新规则⟩〔适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）〕"
+        ),
+        "the other conflict side is labelled too:\n{plain_out}"
     );
 
     // A conflicted goal is not in the fact base, so its report comes from the
@@ -1191,10 +1216,12 @@ rule 新规则 :
 }
 
 /// One premise event inside the range and another outside it is undecidable,
-/// never rounded to "the applicable one"; both dates are shown. The rule still
-/// fires (an undecidable verdict does not block) and the conclusion is labelled.
+/// and an undecidable verdict does **not** fire: the partial evidence already
+/// says the rule does not wholly govern this instance. The target is a gap and
+/// the reason lists both dates; `:gap` also points at the missing explicit
+/// reference time.
 #[test]
-fn partial_event_time_coverage_is_undecidable_and_lists_both_dates() {
+fn partial_event_time_coverage_is_undecidable_and_does_not_fire() {
     let temp = TempRoot::new("partial-time");
     let theory = temp.write(
         "case.std",
@@ -1229,17 +1256,38 @@ rule 跨期规则 :
             ":why 结论 甲".to_string(),
         ],
     );
-    assert_exit(&output, PROVED);
+    assert_exit(&output, GAP);
     let out = stdout(&output);
     assert!(
-        out.contains("▸ 结论 甲"),
-        "an undecidable verdict still fires:\n{out}"
+        !out.contains("▸ 结论 甲"),
+        "an undecidable verdict must not derive a conclusion:\n{out}"
     );
     assert!(
         out.contains(
             "⟨跨期规则⟩：适用性无法判定（事件时间 2019-05-01 在生效区间 1999-01-01..2021-01-01 内，2022-06-01 不在其中；部分覆盖不能当作适用）"
         ),
         "{out}"
+    );
+
+    // `:gap` lists the excluded candidate and tells the reader what would
+    // unblock it (an explicit reference time, not implemented yet).
+    let gap = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":asof 2026-01-01".to_string(),
+            ":gap 结论 甲".to_string(),
+        ],
+    );
+    assert_exit(&gap, GAP);
+    let gap_out = stdout(&gap);
+    assert!(
+        gap_out.contains("候选 ⟨跨期规则⟩〔适用性无法判定（事件时间 2019-05-01"),
+        "{gap_out}"
+    );
+    assert!(
+        gap_out.contains("提示：需要为该争点显式指定引用时间（尚未实现）"),
+        "{gap_out}"
     );
 
     let report = run_in(
@@ -1258,9 +1306,10 @@ rule 跨期规则 :
 }
 
 /// One premise event place covered by the territory and another not is
-/// undecidable; both places are listed.
+/// undecidable and does not fire; both places are listed and `:gap` points at
+/// the missing explicit reference place.
 #[test]
-fn partial_event_place_coverage_is_undecidable_and_lists_both_places() {
+fn partial_event_place_coverage_is_undecidable_and_does_not_fire() {
     let temp = TempRoot::new("partial-place");
     let theory = temp.write(
         "case.std",
@@ -1293,13 +1342,35 @@ rule 河南规则 :
             ":why 结论 甲".to_string(),
         ],
     );
-    assert_exit(&output, PROVED);
+    assert_exit(&output, GAP);
     let out = stdout(&output);
+    assert!(
+        !out.contains("▸ 结论 甲"),
+        "an undecidable verdict must not derive a conclusion:\n{out}"
+    );
     assert!(
         out.contains(
             "⟨河南规则⟩：适用性无法判定（事件地点 CN-HN 在规则地域 CN-HN 内，CN-BJ 不在其中；部分覆盖不能当作适用）"
         ),
         "{out}"
+    );
+
+    let gap = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":gap 结论 甲".to_string(),
+        ],
+    );
+    assert_exit(&gap, GAP);
+    let gap_out = stdout(&gap);
+    assert!(
+        gap_out.contains("候选 ⟨河南规则⟩〔适用性无法判定（事件地点 CN-HN"),
+        "{gap_out}"
+    );
+    assert!(
+        gap_out.contains("提示：需要为该争点显式指定引用时间（尚未实现）"),
+        "{gap_out}"
     );
 }
 

@@ -87,12 +87,10 @@ const CONSTITUTION_39_WHY: &str = "\
   + 某次搜查非法
   + 非法搜查即侵犯
   + 依法搜查不侵犯
-▸ 不受侵犯 张三 甲宅  ⟨非法搜查即侵犯⟩ ← 「宪法第三十九条」
+▸ 不受侵犯 张三 甲宅  ⟨非法搜查即侵犯⟩〔适用性未判定（规则没有声明任何范围）〕 ← 「宪法第三十九条」
   实例：p ↦ 张三，h ↦ 甲宅
   · 非法搜查 张三 甲宅  〔用户陈述〕  [某次搜查非法]  ← 「示例案情某次搜查」
 
-时空适用性：
-  ⟨非法搜查即侵犯⟩：适用性未判定（规则没有声明任何范围）
 推导已通过独立校验。
 ";
 
@@ -124,16 +122,16 @@ fn explain_prints_a_because_so_narrative_with_sources_and_instances() {
     );
 }
 
-/// An unchecked applicability state is printed after the narrative too: the
-/// narrative form must not hide what `:why` labels.
+/// An unchecked applicability state is printed on the conclusion's own step:
+/// the narrative form must not hide what `:why` labels.
 #[test]
 fn explain_labels_an_unchecked_applicability() {
     check(
         session("constitution-39.std", &[":explain 不受侵犯 张三 甲宅"]),
         PROVED,
         &[
-            "时空适用性：",
-            "⟨非法搜查即侵犯⟩：适用性未判定（规则没有声明任何范围）",
+            "【结论】「不受侵犯 张三 甲宅」由规则推出。 〔适用性未判定（规则没有声明任何范围）〕",
+            "所以「不受侵犯 张三 甲宅」成立。 〔适用性未判定（规则没有声明任何范围）〕",
         ],
     );
 }

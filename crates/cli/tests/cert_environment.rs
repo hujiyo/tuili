@@ -885,22 +885,40 @@ fn certificate_identity_options_do_not_affect_packs_env_or_why() {
             .unwrap_or_default()
             .to_owned()
     };
+    // The inline applicability verdict is part of the line; strip it to compare
+    // the derivation's own structure, which the identity options must not touch.
+    let without_verdict = |block: String| {
+        let mut stripped = String::new();
+        for line in block.lines() {
+            if let (Some(open), Some(close)) = (line.find('〔'), line.find('〕')) {
+                if close > open {
+                    stripped.push_str(&line[..open]);
+                    stripped.push_str(&line[close + '〕'.len_utf8()..]);
+                    stripped.push('\n');
+                    continue;
+                }
+            }
+            stripped.push_str(line);
+            stripped.push('\n');
+        }
+        stripped
+    };
     assert_eq!(
-        derivation(&stdout(&plain)),
-        derivation(&stdout(&dated)),
+        without_verdict(derivation(&stdout(&plain))),
+        without_verdict(derivation(&stdout(&dated))),
         "the identity options must not change the derivation itself"
     );
     let plain_out = stdout(&plain);
     let dated_out = stdout(&dated);
     assert!(
         plain_out.contains(
-            "⟨test.law.侵占即侵犯⟩：适用性未判定（规则声明了管辖，但会话未设置 :jurisdiction）"
+            "⟨test.law.侵占即侵犯⟩〔适用性未判定（规则声明了管辖，但会话未设置 :jurisdiction）〕"
         ),
         "{plain_out}"
     );
     assert!(
         dated_out.contains(
-            "⟨test.law.侵占即侵犯⟩：适用性未判定（规则声明了地域，但实例引用的前提事实都没有记录发生地点）"
+            "⟨test.law.侵占即侵犯⟩〔适用性未判定（规则声明了地域，但实例引用的前提事实都没有记录发生地点）〕"
         ),
         "{dated_out}"
     );

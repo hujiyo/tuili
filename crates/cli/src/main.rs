@@ -44,12 +44,13 @@
 //! facts the instance consumes, not the query date. Every event time must be
 //! inside the range and every event place inside the territory; all-out is
 //! inapplicable and partial coverage is undecidable, never rounded. A rule
-//! that does not apply is never applied. An *unchecked* judgement (a needed
-//! input is missing, e.g. no event time and no `:asof`) and an *undecidable*
-//! one (complete input that cannot conclude) keep the old firing behaviour,
-//! but the verdict, its reason and the event times/places are printed by
-//! `:why` / `:explain` / `:gap` and listed by `:applicability`. The
-//! certificate format records no verdict yet.
+//! that does not apply is never applied; a rule with partial coverage is also
+//! never applied (the evidence says it does not wholly govern the instance),
+//! while a rule judged *unchecked* (no evidence at all) keeps firing and every
+//! conclusion line it produces carries `适用性未判定（…）`. The verdict and
+//! the event times/places it relied on are printed on the conclusion line; a
+//! gap's candidates are listed by `:gap` and `:applicability`. The certificate
+//! format records no verdict yet.
 //!
 //! In the closed environment a top-level `:load` accepts only a case file (no
 //! `namespace`): modules are legal packs and must be imported. The case may
@@ -252,18 +253,19 @@
 //! print one warning line before their result: an edge inside a cycle cannot
 //! decide anything, and the warning does not change the exit code.
 //!
-//! After the derivation, `:why` prints a `时空适用性：` block for every rule
-//! the derivation cites, with the per-instance verdict and the event times and
-//! places behind it. An applicable verdict says which event time is covered; an
-//! unchecked or undecidable one names the missing input or the partial
-//! coverage; an inapplicable rule cannot appear because it never fired (`:gap`
-//! and `:applicability` show it). The same block is printed after each conflict
-//! side's tree.
+//! After the derivation, every rule application's conclusion line carries its
+//! applicability verdict and the event times/places behind it (after
+//! `⟨rule⟩`): an unchecked verdict says `适用性未判定（…）`, a clean one
+//! `适用（事件时间 …）`. An inapplicable or undecidable rule cannot appear
+//! because it never fired (`:gap` and `:applicability` show it, with the
+//! latter also listing gap candidates). The same annotation is printed on each
+//! conflict side's tree.
 //!
 //! `:explain` uses exactly the same derivation and prints
 //! [`std_deduce_cert::render_narrative`] instead of the formal tree; the same
 //! certificate is then checked by both layers, and the `0`/`1`/`2` outcomes
-//! match `:why`, including the same `时空适用性：` block. A fact always carries
+//! match `:why`, including the same inline applicability annotations on its
+//! conclusion sentences. A fact always carries
 //! its recorded identity (`据用户陈述`,
 //! `根据法院查明`, `作为分析假设`, `双方无争议`), a step keeps its source and
 //! parameter bindings, a conflict is reported as decided or as `此处未决` with
@@ -287,10 +289,11 @@
 //! too, so a `def` alias finds the rule that concludes its definition. Every
 //! candidate line carries its per-instance verdict and evidence:
 //! `〔适用（事件时间 …）〕`, `〔不适用（原因）〕`, `〔适用性未判定（原因）〕` or
-//! `〔适用性无法判定（原因）〕`. A candidate the judgement excludes is still
-//! listed, with its missing premises but no deeper expansion (adding a
-//! premise cannot make an excluded rule fire); unchecked and undecidable
-//! candidates are expanded as before.
+//! `〔适用性无法判定（原因）〕`. An excluded candidate is still listed, with
+//! its missing premises but no deeper expansion (adding a premise cannot make
+//! an excluded rule fire); an undecidable one also points at the missing
+//! explicit reference time, which this version does not offer yet. Only an
+//! unchecked candidate is expanded further.
 //! The recursion is bounded by explicit limits — depth 6, 128 nodes, 8 attempts
 //! per rule — and a limit that stops a branch is printed as `已截断：…` where it
 //! applies. `:issues` requires a loaded theory and runs the same machinery over
@@ -382,9 +385,10 @@ use std::path::{Path, PathBuf};
 use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
-    render, render_narrative, Certificate, CheckReport, EnvironmentDifference, EnvironmentIdentity,
-    EnvironmentRecord, Node as CertNode, ObligationKind, OpenObligation, PriorityClause,
-    PriorityEdge, PriorityOrigin, ResolutionBasis, Source, TrustLevel,
+    render_narrative_with_annotations, render_with_annotations, Certificate, CheckReport,
+    EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, Node as CertNode,
+    ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, ResolutionBasis,
+    Source, TrustLevel,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
@@ -399,8 +403,8 @@ use std_deduce_lawpack::{
     OFFICIAL_FILE,
 };
 use std_deduce_reason::{
-    certificate as reason_certificate, Conflict, Derivation, GapLimit, GapLimits, GapStatus,
-    GapTree, Node as ReasonNode, Provenance, Reasoner, Resolution, Side,
+    certificate as reason_certificate, Applicability, Conflict, Derivation, GapLimit, GapLimits,
+    GapStatus, GapTree, Node as ReasonNode, Provenance, Reasoner, Resolution, Side,
 };
 
 /// How a query ended. Only `Proved` is a success; the other two make the
@@ -1547,16 +1551,19 @@ impl Session {
         // same certificate is checked by both layers: what the user sees and
         // the object being checked cannot diverge. `:why` keeps the formal
         // tree; `:explain` prints the Chinese because-so rendering of it.
+        // Every applied rule's conclusion line carries its applicability
+        // verdict inline, because the certificate itself does not store it.
+        let annotations = derivation_annotations(&d);
         let rendered = if cmd == "explain" {
-            render_narrative(&certificate)?
+            render_narrative_with_annotations(&certificate, &annotations)?
         } else {
-            render(&certificate)?
+            render_with_annotations(&certificate, &annotations)?
         };
         writeln!(out, "{rendered}").ok();
-        // The derivation carries the per-instance applicability of every rule
-        // it cites, including the event times/places behind the verdict.
+        // A gap root's candidate lines cannot carry a verdict through the
+        // certificate, so its candidates are listed here with their state.
         if let Some(root) = d.root {
-            write_applicability_notes(out, &d, root);
+            write_gap_applicability_notes(out, &d, root);
         }
         // `:why` reports an unresolved or defeated goal before it builds this
         // certificate, so its conflict sides carry their own labels. `:explain`
@@ -1744,14 +1751,30 @@ impl Session {
             )
             .ok();
         }
-        if !scan.inapplicable.is_empty() {
+        if !scan.excluded.is_empty() {
             writeln!(
                 out,
-                "  另有 {} 条规则因时空适用性为“不适用”而未扫描（原因见 :applicability）：{}",
-                scan.inapplicable.len(),
-                format_limited_names(&scan.inapplicable)
+                "  另有 {} 条规则因时空适用性被排除而未扫描：",
+                scan.excluded.len()
             )
             .ok();
+            let mut has_undecidable = false;
+            for (rule, verdict) in &scan.excluded {
+                if matches!(
+                    verdict,
+                    std_deduce_reason::Applicability::Undecidable { .. }
+                ) {
+                    has_undecidable = true;
+                }
+                writeln!(out, "    ⟨{rule}⟩：{}", verdict.summary_zh()).ok();
+            }
+            if has_undecidable {
+                writeln!(
+                    out,
+                    "    提示：无法判定的规则需要为该争点显式指定引用时间（尚未实现）。"
+                )
+                .ok();
+            }
         }
         Ok(if scan.issues.is_empty() {
             Outcome::Proved
@@ -4005,14 +4028,13 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
             return;
         }
     };
-    match render(&certificate) {
+    let annotations = derivation_annotations(&d);
+    match render_with_annotations(&certificate, &annotations) {
         Ok(rendered) => {
+            // Each rule application's conclusion line carries its verdict and
+            // evidence inline, so a conflict side is judged exactly as a
+            // normal derivation.
             writeln!(out, "{rendered}").ok();
-            // A conflict side is a derivation too: its rules and their
-            // event-time/place basis must be visible here as well.
-            if let Some(root) = d.root {
-                write_applicability_notes(out, &d, root);
-            }
         }
         Err(error) => {
             writeln!(out, "  （该推导的证书无法渲染：{error}）").ok();
@@ -4110,11 +4132,45 @@ fn collect_derivation_verdicts(
     }
 }
 
-/// Print the applicability of every rule a derivation cites, with the event
-/// times/places each verdict relied on.
-fn write_applicability_notes(out: &mut impl Write, derivation: &Derivation, root: usize) {
+/// The per-node annotation the certificate renderer prints on a rule
+/// application's conclusion line.
+///
+/// The certificate format records no verdict, but the reasoner's derivation
+/// nodes do and keep the same order, so the node id is enough to line them up.
+/// Every applied rule is annotated: `适用性未判定（…）` when the judgement
+/// lacked input (the rule still fired), and `适用（事件时间 …）` for a clean
+/// verdict. An inapplicable or undecidable rule cannot appear here because it
+/// never fired.
+fn derivation_annotations(derivation: &Derivation) -> BTreeMap<usize, String> {
+    derivation
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(id, node)| match node {
+            ReasonNode::RuleApplication { applicability, .. } => {
+                Some((id, applicability.summary_zh()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Print the applicability of the gap candidates at the root of a derivation.
+///
+/// A gap root's candidate lines are rendered from the certificate, whose
+/// format has no verdict, so the state is printed here. A rule application's
+/// own conclusion line carries its verdict inline instead.
+fn write_gap_applicability_notes(out: &mut impl Write, derivation: &Derivation, root: usize) {
+    let ReasonNode::Gap { candidates, .. } = &derivation.nodes[root] else {
+        return;
+    };
     let mut verdicts = BTreeSet::new();
-    collect_derivation_verdicts(derivation, root, &mut verdicts);
+    for candidate in candidates {
+        verdicts.insert((
+            candidate.rule.to_string(),
+            candidate.applicability.summary_zh(),
+        ));
+    }
     write_applicability_verdicts(out, &verdicts);
 }
 
@@ -4249,6 +4305,13 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
             candidate.applicability.summary_zh()
         )
         .ok();
+        if matches!(candidate.applicability, Applicability::Undecidable { .. }) {
+            writeln!(
+                out,
+                "{pad}  提示：需要为该争点显式指定引用时间（尚未实现）。"
+            )
+            .ok();
+        }
         for source in &candidate.sources {
             writeln!(out, "{pad}  ← {}", source.one_line()).ok();
         }
@@ -4565,7 +4628,7 @@ fn print_help(out: &mut impl Write) {
     writeln!(
         out,
         "时空适用性：按实例前提事实的发生时间/地点判定（事件时优先；无事件时间才用 :asof 兜底）；\
-         不适用则不触发，未判定/无法判定仍触发但会标注。:applicability [命题] 列出判定与依据。"
+         不适用与部分覆盖（无法判定）不触发；无证据的未判定仍触发但每条结论行都会标注。:applicability [命题] 列出判定与依据。"
     )
     .ok();
     writeln!(
