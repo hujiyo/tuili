@@ -70,7 +70,9 @@ fn check(output: Output, expected: i32, needles: &[&str]) -> Output {
 /// snapshot file in this repository, so this constant is the regression test
 /// that adding `:explain` did not change the default output. The applicability
 /// block is part of the current output: an unscoped case rule fires but says
-/// that its scope was never declared.
+/// that its scope was never declared. The last line is the disclaimer every
+/// result output carries; it is a line after the derivation, never part of the
+/// tree.
 const CONSTITUTION_39_WHY: &str = "\
 默认环境 cn.default：已加载 1 个包
   cn.constitution@0.4.0（official）
@@ -93,6 +95,7 @@ const CONSTITUTION_39_WHY: &str = "\
 
 推导已通过独立校验。
 信任：依赖假设（据用户陈述 1 条）
+声明：这是模型内推导，不是法律意见。
 ";
 
 #[test]

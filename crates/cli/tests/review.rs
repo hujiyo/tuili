@@ -944,3 +944,88 @@ fn a_read_only_destination_fails_closed_with_an_explicit_message() {
     assert!(metadata.permissions().readonly());
     fs::set_permissions(&destination, original_permissions).expect("restore permissions");
 }
+
+/// A case whose conclusion rests on a `risk`-marked predicate: the report must
+/// carry the high-risk line and the model-internal disclaimer, without merging
+/// the risk theme into the `需律师判断` trust label and without changing the exit
+/// code.
+#[test]
+fn the_report_carries_the_disclaimer_and_the_risk_theme() {
+    let temp = TempDir::new("risk-disclaimer");
+    let theory = temp.write(
+        "risk.std",
+        "sort 人\n\
+         pred 违法 : 人 → Prop\n\
+         pred 受罚 : 人 → Prop\n\
+         risk 刑事 受罚\n\
+         obj 张三 : 人\n\
+         axiom 违法事实 : 违法 张三\n\
+           source text \"案件材料\" locator \"一\"\n\
+         rule 处罚 :\n\
+           params p : 人\n\
+           premise 违法 p\n\
+           conclude 受罚 p\n\
+           source text \"刑法\" locator \"一\"\n",
+    );
+    let output = session(&theory, &[], &[":review 受罚 张三"]);
+    assert_exit(&output, PROVED);
+    let text = stdout(&output);
+    let report = report_part(&text);
+    assert_contains(
+        report,
+        &[
+            "高风险题材：涉及刑事；",
+            "  依据：",
+            "声明：这是模型内推导，不是法律意见。",
+        ],
+        "the risk report",
+    );
+    assert!(
+        !report.contains("「需律师判断」：成立"),
+        "a risk theme must not turn into the 需律师判断 trust label:\n{report}"
+    );
+    assert_contains(
+        report,
+        &["「依赖假设」：成立"],
+        "the trust labels of a claim-based proof",
+    );
+}
+
+/// `--redact` is display-only, but the report file is display too: both the
+/// stdout and the `--out` form must replace the individual names, while the
+/// certificate JSON keeps them for `:verify-cert`.
+#[test]
+fn redaction_applies_to_the_review_report_and_the_file() {
+    let output = session(
+        "examples/复核-闭合证明.std",
+        &["--redact"],
+        &[":review 受罚 张三"],
+    );
+    assert_exit(&output, PROVED);
+    let text = stdout(&output);
+    assert!(
+        !text.contains("张三"),
+        "a redacted report must not print the original name:\n{text}"
+    );
+    assert_contains(
+        &text,
+        &["甲1", "输出已脱敏；证书未脱敏。"],
+        "the redacted report",
+    );
+
+    let temp = TempDir::new("redact-report-file");
+    let out_path = temp.path.join("report.md").display().to_string();
+    let command = format!(":review 受罚 张三 --out {out_path}");
+    let file_output = run(&[
+        "--redact".to_owned(),
+        "examples/复核-闭合证明.std".to_owned(),
+        command,
+    ]);
+    assert_exit(&file_output, PROVED);
+    let file_text = fs::read_to_string(&out_path).expect("read the report file");
+    assert!(
+        !file_text.contains("张三"),
+        "a redacted report file must not contain the original name:\n{file_text}"
+    );
+    assert_contains(&file_text, &["甲1"], "the redacted report file");
+}

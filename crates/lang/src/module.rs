@@ -150,6 +150,10 @@ impl Library {
         // against the completed environment so a predicate may be declared
         // later in the same file.
         let mut open_concepts: Vec<(String, usize, usize)> = Vec::new();
+        // Every `risk` target with its theme and position. Like `open`, the
+        // marker is inserted after the whole file is in the environment, so it
+        // may mark a predicate declared later in the same file.
+        let mut risk_themes: Vec<(String, String, usize, usize)> = Vec::new();
 
         for item in items {
             match item {
@@ -476,6 +480,18 @@ impl Library {
                     // opened, and it lets the post-pass validate the target
                     // before it reports a repeated marker.
                     open_concepts.push((pred, line, col));
+                }
+                Item::Risk {
+                    theme,
+                    pred,
+                    line,
+                    col,
+                } => {
+                    // The marker records a declared theme for a predicate; its
+                    // target and the theme keyword are validated after the
+                    // whole file is in the environment, so a predicate declared
+                    // later in the same file can be marked too.
+                    risk_themes.push((theme, pred, line, col));
                 }
                 Item::Priority {
                     winner,
@@ -918,6 +934,101 @@ impl Library {
             theory.decls.push(format!("open:{pred}"));
             report.declared.push(format!("open {pred}"));
         }
+        // A `risk` marker names a theme its predicate belongs to. One predicate
+        // carries at most one theme, so a reader can point at exactly one
+        // declaration; the target is validated first so `risk 刑事 不存在`
+        // reports the unknown predicate, and an unknown theme keyword is an
+        // error rather than a silently ignored marker.
+        let mut marked_risk: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut risk_markers: Vec<(std_deduce_kernel::RiskTheme, String, usize, usize)> =
+            Vec::new();
+        for (theme, pred, line, col) in &risk_themes {
+            let Some(parsed) = std_deduce_kernel::RiskTheme::parse(theme) else {
+                return Err(LoadError::at(
+                    format!(
+                        "`risk {theme} {pred}`：未知风险类别 `{theme}`；可选：{}",
+                        std_deduce_kernel::RiskTheme::keywords().join(" / ")
+                    ),
+                    *line,
+                    *col,
+                ));
+            };
+            let p = std_deduce_kernel::name(pred);
+            match next.env.get(&p) {
+                Some(d) if matches!(d.kind, std_deduce_kernel::DeclKind::Pred) => {}
+                Some(_) => {
+                    return Err(LoadError::at(
+                        format!("`risk {theme} {pred}`：`{p}` 不是谓词（pred）"),
+                        *line,
+                        *col,
+                    ))
+                }
+                None => {
+                    return Err(LoadError::at(
+                        format!("`risk {theme} {pred}`：未知谓词 `{p}`"),
+                        *line,
+                        *col,
+                    ))
+                }
+            }
+            if next
+                .env
+                .risk_markers()
+                .iter()
+                .any(|(marked, _)| marked == &p)
+            {
+                return Err(LoadError::at(
+                    format!(
+                        "`risk {theme} {pred}`：谓词 `{p}` 已经标记了风险题材（重复）；\
+                         一个谓词只能声明一次 risk"
+                    ),
+                    *line,
+                    *col,
+                ));
+            }
+            if !marked_risk.insert(p.to_string()) {
+                return Err(LoadError::at(
+                    format!(
+                        "`risk {theme} {pred}`：谓词 `{p}` 已经标记了风险题材（重复）；\
+                         一个谓词只能声明一次 risk"
+                    ),
+                    *line,
+                    *col,
+                ));
+            }
+            risk_markers.push((parsed, pred.clone(), *line, *col));
+        }
+        for (theme, pred, line, col) in &risk_markers {
+            let p = std_deduce_kernel::name(pred);
+            let decl = Decl {
+                name: std_deduce_kernel::name(format!("risk:{pred}")),
+                kind: std_deduce_kernel::DeclKind::Risk {
+                    theme: *theme,
+                    pred: p,
+                },
+                // The marker is metadata, not a claim: its constant has type
+                // `Type`, so the kernel never treats it as a proposition.
+                ty: Expr::Sort(1),
+                sources: Vec::new(),
+                scope: Scope::default(),
+                occurred_at: None,
+                occurred_in: None,
+                index: 0,
+            };
+            next.env
+                .insert(decl, &std_deduce_kernel::Ctx::new())
+                .map_err(|e| {
+                    LoadError::at(
+                        format!("`risk {} {pred}`：{e}", theme.keyword()),
+                        *line,
+                        *col,
+                    )
+                })?;
+            theory.decls.push(format!("risk:{pred}"));
+            report
+                .declared
+                .push(format!("risk {} {pred}", theme.keyword()));
+        }
         // A `defeated_by` / `prefer` name is stored as an opaque string, so a
         // typo would silently disable the intended priority. Validate the
         // targets after the whole file is in the environment, which allows a
@@ -1131,6 +1242,7 @@ fn check_case_decl_names(items: &[Item]) -> Result<(), String> {
             | Item::Contrary { .. }
             | Item::Unique { .. }
             | Item::Open { .. }
+            | Item::Risk { .. }
             | Item::Check(_)
             | Item::Why(_)
             | Item::Gap(_)
@@ -1345,6 +1457,7 @@ fn decl_kind_label(kind: &std_deduce_kernel::DeclKind) -> &'static str {
         DeclKind::Unique { .. } => "unique",
         DeclKind::Priority { .. } => "priority",
         DeclKind::OpenConcept { .. } => "open",
+        DeclKind::Risk { .. } => "risk",
     }
 }
 
@@ -1521,6 +1634,10 @@ fn check_module_names(ns: &str, items: &[Item]) -> Result<(), String> {
             }
             Item::Open { pred, .. } => {
                 let what = format!("`open {pred}`");
+                require_qualified_ref(ns, &what, pred)?;
+            }
+            Item::Risk { theme, pred, .. } => {
+                let what = format!("`risk {theme} {pred}`");
                 require_qualified_ref(ns, &what, pred)?;
             }
             Item::Priority { winner, loser, .. } => {

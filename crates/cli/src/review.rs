@@ -42,8 +42,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use std_deduce_cert::{
     expression_key, Certificate, FactIdentity, Node, NodeId, ObligationKind, OpenConceptDependency,
-    PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side,
-    Source, TrustLabel, TrustReport, UnresolvedReason, LOCAL_EXTENSION_OBLIGATION_ID,
+    PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis,
+    RiskReport, Side, Source, TrustLabel, TrustReport, UnresolvedReason,
+    LOCAL_EXTENSION_OBLIGATION_ID,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, RulePleading};
@@ -199,6 +200,9 @@ pub(crate) fn render_review(
     root_gap: Option<&GapTree>,
     pleadings: &BTreeMap<String, RulePleading>,
 ) -> Result<String, String> {
+    // The risk themes are derived here from the same certificate the report
+    // renders, so the caller cannot pass a different derivation's grading.
+    let risk = std_deduce_cert::derive_risk(env, certificate)?;
     let mut out = String::new();
     write_header(&mut out);
 
@@ -228,7 +232,14 @@ pub(crate) fn render_review(
     let (axiom_instances, axiom_candidates) =
         collect_axioms(env, certificate, trust, root_gap, &issues_sorted);
 
-    write_conclusion_section(&mut out, certificate, trust, dependency, &root_proposition);
+    write_conclusion_section(
+        &mut out,
+        certificate,
+        trust,
+        dependency,
+        &risk,
+        &root_proposition,
+    );
 
     // Sections are rendered in order; each records the item numbers the
     // question section cites, so a question can always point at an item the
@@ -308,6 +319,7 @@ fn write_conclusion_section(
     certificate: &Certificate,
     trust: &TrustReport,
     dependency: Option<&OpenConceptDependency>,
+    risk: &RiskReport,
     root_proposition: &str,
 ) {
     begin_section(out, "## 一、结论与信任标签");
@@ -341,6 +353,22 @@ fn write_conclusion_section(
         }
     }
     out.push_str("信任标签不涵盖时空适用性：规则实例的判定依据单独列在「规则与出处」。\n");
+    // Risk themes are a second, independent view: they say what the case is
+    // about, not whether the model may decide it. A low-risk case gets no line
+    // (the report must not drown an ordinary case in noise); the hint for a
+    // theory without `risk` declarations is a `:why` / `:explain` display aid,
+    // not part of the lawyer report.
+    if risk.is_high_risk() {
+        if let Some(warning) = risk.warning_line() {
+            out.push_str(&format!("{warning}\n"));
+            for theme in risk.themes() {
+                for evidence in risk.evidence(*theme) {
+                    out.push_str(&format!("  依据：{evidence}\n"));
+                }
+            }
+        }
+    }
+    out.push_str("\n声明：这是模型内推导，不是法律意见。\n");
 }
 
 /// A lawyer-facing evidence line for one trust label. The trust report's own

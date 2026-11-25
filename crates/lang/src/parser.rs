@@ -6,7 +6,7 @@
 //! program  := import* namespace? item*
 //! import   := 'import' PACK                (before namespace and all items)
 //! namespace := 'namespace' NAMESPACE      (first non-import item only)
-//! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | open | priority | command
+//! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | open | risk | priority | command
 //! sort     := 'sort' IDENT source?
 //! pred     := 'pred' IDENT ':' term source?
 //! axiom    := 'axiom' IDENT ':' term
@@ -57,7 +57,7 @@
 //! clause unless a term is syntactically incomplete. This keeps rule blocks
 //! looking like prose, which is what a legal reader needs.
 
-use std_deduce_kernel::{Burden, FactIdentity, InterpretationDirection, Standard};
+use std_deduce_kernel::{Burden, FactIdentity, InterpretationDirection, RiskTheme, Standard};
 
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
@@ -589,6 +589,67 @@ impl Parser {
                     });
                 }
                 Ok(Item::Open { pred, line, col })
+            }
+            "risk" => {
+                // `risk <类别> <谓词>`: the theme is a fixed keyword, the target
+                // is validated against the completed environment (so the
+                // predicate may be declared later in the same file). Keeping
+                // the line and column lets those load errors point at this
+                // declaration.
+                let (line, col) = {
+                    let token = self.here();
+                    (token.line, token.col)
+                };
+                self.bump();
+                let theme = match self.peek().clone() {
+                    Tok::Ident(theme) => {
+                        self.bump();
+                        theme
+                    }
+                    other => {
+                        return Err(ParseError {
+                            msg: format!(
+                                "`risk` 之后必须是风险类别（{}），实际是 `{other:?}`",
+                                RiskTheme::keywords().join(" / ")
+                            ),
+                            line,
+                            col,
+                        });
+                    }
+                };
+                let pred = match self.peek().clone() {
+                    Tok::Ident(pred) => {
+                        self.bump();
+                        pred
+                    }
+                    other => {
+                        return Err(ParseError {
+                            msg: format!("`risk {theme}` 之后必须是谓词名，实际是 `{other:?}`"),
+                            line,
+                            col,
+                        });
+                    }
+                };
+                if !matches!(self.peek(), Tok::Newline | Tok::Eof) {
+                    let (bad_line, bad_col) = {
+                        let token = self.here();
+                        (token.line, token.col)
+                    };
+                    return Err(ParseError {
+                        msg: format!(
+                            "`risk {theme} {pred}` 之后必须是换行，实际是 `{:?}`",
+                            self.peek()
+                        ),
+                        line: bad_line,
+                        col: bad_col,
+                    });
+                }
+                Ok(Item::Risk {
+                    theme,
+                    pred,
+                    line,
+                    col,
+                })
             }
             "priority" => {
                 self.bump();
@@ -1603,6 +1664,7 @@ fn is_item_keyword(keyword: &str) -> bool {
             | "contrary"
             | "unique"
             | "open"
+            | "risk"
             | "priority"
             | "obj"
             | "object"

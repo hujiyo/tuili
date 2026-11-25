@@ -22,8 +22,8 @@ pub mod pretty;
 pub mod term;
 
 pub use env::{
-    Burden, Ctx, Decl, DeclKind, Env, FactIdentity, InterpretationDirection, ProofBurden, RuleDecl,
-    RulePleading, Standard,
+    Burden, Ctx, Decl, DeclKind, Env, FactIdentity, InterpretationDirection, ProofBurden,
+    RiskTheme, RuleDecl, RulePleading, Standard,
 };
 pub use error::{Error, Result};
 pub use meta::{Scope, ScopeOrigin};

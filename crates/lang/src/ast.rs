@@ -157,6 +157,21 @@ pub enum Item {
         line: usize,
         col: usize,
     },
+    /// `risk 刑事 故意伤害` — marks a declared predicate as belonging to a
+    /// risk theme.
+    ///
+    /// Like [`Item::Open`], the target is resolved by the loader against the
+    /// completed environment, so it may be declared later in the same file; the
+    /// source position is recorded because that check runs after the whole file
+    /// is read. The theme is written as one of the fixed keywords and names a
+    /// declared decision, not a word the system guessed from the predicate's
+    /// spelling.
+    Risk {
+        theme: String,
+        pred: String,
+        line: usize,
+        col: usize,
+    },
     /// `priority a.r over b.r source …` — a provenance-carrying priority: the
     /// winner outranks the loser. A module (a file with a namespace) is the
     /// only place that may assert one; the declaring namespace is part of the
