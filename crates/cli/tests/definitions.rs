@@ -357,6 +357,17 @@ fn invalid_definitions_are_refused_at_load_with_name_and_position() {
     let err = stderr(&output);
     assert!(err.contains(":3:1"), "{err}");
     assert!(err.contains("`def 缺参`") && err.contains("`y`"), "{err}");
+    // The definition loader's own diagnostic, not the elaborator's
+    // "unknown name" for the same identifier: the restriction is enforced by
+    // the definition check, and its wording must be visible.
+    assert!(
+        err.contains("未绑定") && err.contains("自由变量必须被 λ/∀ 绑定"),
+        "the load-time free-variable diagnostic must name the defect: {err}"
+    );
+    assert!(
+        !err.contains("未知名称"),
+        "the elaboration error must not stand in for the definition check: {err}"
+    );
 
     let clash = TempTheory::new(
         "clash",
@@ -372,7 +383,28 @@ fn invalid_definitions_are_refused_at_load_with_name_and_position() {
     let err = stderr(&output);
     assert!(err.contains(":3:1"), "{err}");
     assert!(err.contains("`def 殴打`"), "{err}");
-    assert!(err.contains("`pred`"), "{err}");
+    assert!(
+        err.contains("已声明为 `pred`"),
+        "the clashing kind must be named exactly: {err}"
+    );
+
+    // The other direction: a later `pred` reusing a `def` name must name both
+    // declarations and point at the `pred` line.
+    let reverse = TempTheory::new(
+        "reverse-clash",
+        "sort 人\naxiom 真 : Prop\n  source text \"测试\" locator \"夹具\"\ndef 名 : Prop := 真\npred 名 : 人 → Prop\n",
+    );
+    let output = reverse.session(&[]);
+    assert_eq!(
+        output.status.code(),
+        Some(COMMAND_ERROR),
+        "{}",
+        stderr(&output)
+    );
+    let err = stderr(&output);
+    assert!(err.contains(":5:1"), "{err}");
+    assert!(err.contains("`pred 名`"), "{err}");
+    assert!(err.contains("已声明为 `def`"), "{err}");
 
     let wrong_type = TempTheory::new(
         "wrong-type",
@@ -478,4 +510,135 @@ impl Drop for TempJson {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+/// A rule whose premise is written through a `def` must match a fact written
+/// with the underlying predicate. The end-to-end contract is the one the
+/// reasoner fixes: `:why` proves it, `:gap` agrees that it is provable, and a
+/// genuinely missing instance shows `缺 ⟨…⟩` with the written name, not a
+/// candidate without a missing premise.
+const DEFINITION_PREMISE: &str = r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+pred 须保护 : 人 → 人 → Prop
+
+obj 张三 : 人
+obj 李四 : 人
+obj 王五 : 人
+
+def 夫妻 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 配偶 a b
+
+axiom 底层事实 : 配偶 张三 李四
+  source text "测试" locator "底层"
+
+rule 夫妻保护 :
+  params a : 人, b : 人
+  premise 夫妻 a b
+  conclude 须保护 a b
+  source text "测试" locator "规则"
+"#;
+
+#[test]
+fn a_definition_premise_matches_the_underlying_fact_end_to_end() {
+    let theory = TempTheory::new("premise-matching", DEFINITION_PREMISE);
+    check(
+        theory.session(&[":why 须保护 张三 李四"]),
+        PROVED,
+        &[
+            "▸ 须保护 张三 李四",
+            "⟨夫妻保护⟩",
+            "· 配偶 张三 李四",
+            "推导已通过独立校验。",
+        ],
+    );
+    check(
+        theory.session(&[":gap 须保护 张三 李四"]),
+        PROVED,
+        &["目标可以推出。"],
+    );
+    // The instantiated alias premise is missing: it must be listed, not
+    // silently treated as satisfied.
+    check(
+        theory.session(&[":gap 须保护 李四 王五"]),
+        GAP,
+        &[
+            "缺口 ⟨须保护 李四 王五⟩",
+            "候选 ⟨夫妻保护⟩",
+            "缺 ⟨夫妻 李四 王五⟩",
+        ],
+    );
+
+    // The matched instance must still certify at both layers: the certificate
+    // records the assumption as written (`配偶 张三 李四`) and the rule step
+    // compares through delta.
+    let output = theory.session(&[":cert 须保护 张三 李四"]);
+    assert_eq!(output.status.code(), Some(PROVED), "{}", stderr(&output));
+    let text = stdout(&output);
+    let start = text
+        .find('{')
+        .unwrap_or_else(|| panic!("no certificate JSON in stdout:\n{text}"));
+    let cert = TempJson::new("premise-matching", &text[start..]);
+    let verify = run(vec![
+        "--no-default-packs".to_string(),
+        format!(":load {}", theory.path_str()),
+        format!(":verify-cert {}", cert.path_str()),
+    ]);
+    check(verify, PROVED, &["逻辑校验：通过", "内核证明：通过"]);
+}
+
+/// A contrary declared over the underlying predicates must see a fact written
+/// through a `def`: `:why` reports the conflict, and an exported certificate
+/// keeps it as an open obligation instead of passing as proved.
+const DEFINITION_CONFLICT: &str = r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+pred 非配偶 : 人 → 人 → Prop
+
+obj 张三 : 人
+obj 李四 : 人
+
+def 夫妻 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 配偶 a b
+
+contrary 配偶 非配偶
+
+axiom 夫妻事实 : 夫妻 张三 李四
+  source text "测试" locator "夫妻"
+axiom 相反事实 : 非配偶 张三 李四
+  source text "测试" locator "相反"
+"#;
+
+#[test]
+fn a_definition_conflict_is_reported_and_stays_an_open_obligation() {
+    let theory = TempTheory::new("definition-conflict", DEFINITION_CONFLICT);
+    check(
+        theory.session(&[":why 配偶 张三 李四"]),
+        GAP,
+        &[
+            "冲突未决：配偶 张三 李四",
+            "左：夫妻 张三 李四",
+            "右：非配偶 张三 李四",
+            "该结论没有进入事实库",
+        ],
+    );
+
+    let output = theory.session(&[":cert 配偶 张三 李四"]);
+    assert_eq!(output.status.code(), Some(GAP), "{}", stderr(&output));
+    let text = stdout(&output);
+    let start = text
+        .find('{')
+        .unwrap_or_else(|| panic!("no certificate JSON in stdout:\n{text}"));
+    let cert = TempJson::new("conflict", &text[start..]);
+    let verify = run(vec![
+        "--no-default-packs".to_string(),
+        format!(":load {}", theory.path_str()),
+        format!(":verify-cert {}", cert.path_str()),
+    ]);
+    let code = verify.status.code();
+    let out = stdout(&verify);
+    let err = stderr(&verify);
+    assert_eq!(code, Some(GAP), "stdout:\n{out}\nstderr:\n{err}");
+    assert!(out.contains("未决冲突 1 项"), "{out}");
+    assert!(
+        !out.contains("推导已通过独立校验"),
+        "a certificate with an unresolved conflict must not report the proof as passed:\n{out}"
+    );
 }

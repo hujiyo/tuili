@@ -37,6 +37,17 @@
 //!   not silently dropped: `conflicts()` reports it, and the CLI prints both
 //!   derivations and exits non-zero.
 //!
+//! ## Premises and conflicts are compared up to kernel equality
+//!
+//! A premise pattern is matched against a fact structurally first; when that
+//! fails, both sides are normalized once (beta, `def` delta, zeta) and matched
+//! again. The derivation and the gap candidates share this one judgment, so a
+//! `def` alias can neither make a rule fire silently nor make a candidate
+//! report a satisfied premise the fixed point could not consume. For the same
+//! reason a `contrary`/`unique` declaration sees the predicate head after the
+//! same normalization: a fact or conclusion written through a `def` alias
+//! takes part in the conflict its underlying predicate declares.
+//!
 //! ## Three commitments
 //!
 //! 1. **No negation as failure.** A rule fires only when every premise has
@@ -811,7 +822,7 @@ impl<'a> Reasoner<'a> {
             // interpretation's conclusion, so there is no interpretation
             // chain.
             let applications = self.apply_interpretations(&mut facts, &removed)?;
-            let conflicts = self.detect_conflicts(&facts, &applications);
+            let conflicts = self.detect_conflicts(&facts, &applications)?;
             let mut next_removed = removed.clone();
             for c in &conflicts {
                 let lk = self.key_of(&c.left);
@@ -956,30 +967,36 @@ impl<'a> Reasoner<'a> {
         rules
     }
 
-    /// Are two facts in conflict? Either their heads are declared contrary and
-    /// their arguments match, or they share a head and differ exactly at a
-    /// position declared `unique`.
-    fn in_conflict(&self, a: &Expr, b: &Expr) -> bool {
-        let (ha, aa) = spine(a);
-        let (hb, ab) = spine(b);
-        let (Expr::Const(ha), Expr::Const(hb)) = (ha, hb) else {
-            return false;
-        };
-        if aa.len() != ab.len() {
+    /// Are two propositions in conflict? Either their heads are declared
+    /// contrary and their arguments are kernel-equal, or they share a head and
+    /// differ exactly at a position declared `unique`.
+    ///
+    /// Both sides are compared after kernel normalization (beta, `def` delta,
+    /// zeta), so a fact or conclusion written through a `def` alias reaches the
+    /// predicate its declaration names: `夫妻 张三 李四` and `非配偶 张三 李四`
+    /// conflict when `配偶` and `非配偶` are declared contrary and
+    /// `夫妻` is defined as `配偶`. A proposition without a constant head (a
+    /// quantified or opaque statement) has no declared contrary/unique
+    /// relation and cannot conflict this way.
+    fn in_conflict(&self, a: &ConflictView, b: &ConflictView) -> bool {
+        if a.args.len() != b.args.len() {
             return false;
         }
-        if ha != hb {
-            return self.contraries.get(ha).is_some_and(|set| set.contains(hb))
-                && aa
+        if a.head != b.head {
+            return self
+                .contraries
+                .get(&a.head)
+                .is_some_and(|set| set.contains(&b.head))
+                && a.args
                     .iter()
-                    .zip(ab.iter())
+                    .zip(b.args.iter())
                     .all(|(x, y)| self.key_of(x) == self.key_of(y));
         }
-        let Some(positions) = self.uniques.get(ha) else {
+        let Some(positions) = self.uniques.get(&a.head) else {
             return false;
         };
-        let differing: Vec<usize> = (0..aa.len())
-            .filter(|i| self.key_of(aa[*i]) != self.key_of(ab[*i]))
+        let differing: Vec<usize> = (0..a.args.len())
+            .filter(|i| self.key_of(&a.args[*i]) != self.key_of(&b.args[*i]))
             .collect();
         differing.len() == 1 && positions.contains(&differing[0])
     }
@@ -988,16 +1005,27 @@ impl<'a> Reasoner<'a> {
         &self,
         facts: &BTreeMap<String, Expr>,
         applications: &BTreeMap<String, Name>,
-    ) -> Vec<Conflict> {
+    ) -> Result<Vec<Conflict>, String> {
         let items: Vec<(&String, &Expr)> = facts.iter().collect();
+        // Normalize each proposition once, not once per pair: the conflict
+        // relation is about the kernel's view of both sides, and rebuilding
+        // that view for every pair would make the quadratic scan quadratic in
+        // normalization work as well.
+        let mut views: Vec<Option<ConflictView>> = Vec::with_capacity(items.len());
+        for (_, expression) in &items {
+            views.push(conflict_view(self.env, expression)?);
+        }
         let mut out = Vec::new();
         for i in 0..items.len() {
             for j in (i + 1)..items.len() {
-                let (ka, a) = items[i];
-                let (kb, b) = items[j];
-                if !self.in_conflict(a, b) {
+                let (Some(left_view), Some(right_view)) = (&views[i], &views[j]) else {
+                    continue;
+                };
+                if !self.in_conflict(left_view, right_view) {
                     continue;
                 }
+                let (ka, a) = items[i];
+                let (kb, b) = items[j];
                 let left = self.support(ka, facts, applications);
                 let right = self.support(kb, facts, applications);
                 let resolution = self.resolve(&left, &right);
@@ -1010,7 +1038,7 @@ impl<'a> Reasoner<'a> {
                 });
             }
         }
-        out
+        Ok(out)
     }
 
     /// How one side of a conflict is supported: a fact recorded in the
@@ -1391,16 +1419,13 @@ impl<'a> Reasoner<'a> {
         let mut out = Vec::new();
         let mut binding: Vec<(Name, Expr)> = Vec::new();
         let mut keys: Vec<String> = Vec::new();
-        let rules = rule.clone();
-        backtrack(
-            &rules,
-            0,
+        let matching = Matching {
+            env: self.env,
+            rule,
             facts,
-            &mut binding,
-            &mut keys,
-            &mut out,
-            rule.unlesses.len(),
-        );
+            unless_len: rule.unlesses.len(),
+        };
+        backtrack(&matching, 0, &mut binding, &mut keys, &mut out);
         out
     }
 
@@ -1906,17 +1931,17 @@ impl<'a> Reasoner<'a> {
     /// conclusions: rules do not consume those, so counting one as satisfied
     /// would hide the very premise that keeps the rule from firing.
     ///
-    /// Both sides of the head match are normalised first, so matching uses the
-    /// same definitional identity as the keys that deduplicate the tree: a
-    /// `def` alias of the goal's head finds the rule that concludes the
-    /// definition, exactly as `convertible` and [`structural_key`] would.
+    /// Both sides of a premise match use the same judgment as the derivation
+    /// ([`match_premise`]): a structural match first, then a normalization of
+    /// both sides. A premise is missing only when no rule-visible fact
+    /// satisfies that judgment, so a candidate with no missing premises means
+    /// the rule really can fire, and one with a missing premise really cannot.
     fn gap_candidates(&self, goal: &Expr) -> Vec<GapCandidate> {
         let facts: BTreeMap<String, Expr> = self
             .fixed
             .as_ref()
             .map(|f| f.rule_facts.clone())
             .unwrap_or_default();
-        let goal = normalize(self.env, &Ctx::new(), goal).unwrap_or_else(|_| goal.clone());
         let mut candidates = Vec::new();
         for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
@@ -1925,14 +1950,12 @@ impl<'a> Reasoner<'a> {
             // Match the rule head against the goal to get a candidate
             // instantiation, then instantiate premises and blockers with it.
             let mut binding = Vec::new();
-            let conclusion = rule.open_conclusion();
-            let conclusion = normalize(self.env, &Ctx::new(), &conclusion).unwrap_or(conclusion);
-            if !match_fact(&conclusion, &goal, &mut binding) {
+            if !match_premise(self.env, &rule.open_conclusion(), goal, &mut binding) {
                 continue;
             }
             let missing: Vec<Expr> = (0..rule.premises.len())
                 .map(|i| close_pattern(&rule.open_premise(i), &binding))
-                .filter(|p| !facts.contains_key(&self.key_of(p)))
+                .filter(|p| !premise_satisfied(self.env, &facts, p))
                 .collect();
             let blocked_by: Vec<Expr> = rule
                 .unlesses
@@ -2209,20 +2232,76 @@ fn kosaraju(adjacency: &BTreeMap<Name, Vec<Name>>) -> BTreeMap<Name, u32> {
     component
 }
 
+// ---------------------------------------------------------------- conflicts
+
+/// A proposition as the conflict relation reads it: the predicate head and its
+/// arguments after kernel normalization.
+struct ConflictView {
+    head: Name,
+    args: Vec<Expr>,
+}
+
+/// The kernel's view of one proposition for the conflict relation.
+///
+/// `None` means the proposition has no constant head (a quantified or opaque
+/// statement): `contrary`/`unique` are declared over predicates, so such a
+/// proposition cannot take part in one. A term beyond the certificate's
+/// expression bound, or a normalization that fails, is an error rather than a
+/// silent `None`: either would hide a conflict the writer declared.
+fn conflict_view(env: &Env, expression: &Expr) -> Result<Option<ConflictView>, String> {
+    if !within_term_limit(expression) {
+        return Err(format!(
+            "无法判定冲突：命题超过 {} 个节点上限：{}",
+            std_deduce_cert::MAX_CERT_EXPR_NODES,
+            print_expr(expression)
+        ));
+    }
+    let normalized = normalize(env, &Ctx::new(), expression).map_err(|error| {
+        format!(
+            "无法归约命题「{}」以判定冲突：{error}",
+            print_expr(expression)
+        )
+    })?;
+    if !within_term_limit(&normalized) {
+        return Err(format!(
+            "无法判定冲突：归约后的命题超过 {} 个节点上限：{}",
+            std_deduce_cert::MAX_CERT_EXPR_NODES,
+            print_expr(&normalized)
+        ));
+    }
+    let (head, args) = spine(&normalized);
+    let Expr::Const(head) = head else {
+        return Ok(None);
+    };
+    Ok(Some(ConflictView {
+        head: head.clone(),
+        args: args.into_iter().cloned().collect(),
+    }))
+}
+
 // ---------------------------------------------------------------- matching
 
+/// The fixed inputs of one rule enumeration. Bundling them keeps the recursive
+/// `backtrack` signature short without hiding which environment and fact set
+/// one enumeration belongs to.
+struct Matching<'a> {
+    env: &'a Env,
+    rule: &'a RuleDecl,
+    facts: &'a BTreeMap<String, Expr>,
+    unless_len: usize,
+}
+
 fn backtrack(
-    rule: &RuleDecl,
+    matching: &Matching,
     idx: usize,
-    facts: &BTreeMap<String, Expr>,
     binding: &mut Vec<(Name, Expr)>,
     keys: &mut Vec<String>,
     out: &mut Vec<Instance>,
-    unless_len: usize,
 ) {
+    let rule = matching.rule;
     if idx == rule.premises.len() {
         let conclusion = close_pattern(&rule.open_conclusion(), binding);
-        let unlesses: Vec<Expr> = (0..unless_len)
+        let unlesses: Vec<Expr> = (0..matching.unless_len)
             .map(|i| close_pattern(&rule.open_unless_text(&rule.unlesses[i]), binding))
             .collect();
         out.push(Instance {
@@ -2235,18 +2314,20 @@ fn backtrack(
     }
 
     let pattern = close_pattern(&rule.open_premise(idx), binding);
-    for (k, fact) in facts {
-        if keys.contains(k) {
-            continue;
-        }
+    // A fact is not a linear resource: one established proposition may satisfy
+    // several premises of the same rule, whether the rule writes the same
+    // premise twice or writes two kernel-equivalent forms of it. Forbidding
+    // reuse was a silent false negative, and it let a gap candidate list no
+    // missing premise while the fixed point still could not fire.
+    for (k, fact) in matching.facts {
         let before = binding.len();
         let mut b = binding.clone();
-        if !match_fact(&pattern, fact, &mut b) {
+        if !match_premise(matching.env, &pattern, fact, &mut b) {
             continue;
         }
         *binding = b;
         keys.push(k.clone());
-        backtrack(rule, idx + 1, facts, binding, keys, out, unless_len);
+        backtrack(matching, idx + 1, binding, keys, out);
         keys.pop();
         binding.truncate(before);
     }
@@ -2312,6 +2393,147 @@ fn match_fact(p: &Expr, f: &Expr, b: &mut Vec<(Name, Expr)>) -> bool {
         (Expr::Sort(x), Expr::Sort(y)) => x == y,
         _ => false,
     }
+}
+
+/// Is `pattern` (containing `?x` constants) matchable against ground `fact`,
+/// up to kernel definitional equality?
+///
+/// The structural match is the fast path, and the only path most premises take.
+/// When it fails, both sides are normalized once (beta, `def` delta, zeta) and
+/// matched again, so a rule may write `夫妻 a b` while the fact records the
+/// underlying `配偶 张三 李四`, and the other way round. The fallback is
+/// deliberately conservative: an open term (a free de Bruijn index), a term
+/// above the certificate's expression bound, a failed normalization, or a
+/// pattern whose normalization drops a rule binder all mean "no match". It
+/// never invents structure, and it is not consulted before the structural
+/// match fails.
+fn match_premise(env: &Env, pattern: &Expr, fact: &Expr, binding: &mut Vec<(Name, Expr)>) -> bool {
+    let mut trial = binding.clone();
+    if match_fact(pattern, fact, &mut trial) {
+        *binding = trial;
+        return true;
+    }
+    match_normalized_premise(env, pattern, fact, binding)
+}
+
+/// The normalization fallback of [`match_premise`].
+fn match_normalized_premise(
+    env: &Env,
+    pattern: &Expr,
+    fact: &Expr,
+    binding: &mut Vec<(Name, Expr)>,
+) -> bool {
+    if !std_deduce_kernel::term::is_closed(pattern) || !std_deduce_kernel::term::is_closed(fact) {
+        return false;
+    }
+    if !within_term_limit(pattern) || !within_term_limit(fact) {
+        return false;
+    }
+    let Ok(normalized_pattern) = normalize(env, &Ctx::new(), pattern) else {
+        return false;
+    };
+    let Ok(normalized_fact) = normalize(env, &Ctx::new(), fact) else {
+        return false;
+    };
+    if !within_term_limit(&normalized_pattern) || !within_term_limit(&normalized_fact) {
+        return false;
+    }
+    // Every binder the pattern mentions must survive normalization. If a
+    // normalization erased one, the instance would have an unbound parameter,
+    // and that is not a match at all.
+    let survivors = open_names(&normalized_pattern);
+    if !open_names(pattern)
+        .iter()
+        .all(|name| survivors.contains(name))
+    {
+        return false;
+    }
+    let mut trial = binding.clone();
+    if !match_fact(&normalized_pattern, &normalized_fact, &mut trial) {
+        return false;
+    }
+    *binding = trial;
+    true
+}
+
+/// Is `premise` already established by the fact set?
+///
+/// The derivation and the gap diagnostics must answer this with one judgment,
+/// otherwise a candidate can list no missing premise while the rule still
+/// cannot fire (or the reverse). The normalized printed key is the exact fast
+/// path; a miss runs [`match_premise`] against every fact. A premise that still
+/// mentions an undetermined rule binder is not matched: that is an open
+/// pattern, reported as such by the tree, not a premise some fact satisfies.
+fn premise_satisfied(env: &Env, facts: &BTreeMap<String, Expr>, premise: &Expr) -> bool {
+    if has_open_pattern(premise) {
+        return facts.contains_key(&key(env, premise));
+    }
+    if facts.contains_key(&key(env, premise)) {
+        return true;
+    }
+    facts
+        .values()
+        .any(|fact| match_premise(env, premise, fact, &mut Vec::new()))
+}
+
+/// Can this term be walked by the normalization fallback?
+///
+/// The bound is the certificate's expression node limit: a term larger than
+/// that can never be checked as part of a derivation, and the same limit keeps
+/// the fallback from turning into an unbounded walk over a pathological term.
+fn within_term_limit(expression: &Expr) -> bool {
+    fn count(expression: &Expr, nodes: &mut usize) -> bool {
+        *nodes += 1;
+        if *nodes > std_deduce_cert::MAX_CERT_EXPR_NODES {
+            return false;
+        }
+        match expression {
+            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) => true,
+            Expr::Pi {
+                domain, codomain, ..
+            } => count(domain, nodes) && count(codomain, nodes),
+            Expr::Lam { domain, body, .. } => count(domain, nodes) && count(body, nodes),
+            Expr::App { func, arg } => count(func, nodes) && count(arg, nodes),
+            Expr::Let { value, body, .. } => count(value, nodes) && count(body, nodes),
+        }
+    }
+    let mut nodes = 0;
+    count(expression, &mut nodes)
+}
+
+/// Every rule binder (`?name` constant) a pattern mentions.
+fn open_names(expression: &Expr) -> BTreeSet<Name> {
+    fn go(expression: &Expr, names: &mut BTreeSet<Name>) {
+        match expression {
+            Expr::Const(name) => {
+                if let Some(stripped) = name.strip_prefix('?') {
+                    names.insert(std_deduce_kernel::name(stripped));
+                }
+            }
+            Expr::Sort(_) | Expr::Var(_) => {}
+            Expr::Pi {
+                domain, codomain, ..
+            } => {
+                go(domain, names);
+                go(codomain, names);
+            }
+            Expr::Lam { domain, body, .. } => {
+                go(domain, names);
+                go(body, names);
+            }
+            Expr::App { func, arg } => {
+                go(func, names);
+                go(arg, names);
+            }
+            Expr::Let { value, body, .. } => {
+                go(value, names);
+                go(body, names);
+            }
+        }
+    }
+    let mut names = BTreeSet::new();
+    go(expression, &mut names);
+    names
 }
 
 /// Substitute the `?x` constants of a pattern.
@@ -2850,7 +3072,7 @@ pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
         for (i, p) in premises.iter().enumerate() {
             let actual = node_prop(&d.nodes[*p])
                 .ok_or_else(|| format!("节点 {id}：前提 {p} 是未闭合的缺口，不能充当前提"))?;
-            if !match_fact(&r.open_premise(i), actual, &mut binding) {
+            if !match_premise(env, &r.open_premise(i), actual, &mut binding) {
                 return Err(format!(
                     "节点 {id}：规则 `{rule}` 的第 {} 个前提是 `{}`，而引用的节点 {p} 证成的是 `{}`",
                     i + 1,

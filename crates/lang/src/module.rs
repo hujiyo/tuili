@@ -209,7 +209,12 @@ impl Library {
                     name: n,
                     ty,
                     source,
+                    line,
+                    col,
                 } => {
+                    if let Some(err) = decl_name_clash(&next.env, &n, "pred", line, col) {
+                        return Err(err);
+                    }
                     let ety = elab::elab_top(&next.env, &ty)
                         .map_err(|e| LoadError::new(format!("`pred {n}`：{}", e.msg)))?;
                     let decl = Decl {
@@ -224,7 +229,7 @@ impl Library {
                     };
                     next.env
                         .insert(decl, &std_deduce_kernel::Ctx::new())
-                        .map_err(|e| LoadError::new(format!("`pred`：{e}")))?;
+                        .map_err(|e| LoadError::new(format!("`pred {n}`：{e}")))?;
                     theory.decls.push(n.clone());
                     report.declared.push(n);
                 }
@@ -328,16 +333,8 @@ impl Library {
                     // sort/obj/pred/axiom/fact/rule/def. Report the clash at
                     // the definition with both names, before the body is
                     // examined.
-                    if let Some(existing) = next.env.get(&n) {
-                        return Err(LoadError::at(
-                            format!(
-                                "`def {n}`：名称 `{n}` 已被已声明的 `{}` 占用；\
-                                 定义名不能与 sort/obj/pred/axiom/fact/rule/def 等任何声明重名",
-                                decl_kind_label(&existing.kind)
-                            ),
-                            line,
-                            col,
-                        ));
+                    if let Some(err) = decl_name_clash(&next.env, &n, "def", line, col) {
+                        return Err(err);
                     }
                     // A definition is a macro the kernel unfolds by delta: its
                     // body must be resolvable when the declaration loads. A
@@ -1304,6 +1301,32 @@ fn check_term(ns: &str, what: &str, locals: &[String], term: &Term) -> Result<()
             check_term(ns, what, locals, arg)
         }
     }
+}
+
+/// The load error for a declaration name that is already in the ledger.
+///
+/// Every declaration kind shares one name space. The message names the
+/// declaration that tried to reuse the name, the existing kind, and the
+/// source position; it keeps the kernel's own phrase (`名称已被占用`) so the
+/// ledger remains the single authority on name clashes. A duplicate that
+/// reaches `Env::insert` anyway is still reported, but without this position.
+fn decl_name_clash(
+    env: &Env,
+    written: &str,
+    keyword: &str,
+    line: usize,
+    col: usize,
+) -> Option<LoadError> {
+    let existing = env.get(written)?;
+    Some(LoadError::at(
+        format!(
+            "`{keyword} {written}`：名称已被占用：`{written}`（已声明为 `{}`）；\
+             所有声明共用同一个名字空间，不能与任何已有声明重名",
+            decl_kind_label(&existing.kind)
+        ),
+        line,
+        col,
+    ))
 }
 
 /// The surface keyword of a declaration kind, for a name-clash diagnostic.

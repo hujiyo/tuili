@@ -403,12 +403,25 @@ impl Parser {
                 Ok(Item::Obj { name, ty, source })
             }
             "pred" => {
+                // A predicate can clash with an earlier declaration (a `def`
+                // alias, for example); the position lets the loader report
+                // that clash at this line.
+                let (line, col) = {
+                    let token = self.here();
+                    (token.line, token.col)
+                };
                 self.bump();
                 let name = self.ident()?;
                 self.expect(&Tok::Colon, "`:`")?;
                 let ty = self.term()?;
                 let source = self.optional_source()?;
-                Ok(Item::Pred { name, ty, source })
+                Ok(Item::Pred {
+                    name,
+                    ty,
+                    source,
+                    line,
+                    col,
+                })
             }
             "axiom" => {
                 self.bump();

@@ -6,6 +6,7 @@
 //! rules match, derive and verify without panicking, hanging or losing the
 //! structure of the term.
 
+use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::Expr;
 use std_deduce_lang::Library;
 use std_deduce_reason::{verify, Reasoner};
@@ -105,4 +106,255 @@ fn a_deeply_nested_ground_term_matches_and_verifies() {
     let mut derivation = reasoner.derivation();
     derivation.root = reasoner.root_for(&goal);
     verify(&lib.env, &derivation).expect("the nested instance must be legal");
+}
+
+/// A rule premise written through a `def` alias and a fact written with the
+/// underlying predicate must match both ways round: the structural fast path
+/// is not the only judgment, and the normalization fallback is not narrower
+/// than the kernel's definitional equality.
+///
+/// Each case is one of the two writings; both must derive and pass the
+/// independent verifier.
+#[test]
+fn a_definition_and_its_underlying_predicate_match_in_both_directions() {
+    for def_premise in [true, false] {
+        let premise = if def_premise {
+            "夫妻 a b"
+        } else {
+            "配偶 a b"
+        };
+        let fact = if def_premise {
+            "夫妻 张三 李四"
+        } else {
+            "配偶 张三 李四"
+        };
+        let src = format!(
+            r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+pred 须保护 : 人 → 人 → Prop
+obj 张三 : 人
+obj 李四 : 人
+def 夫妻 : 人 → 人 → Prop := λ (a : 人) := λ (b : 人) := 配偶 a b
+axiom 事实 : {fact}
+  source text "测试" locator "夹具"
+rule 夫妻保护 :
+  params a : 人, b : 人
+  premise {premise}
+  conclude 须保护 a b
+  source text "测试" locator "夹具"
+"#
+        );
+        let lib = load(&src);
+        let r = reasoner(&lib);
+        let goal = Expr::apps(
+            Expr::constant("须保护"),
+            [Expr::constant("张三"), Expr::constant("李四")],
+        );
+        assert!(
+            r.knows(&goal),
+            "the premise `{premise}` must match the fact `{fact}`"
+        );
+        let mut derivation = r.derivation();
+        derivation.root = r.root_for(&goal);
+        verify(&lib.env, &derivation).expect("the matched instance must be legal");
+    }
+}
+
+/// Two different `def` names for the same predicate feed each other: a rule
+/// may conclude through one alias while the next rule consumes the other.
+#[test]
+fn two_equivalent_definition_aliases_feed_each_other() {
+    let src = r#"
+sort 人
+pred 殴打 : 人 → 人 → Prop
+pred 配偶 : 人 → 人 → Prop
+pred 结论 : 人 → 人 → Prop
+obj 张三 : 人
+obj 李四 : 人
+def 夫妻 : 人 → 人 → Prop := 配偶
+def 配对 : 人 → 人 → Prop := 配偶
+axiom 殴打事实 : 殴打 李四 张三
+  source text "测试" locator "夹具"
+rule 第一 :
+  params a : 人, b : 人
+  premise 殴打 b a
+  conclude 夫妻 a b
+  source text "测试" locator "夹具"
+rule 第二 :
+  params a : 人, b : 人
+  premise 配对 a b
+  conclude 结论 a b
+  source text "测试" locator "夹具"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let goal = Expr::apps(
+        Expr::constant("结论"),
+        [Expr::constant("张三"), Expr::constant("李四")],
+    );
+    assert!(
+        r.knows(&goal),
+        "an alias conclusion must feed an alias premise"
+    );
+    let mut derivation = r.derivation();
+    derivation.root = r.root_for(&goal);
+    verify(&lib.env, &derivation).expect("the alias chain must be legal");
+}
+
+/// A nullary `def` is a proposition, not a function: it can be a premise and
+/// must match the proposition its body names.
+#[test]
+fn a_nullary_definition_is_a_premise() {
+    let src = r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+pred 结论 : Prop
+obj 张三 : 人
+obj 李四 : 人
+def 情形 : Prop := 配偶 张三 李四
+axiom 事实 : 配偶 张三 李四
+  source text "测试" locator "夹具"
+rule 规则 :
+  premise 情形
+  conclude 结论
+  source text "测试" locator "夹具"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let goal = Expr::constant("结论");
+    assert!(
+        r.knows(&goal),
+        "a nullary definition must stand in for its body as a premise"
+    );
+    let mut derivation = r.derivation();
+    derivation.root = r.root_for(&goal);
+    verify(&lib.env, &derivation).expect("the nullary premise instance must be legal");
+}
+
+/// A rule whose conclusion is a `def` application can feed another rule whose
+/// premise names the underlying predicate; the stored conclusion is the
+/// written term, and matching sees through it.
+#[test]
+fn a_definition_conclusion_feeds_a_native_premise() {
+    let src = r#"
+sort 人
+pred 殴打 : 人 → 人 → Prop
+pred 配偶 : 人 → 人 → Prop
+pred 须保护 : 人 → 人 → Prop
+obj 张三 : 人
+obj 李四 : 人
+def 夫妻 : 人 → 人 → Prop := 配偶
+def 配对 : 人 → 人 → Prop := 配偶
+axiom 殴打事实 : 殴打 李四 张三
+  source text "测试" locator "夹具"
+rule 认定夫妻 :
+  params a : 人, b : 人
+  premise 殴打 b a
+  conclude 夫妻 a b
+  source text "测试" locator "夹具"
+rule 保护夫妻 :
+  params a : 人, b : 人
+  premise 配偶 a b
+  conclude 须保护 a b
+  source text "测试" locator "夹具"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let goal = Expr::apps(
+        Expr::constant("须保护"),
+        [Expr::constant("张三"), Expr::constant("李四")],
+    );
+    assert!(
+        r.knows(&goal),
+        "a definition conclusion must match a native premise"
+    );
+    let mut derivation = r.derivation();
+    derivation.root = r.root_for(&goal);
+    verify(&lib.env, &derivation).expect("the definition-to-native chain must be legal");
+}
+
+/// A candidate that cannot fire lists its missing premise, printed as the
+/// writer wrote it; the tree shows `缺 ⟨…⟩` instead of an empty candidate.
+#[test]
+fn a_mixed_writing_gap_lists_the_missing_premise() {
+    let src = r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+pred 须保护 : 人 → 人 → Prop
+obj 张三 : 人
+obj 李四 : 人
+obj 王五 : 人
+def 夫妻 : 人 → 人 → Prop := 配偶
+axiom 事实 : 配偶 张三 李四
+  source text "测试" locator "夹具"
+rule 夫妻保护 :
+  params a : 人, b : 人
+  premise 夫妻 a b
+  conclude 须保护 a b
+  source text "测试" locator "夹具"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let goal = Expr::apps(
+        Expr::constant("须保护"),
+        [Expr::constant("李四"), Expr::constant("王五")],
+    );
+    assert!(!r.knows(&goal), "no fact supplies the instantiated premise");
+    let tree = r.gap_tree(&goal);
+    assert_eq!(tree.candidates.len(), 1, "the rule is still a candidate");
+    let candidate = &tree.candidates[0];
+    assert_eq!(
+        candidate.missing.len(),
+        1,
+        "a candidate that cannot fire must name the missing premise:\n{:?}",
+        candidate.missing
+    );
+    assert_eq!(
+        print_expr(&candidate.missing[0].premise),
+        "夫妻 李四 王五",
+        "the missing premise is reported as the writer wrote it"
+    );
+    assert!(
+        candidate.missing[0].gap.is_some(),
+        "the missing premise is expanded instead of silently dropped"
+    );
+}
+
+/// One fact proves one proposition; a rule may need that proposition twice,
+/// written once through the alias and once through the underlying predicate.
+/// Facts are monotone, not linear, so one fact must be able to satisfy both
+/// premises. Without reuse the candidate would list no missing premise while
+/// the rule still could not fire.
+#[test]
+fn one_fact_satisfies_two_premises_writing_the_same_proposition() {
+    let src = r#"
+sort 人
+pred 配偶 : 人 → 人 → Prop
+pred 须保护 : 人 → 人 → Prop
+obj 张三 : 人
+obj 李四 : 人
+def 夫妻 : 人 → 人 → Prop := 配偶
+axiom 事实 : 配偶 张三 李四
+  source text "测试" locator "夹具"
+rule 规则 :
+  params a : 人, b : 人
+  premise 夫妻 a b
+  premise 配偶 a b
+  conclude 须保护 a b
+  source text "测试" locator "夹具"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let goal = Expr::apps(
+        Expr::constant("须保护"),
+        [Expr::constant("张三"), Expr::constant("李四")],
+    );
+    assert!(
+        r.knows(&goal),
+        "one fact must satisfy both premises of the same proposition"
+    );
+    let mut derivation = r.derivation();
+    derivation.root = r.root_for(&goal);
+    verify(&lib.env, &derivation).expect("the reused-fact instance must be legal");
 }

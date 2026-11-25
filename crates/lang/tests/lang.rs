@@ -329,8 +329,8 @@ fn a_predicate_must_return_a_proposition_at_load() {
         .expect_err("a predicate whose codomain is a sort must be refused")
         .to_string();
     assert!(
-        err.starts_with("`pred`："),
-        "the load error must say which declaration shape failed: {err}"
+        err.starts_with("`pred 坏人`："),
+        "the load error must say which declaration failed: {err}"
     );
     assert!(
         err.contains("`坏人`"),
@@ -800,48 +800,64 @@ fn a_definition_body_may_not_leave_a_name_unbound() {
 
 /// A definition name lives in the same ledger as every other declaration, so
 /// a clash with an existing sort/obj/pred/axiom/fact/rule/def is reported at
-/// the definition, naming both sides' kinds.
+/// the definition, naming the existing kind exactly.
 #[test]
 fn a_definition_name_may_not_clash_with_any_declaration() {
     let cases = [
-        ("sort X\ndef X : Type := Prop\n", "sort", 2),
-        ("pred P : Prop\ndef P : Prop := P\n", "pred", 2),
-        ("sort 人\nobj 甲 : 人\ndef 甲 : 人 := 甲\n", "obj", 3),
+        ("sort X\ndef X : Type := Prop\n", "sort", 2, "def X"),
+        ("pred P : Prop\ndef P : Prop := P\n", "pred", 2, "def P"),
+        ("sort 人\nobj 甲 : 人\ndef 甲 : 人 := 甲\n", "obj", 3, "def 甲"),
         (
             "axiom 真 : Prop\n  source text \"测试\" locator \"夹具\"\ndef 真 : Prop := 真\n",
             "axiom",
             3,
+            "def 真",
         ),
         (
             "sort 人\npred Q : 人 → Prop\nobj 甲 : 人\nrule 名 :\n  params x : 人\n  premise Q x\n  conclude Q x\n  source text \"测试\" locator \"夹具\"\ndef 名 : Prop := Prop\n",
             "rule",
             9,
+            "def 名",
         ),
         (
             "sort 人\nobj 乙 : 人\ndef 甲 : 人 := 乙\ndef 甲 : 人 := 乙\n",
             "def",
             4,
+            "def 甲",
         ),
         (
             "sort 人\npred P : 人 → Prop\nobj 甲 : 人\naxiom 事实 : P 甲\n  source text \"测试\" locator \"夹具\"\ndef 事实 : Prop := Prop\n",
             "fact",
             6,
+            "def 事实",
         ),
     ];
-    for (src, kind, line) in cases {
+    for (src, kind, line, written) in cases {
         let err = Library::new()
             .load("t", src)
             .expect_err("a duplicate definition name must be refused");
         assert_eq!(err.position(), Some((line, 1)), "{src}\n{err}");
         assert!(
-            err.msg.contains("名称") && err.msg.contains("已被已声明的"),
-            "{src}\n{err}"
+            err.msg.contains(&format!("已声明为 `{kind}`")),
+            "the clashing kind must be named exactly, not merely appear in the \
+             message's list of kinds: {src}\n{err}"
         );
         assert!(
-            err.msg.contains(kind),
-            "the clashing kind must be named: {err}"
+            err.msg.contains(&format!("`{written}`")),
+            "the written declaration must be named: {src}\n{err}"
         );
     }
+
+    // The other direction: `def` first, then a later declaration of the same
+    // name. The clash is reported at the later declaration with its position
+    // and the existing kind, not as a nameless `pred` error.
+    let reverse = "sort 人\naxiom 真 : Prop\n  source text \"测试\" locator \"夹具\"\ndef 名 : Prop := 真\npred 名 : 人 → Prop\n";
+    let err = Library::new()
+        .load("t", reverse)
+        .expect_err("a pred reusing a def name must be refused");
+    assert_eq!(err.position(), Some((5, 1)), "{err}");
+    assert!(err.msg.contains("`pred 名`"), "{err}");
+    assert!(err.msg.contains("已声明为 `def`"), "{err}");
 }
 
 /// A definition whose body does not have the declared type is rejected at
