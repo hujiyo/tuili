@@ -1126,12 +1126,28 @@ impl<'a> Reasoner<'a> {
 
     /// Why is `goal` unreachable? List candidate rules with what each is
     /// missing and what is blocking it.
+    ///
+    /// A goal that took part in a conflict gets a note that follows the
+    /// recorded resolution: an unresolved conflict needs a human decision, a
+    /// defeated loser is already rejected, and a winner is not described as
+    /// pending. Only a goal with no conflict falls through to candidate rules.
     pub fn explain(&self, goal: &Expr) -> GapExplanation {
         let mut candidates = Vec::new();
         let note = if check::check(self.env, &Ctx::new(), goal, &Expr::Sort(0)).is_err() {
             Some("目标不是命题".to_string())
-        } else if self.conflict_for(goal).is_some() {
-            Some("目标处于冲突中：未决的结论不进入事实库，需要人工裁决".to_string())
+        } else if let Some(conflict) = self.conflict_for(goal) {
+            Some(match &conflict.resolution {
+                Resolution::Unresolved { .. } => {
+                    "目标处于冲突中：未决的结论不进入事实库，需要人工裁决".to_string()
+                }
+                Resolution::Defeated { winner, .. } => match self.conflict_side(&conflict, goal) {
+                    Some(side) if side == *winner => {
+                        "目标在该冲突中胜出：依据见冲突记录".to_string()
+                    }
+                    Some(_) => "目标已被否决：冲突已裁决，依据见冲突记录".to_string(),
+                    None => "目标处于冲突中：冲突已裁决，但无法确定目标所在的一侧".to_string(),
+                },
+            })
         } else if self.knows(goal) {
             Some("目标已可推出".to_string())
         } else {

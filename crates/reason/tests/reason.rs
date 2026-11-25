@@ -713,6 +713,26 @@ rule 下游 :
     ));
     // A defeated conclusion is still inspectable, for audit.
     assert!(r.derivation_for(&refused).is_some());
+    let loser = r.explain(&refused);
+    let loser_note = loser.note.as_deref().unwrap_or("");
+    assert!(
+        loser_note.contains("已被否决"),
+        "a defeated loser must not be described as pending: {loser_note}"
+    );
+    assert!(
+        !loser_note.contains("需要人工裁决"),
+        "a decided conflict does not need a human decision: {loser_note}"
+    );
+    let winner = r.explain(&approved);
+    let winner_note = winner.note.as_deref().unwrap_or("");
+    assert!(
+        winner_note.contains("胜出"),
+        "the winning side is not pending either: {winner_note}"
+    );
+    assert!(
+        !winner_note.contains("需要人工裁决"),
+        "a decided conflict does not need a human decision: {winner_note}"
+    );
 }
 
 #[test]

@@ -97,7 +97,10 @@
 //! alone, so what a user sees is the object that [`check`] and
 //! [`kernel_proof`] inspect. It rejects an out-of-range node reference or a
 //! cyclic node graph with an error naming the node; it never falls back to a
-//! placeholder.
+//! placeholder. [`render_narrative`] renders the same certificate as a Chinese
+//! because-so explanation. It attributes every fact to its recorded identity,
+//! keeps the recorded sources, bindings, conflicts, gaps and obligations, and
+//! reports a missing source or an unresolved conflict instead of filling it in.
 
 mod closure;
 mod key;
@@ -106,6 +109,7 @@ pub mod check;
 pub mod environment;
 pub mod expr;
 pub mod model;
+pub mod narrative;
 pub mod proof;
 pub mod render;
 pub mod source;
@@ -123,6 +127,7 @@ pub use model::{
     Resolution, ResolutionBasis, Side, UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES,
     MAX_CERT_JSON_BYTES, MAX_CERT_NODES,
 };
+pub use narrative::render_narrative;
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
 pub use render::render;
 pub use source::Source;

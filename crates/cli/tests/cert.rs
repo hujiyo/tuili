@@ -302,6 +302,33 @@ fn unresolved_conflicts_become_open_obligations() {
 }
 
 #[test]
+fn a_defeated_loser_is_exported_as_rejected_not_unresolved() {
+    let generated = session(
+        "法律位阶-河南种子案-裁决.std",
+        &[":cert 应适用 河南省农作物种子管理条例 汝阳种子公司案".to_owned()],
+    );
+    assert_exit(&generated, GAP);
+    let certificate = certificate_json(&generated);
+    assert!(
+        certificate.open_obligations.iter().any(|obligation| {
+            obligation.kind == ObligationKind::MissingPremise
+                && obligation.description.contains("目标已被否决")
+                && obligation.description.contains("依据见冲突记录")
+        }),
+        "a defeated loser must not be exported as an unresolved conflict: {:?}",
+        certificate.open_obligations
+    );
+    assert!(
+        !certificate.open_obligations.iter().any(|obligation| {
+            obligation.kind == ObligationKind::MissingPremise
+                && obligation.description.contains("需要人工裁决")
+        }),
+        "a decided conflict does not need an unresolved-conflict note: {:?}",
+        certificate.open_obligations
+    );
+}
+
+#[test]
 fn tampered_conclusion_or_binding_is_rejected() {
     let generated = session(
         "constitution-39.std",

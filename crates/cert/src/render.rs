@@ -44,6 +44,20 @@ pub fn render(certificate: &Certificate) -> Result<String, String> {
 
     // No root: print every node not used as a premise elsewhere, then every
     // gap, in node order.
+    let roots = root_nodes(certificate);
+    for (index, id) in roots.into_iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        render_node(certificate, id, 0, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// The nodes printed when a certificate has no root: every assumption or rule
+/// application that is not a premise of a rule step, then every gap, in node
+/// order.
+pub(crate) fn root_nodes(certificate: &Certificate) -> Vec<NodeId> {
     let mut used = BTreeSet::new();
     for node in &certificate.nodes {
         if let Node::RuleApplication { premises, .. } = node {
@@ -61,17 +75,11 @@ pub fn render(certificate: &Certificate) -> Result<String, String> {
             Node::Gap { .. } => roots.push(id),
         }
     }
-    for (index, id) in roots.into_iter().enumerate() {
-        if index > 0 {
-            out.push('\n');
-        }
-        render_node(certificate, id, 0, &mut out)?;
-    }
-    Ok(out)
+    roots
 }
 
 /// Check every node reference and reject a cycle before anything is printed.
-fn validate(certificate: &Certificate) -> Result<(), String> {
+pub(crate) fn validate(certificate: &Certificate) -> Result<(), String> {
     if let Some(root) = certificate.root {
         if root >= certificate.nodes.len() {
             return Err(format!(

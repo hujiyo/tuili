@@ -254,6 +254,7 @@ fn help_lists_the_batch_and_certificate_entries() {
         let out = stdout(&output);
         assert!(out.contains("std-deduce"), "{flag}: {out}");
         assert!(out.contains(":verify-cert"), "{flag}: {out}");
+        assert!(out.contains(":explain"), "{flag}: {out}");
         assert!(out.contains("check <文件.std>"), "{flag}: {out}");
     }
 }
@@ -278,6 +279,7 @@ fn the_repl_entry_forms_start_the_session() {
         assert!(out.contains("std-deduce"), "{args:?}: {out}");
         assert!(out.contains(":verify-cert"), "{args:?}: {out}");
         assert!(out.contains(":fact"), "{args:?}: {out}");
+        assert!(out.contains(":explain"), "{args:?}: {out}");
         assert!(!out.contains(":check <证书文件>"), "{args:?}: {out}");
     }
 }
