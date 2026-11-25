@@ -121,6 +121,7 @@ pub use environment::{
     PackRecord, TrustLevel, UnrecordedEnvironment,
 };
 pub use expr::{CertExpr, ExprEncodeError};
+pub use key::expression_key;
 pub use model::{
     Assumption, Binding, Certificate, Conflict, FactIdentity, GapCandidate, Metadata, Node, NodeId,
     ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,

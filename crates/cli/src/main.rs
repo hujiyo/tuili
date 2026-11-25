@@ -77,7 +77,8 @@
 //! :why <term>             derive, print the certificate's tree, and check it
 //! :explain <term>         derive, print a Chinese because-so explanation, and
 //!                         check the same certificate
-//! :gap <term>             explain what is missing for a goal
+//! :gap <term>             explain what is missing, as a recursive gap tree
+//! :issues                 list every conclusion the current facts can contest
 //! :cert <term>            derive and print the goal's certificate JSON
 //! :verify-cert <file> [goal]
 //!                         check a certificate, optionally bound to a goal
@@ -225,6 +226,27 @@
 //! prints the formal tree, so the certificate remains expandable; `:cert` JSON
 //! is unchanged.
 //!
+//! `:gap` prints a recursive gap tree: every candidate rule names the premises
+//! it is missing and the blocking conditions that already hold, and every
+//! missing premise is expanded into its own gap — the rules that could conclude
+//! it, in turn — until the branch reaches a proposition no rule concludes, a
+//! proposition in an unresolved conflict or a decided loser, an open rule
+//! pattern, a non-proposition, or a proposition already being expanded on the
+//! same path (a rule cycle). Repeated expansions are recognised by a structural
+//! key of the normalised proposition, never by printed text, so an alpha
+//! variant cannot start a second, endless branch; the head match is normalised
+//! too, so a `def` alias finds the rule that concludes its definition. The
+//! recursion is bounded by explicit limits — depth 6, 128 nodes, 8 attempts per
+//! rule — and a limit that stops a branch is printed as `已截断：…` where it
+//! applies. `:issues` requires a loaded theory and runs the same machinery over
+//! the whole fact set instead of one goal: it instantiates every rule over the
+//! declared constants, lists each conclusion that is not already proved (and
+//! each side of an unresolved conflict) with its own gap tree, reports rules it
+//! could not instantiate, and caps the list at 32 conclusions. A conflict the
+//! theory already decided is not an open issue: its winner is in the fact base
+//! and its loser is reported by `:gap`/`:why` as decided, never as unresolved.
+//! Neither command touches the certificate format.
+//!
 //! `:cert` requires a loaded theory and writes only the certificate JSON to
 //! stdout; a gap becomes a `MissingPremise` obligation and an unresolved
 //! conflict becomes an `UnresolvedConflict` obligation in that JSON. Before
@@ -312,7 +334,8 @@ use std_deduce_lawpack::{
     OFFICIAL_FILE,
 };
 use std_deduce_reason::{
-    certificate as reason_certificate, Conflict, Provenance, Reasoner, Resolution, Side,
+    certificate as reason_certificate, Conflict, GapLimit, GapLimits, GapStatus, GapTree,
+    Provenance, Reasoner, Resolution, Side,
 };
 
 /// How a query ended. Only `Proved` is a success; the other two make the
@@ -734,7 +757,7 @@ impl Session {
             // would turn `std-deduce file.std --help` into a success.
             return Err(unknown_option_message(
                 line,
-                "它不是命令；查询请用 :why / :gap",
+                "它不是命令；查询请用 :why / :gap / :issues",
             ));
         }
         if let Some(rest) = line.strip_prefix(':') {
@@ -861,6 +884,7 @@ impl Session {
                 }
                 "fact" => self.fact_command(arg, out),
                 "why" | "gap" | "explain" => self.query(cmd, arg, out),
+                "issues" => self.issues_command(arg, out),
                 "cert" => self.export_certificate(arg, out),
                 "verify-cert" => self.verify_certificate(arg, out),
                 "check" => Err(
@@ -1108,56 +1132,22 @@ impl Session {
         let reachable = r.knows(&goal);
 
         if cmd == "gap" {
-            let ex = r.explain(&goal);
             if reachable {
                 writeln!(out, "目标可以推出。").ok();
                 return Ok(Outcome::Proved);
             }
-            writeln!(out, "无法推出 {}。以下是缺口：", print_expr(&goal)).ok();
-            if let Some(n) = ex.note {
-                writeln!(out, "  {n}").ok();
-            }
-            if ex.candidates.is_empty() {
-                writeln!(
-                    out,
-                    "  没有任何规则以它为结论：要么补一条规则，要么把它作为已知事实登记。"
-                )
-                .ok();
-            }
-            for c in ex.candidates {
-                writeln!(out, "  候选 ⟨{}⟩", c.rule).ok();
-                for s in &c.sources {
-                    writeln!(out, "    ← {}", s.one_line()).ok();
-                }
-                if !c.missing.is_empty() {
-                    writeln!(
-                        out,
-                        "    缺：{}",
-                        c.missing
-                            .iter()
-                            .map(print_expr)
-                            .collect::<Vec<_>>()
-                            .join("；")
-                    )
-                    .ok();
-                }
-                for b in &c.blocked_by {
-                    // The blocker can be a session fact; its identity is part
-                    // of why it blocks, and a reasoner-derived conclusion has
-                    // none. No identity keeps the original wording.
-                    let identity = r
-                        .identity_of(b)
-                        .map(|identity| format!("〔{}〕", identity.label_zh()))
-                        .unwrap_or_default();
-                    writeln!(
-                        out,
-                        "    被阻断：「{}」{}已成立，故本规则不触发",
-                        print_expr(b),
-                        identity
-                    )
-                    .ok();
-                }
-            }
+            let limits = GapLimits::default();
+            let tree = r.gap_tree_with(&goal, &limits);
+            writeln!(
+                out,
+                "无法推出 {}。缺口树（最大深度 {}，最多 {} 个节点，每条规则最多尝试 {} 次）：",
+                print_expr(&goal),
+                limits.max_depth,
+                limits.max_nodes,
+                limits.max_rule_attempts
+            )
+            .ok();
+            render_gap_tree(out, &tree, &r, 2, "缺口");
             return Ok(Outcome::Gap);
         }
 
@@ -1277,6 +1267,74 @@ impl Session {
             }
         }
         Ok(Outcome::Proved)
+    }
+
+    /// `:issues` — every conclusion the current fact set can still contest.
+    ///
+    /// The scan itself lives in the reasoner; this command only renders the
+    /// gap tree of each contestable conclusion and the limits that stopped the
+    /// scan. A scan that finds nothing is a success: there is nothing to
+    /// argue about under the current facts. A limit is always printed, never
+    /// applied silently.
+    fn issues_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if !arg.is_empty() {
+            return Err("用法：:issues（不接受参数；它列出当前事实集下所有可争的结论）".into());
+        }
+        if !self.loaded {
+            // Same rule as `:cert`: the scan describes the current fact set,
+            // and an unloaded session has no environment to describe.
+            return Err(
+                "尚未加载理论：:issues 需要已加载的环境才能扫描当前事实集，请先 :load <文件>"
+                    .into(),
+            );
+        }
+        let mut r = Reasoner::new(&self.lib.env);
+        r.assume_ledger_axioms()?;
+        r.saturate()?;
+        write_priority_cycle_warning(out, &r.priority_cycles());
+
+        let limits = GapLimits::default();
+        let scan = r.issues_with(&limits);
+        if scan.issues.is_empty() {
+            writeln!(out, "没有可争的结论。").ok();
+        } else {
+            writeln!(
+                out,
+                "当前事实集下可争的结论 {} 条（缺口树：最大深度 {}，最多 {} 个节点，每条规则最多尝试 {} 次）：",
+                scan.issues.len(),
+                limits.max_depth,
+                limits.max_nodes,
+                limits.max_rule_attempts
+            )
+            .ok();
+            for issue in &scan.issues {
+                render_gap_tree(out, issue, &r, 2, "争点");
+            }
+        }
+        for limit in &scan.limits {
+            // "已截断" must say what was cut off: an issue cap drops whole
+            // conclusions, a per-rule cap leaves instances of that rule
+            // unenumerated.
+            let suffix = match limit {
+                GapLimit::RuleAttempts { .. } => "其余实例未枚举",
+                _ => "其余未列出",
+            };
+            writeln!(out, "  已截断：{}；{suffix}。", gap_limit_text(limit)).ok();
+        }
+        if !scan.uninstantiable.is_empty() {
+            writeln!(
+                out,
+                "  另有 {} 条规则无法在当前事实集上实例化（参数类型没有已声明的常量，或结论依赖前提证明）：{}",
+                scan.uninstantiable.len(),
+                format_limited_names(&scan.uninstantiable)
+            )
+            .ok();
+        }
+        Ok(if scan.issues.is_empty() {
+            Outcome::Proved
+        } else {
+            Outcome::Gap
+        })
     }
 
     /// Parse `arg` as a proposition in the current environment.
@@ -3350,6 +3408,142 @@ fn report_conflicts(out: &mut impl Write, certificate: &Certificate) {
     }
 }
 
+/// Render one gap tree, with `label` on its root line.
+///
+/// The tree is the reasoner's own recursion: every missing premise with a
+/// child gap is printed under the premise that needs it, indented one level
+/// deeper, so the output shows *what* is missing, *why* it is missing and
+/// *which rule* could use it. Limits are printed where they stopped the
+/// expansion; a truncated branch is never left looking like a complete one.
+fn render_gap_tree(
+    out: &mut impl Write,
+    tree: &GapTree,
+    reasoner: &Reasoner<'_>,
+    indent: usize,
+    label: &str,
+) {
+    writeln!(
+        out,
+        "{}{label} ⟨{}⟩",
+        " ".repeat(indent),
+        print_expr(&tree.goal)
+    )
+    .ok();
+    render_gap_body(out, tree, reasoner, indent + 2);
+}
+
+fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>, indent: usize) {
+    let pad = " ".repeat(indent);
+    match tree.status {
+        GapStatus::Proved => {
+            writeln!(out, "{pad}目标已可推出。").ok();
+            return;
+        }
+        GapStatus::Conflicted => {
+            writeln!(
+                out,
+                "{pad}目标处于冲突中：未决的结论不进入事实库，需要人工裁决。"
+            )
+            .ok();
+            return;
+        }
+        GapStatus::Defeated => {
+            writeln!(out, "{pad}目标在已裁决的冲突中败出，按记录不进入事实库。").ok();
+            return;
+        }
+        GapStatus::NotAProposition => {
+            writeln!(out, "{pad}目标不是命题。").ok();
+            return;
+        }
+        GapStatus::OpenPattern => {
+            writeln!(out, "{pad}前提含有未随目标闭合的规则参数，无法继续展开。").ok();
+            return;
+        }
+        GapStatus::Cycle => {
+            writeln!(out, "{pad}循环依赖：同一命题已在当前展开路径上，停止递归。").ok();
+            return;
+        }
+        GapStatus::Unreachable => {}
+    }
+    if tree.candidates.is_empty() && tree.limit.is_none() {
+        writeln!(
+            out,
+            "{pad}没有任何规则以它为结论：要么补一条规则，要么把它作为已知事实登记。"
+        )
+        .ok();
+    }
+    for candidate in &tree.candidates {
+        writeln!(out, "{pad}候选 ⟨{}⟩", candidate.rule).ok();
+        for source in &candidate.sources {
+            writeln!(out, "{pad}  ← {}", source.one_line()).ok();
+        }
+        for missing in &candidate.missing {
+            writeln!(out, "{pad}  缺 ⟨{}⟩", print_expr(&missing.premise)).ok();
+            if let Some(child) = &missing.gap {
+                render_gap_body(out, child, reasoner, indent + 4);
+            }
+        }
+        for blocker in &candidate.blocked_by {
+            // A blocker can be a session fact; its identity is part of why it
+            // blocks, and a reasoner-derived conclusion has none.
+            let identity = reasoner
+                .identity_of(blocker)
+                .map(|identity| format!("〔{}〕", identity.label_zh()))
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "{pad}  被阻断：「{}」{}已成立，故本规则不触发",
+                print_expr(blocker),
+                identity
+            )
+            .ok();
+        }
+        if let Some(limit) = &candidate.limit {
+            writeln!(
+                out,
+                "{pad}  已截断：{}；其余前提不再展开。",
+                gap_limit_text(limit)
+            )
+            .ok();
+        }
+    }
+    if let Some(limit) = &tree.limit {
+        writeln!(
+            out,
+            "{pad}已截断：{}；其余缺口不再展开。",
+            gap_limit_text(limit)
+        )
+        .ok();
+    }
+}
+
+/// One limit in words, shared by gap trees and the issue scan.
+fn gap_limit_text(limit: &GapLimit) -> String {
+    match limit {
+        GapLimit::Depth { limit } => format!("达到最大展开深度（{limit} 层）"),
+        GapLimit::Nodes { limit } => format!("达到最大节点数（{limit} 个）"),
+        GapLimit::RuleAttempts { rule, limit } => {
+            format!("规则 ⟨{rule}⟩ 的尝试次数已达上限（{limit} 次）")
+        }
+        GapLimit::Issues { limit } => format!("可争的结论已达到上限（{limit} 条）"),
+    }
+}
+
+/// `⟨a⟩、⟨b⟩` for a rule list, with the first eight names and a total count.
+fn format_limited_names(names: &[Name]) -> String {
+    let shown = names
+        .iter()
+        .take(8)
+        .map(|name| format!("⟨{name}⟩"))
+        .collect::<Vec<_>>()
+        .join("、");
+    if names.len() > 8 {
+        format!("{shown} 等 {} 条", names.len())
+    } else {
+        shown
+    }
+}
+
 /// Warn once when the environment's declared priorities contain a cycle.
 ///
 /// An edge inside a strongly connected component can never decide a conflict,
@@ -3617,7 +3811,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
             writeln!(
                 out,
                 ":load <文件>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
-                 :why <命题>  :explain <命题>  :gap <命题>  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
+                 :why <命题>  :explain <命题>  :gap <命题>  :issues  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )
             .ok();

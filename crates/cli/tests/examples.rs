@@ -264,12 +264,12 @@ fn sun_zhigang_pack_gap_is_filled_by_a_given_detention_fact() {
         GAP_OR_CONFLICT,
         &[
             "无法推出 cn.constitution.人身自由受侵犯 孙志刚",
-            "缺：cn.constitution.非法拘禁 孙志刚",
+            "缺 ⟨cn.constitution.非法拘禁 孙志刚⟩",
         ],
     );
     let out = stdout(&output);
     assert!(
-        !out.contains("缺：cn.constitution.公民 孙志刚"),
+        !out.contains("缺 ⟨cn.constitution.公民 孙志刚⟩"),
         "the pack derives citizenship from nationality; it is not a missing premise:\n{out}"
     );
     check(
@@ -296,7 +296,9 @@ fn sun_zhigang_detention_stays_a_gap_while_the_independent_rule_proves() {
         GAP_OR_CONFLICT,
         &[
             "无法推出 应当收容 孙志刚",
-            "缺：无合法证件 孙志刚；无正常居所 孙志刚；无正当生活来源 孙志刚",
+            "缺 ⟨无合法证件 孙志刚⟩",
+            "缺 ⟨无正常居所 孙志刚⟩",
+            "缺 ⟨无正当生活来源 孙志刚⟩",
         ],
     );
     check(
@@ -375,7 +377,7 @@ fn criminal_law_20_basic_proves_no_liability() {
     check(
         session("刑法第二十条-基本.std", &[":gap 应当负刑事责任 乙行为"]),
         GAP_OR_CONFLICT,
-        &["无法推出 应当负刑事责任 乙行为", "缺：防卫过当 乙行为"],
+        &["无法推出 应当负刑事责任 乙行为", "缺 ⟨防卫过当 乙行为⟩"],
     );
 }
 

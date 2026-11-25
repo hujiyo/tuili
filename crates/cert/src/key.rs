@@ -10,7 +10,10 @@
 use std_deduce_kernel::Expr;
 
 /// A collision-free key for structural equality, ignoring binder names.
-pub(crate) fn expression_key(expression: &Expr) -> String {
+///
+/// The reasoner reuses this encoding for its gap-tree keys, so "the same
+/// proposition" never has to be decided by comparing printed text.
+pub fn expression_key(expression: &Expr) -> String {
     let mut out = String::new();
     write_expression(expression, &mut out);
     out
