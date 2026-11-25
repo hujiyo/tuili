@@ -6,7 +6,7 @@
 //! program  := import* namespace? item*
 //! import   := 'import' PACK                (before namespace and all items)
 //! namespace := 'namespace' NAMESPACE      (first non-import item only)
-//! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | priority | command
+//! item     := sort | pred | axiom | def | rule | interpret | contrary | unique | open | priority | command
 //! sort     := 'sort' IDENT source?
 //! pred     := 'pred' IDENT ':' term source?
 //! axiom    := 'axiom' IDENT ':' term
@@ -38,6 +38,9 @@
 //! standard_value := 'preponderance' | 'clear_and_convincing'
 //!                 | 'beyond_reasonable_doubt'
 //! priority := 'priority' IDENT 'over' IDENT source*
+//! open     := 'open' IDENT
+//!           -- marks an already declared (or later declared in the same file)
+//!           -- predicate as an open concept; the target is checked on load
 //! DIRECTION := 'literal' | 'expand' | 'narrow' | 'analogy'
 //! source_key := 'text' | 'locator' | 'version' | 'effective' | 'quote' | 'url'
 //!           | 'jurisdiction' | 'retrieved_at' | 'hash' | 'note'
@@ -528,6 +531,42 @@ impl Parser {
                     index,
                     source,
                 })
+            }
+            "open" => {
+                // The declaration's position is kept in the AST: the target is
+                // validated against the completed environment (so a predicate
+                // may be declared later in the same file), and those load
+                // errors still have to point at the `open` line.
+                let (line, col) = {
+                    let token = self.here();
+                    (token.line, token.col)
+                };
+                self.bump();
+                let pred = match self.peek().clone() {
+                    Tok::Ident(pred) => {
+                        self.bump();
+                        pred
+                    }
+                    other => {
+                        return Err(ParseError {
+                            msg: format!("`open` 之后必须是谓词名，实际是 `{other:?}`"),
+                            line,
+                            col,
+                        });
+                    }
+                };
+                if !matches!(self.peek(), Tok::Newline | Tok::Eof) {
+                    let (bad_line, bad_col) = {
+                        let token = self.here();
+                        (token.line, token.col)
+                    };
+                    return Err(ParseError {
+                        msg: format!("`open {pred}` 之后必须是换行，实际是 `{:?}`", self.peek()),
+                        line: bad_line,
+                        col: bad_col,
+                    });
+                }
+                Ok(Item::Open { pred, line, col })
             }
             "priority" => {
                 self.bump();
@@ -1541,6 +1580,7 @@ fn is_item_keyword(keyword: &str) -> bool {
             | "interpretation"
             | "contrary"
             | "unique"
+            | "open"
             | "priority"
             | "obj"
             | "object"

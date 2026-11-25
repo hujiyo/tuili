@@ -42,10 +42,10 @@
 //! In the closed environment a top-level `:load` accepts only a case file (no
 //! `namespace`): modules are legal packs and must be imported. The case may
 //! state facts (`obj`, `axiom`) and query, but by default it may not declare
-//! `sort`/`pred`/`def`/`rule`/`contrary`/`unique`, and its facts may not smuggle
-//! a concept through their type: an object must be declared at a sort from a
-//! loaded pack (not `Prop`, `Type` or a function type), and an axiom's type must
-//! be a proposition. The error names what was rejected and points at
+//! `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`open`, and its facts may not
+//! smuggle a concept through their type: an object must be declared at a sort
+//! from a loaded pack (not `Prop`, `Type` or a function type), and an axiom's
+//! type must be a proposition. The error names what was rejected and points at
 //! `--allow-case-rules`. With that flag the declarations load and are recorded
 //! as case extensions: `:inspect` marks them ` [案件扩展]` (including an object
 //! or axiom whose type invented a concept), and a certificate that applies a
@@ -847,6 +847,10 @@ impl Session {
                                 pack.decls.iter().map(move |decl| (decl.as_str(), pack))
                             })
                             .collect();
+                    // `open` markers are metadata on predicates: the predicate
+                    // line shows the marker, and the marker's own ledger entry
+                    // remains visible as `open:<predicate>`.
+                    let open_predicates = self.lib.env.open_predicates();
                     for decl in self.lib.env.iter() {
                         let kind = match &decl.kind {
                             DeclKind::Sort => "sort ",
@@ -860,6 +864,7 @@ impl Session {
                             DeclKind::Contrary { .. } => "contr ",
                             DeclKind::Unique { .. } => "uniq  ",
                             DeclKind::Priority { .. } => "prior ",
+                            DeclKind::OpenConcept { .. } => "open ",
                         };
                         // A fact shows who asserts it, so the ledger line
                         // carries the Chinese identity label. An `Axiom`
@@ -889,6 +894,19 @@ impl Session {
                                 )
                             }
                             _ => String::new(),
+                        };
+                        // An `open` marker belongs on the predicate it marks,
+                        // next to the type. The marker's own ledger entry below
+                        // still shows the synthetic `open:<predicate>` name.
+                        let open = match &decl.kind {
+                            DeclKind::Pred
+                                if open_predicates
+                                    .iter()
+                                    .any(|pred| pred.as_ref() == decl.name.as_ref()) =>
+                            {
+                                " 〔开放概念〕"
+                            }
+                            _ => "",
                         };
                         // Recorded scope and occurrence are shown next to the
                         // identity; an undeclared field prints nothing, never a
@@ -926,7 +944,7 @@ impl Session {
                         };
                         writeln!(
                             out,
-                            "  {kind} {name} : {}{identity}{extra}{scope}{occurrence}{pleading}{namespace}",
+                            "  {kind} {name} : {}{identity}{extra}{open}{scope}{occurrence}{pleading}{namespace}",
                             print_expr(&decl.ty)
                         )
                         .ok();
@@ -2343,9 +2361,9 @@ const LOCAL_EXTENSION_ID: &str = "local-extension";
 /// `namespace`) is refused: modules are legal packs and enter through `import`.
 /// The case may state facts (`obj`, `axiom`) and query, but its legal concepts
 /// must come from the loaded packs. A case that declares sorts, predicates,
-/// definitions, rules, contraries or uniques is refused unless
-/// `--allow-case-rules` is given; the error names what was declared so the
-/// author can move it into a pack or opt in explicitly.
+/// definitions, rules, contraries, uniques or open-concept markers is refused
+/// unless `--allow-case-rules` is given; the error names what was declared so
+/// the author can move it into a pack or opt in explicitly.
 ///
 /// Facts are checked too, because their *type* can carry a new legal concept:
 /// an object must be declared at a sort from a loaded pack (not `Prop`, `Type`
@@ -2435,6 +2453,7 @@ fn case_declaration(item: &Item) -> Option<String> {
         Item::Interpretation { name, .. } => Some(format!("interpret {name}")),
         Item::Contrary { left, right, .. } => Some(format!("contrary {left} {right}")),
         Item::Unique { pred, index, .. } => Some(format!("unique {pred} {index}")),
+        Item::Open { pred, .. } => Some(format!("open {pred}")),
         _ => None,
     }
 }
@@ -2512,6 +2531,7 @@ fn record_case_extensions(
             DeclKind::Interpretation(_) => "interpret",
             DeclKind::Contrary { .. } => "contrary",
             DeclKind::Unique { .. } => "unique",
+            DeclKind::OpenConcept { .. } => "open",
             DeclKind::Obj | DeclKind::Axiom | DeclKind::Fact { .. } | DeclKind::Priority { .. } => {
                 continue
             }

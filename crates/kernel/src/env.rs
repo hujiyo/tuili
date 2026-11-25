@@ -350,6 +350,12 @@ pub enum DeclKind {
         loser: Name,
         declared_in: Name,
     },
+    /// A predicate marked as an open concept: `open 重大`. The marker records
+    /// that applying the concept (「重大」「合理」「善意」「情节严重」) needs a
+    /// human judgement; it asserts nothing itself. The declaration is metadata:
+    /// it seeds no derivation, blocks no `unless`, and no certificate node
+    /// cites it yet.
+    OpenConcept { pred: Name },
 }
 
 /// A defeasible rule.
@@ -667,6 +673,20 @@ impl Env {
         self.iter()
             .filter_map(|d| match &d.kind {
                 DeclKind::Unique { pred, index } => Some((pred.clone(), *index)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Predicates marked as open concepts, in declaration order.
+    ///
+    /// A marker is metadata about how a predicate should be read. The kernel
+    /// stores it and never lets it seed a derivation or block a rule; readers
+    /// (`:inspect`) use this list to show the marker next to the predicate.
+    pub fn open_predicates(&self) -> Vec<Name> {
+        self.iter()
+            .filter_map(|d| match &d.kind {
+                DeclKind::OpenConcept { pred } => Some(pred.clone()),
                 _ => None,
             })
             .collect()

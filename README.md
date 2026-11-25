@@ -77,6 +77,27 @@ unique 应适用 1           -- 一个谓词的第 1 个参数单值：同一案
 优先级只在两条规则确实冲突时起作用，不改变无关规则的推导；它不传递：`A over B` 与 `B over C`
 推不出 `A over C`。细节见「跨包冲突与优先级出处」。
 
+## 开放概念：只标记，不推理
+
+有些概念不能被静默布尔化：「重大」「合理」「善意」「情节严重」。`open <谓词名>` 把已声明的
+`pred` 标记为开放概念，让读者在台账里看见它：
+
+```text
+sort 损害
+pred 重大 : 损害 → Prop
+open 重大
+```
+
+- 目标必须是谓词：同一文件里后声明的 `pred` 可以（按 `priority` 目标同样的前向引用规则），
+  模块里必须写全限定名（`open cn.constitution.非法搜查`）。未知名称、非谓词目标、重复标记
+  都让加载失败，诊断带 `路径:行:列` 与原因。
+- 标记不是命题，不进事实库，不参与推导，也不会改变 `:why` / `:cert` 的输出；`:inspect` 在
+  对应谓词行追加 `〔开放概念〕`，标记本身以合成名 `open:<谓词>` 留在台账里。
+- 封闭环境里案件文件的 `open` 与其他案件扩展一样默认拒绝；`--allow-case-rules` 允许加载并
+  在 `:inspect` 标 ` [案件扩展]`。包内模块的 `open` 正常加载。
+- **这一步只做声明层**：推理层尚未生成「需要人判断」的节点，也不会自动列出可选解释或后果；
+  报告、义务和解释候选都还没有接上。标记当前只提醒读者这里不能当普通布尔谓词使用。
+
 ## 事实身份
 
 一个事实由两部分组成：命题，以及**谁在断言它**。后者是 `identity`，不是备注，而是参与裁决的证据。
@@ -169,8 +190,8 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 
 | 命令 | 作用 |
 |---|---|
-| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则 |
-| `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签；解释显示为 `interpret` 并附方向与来源摘要（`〔方向 …〕〔来源 …〕`）。规则与事实已记录的生效区间、管辖、地域和发生时间/地点以 `〔生效 from..to〕`、`〔管辖 CN〕`、`〔地域 CN-HN〕`、`〔发生 2020-05-06〕`、`〔发生地 CN-HN〕` 显示，未声明的字段不打印占位符；区间端点继承自包清单时标 `（继承）`，规则自写时标 `（规则）`。规则只显示已声明的举证/证明标准：`〔举证 claimant · 标准 preponderance〕`，有例外声明时再显示 `〔例外举证 … · 例外标准 …〕`，未声明的字段不显示占位。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
+| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`open`/`interpret`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则 |
+| `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签；解释显示为 `interpret` 并附方向与来源摘要（`〔方向 …〕〔来源 …〕`），被 `open` 标记的谓词追加 `〔开放概念〕`。规则与事实已记录的生效区间、管辖、地域和发生时间/地点以 `〔生效 from..to〕`、`〔管辖 CN〕`、`〔地域 CN-HN〕`、`〔发生 2020-05-06〕`、`〔发生地 CN-HN〕` 显示，未声明的字段不打印占位符；区间端点继承自包清单时标 `（继承）`，规则自写时标 `（规则）`。规则只显示已声明的举证/证明标准：`〔举证 claimant · 标准 preponderance〕`，有例外声明时再显示 `〔例外举证 … · 例外标准 …〕`，未声明的字段不显示占位。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`open`/`interpret`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
 | `:given <命题>` | 以「用户陈述」身份手工登记一条事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示。手工登记的事实不记录发生时间/地点（不会被会话基准日填充） |
 | `:asof [YYYY-MM-DD]` | 无参数打印会话基准日与来源（`命令行` / `会话命令` / `未设置`）；带参数校验并设置同一会话值，供 `:cert` 记录、`:verify-cert` 比对。不参与推理，也不改变规则是否触发 |
 | `:jurisdiction [代码]` | 无参数打印会话管辖与来源；带参数校验并设置同一会话值。它是多法域门禁的答案，也是证书环境身份的一部分；不会用代码过滤规则 |
@@ -641,7 +662,7 @@ cn.constitution 0.4.0  CN/CN  1982-12-04..未注明  official（本项目审核�
 `axiom` 的类型必须真的是命题（如 `cn.constitution.中国国籍 张三`），`axiom P : Prop`、
 `axiom P : Type`、函数类型都不是命题，拒绝。
 
-默认拒绝案件自己声明 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`，也拒绝上面这些违规
+默认拒绝案件自己声明 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`open`/`interpret`，也拒绝上面这些违规
 `obj`/`axiom`；后两类会带原因后缀。错误一次列出最多 8 项，其余写“等 N 项”，并提示
 `--allow-case-rules`。例如：
 
@@ -670,7 +691,7 @@ module.std: error: 封闭环境（--closed-env）只接受案件文件（不带 
 `--allow-case-rules` 下这些声明和异常 `obj`/`axiom` 都可以加载。`:inspect` 的标记范围是：
 正常的 `obj`（类型是包内 sort）和正常事实（类型是命题、且不引用任何案件扩展）不标；类型不是
 包内 sort 的 `obj`、只声明常量的 `axiom`（类型是 `Prop`/`Type`/函数类型等非命题）、引用了案件
-扩展的命题事实，以及 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret` 都标 ` [案件扩展]`。例如：
+扩展的命题事实，以及 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`open`/`interpret` 都标 ` [案件扩展]`。例如：
 
 ```text
 obj   甲 : cn.constitution.人
@@ -1501,7 +1522,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 971 个：kernel 25、lang 168、reason 79、cert 196、cli 339、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 988 个：kernel 25、lang 180、reason 79、cert 196、cli 344、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（25）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
