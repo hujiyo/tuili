@@ -1329,7 +1329,7 @@ fn validate_open_concept_obligations(env: &Env, cert: &Certificate) -> Result<()
                  重算：id `{}`，节点 {:?}，描述「{}」）",
                 escape_control(&only.id),
                 only.nodes,
-                only.description,
+                escape_control(&only.description),
                 escape_control(&expected.id),
                 expected.nodes,
                 expected.description

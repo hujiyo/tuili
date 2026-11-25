@@ -373,6 +373,11 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
 （`nodes` 按序号升序）；缺口根不生成这一条。这份义务由环境的 `open` 标记与证明节点重算，
 `cert::check` 拒绝与重算结果不一致（缺失、被改、凭空添加）的证书，所以删掉它不能把结论
 变成无保留的证明。证书格式版本仍为 v6：`ObligationKind::OpenConcept` 早已在格式里，无需新字段。
+格式号没变，但 `open_concept` 义务的接受条件由环境与节点重算决定：**根推导依赖开放概念的 v6
+证书**若缺少该义务，或义务的 `id`/描述/节点与重算结果不一致（含凭空添加、复制成多条），逻辑
+校验失败并退出 `2`，必须按当前理论重新生成；**不依赖任何开放概念的 v6 证书**不受影响，仍可直接
+校验（闭合根退出 `0`、缺口根退出 `1`）。其余义务（`local-extension`、缺口、未决冲突）的形状与
+校验不变。
 版本 5、4、3、2、1 证书都被拒绝（例如 `unsupported certificate format version 5; this build
 supports 6`），必须按当前理论重新生成；推理器内部生成的 `Unrecorded` 证书没有环境身份，不能导出。
 
@@ -1622,7 +1627,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 1040 个：kernel 25、lang 181、reason 90、cert 212、cli 368、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 1048 个：kernel 25、lang 181、reason 90、cert 213、cli 375、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（25）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -1716,7 +1721,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   以及越界根/越界假设/越界前提和可达、不可达的节点环都返回带节点编号的错误；来源备注、假设标签、
   规则名、绑定参数、缺口备注、候选规则名与表达式常量/binder 名中的换行及控制/格式字符会被转义，
   不能伪造 `▸` 推导行。
-- `crates/cert/tests/check.rs`（88）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
+- `crates/cert/tests/check.rs`（89）：检查器自己的契约——合法证书通过；前提数不符、未知规则、
   缺失/重复/未闭合绑定、结论或前提漂移、已成立的 `unless`、缺口当前提、越界索引和
   非命题假设等伪造都会被拒绝；根是缺口时 `root_proved = false`。
   冲突记录按环境复核：`defeated/assumption`、`defeated/priority` 与五种未决原因都能通过合法记录；
@@ -1921,15 +1926,17 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   `local-extension`（`nodes` 去重升序）；`:why`/`:verify-cert` 打印 `  本地扩展：` 并按未决义务
   退出 `1`，默认模式不标记；`:given` 未知名称提示有无 allow 两种文案；默认模式验证带义务证书、
   `:cert`/`:why` 义务描述一致、封闭环境可导入社区包。
-- `crates/cli/tests/open_concept.rs`（14）：开放概念端到端——`:inspect` 只给被标记谓词追加
+- `crates/cli/tests/open_concept.rs`（21）：开放概念端到端——`:inspect` 只给被标记谓词追加
   `〔开放概念〕`，标记以 `open:<谓词>` 留在台账；坏目标带行号拒绝；封闭环境默认拒绝案件 `open`，
   `--allow-case-rules` 允许并标 ` [案件扩展]`；包内 `open` 正常加载；规则直接推出开放概念时
   `:why`/`:explain` 打印 `` `此处需人判断：`概念` ``、不打印成功行并退出 `1`，`:cert` 记录一条
   `open-concept` 义务（固定 `id`、点名的描述、直接依赖节点），`:verify-cert` 报告该义务并退出 `1`；
   目标换成封闭谓词时无义务且退出 `0`；开放概念只出现在无关分支时根不受影响；只作为用户事实出现
-  的开放概念不算依赖；`def` 别名指向开放谓词时按规范化后的谓词头判定；两个进程生成的证书逐字节
-  一致；删掉义务或凭空添加义务都让 `:verify-cert` 逻辑校验失败并退出 `2`；`:issues` 不把 `open:`
-  标记当常量枚举。
+  的开放概念不算依赖；`def` 别名指向开放谓词时按规范化后的谓词头判定；启用解释推出开放概念时
+  `interpretation_application` 节点成为依赖，证书、校验与删除义务都按同一义务处理；一条义务里多个
+  开放概念按名字升序用 `、` 连接；零元开放谓词（`pred P : Prop`）同样往返；两个进程生成的证书
+  逐字节一致；删掉义务、改 `id`、改描述（含换行/ESC 注入）、改 `nodes`、复制成两条都让
+  `:verify-cert` 逻辑校验失败并退出 `2` 且错误可定位；`:issues` 不把 `open:` 标记当常量枚举。
 - `crates/cli/tests/priority.rs`（8）：跨包冲突与优先级端到端——两个包各出一条冲突规则，
   第三个包用带出处的顶层 `priority` 裁决：未声明时 `:why` 退出 `1` 并打印“没有声明任何优先关系”，
   证书 `conflicts[0].resolution` 为 `unresolved/no_priority`、`open_obligations` 含
