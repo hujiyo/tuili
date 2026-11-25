@@ -33,7 +33,12 @@
 //!   conversion, and must be closed: a free variable, a bound-variable capture
 //!   or a leaked binder variable is rejected. The node has no premise; the
 //!   universal declaration is its evidence, and its recorded identity is
-//!   compared with the environment's registration.
+//!   compared with the environment's registration. Its recorded `sources` are
+//!   the declaration's provenance: the count, order and every field (text,
+//!   locator, version, effective date, note, quote, link, jurisdiction,
+//!   retrieval time and hash) must equal the environment's `sources`; an added
+//!   or dropped citation is rejected, so a certificate cannot claim a
+//!   different article for the universal fact than the ledger declares.
 //! * The bindings name only rule parameters, bind each parameter exactly once
 //!   and are closed terms.
 //! * Instantiating the rule's premises with those bindings yields exactly the
@@ -506,7 +511,7 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
             identity,
             bindings,
             conclusion,
-            ..
+            sources,
         } = node
         {
             let Some(decl) = env.get(axiom) else {
@@ -544,6 +549,12 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
                 ));
             }
             let declaration = format!("公理 `{axiom}`");
+            // The recorded sources are the declaration's provenance, not
+            // free text: compare every field with the environment's
+            // registration, and allow neither an added nor a dropped source.
+            compare_sources(&decl.sources, sources, |message| {
+                CheckError::at(id, format!("{declaration}：{message}"))
+            })?;
             let Some((variables, body)) = named_binders(env, &decl.ty).map_err(|error| {
                 CheckError::at(id, format!("无法解析{declaration}的类型：{error}"))
             })?
@@ -2030,22 +2041,7 @@ fn validate_interpretations(env: &Env, cert: &Certificate) -> Result<(), CheckEr
                 InterpretationDirection::from(&declared.direction).keyword()
             )));
         }
-        if entry.sources.len() != declared.sources.len() {
-            return Err(fail(format!(
-                "证书记录了 {} 条来源，环境声明有 {} 条",
-                entry.sources.len(),
-                declared.sources.len()
-            )));
-        }
-        for (source_index, source) in entry.sources.iter().enumerate() {
-            let kernel_source = std_deduce_kernel::env::SourceRef::from(source);
-            if kernel_source != declared.sources[source_index] {
-                return Err(fail(format!(
-                    "第 {} 条来源与环境的解释声明逐字段不一致",
-                    source_index + 1
-                )));
-            }
-        }
+        compare_sources(&declared.sources, &entry.sources, fail)?;
     }
 
     // Every listed interpretation must be referenced by an application node
@@ -2113,6 +2109,104 @@ fn validate_interpretations(env: &Env, cert: &Certificate) -> Result<(), CheckEr
         }
     }
     Ok(())
+}
+
+/// Compare a certificate's recorded sources with an environment declaration's
+/// sources, field by field.
+///
+/// This is the one comparison used for every certificate record whose sources
+/// claim to be a declaration's provenance (an interpretation table entry and an
+/// `axiom_instance` node). A source is a citation, not free text: the reasoner
+/// copies the declaration's sources verbatim, so a certificate that names a
+/// different article, quote, version, jurisdiction or any other field is
+/// rejected. The length is compared first, so a certificate cannot add a source
+/// the declaration does not have, or drop one it does have, while keeping the
+/// rest plausible. Every differing field is named with both values; `fail`
+/// attaches the node or table entry the comparison belongs to.
+fn compare_sources(
+    expected: &[std_deduce_kernel::env::SourceRef],
+    actual: &[Source],
+    fail: impl Fn(String) -> CheckError,
+) -> Result<(), CheckError> {
+    if actual.len() != expected.len() {
+        return Err(fail(format!(
+            "证书记录了 {} 条来源，环境声明有 {} 条",
+            actual.len(),
+            expected.len()
+        )));
+    }
+    for (index, source) in actual.iter().enumerate() {
+        let differences = source_differences(&expected[index], source);
+        if !differences.is_empty() {
+            return Err(fail(format!(
+                "第 {} 条来源与环境中声明不一致：{}",
+                index + 1,
+                differences.join("；")
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The fields on which a certificate source differs from the declaration.
+///
+/// Each entry names the field and shows both values, so a hand-edited citation
+/// is reported on its own terms rather than as a generic inequality. The
+/// comparison uses the kernel's field names and the certificate-to-kernel
+/// conversion, so it cannot drift from the ledger's own `SourceRef`.
+fn source_differences(
+    expected: &std_deduce_kernel::env::SourceRef,
+    actual: &Source,
+) -> Vec<String> {
+    let actual = std_deduce_kernel::env::SourceRef::from(actual);
+    let mut differences = Vec::new();
+    push_source_field(&mut differences, "文本", &expected.text, &actual.text);
+    push_source_field(&mut differences, "条号", &expected.locator, &actual.locator);
+    push_source_field(&mut differences, "版本", &expected.version, &actual.version);
+    if expected.effective != actual.effective {
+        differences.push(format!(
+            "「生效」证书是 {}，环境是 {}",
+            effective_text(&actual.effective),
+            effective_text(&expected.effective)
+        ));
+    }
+    push_source_field(&mut differences, "备注", &expected.note, &actual.note);
+    push_source_field(&mut differences, "引文", &expected.quote, &actual.quote);
+    push_source_field(&mut differences, "链接", &expected.url, &actual.url);
+    push_source_field(
+        &mut differences,
+        "管辖",
+        &expected.jurisdiction,
+        &actual.jurisdiction,
+    );
+    push_source_field(
+        &mut differences,
+        "抓取时间",
+        &expected.retrieved_at,
+        &actual.retrieved_at,
+    );
+    push_source_field(&mut differences, "哈希", &expected.hash, &actual.hash);
+    differences
+}
+
+/// Record one differing source field, naming the field and both values.
+fn push_source_field(differences: &mut Vec<String>, label: &str, expected: &str, actual: &str) {
+    if expected != actual {
+        differences.push(format!(
+            "「{}」证书是 `{}`，环境是 `{}`",
+            label,
+            escape_control(actual),
+            escape_control(expected)
+        ));
+    }
+}
+
+/// Render an optional effective date in a source difference.
+fn effective_text(value: &Option<String>) -> String {
+    match value {
+        Some(value) => format!("`{}`", escape_control(value)),
+        None => "未记录".to_owned(),
+    }
 }
 
 /// Recompute the certificate's `open_concept` obligation and compare it with

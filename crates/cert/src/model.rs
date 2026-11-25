@@ -596,10 +596,13 @@ pub enum Node {
         /// The binding variable's name and the closed value substituted for
         /// it, in the declaration's binder order (outermost first).
         bindings: Vec<Binding>,
-        /// The conclusion, which must be the universal declaration's body with
-        /// the bindings substituted.
+        /// The instantiated conclusion, which must be the universal
+        /// declaration's body with the bindings substituted.
         conclusion: CertExpr,
-        /// Where the universal declaration comes from.
+        /// Where the universal declaration comes from. The checker compares
+        /// every field (count and order included) with the environment
+        /// declaration's sources; the reasoner copies them verbatim, so a
+        /// reader can audit which article the instance cites.
         #[serde(default)]
         sources: Vec<Source>,
     },

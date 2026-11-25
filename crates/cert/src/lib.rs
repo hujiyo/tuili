@@ -43,8 +43,12 @@
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
 //! Version 8 records universal elimination: an `axiom_instance` node naming the
 //! universal fact, the identity it is asserted under, the closed value of each
-//! binding variable and the substituted conclusion, and each gap node's
-//! universal candidates with their bindings and refusal reasons. Version 7
+//! binding variable, the substituted conclusion and the declaration's sources,
+//! and each gap node's universal candidates with their bindings and refusal
+//! reasons. The checker recomputes the identity, the binder types, the
+//! substituted conclusion and the sources of every instance: a node whose
+//! citation differs from the environment declaration in any field — or adds or
+//! drops a source — is rejected. Version 7
 //! records the temporal/spatial applicability of every rule application and
 //! gap candidate (verdict, reference dates and places, rule scope, session
 //! fallback values, reason code and explanation) and each assumption's

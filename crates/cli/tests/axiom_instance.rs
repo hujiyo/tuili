@@ -386,6 +386,57 @@ fn a_forged_binding_or_conclusion_is_rejected() {
 }
 
 #[test]
+fn a_forged_axiom_instance_source_is_rejected() {
+    let theory = TempFile::new("relation", "std", RELATION);
+    let base = generated_certificate(&theory.path, "关系 甲 乙");
+
+    // The certificate's recorded citation is the declaration's provenance, not
+    // free text: a different article number is a different citation.
+    let mut changed_locator = base.clone();
+    for node in &mut changed_locator.nodes {
+        if let Node::AxiomInstance { sources, .. } = node {
+            sources[0].locator = "第二条".to_owned();
+        }
+    }
+    assert_verify_rejects(&theory.path, &changed_locator, "「条号」");
+
+    let mut changed_quote = base.clone();
+    for node in &mut changed_quote.nodes {
+        if let Node::AxiomInstance { sources, .. } = node {
+            sources[0].quote = "伪造的引文".to_owned();
+        }
+    }
+    assert_verify_rejects(&theory.path, &changed_quote, "「引文」");
+
+    let mut added_source = base.clone();
+    for node in &mut added_source.nodes {
+        if let Node::AxiomInstance { sources, .. } = node {
+            sources.push(std_deduce_cert::Source {
+                text: "另一部法".to_owned(),
+                locator: "第九条".to_owned(),
+                version: String::new(),
+                effective: None,
+                note: String::new(),
+                quote: String::new(),
+                url: String::new(),
+                jurisdiction: String::new(),
+                retrieved_at: String::new(),
+                hash: String::new(),
+            });
+        }
+    }
+    assert_verify_rejects(&theory.path, &added_source, "证书记录了 2 条来源");
+
+    let mut dropped_source = base;
+    for node in &mut dropped_source.nodes {
+        if let Node::AxiomInstance { sources, .. } = node {
+            sources.clear();
+        }
+    }
+    assert_verify_rejects(&theory.path, &dropped_source, "证书记录了 0 条来源");
+}
+
+#[test]
 fn a_non_universal_declaration_cannot_be_claimed_as_an_instance() {
     let theory = TempFile::new("relation", "std", RELATION);
     let base = generated_certificate(&theory.path, "关系 甲 乙");
@@ -395,6 +446,7 @@ fn a_non_universal_declaration_cannot_be_claimed_as_an_instance() {
             axiom,
             bindings,
             conclusion,
+            sources,
             ..
         } = node
         {
@@ -403,6 +455,20 @@ fn a_non_universal_declaration_cannot_be_claimed_as_an_instance() {
             *conclusion = std_deduce_cert::CertExpr::Const {
                 name: "晴朗".to_owned(),
             };
+            // Give the forged node the declaration's own source, so the only
+            // remaining claim under test is the non-universal type.
+            *sources = vec![std_deduce_cert::Source {
+                text: "示例法".to_owned(),
+                locator: "第二条".to_owned(),
+                version: String::new(),
+                effective: None,
+                note: String::new(),
+                quote: String::new(),
+                url: String::new(),
+                jurisdiction: String::new(),
+                retrieved_at: String::new(),
+                hash: String::new(),
+            }];
         }
     }
     assert_verify_rejects(&theory.path, &forged, "不是带命名绑定变量的全称命题");
