@@ -390,12 +390,47 @@ fn write_gap_candidate(certificate: &Certificate, candidate: &GapCandidate, out:
     }
 }
 
-/// A blocker proposition, with its identity when the assumption table has one.
+/// A blocker proposition, with its identity when that attribution is
+/// unambiguous in the certificate.
 fn blocked_condition(certificate: &Certificate, proposition: &CertExpr) -> String {
     let printed = print_expr(&Expr::from(proposition));
-    match assumption_for(certificate, proposition) {
+    match blocker_assumption(certificate, proposition) {
         Some(entry) => format!("「{printed}」（{}）", entry.identity.label_zh()),
         None => format!("「{printed}」（证书未记录身份）"),
+    }
+}
+
+/// The assumption that may be attributed to a blocker.
+///
+/// A gap candidate records only the blocker proposition, not whether it was
+/// seeded as a fact or derived by a rule. Attributing the identity of a fact
+/// that happens to have the same proposition would mislabel a rule-derived
+/// blocker, so this returns a match only when exactly one assumption has the
+/// proposition and no rule application in the certificate concludes it. The
+/// formal renderer keeps its older approximation; the narrative is stricter
+/// because it states the identity in words instead of leaving it implicit.
+fn blocker_assumption<'a>(
+    certificate: &'a Certificate,
+    proposition: &CertExpr,
+) -> Option<&'a Assumption> {
+    let mut matches = certificate
+        .assumptions
+        .iter()
+        .filter(|entry| &entry.proposition == proposition);
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let derived = certificate.nodes.iter().any(|node| {
+        matches!(
+            node,
+            Node::RuleApplication { conclusion, .. } if conclusion == proposition
+        )
+    });
+    if derived {
+        None
+    } else {
+        Some(first)
     }
 }
 
@@ -673,7 +708,7 @@ fn obligation_kind_label(kind: ObligationKind) -> &'static str {
         ObligationKind::MissingPremise => "缺少前提",
         ObligationKind::MissingSource => "缺少来源",
         ObligationKind::OpenConcept => "开放概念",
-        ObligationKind::UnresolvedConflict => "未决冲突",
+        ObligationKind::UnresolvedConflict => "冲突未决",
         ObligationKind::NeedsHumanDetermination => "需人判断",
         ObligationKind::Other => "其他",
     }

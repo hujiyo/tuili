@@ -302,6 +302,71 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
 }
 
 #[test]
+fn an_ambiguous_blocker_is_not_attributed_to_a_fact() {
+    let certificate = certificate(
+        vec![assumption(
+            atom("已决", "甲"),
+            FactIdentity::Assumed,
+            vec![source("分析备忘", "第二段", "", "")],
+            None,
+        )],
+        vec![
+            Node::Assumption { assumption: 0 },
+            rule(
+                "规则乙",
+                atom("已决", "甲"),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Node::Gap {
+                proposition: atom("可复议", "甲"),
+                note: None,
+                candidates: vec![GapCandidate {
+                    rule: "规则一".to_owned(),
+                    missing: Vec::new(),
+                    blocked_by: vec![atom("已决", "甲")],
+                    sources: Vec::new(),
+                }],
+            },
+        ],
+        Some(2),
+    );
+    let out = render_narrative(&certificate).unwrap();
+    assert!(
+        out.contains("unless 条件「已决 甲」（证书未记录身份）已成立，故该规则被阻断。"),
+        "{out}"
+    );
+    assert!(!out.contains("（分析假设）"), "{out}");
+}
+
+#[test]
+fn a_duplicate_blocker_fact_is_not_attributed() {
+    let certificate = certificate(
+        vec![
+            assumption(atom("已决", "甲"), FactIdentity::Assumed, Vec::new(), None),
+            assumption(atom("已决", "甲"), FactIdentity::Verified, Vec::new(), None),
+        ],
+        vec![Node::Gap {
+            proposition: atom("可复议", "甲"),
+            note: None,
+            candidates: vec![GapCandidate {
+                rule: "规则一".to_owned(),
+                missing: Vec::new(),
+                blocked_by: vec![atom("已决", "甲")],
+                sources: Vec::new(),
+            }],
+        }],
+        Some(0),
+    );
+    let out = render_narrative(&certificate).unwrap();
+    assert!(
+        out.contains("unless 条件「已决 甲」（证书未记录身份）已成立，故该规则被阻断。"),
+        "{out}"
+    );
+}
+
+#[test]
 fn an_empty_candidate_list_is_not_guessed_at() {
     let certificate = certificate(
         Vec::new(),
@@ -724,7 +789,7 @@ fn open_obligations_are_listed_with_their_kind_and_id() {
         (ObligationKind::MissingPremise, "缺少前提"),
         (ObligationKind::MissingSource, "缺少来源"),
         (ObligationKind::OpenConcept, "开放概念"),
-        (ObligationKind::UnresolvedConflict, "未决冲突"),
+        (ObligationKind::UnresolvedConflict, "冲突未决"),
         (ObligationKind::NeedsHumanDetermination, "需人判断"),
         (ObligationKind::Other, "其他"),
     ] {
@@ -743,6 +808,32 @@ fn open_obligations_are_listed_with_their_kind_and_id() {
             "{kind:?}\n{out}"
         );
     }
+}
+
+#[test]
+fn obligation_nodes_are_printed_without_being_resolved() {
+    let mut certificate = certificate(
+        Vec::new(),
+        vec![rule(
+            "规则甲",
+            atom("违法", "张三"),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )],
+        Some(0),
+    );
+    certificate.open_obligations.push(OpenObligation {
+        id: "外部义务".to_owned(),
+        kind: ObligationKind::OpenConcept,
+        description: "证书没有记录这个节点".to_owned(),
+        nodes: vec![99],
+    });
+    let out = render_narrative(&certificate).unwrap();
+    assert!(
+        out.contains("  - [开放概念] 证书没有记录这个节点（义务编号：外部义务；相关节点：99）"),
+        "{out}"
+    );
 }
 
 #[test]

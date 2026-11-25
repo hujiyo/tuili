@@ -219,8 +219,11 @@
 //! parameter bindings, a conflict is reported as decided or as `此处未决` with
 //! its recorded reason, and a gap lists its candidates, missing premises and
 //! `unless` blockers. A source the certificate does not record is printed as
-//! `证书未记录来源`, never omitted or filled in. `:why` still prints the formal
-//! tree, so the certificate remains expandable; `:cert` JSON is unchanged.
+//! `证书未记录来源`, never omitted or filled in. The narrative owns the whole
+//! conflict report, so `:explain` does not append the terse `:why` conflict
+//! lines, the `注：…` defeat note or its `依据：` lines afterwards. `:why` still
+//! prints the formal tree, so the certificate remains expandable; `:cert` JSON
+//! is unchanged.
 //!
 //! `:cert` requires a loaded theory and writes only the certificate JSON to
 //! stdout; a gap becomes a `MissingPremise` obligation and an unresolved
@@ -1190,12 +1193,16 @@ impl Session {
             .ok_or_else(|| "推理器生成的证书没有根节点：无法确认结论".to_owned())?;
         if matches!(certificate.nodes.get(root), Some(CertNode::Gap { .. })) {
             writeln!(out, "证书有效，但根为缺口，结论未被证明。").ok();
-            report_conflicts(out, &certificate);
+            if cmd != "explain" {
+                report_conflicts(out, &certificate);
+            }
             return Ok(Outcome::Gap);
         }
         if !report.root_proved || !kernel_report.root_proved {
             writeln!(out, "证书有效，但根未被证明，结论未被证明。").ok();
-            report_conflicts(out, &certificate);
+            if cmd != "explain" {
+                report_conflicts(out, &certificate);
+            }
             return Ok(Outcome::Gap);
         }
 
@@ -1220,29 +1227,34 @@ impl Session {
                 unresolved
             )
             .ok();
-            report_conflicts(out, &certificate);
+            if cmd != "explain" {
+                report_conflicts(out, &certificate);
+            }
             return Ok(Outcome::Gap);
         }
 
         // Determine the defeated-conflict note before printing the success
         // line: a comparison failure is an error, never a success followed by
-        // an error.
-        let won_conflict = if reachable {
+        // an error. `:explain` already narrates every conflict, so it skips the
+        // terse `:why` postscript.
+        let won_conflict = if reachable && cmd != "explain" {
             won_conflict_note(&self.lib.env, &goal, &certificate)?
         } else {
             None
         };
 
         writeln!(out, "推导已通过独立校验。").ok();
-        report_conflicts(out, &certificate);
-        if let Some((other, other_by, basis)) = won_conflict {
-            writeln!(
-                out,
-                "注：与「{}」存在冲突，已按记录的裁决为本结论胜出。",
-                print_expr(&other)
-            )
-            .ok();
-            write_certificate_basis(out, &basis, &other_by);
+        if cmd != "explain" {
+            report_conflicts(out, &certificate);
+            if let Some((other, other_by, basis)) = won_conflict {
+                writeln!(
+                    out,
+                    "注：与「{}」存在冲突，已按记录的裁决为本结论胜出。",
+                    print_expr(&other)
+                )
+                .ok();
+                write_certificate_basis(out, &basis, &other_by);
+            }
         }
         Ok(Outcome::Proved)
     }

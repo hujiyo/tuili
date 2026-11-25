@@ -149,7 +149,7 @@ fn explain_reports_a_gap_and_exits_one() {
 
 #[test]
 fn explain_reports_an_unresolved_conflict_as_pending() {
-    check(
+    let output = check(
         session(
             "法律位阶-河南种子案-冲突.std",
             &[":explain 应适用 种子法 汝阳种子公司案"],
@@ -163,11 +163,16 @@ fn explain_reports_an_unresolved_conflict_as_pending() {
             "证书有效，但根为缺口，结论未被证明。",
         ],
     );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("冲突（未决）"),
+        "the narrative already owns the conflict report:\n{out}"
+    );
 }
 
 #[test]
 fn explain_reports_a_rejected_conclusion_with_its_winner_and_basis() {
-    check(
+    let output = check(
         session(
             "法律位阶-河南种子案-裁决.std",
             &[":explain 应适用 种子法 汝阳种子公司案"],
@@ -182,6 +187,53 @@ fn explain_reports_a_rejected_conclusion_with_its_winner_and_basis() {
             "依据：",
             "推导已通过独立校验。",
         ],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("冲突（已裁决）"),
+        "the narrative already owns the conflict report:\n{out}"
+    );
+    assert!(
+        !out.contains("注：与「"),
+        "the narrative already states the defeat:\n{out}"
+    );
+    assert!(
+        !out.lines().any(|line| line.starts_with("  依据：")),
+        "the narrative keeps its own indented basis line:\n{out}"
+    );
+    assert!(
+        out.lines().any(|line| line.starts_with("     依据：")),
+        "the narrative must keep its basis line:\n{out}"
+    );
+}
+
+#[test]
+fn explain_reports_a_defeated_loser_as_rejected_not_pending() {
+    let output = check(
+        session(
+            "法律位阶-河南种子案-裁决.std",
+            &[":explain 应适用 河南省农作物种子管理条例 汝阳种子公司案"],
+        ),
+        GAP_OR_CONFLICT,
+        &[
+            "【结论】「应适用 河南省农作物种子管理条例 汝阳种子公司案」未获证明（此处是缺口）。",
+            "说明：目标已被否决：冲突已裁决，依据见冲突记录",
+            "被否决：",
+            "证书有效，但根为缺口，结论未被证明。",
+        ],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("需要人工裁决"),
+        "a defeated loser is not unresolved:\n{out}"
+    );
+    assert!(
+        !out.contains("冲突（已裁决）"),
+        "the narrative already owns the conflict report:\n{out}"
+    );
+    assert!(
+        !out.contains("注：与「"),
+        "the narrative already states the defeat:\n{out}"
     );
 }
 
