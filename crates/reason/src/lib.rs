@@ -1470,9 +1470,10 @@ impl<'a> Reasoner<'a> {
     /// Used to show both sides of an unresolved conflict: the conclusion is
     /// not asserted, but the argument for it must still be inspectable. When
     /// the side was licensed by an enabled interpretation, the rebuilt
-    /// derivation carries that application step too; the interpretation reads
-    /// only the settled base facts, so the reconstruction cannot invent a
-    /// chain.
+    /// derivation carries that application step too. The interpretation is
+    /// matched against the rule-visible facts, never against the settled base
+    /// with interpretation conclusions, so the reconstruction cannot invent a
+    /// chain by reading another interpretation's output.
     pub fn derivation_for(&self, prop: &Expr) -> Option<Derivation> {
         let k = self.key_of(prop);
         let base = self.fixed.as_ref()?;
@@ -1485,7 +1486,9 @@ impl<'a> Reasoner<'a> {
             // rule can still conclude it; otherwise the rule is the witness
             // the conflict recorded.
             if self.derivers(&k, &facts).is_empty() {
-                if let Ok(Some(interpretation)) = self.interpretation_for(&k, prop, &base.facts) {
+                if let Ok(Some(interpretation)) =
+                    self.interpretation_for(&k, prop, &base.rule_facts)
+                {
                     applications.insert(k.clone(), interpretation);
                 }
             }

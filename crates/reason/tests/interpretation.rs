@@ -468,3 +468,47 @@ fn an_interpretation_application_certificate_checks_and_proves() {
     let kernel = std_deduce_cert::kernel_proof(&lib.env, &certificate).expect("the proof passes");
     assert!(kernel.root_proved);
 }
+
+/// A conflicted conclusion that only a chain could reach must not be rebuilt by
+/// chaining: the conflict side is reconstructed from the rule-visible facts,
+/// where an interpretation's own output never appears. The side is then simply
+/// unrebuildable, which is reported as such instead of producing a certificate
+/// that its own checker rejects.
+#[test]
+fn a_conflict_side_is_not_rebuilt_by_an_interpretation_chain() {
+    let lib = load(
+        r#"
+sort 人
+pred F : 人 → Prop
+pred Q : 人 → Prop
+pred Z : 人 → Prop
+pred R : 人 → Prop
+obj 张三 : 人
+contrary Z R
+axiom 事实F : F 张三
+  source text "案情" locator "一"
+rule 规则R :
+  conclude R 张三
+  source text "规则" locator "一"
+interpret i1 : F 张三 → Q 张三
+  direction literal
+  source text "解释" locator "一" version "2020"
+interpret i2 : Q 张三 → Z 张三
+  direction literal
+  source text "解释" locator "二" version "2020"
+"#,
+    );
+    let reasoner = reasoner(&lib, &["i1", "i2"]);
+    // `Q` comes from `i1`; `i2` may not read it, so `Z` is never derived.
+    assert!(reasoner.knows(&atom("Q")));
+    assert!(!reasoner.knows(&atom("Z")), "interpretation chain");
+    // The conflict side of `Z` therefore cannot be rebuilt either: the rebuild
+    // reads the rule-visible facts, where `Q` never appears, so no witness is
+    // produced. The conflict is reported as unrebuildable instead of yielding a
+    // certificate that contains an interpretation chain and fails its own
+    // checker.
+    assert!(
+        reasoner.derivation_for(&atom("Z")).is_none(),
+        "the conflict side must not be rebuilt by an interpretation chain"
+    );
+}
