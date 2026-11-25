@@ -293,10 +293,12 @@
 //! summary plus every applicable label and its evidence. The five labels are
 //! `已验证`, `依赖假设`, `事实待举证`, `争点未决` and `需律师判断`; a gap root
 //! is never `已验证`, an unresolved conflict always makes `争点未决` appear,
-//! and `已验证` says only that the certificate proves the root under strict
-//! facts with nothing left open — it is not a claim that the conclusion is
-//! legally correct. `:cert` JSON is unchanged: the labels are not a certificate
-//! field and the format stays v7.
+//! and `需律师判断` comes from an open concept, a human-judgement obligation or
+//! a case extension — never from an unresolved conflict alone, so the two
+//! labels can appear together. `已验证` says only that the certificate proves
+//! the root under strict facts with nothing left open — it is not a claim that
+//! the conclusion is legally correct. `:cert` JSON is unchanged: the labels are
+//! not a certificate field and the format stays v7.
 //!
 //! `:why` and `:explain` also report the `open` concept marker. A rule step
 //! whose conclusion head is an open predicate, or a root that is one, makes the

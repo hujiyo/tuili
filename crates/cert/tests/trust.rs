@@ -254,16 +254,14 @@ fn an_open_concept_obligation_requires_lawyer_judgement() {
     });
     let report = derive_trust(&certificate).unwrap();
     assert_eq!(report.primary(), TrustLabel::NeedsLawyerJudgment);
-    assert!(report.contains(TrustLabel::DisputeUnresolved));
-    assert_eq!(report.labels()[0], TrustLabel::NeedsLawyerJudgment);
+    assert_eq!(report.labels(), &[TrustLabel::NeedsLawyerJudgment]);
+    assert!(
+        !report.contains(TrustLabel::DisputeUnresolved),
+        "an open concept is a semantic judgement, not an unresolved conflict"
+    );
     assert!(
         report.summary().contains("开放概念义务 1 项"),
         "{}",
-        report.summary()
-    );
-    assert!(
-        report.summary().contains("另含：争点未决"),
-        "the open concept is also an unresolved issue: {}",
         report.summary()
     );
 }
@@ -283,6 +281,7 @@ fn a_local_extension_obligation_requires_lawyer_judgement() {
     });
     let report = derive_trust(&certificate).unwrap();
     assert_eq!(report.primary(), TrustLabel::NeedsLawyerJudgment);
+    assert_eq!(report.labels(), &[TrustLabel::NeedsLawyerJudgment]);
     assert!(
         report.summary().contains("案件扩展义务 1 项"),
         "{}",
@@ -290,6 +289,55 @@ fn a_local_extension_obligation_requires_lawyer_judgement() {
     );
     assert!(
         report.summary().contains("local-extension"),
+        "{}",
+        report.summary()
+    );
+}
+
+#[test]
+fn a_claim_with_an_unrelated_unresolved_conflict_is_not_needs_lawyer() {
+    // The proved root uses a claim, and the certificate records an unresolved
+    // conflict elsewhere. Logic cannot decide the conflict, so the labels are
+    // `争点未决` + `依赖假设`; neither is a semantic judgement, and the old
+    // "high-risk combination" must not turn every such certificate into
+    // `需律师判断`.
+    let mut certificate = certificate(
+        vec![assumption(atom("违法", "张三"), FactIdentity::UserAsserted)],
+        vec![
+            Node::Assumption { assumption: 0 },
+            rule(atom("受罚", "张三"), vec![0]),
+        ],
+        Some(1),
+    );
+    certificate.conflicts.push(Conflict {
+        left: atom("批准", "甲"),
+        right: atom("不批准", "甲"),
+        left_by: Provenance::Rules {
+            rules: vec!["批准规则".to_owned()],
+        },
+        right_by: Provenance::Rules {
+            rules: vec!["不批准规则".to_owned()],
+        },
+        resolution: Resolution::Unresolved {
+            reason: UnresolvedReason::NoPriority,
+        },
+    });
+    certificate.open_obligations.push(OpenObligation {
+        id: "conflict-0".to_owned(),
+        kind: ObligationKind::UnresolvedConflict,
+        description: "冲突未决".to_owned(),
+        nodes: Vec::new(),
+    });
+    let report = derive_trust(&certificate).unwrap();
+    assert_eq!(report.primary(), TrustLabel::DisputeUnresolved);
+    assert!(report.contains(TrustLabel::DisputeUnresolved));
+    assert!(report.contains(TrustLabel::DependsOnAssumption));
+    assert!(
+        !report.contains(TrustLabel::NeedsLawyerJudgment),
+        "an unresolved conflict plus a claim must not become 需律师判断"
+    );
+    assert!(
+        report.summary().contains("另含：依赖假设"),
         "{}",
         report.summary()
     );

@@ -200,6 +200,32 @@ rule 赔偿规则 :
   source text "案件规则" locator "二"
 "#;
 
+/// A proved root that uses a claim, while an unrelated conflict elsewhere is
+/// unresolved. The labels must be `争点未决` + `依赖假设`, never
+/// `需律师判断`: the conflict is logic-undecided, not a semantic judgement.
+const CLAIM_WITH_CONFLICT: &str = r#"sort 人
+pred 违法 : 人 → Prop
+pred 受罚 : 人 → Prop
+pred 批准 : 人 → Prop
+pred 不批准 : 人 → Prop
+contrary 批准 不批准
+obj 张三 : 人
+obj 甲 : 人
+axiom 张三违法 : 违法 张三
+  source text "案情" locator "一"
+rule 处罚 :
+  params p : 人
+  premise 违法 p
+  conclude 受罚 p
+  source text "测试" locator "二"
+rule 批准规则 :
+  conclude 批准 甲
+  source text "测试" locator "三"
+rule 不批准规则 :
+  conclude 不批准 甲
+  source text "测试" locator "四"
+"#;
+
 #[test]
 fn five_minimal_cases_trigger_five_labels() {
     let dir = TempDir::new("five");
@@ -247,7 +273,7 @@ fn five_minimal_cases_trigger_five_labels() {
     check(
         &session(&open, &[], &[":labels 重大 甲"]),
         GAP_OR_CONFLICT,
-        &["信任：需律师判断", "开放概念义务 1 项", "另含：争点未决"],
+        &["信任：需律师判断", "开放概念义务 1 项"],
     );
 
     let local = dir.write("local.std", LOCAL_EXTENSION);
@@ -259,6 +285,23 @@ fn five_minimal_cases_trigger_five_labels() {
         ),
         GAP_OR_CONFLICT,
         &["信任：需律师判断", "案件扩展义务 1 项", "`local-extension`"],
+    );
+}
+
+#[test]
+fn an_unresolved_conflict_with_a_claim_is_dispute_not_needs_lawyer() {
+    let dir = TempDir::new("claim-conflict");
+    let case = dir.write("claim-conflict.std", CLAIM_WITH_CONFLICT);
+    let output = session(&case, &[], &[":labels 受罚 张三"]);
+    check(
+        &output,
+        GAP_OR_CONFLICT,
+        &["信任：争点未决", "未决冲突 1 项", "另含：依赖假设"],
+    );
+    assert!(
+        !stdout(&output).contains("需律师判断"),
+        "a claim plus an unresolved conflict must stay 争点未决 + 依赖假设:\n{}",
+        stdout(&output)
     );
 }
 

@@ -16,8 +16,18 @@
 //! | [`TrustLabel::Verified`] (`已验证`) | `root` proves a proposition (not a gap, and no gap is reachable from it); every assumption reachable from the root is `verified` or `stipulated`; the proof uses no interpretation application; `open_obligations` is empty and no `conflicts` entry is unresolved. The summary names this "模型内" and says it does not mean legally correct. |
 //! | [`TrustLabel::DependsOnAssumption`] (`依赖假设`) | `root` proves a proposition, and its reachable proof graph uses at least one `user_asserted`, `assumed` or `disputed` assumption, or at least one [`Node::InterpretationApplication`]. The evidence counts each identity and the interpretation applications, so a mixed strict/claim proof says which facts are the user's. |
 //! | [`TrustLabel::FactNeedsEvidence`] (`事实待举证`) | `root` is missing or is a [`Node::Gap`] (or a gap is reachable from a non-gap root). The evidence names the root gap, the `MissingPremise` obligations and the number of missing premises the root gap candidates record. |
-//! | [`TrustLabel::DisputeUnresolved`] (`争点未决`) | a `conflicts` entry has [`crate::Resolution::Unresolved`], or an obligation is `UnresolvedConflict`, `OpenConcept`, `NeedsHumanDetermination` (including `local-extension`), or a proved root still records any open obligation. |
-//! | [`TrustLabel::NeedsLawyerJudgment`] (`需律师判断`) | an obligation is `OpenConcept` or `NeedsHumanDetermination` (the `local-extension` case-extension obligation is counted separately), or the high-risk combination: a proved root that also depends on a claim/interpretation **and** still records an open obligation or an unresolved conflict. |
+//! | [`TrustLabel::DisputeUnresolved`] (`争点未决`) | a `conflicts` entry has [`crate::Resolution::Unresolved`], or an obligation is `UnresolvedConflict`. This label means logic cannot decide; it is not produced by an open concept or a case extension. |
+//! | [`TrustLabel::NeedsLawyerJudgment`] (`需律师判断`) | an obligation is `OpenConcept` or `NeedsHumanDetermination` (the `local-extension` case-extension obligation is counted separately). This label means the concept's meaning needs a human, or the rule's source was not audited by this project; it does not absorb an unresolved conflict. |
+//!
+//! The primary label is the first label a reader should see; it does not make
+//! the other labels disappear. A certificate can carry `争点未决` and
+//! `需律师判断` at the same time (an unresolved conflict over an open concept),
+//! and the summary names every additional label as `另含：…`.
+//!
+//! A proved root that records an obligation of a kind listed by none of the
+//! five rules (`missing_source` or `other`) both blocks `已验证` and earns no
+//! other label; [`derive_trust`] then reports that the certificate's fields
+//! cannot support a label instead of guessing one.
 //!
 //! A gap root can never be `已验证`; an unresolved conflict always makes
 //! `争点未决` appear, even when another label also applies; and a label never
@@ -43,11 +53,10 @@ pub const LOCAL_EXTENSION_OBLIGATION_ID: &str = "local-extension";
 /// certificate earns is its primary label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TrustLabel {
-    /// `需律师判断`: an open concept, a human judgement, a case extension, or
-    /// the high-risk combination described in the module documentation.
+    /// `需律师判断`: an open concept, a human judgement, or a case extension
+    /// whose rule source this project did not audit.
     NeedsLawyerJudgment,
-    /// `争点未决`: an unresolved conflict or an open obligation that needs a
-    /// human choice.
+    /// `争点未决`: logic cannot decide an unresolved conflict.
     DisputeUnresolved,
     /// `事实待举证`: the root (or the graph below it) is a gap.
     FactNeedsEvidence,
@@ -254,11 +263,10 @@ pub fn derive_trust(certificate: &Certificate) -> Result<TrustReport, String> {
 
     let mut entries: Vec<(TrustLabel, Vec<String>)> = Vec::new();
 
-    // 需律师判断: an open concept, a human judgement, a case extension, or the
-    // high-risk combination of a proved root that also rests on a claim while
-    // something remains open.
-    let high_risk = root_proved && uses_claim && (open_obligations > 0 || unresolved_conflicts > 0);
-    if open_judgement_obligations > 0 || high_risk {
+    // 需律师判断: an open concept, or a rule source outside this project's
+    // audit (`local-extension`). It does not absorb an unresolved conflict:
+    // `争点未决` is its own label and both can apply.
+    if open_judgement_obligations > 0 {
         let mut evidence = Vec::new();
         if open_concept_obligations > 0 {
             evidence.push(format!(
@@ -277,59 +285,23 @@ pub fn derive_trust(certificate: &Certificate) -> Result<TrustReport, String> {
                 quoted_ids(&needs_human_ids)
             ));
         }
-        if high_risk {
-            evidence.push(format!(
-                "高风险组合：根已证明但依赖{}，且{}",
-                claim_phrase(
-                    verified_facts,
-                    stipulated_facts,
-                    user_asserted_facts,
-                    assumed_facts,
-                    disputed_facts,
-                    interpretation_applications,
-                ),
-                open_obligation_phrase(open_obligations, unresolved_conflicts)
-            ));
-        }
         entries.push((TrustLabel::NeedsLawyerJudgment, evidence));
     }
 
-    // 争点未决: an unresolved conflict, an open concept / human judgement /
-    // case extension, or a proved root that still records any open obligation.
-    let dispute = unresolved_conflicts > 0
-        || unresolved_conflict_obligations > 0
-        || open_judgement_obligations > 0
-        || (root_proved && open_obligations > 0);
+    // 争点未决: logic cannot decide an unresolved conflict. Open concepts and
+    // a case extension are `需律师判断`, not this label; when an unresolved
+    // conflict also touches an open concept both labels apply.
+    let dispute = unresolved_conflicts > 0 || unresolved_conflict_obligations > 0;
     if dispute {
         let mut evidence = Vec::new();
         if unresolved_conflicts > 0 {
             evidence.push(format!("证书记录未决冲突 {unresolved_conflicts} 项"));
-        } else if unresolved_conflict_obligations > 0 {
+        } else {
             evidence.push(format!(
                 "证书记录冲突未决义务 {unresolved_conflict_obligations} 项"
             ));
         }
-        if open_concept_obligations > 0 {
-            evidence.push(format!(
-                "证书记录开放概念义务 {open_concept_obligations} 项"
-            ));
-        }
-        if local_extension_obligations > 0 {
-            evidence.push(format!(
-                "证书记录案件扩展义务 {local_extension_obligations} 项"
-            ));
-        }
-        if needs_human_obligations > 0 {
-            evidence.push(format!("证书记录需人判断义务 {needs_human_obligations} 项"));
-        }
-        if evidence.is_empty() && root_proved && open_obligations > 0 {
-            evidence.push(format!(
-                "根已证明，但证书记录未决义务 {open_obligations} 项"
-            ));
-        }
-        if !evidence.is_empty() {
-            entries.push((TrustLabel::DisputeUnresolved, evidence));
-        }
+        entries.push((TrustLabel::DisputeUnresolved, evidence));
     }
 
     // 事实待举证: the root itself is missing or a gap, or the graph below a
@@ -443,42 +415,4 @@ fn identity_counts(user_asserted: usize, assumed: usize, disputed: usize) -> Str
         parts.push(format!("对方争议 {disputed} 条"));
     }
     parts.join("、")
-}
-
-fn claim_phrase(
-    verified: usize,
-    stipulated: usize,
-    user_asserted: usize,
-    assumed: usize,
-    disputed: usize,
-    interpretations: usize,
-) -> String {
-    let mut parts = Vec::new();
-    if user_asserted + assumed + disputed > 0 {
-        parts.push(format!(
-            "主张（{}）",
-            identity_counts(user_asserted, assumed, disputed)
-        ));
-    }
-    if interpretations > 0 {
-        parts.push(format!("解释应用 {interpretations} 处"));
-    }
-    if verified + stipulated > 0 {
-        parts.push(format!(
-            "严格事实（法院查明 {verified} 条、双方无争议 {stipulated} 条）"
-        ));
-    }
-    if parts.is_empty() {
-        "事实".to_owned()
-    } else {
-        parts.join("、")
-    }
-}
-
-fn open_obligation_phrase(open_obligations: usize, unresolved_conflicts: usize) -> String {
-    match (open_obligations, unresolved_conflicts) {
-        (0, count) => format!("存在未决冲突 {count} 项"),
-        (count, 0) => format!("证书记录未决义务 {count} 项"),
-        (open, conflicts) => format!("证书记录未决义务 {open} 项、未决冲突 {conflicts} 项"),
-    }
 }
