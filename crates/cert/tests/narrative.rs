@@ -273,6 +273,7 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
         vec![Node::Gap {
             proposition: atom("可复议", "甲"),
             note: Some("目标处于冲突中".to_owned()),
+            axiom_candidates: Vec::new(),
             candidates: vec![
                 GapCandidate {
                     rule: "规则一".to_owned(),
@@ -346,6 +347,7 @@ fn a_gap_without_declaration_context_says_the_declaration_was_not_found() {
         vec![Node::Gap {
             proposition: atom("可复议", "甲"),
             note: None,
+            axiom_candidates: Vec::new(),
             candidates: vec![
                 GapCandidate {
                     rule: "规则一".to_owned(),
@@ -405,6 +407,7 @@ fn an_ambiguous_blocker_is_not_attributed_to_a_fact() {
             Node::Gap {
                 proposition: atom("可复议", "甲"),
                 note: None,
+                axiom_candidates: Vec::new(),
                 candidates: vec![GapCandidate {
                     rule: "规则一".to_owned(),
                     bindings: Vec::new(),
@@ -436,6 +439,7 @@ fn a_duplicate_blocker_fact_is_not_attributed() {
         vec![Node::Gap {
             proposition: atom("可复议", "甲"),
             note: None,
+            axiom_candidates: Vec::new(),
             candidates: vec![GapCandidate {
                 rule: "规则一".to_owned(),
                 bindings: Vec::new(),
@@ -462,13 +466,14 @@ fn an_empty_candidate_list_is_not_guessed_at() {
         vec![Node::Gap {
             proposition: atom("可复议", "甲"),
             note: None,
+            axiom_candidates: Vec::new(),
             candidates: Vec::new(),
         }],
         Some(0),
     );
     let out = render_narrative(&certificate).unwrap();
     assert!(
-        out.contains("  · 证书没有记录候选规则，无法说明还缺什么。"),
+        out.contains("  · 证书没有记录候选规则或公理，无法说明还缺什么。"),
         "{out}"
     );
 }
@@ -481,6 +486,7 @@ fn a_gap_used_as_a_premise_is_named_as_unclosed() {
             Node::Gap {
                 proposition: atom("前提", "甲"),
                 note: None,
+                axiom_candidates: Vec::new(),
                 candidates: Vec::new(),
             },
             rule(

@@ -2,7 +2,7 @@
 //!
 //! The five labels are a **derived view**: they are computed from
 //! [`Certificate`] fields only and are never written into the certificate JSON.
-//! The format version therefore stays at v7, and `:cert` output is unchanged.
+//! The format version therefore stays at v8, and `:cert` output is unchanged.
 //! No renderer guesses a label from printed text, and no label is read from an
 //! obligation's description; a rule here is a named condition over the fields
 //! below.
@@ -14,7 +14,7 @@
 //! | label | fields that produce it |
 //! |---|---|
 //! | [`TrustLabel::Verified`] (`已验证`) | `root` proves a proposition (not a gap, and no gap is reachable from it); every assumption reachable from the root is `verified` or `stipulated`; the proof uses no interpretation application; no **root-relevant** obligation and no **root-relevant** unresolved conflict. The summary names this "模型内" and says it does not mean legally correct; an unrelated branch's obligation or conflict does not remove this label. |
-//! | [`TrustLabel::DependsOnAssumption`] (`依赖假设`) | `root` proves a proposition, and its reachable proof graph uses at least one `user_asserted`, `assumed` or `disputed` assumption, or at least one [`Node::InterpretationApplication`]. The evidence counts each identity and the interpretation applications, so a mixed strict/claim proof says which facts are the user's. |
+//! | [`TrustLabel::DependsOnAssumption`] (`依赖假设`) | `root` proves a proposition, and its reachable proof graph uses at least one `user_asserted`, `assumed` or `disputed` assumption (including the identity an `axiom_instance` records for the universal fact it instantiates), or at least one [`Node::InterpretationApplication`]. The evidence counts each identity and the interpretation applications, so a mixed strict/claim proof says which facts are the user's. |
 //! | [`TrustLabel::FactNeedsEvidence`] (`事实待举证`) | `root` is missing or is a [`Node::Gap`] (or a gap is reachable from a non-gap root), or a root-relevant `MissingPremise` obligation is recorded. The evidence names the root gap, the root gap candidates' missing premises and the relevant `MissingPremise` obligations. |
 //! | [`TrustLabel::DisputeUnresolved`] (`争点未决`) | a root-relevant `conflicts` entry has [`crate::Resolution::Unresolved`], a root-relevant `UnresolvedConflict` obligation, or a root-relevant `MissingSource` / `Other` obligation (the certificate still has an unresolved item). Open concepts and case extensions are not this label. |
 //! | [`TrustLabel::NeedsLawyerJudgment`] (`需律师判断`) | a root-relevant obligation is `OpenConcept` or `NeedsHumanDetermination` (the `local-extension` case-extension obligation is counted separately). This label means the concept's meaning needs a human, or the rule's source was not audited by this project; it does not absorb an unresolved conflict. |
@@ -23,9 +23,13 @@
 //! the proof graph below [`Certificate::root`]. A conflict side is relevant
 //! when its proposition has the structural key of a proposition on a reachable
 //! node, or when its [`Provenance::Rules`] witness is a rule applied on that
-//! graph, or when its [`Provenance::Interpretation`] witness is an
+//! graph, or when its [`Provenance::Axiom`] witness is a universal fact the
+//! graph instantiated, or when its [`Provenance::Interpretation`] witness is an
 //! interpretation the graph applied. An assumption identity adds nothing
-//! structural: its proposition is already on the graph. The comparison uses
+//! structural: its proposition is already on the graph. A universal instance's
+//! recorded identity is counted exactly like an assumption identity, so a
+//! proof that instantiates a `user_asserted` universal fact is never labelled
+//! `已验证`. The comparison uses
 //! [`crate::expression_key`], which ignores binder names but does not normalize
 //! with a kernel environment, so the label layer never needs an environment.
 //!
@@ -198,7 +202,7 @@ pub fn derive_trust(certificate: &Certificate) -> Result<TrustReport, String> {
                 Node::InterpretationApplication { premise, .. } => {
                     pending.push(*premise);
                 }
-                Node::Gap { .. } => {}
+                Node::AxiomInstance { .. } | Node::Gap { .. } => {}
             }
         }
     }
@@ -214,6 +218,8 @@ pub fn derive_trust(certificate: &Certificate) -> Result<TrustReport, String> {
     let mut reachable_propositions: BTreeSet<String> = BTreeSet::new();
     let mut reachable_rules: BTreeSet<String> = BTreeSet::new();
     let mut reachable_interpretations: BTreeSet<usize> = BTreeSet::new();
+    let mut reachable_axioms: BTreeSet<String> = BTreeSet::new();
+    let mut axiom_identities: Vec<FactIdentity> = Vec::new();
     for id in &reachable {
         match &certificate.nodes[*id] {
             Node::Assumption { assumption } => {
@@ -233,6 +239,16 @@ pub fn derive_trust(certificate: &Certificate) -> Result<TrustReport, String> {
                 interpretation_applications += 1;
                 reachable_propositions.insert(expression_key(&Expr::from(conclusion)));
                 reachable_interpretations.insert(*interpretation);
+            }
+            Node::AxiomInstance {
+                axiom,
+                identity,
+                conclusion,
+                ..
+            } => {
+                reachable_propositions.insert(expression_key(&Expr::from(conclusion)));
+                reachable_axioms.insert(axiom.clone());
+                axiom_identities.push(*identity);
             }
             Node::Gap { proposition, .. } => {
                 reachable_propositions.insert(expression_key(&Expr::from(proposition)));
@@ -266,6 +282,18 @@ pub fn derive_trust(certificate: &Certificate) -> Result<TrustReport, String> {
             )
         })?;
         match entry.identity {
+            FactIdentity::Verified => verified_facts += 1,
+            FactIdentity::Stipulated => stipulated_facts += 1,
+            FactIdentity::UserAsserted => user_asserted_facts += 1,
+            FactIdentity::Assumed => assumed_facts += 1,
+            FactIdentity::Disputed => disputed_facts += 1,
+        }
+    }
+    // A universal instance rests on the universal fact's assertion just as a
+    // premise fact does. Counting its identity keeps a proof that instantiates
+    // a `user_asserted` universal from being labelled `已验证`.
+    for identity in axiom_identities {
+        match identity {
             FactIdentity::Verified => verified_facts += 1,
             FactIdentity::Stipulated => stipulated_facts += 1,
             FactIdentity::UserAsserted => user_asserted_facts += 1,
@@ -340,6 +368,7 @@ pub fn derive_trust(certificate: &Certificate) -> Result<TrustReport, String> {
                 &reachable_propositions,
                 &reachable_rules,
                 &reachable_interpretations,
+                &reachable_axioms,
             )
         })
         .count();
@@ -521,6 +550,7 @@ fn conflict_is_reachable(
     propositions: &BTreeSet<String>,
     rules: &BTreeSet<String>,
     interpretations: &BTreeSet<usize>,
+    axioms: &BTreeSet<String>,
 ) -> bool {
     conflict_side_is_reachable(
         &conflict.left,
@@ -528,12 +558,14 @@ fn conflict_is_reachable(
         propositions,
         rules,
         interpretations,
+        axioms,
     ) || conflict_side_is_reachable(
         &conflict.right,
         &conflict.right_by,
         propositions,
         rules,
         interpretations,
+        axioms,
     )
 }
 
@@ -543,6 +575,7 @@ fn conflict_side_is_reachable(
     propositions: &BTreeSet<String>,
     rules: &BTreeSet<String>,
     interpretations: &BTreeSet<usize>,
+    axioms: &BTreeSet<String>,
 ) -> bool {
     if propositions.contains(&expression_key(&Expr::from(proposition))) {
         return true;
@@ -552,6 +585,7 @@ fn conflict_side_is_reachable(
         // reachable graph; the identity adds nothing structural.
         Provenance::Assumption => false,
         Provenance::Rules { rules: witnesses } => witnesses.iter().any(|rule| rules.contains(rule)),
+        Provenance::Axiom { axiom } => axioms.contains(axiom),
         Provenance::Interpretation { interpretation } => interpretations.contains(interpretation),
     }
 }

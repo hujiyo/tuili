@@ -176,6 +176,7 @@ fn a_gap_root_is_fact_needs_evidence_and_never_verified() {
         vec![Node::Gap {
             proposition: atom("受罚", "张三"),
             note: None,
+            axiom_candidates: Vec::new(),
             candidates: Vec::new(),
         }],
         Some(0),
@@ -201,6 +202,7 @@ fn an_unresolved_conflict_always_makes_dispute_unresolved() {
         vec![Node::Gap {
             proposition: atom("批准", "甲"),
             note: None,
+            axiom_candidates: Vec::new(),
             candidates: Vec::new(),
         }],
         Some(0),

@@ -187,6 +187,25 @@ pub fn instantiate(body: &Expr, arg: &Expr) -> Expr {
     subst(body, 0, arg)
 }
 
+/// Instantiate a telescope body with one value per binder, outermost binder
+/// first.
+///
+/// `body` is written in the context of `values.len()` binders, so the
+/// outermost binder has de Bruijn index `values.len() - 1` and the innermost
+/// has index `0`. Substituting the outermost binder first leaves the inner
+/// indices unchanged, so the values are consumed in the same order they are
+/// listed. Every value must be closed: a value that mentions one of the
+/// telescope's binders would be a capture, and the callers refuse it before
+/// reaching here.
+pub fn instantiate_telescope(body: &Expr, values: &[Expr]) -> Expr {
+    let mut result = body.clone();
+    for (position, value) in values.iter().enumerate() {
+        let index = values.len() - 1 - position;
+        result = subst(&result, index, value);
+    }
+    result
+}
+
 /// True when no variable is free at the top level.
 pub fn is_closed(e: &Expr) -> bool {
     free_vars(e, 0).is_empty()

@@ -11,6 +11,10 @@
 //! * an interpretation application becomes `Const(interpretation)` applied to
 //!   the proof term of its premise; the kernel's declaration type is
 //!   `from → to`, and the node's conclusion must be the declared `to`;
+//! * an axiom instance becomes `Const(axiom)` applied to the recorded binder
+//!   values (in the declaration's binder order). The kernel's declaration type
+//!   is the universal proposition, so the term's type is the substituted
+//!   conclusion, and the kernel checks every value against its binder domain;
 //! * a [`Node::Gap`] has no proof term and cannot be a premise. A gap may be
 //!   the root; the report then has `root_proved = false`.
 //!
@@ -265,6 +269,90 @@ pub fn kernel_proof(env: &Env, cert: &Certificate) -> Result<KernelProofReport, 
                 });
                 proofs[id] = Some(term);
             }
+            Node::AxiomInstance {
+                axiom,
+                bindings,
+                conclusion,
+                ..
+            } => {
+                let decl = env
+                    .get(axiom)
+                    .ok_or_else(|| KernelProofError::at(id, format!("未知全称公理 `{axiom}`")))?;
+                let DeclKind::Fact { .. } = &decl.kind else {
+                    return Err(KernelProofError::at(
+                        id,
+                        format!("`{axiom}` 不是断言命题的事实声明，不能作为公理实例化的依据"),
+                    ));
+                };
+                let Some((variables, _)) = std_deduce_kernel::env::named_binders(env, &decl.ty)
+                    .map_err(|error| {
+                        KernelProofError::at(
+                            id,
+                            format!("无法解析全称公理 `{axiom}` 的类型：{error}"),
+                        )
+                    })?
+                else {
+                    return Err(KernelProofError::at(
+                        id,
+                        format!("`{axiom}` 的类型不是带命名绑定变量的全称命题"),
+                    ));
+                };
+                if bindings.len() != variables.len() {
+                    return Err(KernelProofError::at(
+                        id,
+                        format!(
+                            "全称公理 `{axiom}` 有 {} 个绑定变量，本步记录了 {} 个绑定",
+                            variables.len(),
+                            bindings.len()
+                        ),
+                    ));
+                }
+                let mut values = Vec::with_capacity(variables.len());
+                for (index, (variable, binding)) in
+                    variables.iter().zip(bindings.iter()).enumerate()
+                {
+                    if variable.as_ref() != binding.parameter.as_str() {
+                        return Err(KernelProofError::at(
+                            id,
+                            format!(
+                                "全称公理 `{axiom}` 的第 {} 个绑定变量是 `{variable}`，\
+                                 本步记录的是 `{}`",
+                                index + 1,
+                                binding.parameter
+                            ),
+                        ));
+                    }
+                    let value = Expr::from(&binding.value);
+                    if !is_closed(&value) {
+                        return Err(KernelProofError::at(
+                            id,
+                            format!("绑定变量 `{variable}` 的取值不是闭合项"),
+                        ));
+                    }
+                    values.push(value);
+                }
+                // `Const(axiom)` applied to the binder values: the kernel's
+                // declaration type is the universal proposition, so the term
+                // has the substituted body as its type. The kernel checks every
+                // value against its binder domain.
+                let term = Expr::apps(Expr::constant(axiom), values);
+                let conclusion_expr = Expr::from(conclusion);
+                kernel_check::check(env, &Ctx::new(), &conclusion_expr, &Expr::Sort(0))
+                    .map_err(|error| KernelProofError::at(id, format!("结论不是命题：{error}")))?;
+                kernel_check::check(env, &ctx, &term, &conclusion_expr).map_err(|error| {
+                    KernelProofError::at(
+                        id,
+                        format!("全称公理 `{axiom}` 的实例项未通过内核检查：{error}"),
+                    )
+                })?;
+                steps.push(KernelStep {
+                    node: id,
+                    rule: axiom.clone(),
+                    term: term.clone(),
+                    checked: true,
+                });
+                proofs[id] = Some(term);
+            }
             Node::InterpretationApplication {
                 interpretation,
                 premise,
@@ -366,7 +454,9 @@ pub fn kernel_proof(env: &Env, cert: &Certificate) -> Result<KernelProofReport, 
                 })?;
                 Some(term)
             }
-            Node::RuleApplication { .. } | Node::InterpretationApplication { .. } => Some(
+            Node::RuleApplication { .. }
+            | Node::InterpretationApplication { .. }
+            | Node::AxiomInstance { .. } => Some(
                 proofs[root]
                     .clone()
                     .ok_or_else(|| KernelProofError::at(root, "推导节点没有可用的证明项"))?,

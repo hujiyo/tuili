@@ -158,7 +158,7 @@ rule 规则T :
     let reasoner = reasoner(&lib, &["i"]);
     assert!(reasoner.knows(&atom("Q")), "the interpretation proves `to`");
 
-    let s = reasoner.explain(&atom("S"));
+    let s = reasoner.explain(&atom("S")).unwrap();
     assert_eq!(s.candidates.len(), 1, "{s:?}");
     assert_eq!(
         s.candidates[0].missing,
@@ -166,7 +166,7 @@ rule 规则T :
         "`Q` is an interpretation conclusion, not a rule-stage fact"
     );
 
-    let t = reasoner.explain(&atom("T"));
+    let t = reasoner.explain(&atom("T")).unwrap();
     assert_eq!(t.candidates.len(), 1, "{t:?}");
     assert_eq!(
         t.candidates[0].missing,
@@ -176,7 +176,7 @@ rule 规则T :
 
     // The child node under the missing premise must not claim the premise is
     // satisfied: it is proved by an interpretation, which no rule may consume.
-    let tree = reasoner.gap_tree(&atom("S"));
+    let tree = reasoner.gap_tree(&atom("S")).unwrap();
     assert_eq!(tree.candidates.len(), 1, "{tree:?}");
     let q = tree.candidates[0].missing[0]
         .gap
@@ -400,6 +400,7 @@ interpret i1 : P 张三 → Q 张三
     provenances.sort_by_key(|provenance| match provenance {
         Provenance::Rules(_) => 0,
         Provenance::Interpretation(_) => 1,
+        Provenance::Axiom(_) => 3,
         Provenance::Assumption => 2,
     });
     assert!(matches!(

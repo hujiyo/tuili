@@ -1,4 +1,4 @@
-//! End-to-end tests for certificate v7 applicability: the generated record,
+//! End-to-end tests for certificate v8 applicability: the generated record,
 //! the independent recomputation of `:verify-cert`, and hand-edited
 //! counterexamples that must be rejected.
 //!

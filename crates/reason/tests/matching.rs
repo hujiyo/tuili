@@ -301,7 +301,7 @@ rule 夫妻保护 :
         [Expr::constant("李四"), Expr::constant("王五")],
     );
     assert!(!r.knows(&goal), "no fact supplies the instantiated premise");
-    let tree = r.gap_tree(&goal);
+    let tree = r.gap_tree(&goal).unwrap();
     assert_eq!(tree.candidates.len(), 1, "the rule is still a candidate");
     let candidate = &tree.candidates[0];
     assert_eq!(

@@ -1154,6 +1154,7 @@ fn conflict(left: CertExpr, right: CertExpr, resolution: Resolution) -> Conflict
 fn gap_node(proposition: CertExpr) -> Node {
     Node::Gap {
         proposition,
+        axiom_candidates: Vec::new(),
         candidates: Vec::new(),
         note: None,
     }

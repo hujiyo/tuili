@@ -23,6 +23,17 @@
 //! * Every rule application names a rule, cites exactly as many premises as
 //!   the rule has and cites them in the rule's own order, and cites only
 //!   earlier nodes.
+//! * Every axiom instance names an environment `Fact` declaration whose
+//!   declared type is a telescope of named universal binders ending in a
+//!   proposition, and whose identity the certificate records verbatim (a
+//!   `disputed` fact is not a source). It binds every binder exactly once, in
+//!   the declaration's order, to a closed value; the kernel checks each value
+//!   against the instantiated binder domain. The conclusion must be exactly the
+//!   declaration's body with those values substituted, compared by kernel
+//!   conversion, and must be closed: a free variable, a bound-variable capture
+//!   or a leaked binder variable is rejected. The node has no premise; the
+//!   universal declaration is its evidence, and its recorded identity is
+//!   compared with the environment's registration.
 //! * The bindings name only rule parameters, bind each parameter exactly once
 //!   and are closed terms.
 //! * Instantiating the rule's premises with those bindings yields exactly the
@@ -187,10 +198,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use std_deduce_kernel::conv::convertible;
-use std_deduce_kernel::env::{escape_control, DeclKind, RuleDecl};
+use std_deduce_kernel::env::{escape_control, named_binders, DeclKind, RuleDecl};
 use std_deduce_kernel::norm::normalize;
 use std_deduce_kernel::pretty::print_expr;
-use std_deduce_kernel::term::is_closed;
+use std_deduce_kernel::term::{instantiate_telescope, is_closed};
 use std_deduce_kernel::{check as kernel_check, Ctx, Env, Expr};
 
 use crate::applicability::{
@@ -336,6 +347,7 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
             }
             Node::RuleApplication { conclusion, .. } => ("结论", Expr::from(conclusion)),
             Node::InterpretationApplication { conclusion, .. } => ("结论", Expr::from(conclusion)),
+            Node::AxiomInstance { conclusion, .. } => ("公理实例的结论", Expr::from(conclusion)),
             Node::Gap { .. } => continue,
         };
         kernel_check::check(env, &Ctx::new(), &proposition, &Expr::Sort(0))
@@ -481,6 +493,150 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
                 ));
             }
             interpretation_derived[id] = true;
+            continue;
+        }
+        // Universal elimination. The node claims that a declared universal
+        // fact, asserted under a recorded identity, yields the conclusion when
+        // its binding variables take the recorded closed values. Every part is
+        // recomputed from the kernel declaration: a changed value, a changed
+        // conclusion, an open value or a declaration that is not a universal
+        // proposition is rejected.
+        if let Node::AxiomInstance {
+            axiom,
+            identity,
+            bindings,
+            conclusion,
+            ..
+        } = node
+        {
+            let Some(decl) = env.get(axiom) else {
+                return Err(CheckError::at(
+                    id,
+                    format!("未知全称公理 `{axiom}`：当前环境没有这个声明"),
+                ));
+            };
+            let DeclKind::Fact {
+                identity: declared_identity,
+            } = &decl.kind
+            else {
+                return Err(CheckError::at(
+                    id,
+                    format!("`{axiom}` 不是断言命题的事实声明，不能作为公理实例化的依据"),
+                ));
+            };
+            if !declared_identity.seeds_derivation() {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "公理 `{axiom}` 登记为「{}」，断言的是对方的主张，不能作为公理实例化的依据",
+                        declared_identity.label_zh()
+                    ),
+                ));
+            }
+            if std_deduce_kernel::FactIdentity::from(identity) != *declared_identity {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "公理 `{axiom}` 在环境中登记为「{}」，而本步记录的是「{}」",
+                        declared_identity.label_zh(),
+                        identity.label_zh()
+                    ),
+                ));
+            }
+            let declaration = format!("公理 `{axiom}`");
+            let Some((variables, body)) = named_binders(env, &decl.ty).map_err(|error| {
+                CheckError::at(id, format!("无法解析{declaration}的类型：{error}"))
+            })?
+            else {
+                return Err(CheckError::at(
+                    id,
+                    format!("{declaration}的类型不是带命名绑定变量的全称命题，不能实例化"),
+                ));
+            };
+            if bindings.len() != variables.len() {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "{declaration}有 {} 个绑定变量，本步记录了 {} 个绑定",
+                        variables.len(),
+                        bindings.len()
+                    ),
+                ));
+            }
+            let mut values = Vec::with_capacity(variables.len());
+            for (index, (variable, binding)) in variables.iter().zip(bindings.iter()).enumerate() {
+                if variable.as_ref() != binding.parameter.as_str() {
+                    return Err(CheckError::at(
+                        id,
+                        format!(
+                            "{declaration}的第 {} 个绑定变量是 `{variable}`，本步记录的是 `{}`",
+                            index + 1,
+                            binding.parameter
+                        ),
+                    ));
+                }
+                let value = Expr::from(&binding.value);
+                if !is_closed(&value) {
+                    return Err(CheckError::at(
+                        id,
+                        format!("绑定变量 `{variable}` 的取值不是闭合项"),
+                    ));
+                }
+                values.push(value);
+            }
+            // The declared type must itself be a universal proposition: it must
+            // type-check as a proposition, and `named_binders` above already
+            // required at least one named binder.
+            kernel_check::check(env, &Ctx::new(), &decl.ty, &Expr::Sort(0)).map_err(|error| {
+                CheckError::at(
+                    id,
+                    format!("{declaration}的类型不是命题，不能是公理实例化：{error}"),
+                )
+            })?;
+            let expected = instantiate_telescope(&body, &values);
+            // Applying the declaration to the values asks the kernel to check
+            // every value against the binder's domain and to confirm the
+            // substituted body is the instance's type.
+            let applied = Expr::apps(Expr::constant(axiom), values.iter().cloned());
+            kernel_check::check(env, &Ctx::new(), &applied, &expected).map_err(|error| {
+                CheckError::at(
+                    id,
+                    format!("{declaration}的绑定值不满足其参数类型：{error}"),
+                )
+            })?;
+            if !is_closed(&expected) {
+                return Err(CheckError::at(
+                    id,
+                    format!("{declaration}的实例结论不是闭合命题：绑定不足或发生变量捕获"),
+                ));
+            }
+            let conclusion_expr = Expr::from(conclusion);
+            // The conclusion must not carry the declaration's binders as free
+            // variables: an open conclusion is not the result of substituting
+            // closed values.
+            if !is_closed(&conclusion_expr) {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "{declaration}的结论「{}」含有自由变量（绑定变量泄漏），不是闭合命题",
+                        print_expr(&conclusion_expr)
+                    ),
+                ));
+            }
+            let same =
+                convertible(env, &Ctx::new(), &expected, &conclusion_expr).map_err(|error| {
+                    CheckError::at(id, format!("无法判定公理实例结论是否等价：{error}"))
+                })?;
+            if !same {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "{declaration}按绑定得到的结论是 `{}`，而本步写的是 `{}`",
+                        print_expr(&expected),
+                        print_expr(&conclusion_expr)
+                    ),
+                ));
+            }
             continue;
         }
         let Node::RuleApplication {
@@ -2235,6 +2391,93 @@ fn validate_provenance(
                     }
                 }
             }
+            Provenance::Axiom { axiom } => {
+                // A universal elimination is a derivation, so it cannot also be
+                // an assumed fact or an environment fact: the reasoner records
+                // a fact side as `assumption`, and a hand-edited record must
+                // not relabel evidence as a derivation.
+                let proposition_expr = Expr::from(proposition);
+                for entry in &cert.assumptions {
+                    let same = entry.proposition == *proposition
+                        || convertible(
+                            env,
+                            &Ctx::new(),
+                            &Expr::from(&entry.proposition),
+                            &proposition_expr,
+                        )
+                        .map_err(|error| {
+                            fail(format!(
+                                "无法判定{label}侧命题是否与证书假设表等价：{error}"
+                            ))
+                        })?;
+                    if same {
+                        return Err(fail(format!(
+                            "{label}侧命题「{}」已作为事实列在假设表里，不能同时记为公理实例",
+                            print_expr(&proposition_expr)
+                        )));
+                    }
+                }
+                let proposition_key = key(env, &proposition_expr).map_err(fail)?;
+                for fact in facts {
+                    if !fact.identity.seeds_derivation() {
+                        continue;
+                    }
+                    let same = fact.key == proposition_key
+                        || convertible(env, &Ctx::new(), &fact.proposition, &proposition_expr)
+                            .map_err(|error| {
+                                fail(format!(
+                                    "无法判定{label}侧命题是否与环境中事实 `{}` 等价：{error}",
+                                    fact.name
+                                ))
+                            })?;
+                    if same {
+                        return Err(fail(format!(
+                            "{label}侧命题「{}」已在环境中登记为事实，不能同时记为公理实例",
+                            print_expr(&proposition_expr)
+                        )));
+                    }
+                }
+                let Some(declaration) = env.get(axiom) else {
+                    return Err(fail(format!(
+                        "{label}侧引用的全称公理 `{axiom}` 不在环境中"
+                    )));
+                };
+                let DeclKind::Fact { identity } = &declaration.kind else {
+                    return Err(fail(format!(
+                        "{label}侧引用的 `{axiom}` 不是断言命题的事实声明，不能是公理实例的来源"
+                    )));
+                };
+                if !identity.seeds_derivation() {
+                    return Err(fail(format!(
+                        "{label}侧引用的 `{axiom}` 登记为「{}」，不能作为公理实例化的依据",
+                        identity.label_zh()
+                    )));
+                }
+                let Some((_, body)) = named_binders(env, &declaration.ty)
+                    .map_err(|error| fail(format!("无法解析全称公理 `{axiom}` 的类型：{error}")))?
+                else {
+                    return Err(fail(format!(
+                        "{label}侧引用的 `{axiom}` 的类型不是带命名绑定变量的全称命题"
+                    )));
+                };
+                let Some(axiom_head) = closure::concrete_head(env, &body).map_err(fail)? else {
+                    // The body's head is not concrete (for example a
+                    // proposition-valued variable), so head agreement cannot
+                    // be judged. Stay conservative.
+                    continue;
+                };
+                let Some(proposition_head) =
+                    closure::concrete_head(env, &Expr::from(proposition)).map_err(fail)?
+                else {
+                    continue;
+                };
+                if axiom_head != proposition_head {
+                    return Err(fail(format!(
+                        "全称公理 `{axiom}` 的命题体头是 `{axiom_head}`，\
+                         而{label}侧冲突命题的头是 `{proposition_head}`"
+                    )));
+                }
+            }
             Provenance::Interpretation { interpretation } => {
                 let Some(entry) = cert.interpretations.get(*interpretation) else {
                     return Err(fail(format!(
@@ -2466,16 +2709,20 @@ fn validate_resolution(
                 let (fact_side, fact_prop) = match (&conflict.left_by, &conflict.right_by) {
                     (
                         Provenance::Assumption,
-                        Provenance::Rules { .. } | Provenance::Interpretation { .. },
+                        Provenance::Rules { .. }
+                        | Provenance::Axiom { .. }
+                        | Provenance::Interpretation { .. },
                     ) => (Side::Left, &conflict.left),
                     (
-                        Provenance::Rules { .. } | Provenance::Interpretation { .. },
+                        Provenance::Rules { .. }
+                        | Provenance::Axiom { .. }
+                        | Provenance::Interpretation { .. },
                         Provenance::Assumption,
                     ) => (Side::Right, &conflict.right),
                     _ => {
                         return Err(fail(
-                            "记录为未经证明的主张与规则或解释结论之间的未决冲突，\
-                             但两侧必须一侧是事实、另一侧是规则或解释"
+                            "记录为未经证明的主张与规则、公理或解释结论之间的未决冲突，\
+                             但两侧必须一侧是事实、另一侧是规则、公理或解释"
                                 .to_owned(),
                         ));
                     }
@@ -2526,6 +2773,13 @@ fn validate_resolution(
                             .to_owned(),
                     ));
                 }
+                if matches!(conflict.left_by, Provenance::Axiom { .. })
+                    || matches!(conflict.right_by, Provenance::Axiom { .. })
+                {
+                    return Err(fail(
+                        "一侧是公理实例时，见证就是那条全称公理，不能记录为见证无法重建".to_owned(),
+                    ));
+                }
                 let lost = matches!(&conflict.left_by, Provenance::Rules { rules } if rules.is_empty())
                     || matches!(&conflict.right_by, Provenance::Rules { rules } if rules.is_empty());
                 if !lost {
@@ -2534,17 +2788,21 @@ fn validate_resolution(
                 Ok(0)
             }
             UnresolvedReason::NoPriority => {
-                let interpretation = matches!(conflict.left_by, Provenance::Interpretation { .. })
-                    || matches!(conflict.right_by, Provenance::Interpretation { .. });
-                if interpretation {
+                let no_declared_order =
+                    matches!(conflict.left_by, Provenance::Interpretation { .. })
+                        || matches!(conflict.right_by, Provenance::Interpretation { .. })
+                        || matches!(conflict.left_by, Provenance::Axiom { .. })
+                        || matches!(conflict.right_by, Provenance::Axiom { .. });
+                if no_declared_order {
                     // A priority orders rules only, so no declared edge can
-                    // involve an interpretation. A fact side, however, must be
-                    // recorded as a defeat or as `non_strict_fact`.
+                    // involve an interpretation or a universal instance. A
+                    // fact side, however, must be recorded as a defeat or as
+                    // `non_strict_fact`.
                     if matches!(conflict.left_by, Provenance::Assumption)
                         || matches!(conflict.right_by, Provenance::Assumption)
                     {
                         return Err(fail(
-                            "一侧是事实、另一侧是解释时，应记录事实胜出或主张未决，\
+                            "一侧是事实、另一侧是解释或公理实例时，应记录事实胜出或主张未决，\
                              不能记录为没有优先关系"
                                 .to_owned(),
                         ));
@@ -2780,6 +3038,7 @@ fn node_prop<'a>(cert: &'a Certificate, node: &'a Node) -> Option<&'a CertExpr> 
             .map(|entry| &entry.proposition),
         Node::RuleApplication { conclusion, .. } => Some(conclusion),
         Node::InterpretationApplication { conclusion, .. } => Some(conclusion),
+        Node::AxiomInstance { conclusion, .. } => Some(conclusion),
         Node::Gap { .. } => None,
     }
 }

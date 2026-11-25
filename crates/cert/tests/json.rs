@@ -12,7 +12,7 @@ use std_deduce_cert::{
 use std_deduce_kernel::env::SourceRef;
 use std_deduce_kernel::{name, Expr};
 
-const SNAPSHOT: &str = include_str!("fixtures/certificate_v7.json");
+const SNAPSHOT: &str = include_str!("fixtures/certificate_v8.json");
 const V6_SNAPSHOT: &str = include_str!("fixtures/certificate_v6.json");
 const V5_SNAPSHOT: &str = include_str!("fixtures/certificate_v5.json");
 const V4_SNAPSHOT: &str = include_str!("fixtures/certificate_v4.json");
@@ -151,6 +151,7 @@ fn sample_certificate() -> Certificate {
             },
             Node::Gap {
                 proposition: app(constant("赔偿"), constant("张三")),
+                axiom_candidates: Vec::new(),
                 candidates: vec![GapCandidate {
                     rule: "侵权赔偿".to_owned(),
                     bindings: Vec::new(),
@@ -246,7 +247,7 @@ fn field_names_are_stable() {
         assert!(object.contains_key(field), "missing field `{field}`");
     }
 
-    assert_eq!(value["format_version"], 7);
+    assert_eq!(value["format_version"], 8);
     let environment = value["environment"]
         .as_object()
         .expect("the environment is an inline object");
@@ -338,7 +339,7 @@ fn a_v3_certificate_is_rejected_before_its_missing_resolution_basis() {
         message.contains("unsupported certificate format version 3"),
         "{message}"
     );
-    assert!(message.contains("this build supports 7"), "{message}");
+    assert!(message.contains("this build supports 8"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -353,7 +354,7 @@ fn a_v4_certificate_is_rejected_before_its_missing_assumption_identity() {
         message.contains("unsupported certificate format version 4"),
         "{message}"
     );
-    assert!(message.contains("this build supports 7"), "{message}");
+    assert!(message.contains("this build supports 8"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -368,10 +369,28 @@ fn a_v6_certificate_is_rejected_before_its_missing_applicability() {
         message.contains("unsupported certificate format version 6"),
         "{message}"
     );
-    assert!(message.contains("this build supports 7"), "{message}");
+    assert!(message.contains("this build supports 8"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
     assert!(!message.contains("applicability"), "{message}");
     assert!(!message.contains("occurred_at"), "{message}");
+}
+
+#[test]
+fn a_v7_certificate_is_rejected_before_its_missing_axiom_instances() {
+    // Version 7 predates universal elimination: it cannot express an
+    // `axiom_instance` node or the `axiom_candidates` of a gap. The version
+    // probe must reject it on the version, not read a v8 document as if the
+    // older writer had said nothing about instantiation.
+    let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    value["format_version"] = Value::from(7);
+    let error = Certificate::from_json(&value.to_string()).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported certificate format version 7"),
+        "{message}"
+    );
+    assert!(message.contains("this build supports 8"), "{message}");
+    assert!(!message.contains("missing field"), "{message}");
 }
 
 #[test]
@@ -385,7 +404,7 @@ fn a_v5_certificate_is_rejected_before_its_missing_interpretations() {
         message.contains("unsupported certificate format version 5"),
         "{message}"
     );
-    assert!(message.contains("this build supports 7"), "{message}");
+    assert!(message.contains("this build supports 8"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
     assert!(!message.contains("interpretations"), "{message}");
 }
@@ -401,7 +420,7 @@ fn a_true_v1_certificate_is_rejected_with_a_version_error() {
         message.contains("unsupported certificate format version 1"),
         "{message}"
     );
-    assert!(message.contains("supports 7"), "{message}");
+    assert!(message.contains("supports 8"), "{message}");
 }
 
 #[test]
@@ -415,7 +434,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
         message.contains("unsupported certificate format version 2"),
         "{message}"
     );
-    assert!(message.contains("this build supports 7"), "{message}");
+    assert!(message.contains("this build supports 8"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -423,7 +442,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
 fn source_fields_added_in_v2_still_use_defaults() {
     let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
     strip_new_source_fields(&mut value);
-    assert_eq!(value["format_version"], 7);
+    assert_eq!(value["format_version"], 8);
     let certificate = Certificate::from_json(&value.to_string())
         .expect("source fields added with #[serde(default)] may be omitted");
     let source = &certificate.assumptions[0].sources[0];
@@ -590,7 +609,7 @@ fn every_source_field_survives_a_json_round_trip() {
 
 #[test]
 fn unknown_format_version_is_rejected() {
-    let text = SNAPSHOT.replace("\"format_version\": 7", "\"format_version\": 999");
+    let text = SNAPSHOT.replace("\"format_version\": 8", "\"format_version\": 999");
     let error = Certificate::from_json(&text).unwrap_err();
     assert!(
         error

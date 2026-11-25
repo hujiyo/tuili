@@ -8,7 +8,7 @@
 //! the anchor and converts the result into the types the reasoner, `:gap`,
 //! `:why` and `:applicability` print. It does not read the environment, the
 //! derivation or the CLI, so it can be tested on its own, and the same
-//! judgement is recorded in a version 7 certificate.
+//! judgement is recorded in a version 8 certificate.
 //!
 //! ## The reference point is the event, not the query date
 //!

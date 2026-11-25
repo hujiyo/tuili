@@ -11,11 +11,15 @@
 //! A fact is always attributed: a `verified` assumption reads "根据法院查明",
 //! `user_asserted` reads "据用户陈述", `assumed` reads "作为分析假设", and
 //! `stipulated` reads "双方无争议". An empty source list is printed as
-//! "证书未记录来源" rather than omitted. A conflict is printed with its winner,
+//! "证书未记录来源" rather than omitted. A universal elimination reads
+//! 「根据全称公理「…」（身份）的全称实例，所以「…」成立」 and then prints the
+//! binding values; the universal fact's identity is the evidence its instance
+//! rests on. A conflict is printed with its winner,
 //! loser and recorded basis, or as "此处未决" with the recorded reason; a gap
-//! lists its candidates, missing premises and `unless` blockers. A blocker's
-//! identity is taken from the assumption table when the certificate records it,
-//! and otherwise the line says no identity is recorded.
+//! lists its candidates, its universal-fact candidates (with the values an
+//! instance would need and the refusal reason) and `unless` blockers. A
+//! blocker's identity is taken from the assumption table when the certificate
+//! records it, and otherwise the line says no identity is recorded.
 //!
 //! A gap candidate's rule may declare who must prove the missing premises and
 //! to what standard, plus the same for its `unless` exceptions. The
@@ -89,7 +93,7 @@ pub fn render_narrative(certificate: &Certificate) -> Result<String, String> {
 /// [`render_narrative`] does.
 ///
 /// `pleadings` is every declared rule's burden/standard, keyed by rule name.
-/// Certificate v7 does not record these declarations, so the caller supplies
+/// Certificate v8 does not record these declarations, so the caller supplies
 /// them; a missing-premise sentence then says who must present the evidence
 /// and to what standard. An undeclared burden or standard reads `未声明举证责任`
 /// / `未声明证明标准`, never a default; the standard itself is only a label and
@@ -173,6 +177,15 @@ fn write_conclusion(
                 print_expr(&Expr::from(conclusion))
             ));
         }
+        Node::AxiomInstance {
+            axiom, conclusion, ..
+        } => {
+            out.push_str(&format!(
+                "【结论】「{}」由全称公理「{}」实例化推出。\n",
+                print_expr(&Expr::from(conclusion)),
+                escape_control(axiom)
+            ));
+        }
         Node::Gap { proposition, .. } => {
             out.push_str(&format!(
                 "【结论】「{}」未获证明（此处是缺口）。\n",
@@ -209,7 +222,7 @@ fn collect_postorder(
         Node::InterpretationApplication { premise, .. } => {
             collect_postorder(certificate, *premise, seen, order)?;
         }
-        Node::Assumption { .. } | Node::Gap { .. } => {}
+        Node::Assumption { .. } | Node::AxiomInstance { .. } | Node::Gap { .. } => {}
     }
     order.push(id);
     Ok(())
@@ -230,7 +243,8 @@ fn write_proof(
             Some(
                 Node::Assumption { .. }
                 | Node::RuleApplication { .. }
-                | Node::InterpretationApplication { .. },
+                | Node::InterpretationApplication { .. }
+                | Node::AxiomInstance { .. },
             ) => steps.push(*id),
             Some(Node::Gap { .. }) => gaps.push(*id),
             None => {
@@ -353,6 +367,39 @@ fn write_step(
             ));
             write_sources(&entry.sources, out);
         }
+        Node::AxiomInstance {
+            axiom,
+            identity,
+            bindings,
+            conclusion,
+            sources,
+        } => {
+            out.push_str(&format!(
+                "  {number}. 根据全称公理「{}」（{}）的全称实例，所以「{}」成立。",
+                escape_control(axiom),
+                identity.label_zh(),
+                print_expr(&Expr::from(conclusion))
+            ));
+            if let Some(annotation) = annotations.get(&id) {
+                out.push_str(&format!(" 〔{}〕", escape_control(annotation)));
+            }
+            out.push('\n');
+            if !bindings.is_empty() {
+                let instance = bindings
+                    .iter()
+                    .map(|binding| {
+                        format!(
+                            "{} ↦ {}",
+                            escape_control(&binding.parameter),
+                            print_expr(&Expr::from(&binding.value))
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("，");
+                out.push_str(&format!("     实例：{instance}\n"));
+            }
+            write_sources(sources, out);
+        }
         Node::Gap { .. } => {
             return Err(format!("节点 {id}：缺口不应被编号为推理步骤"));
         }
@@ -378,6 +425,7 @@ fn premise_reference(
         }
         Node::RuleApplication { conclusion, .. } => conclusion,
         Node::InterpretationApplication { conclusion, .. } => conclusion,
+        Node::AxiomInstance { conclusion, .. } => conclusion,
         Node::Gap { proposition, .. } => proposition,
     };
     let printed = print_expr(&Expr::from(proposition));
@@ -446,6 +494,7 @@ fn write_gap(
     let Some(Node::Gap {
         proposition,
         candidates,
+        axiom_candidates,
         note,
     }) = certificate.nodes.get(id)
     else {
@@ -458,8 +507,32 @@ fn write_gap(
     if let Some(note) = note {
         out.push_str(&format!("  · 说明：{}\n", escape_control(note)));
     }
-    if candidates.is_empty() {
-        out.push_str("  · 证书没有记录候选规则，无法说明还缺什么。\n");
+    for candidate in axiom_candidates {
+        let mut line = format!("  · 公理候选「{}」", escape_control(&candidate.axiom));
+        if !candidate.bindings.is_empty() {
+            let bindings = candidate
+                .bindings
+                .iter()
+                .map(|binding| {
+                    format!(
+                        "{} ↦ {}",
+                        escape_control(&binding.parameter),
+                        print_expr(&Expr::from(&binding.value))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("，");
+            line.push_str(&format!("（绑定：{bindings}）"));
+        }
+        match &candidate.problem {
+            Some(problem) => line.push_str(&format!("：未实例化：{}。", escape_control(problem))),
+            None => line.push_str("：可由该公理实例化，但本次推导没有触发它。"),
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    if candidates.is_empty() && axiom_candidates.is_empty() {
+        out.push_str("  · 证书没有记录候选规则或公理，无法说明还缺什么。\n");
         return Ok(());
     }
     for candidate in candidates {
@@ -565,6 +638,9 @@ fn blocker_assumption<'a>(
         ) || matches!(
             node,
             Node::InterpretationApplication { conclusion, .. } if conclusion == proposition
+        ) || matches!(
+            node,
+            Node::AxiomInstance { conclusion, .. } if conclusion == proposition
         )
     });
     if derived {
@@ -653,6 +729,9 @@ fn provenance_phrase(
                 .collect::<Vec<_>>()
                 .join("、")
         ),
+        Provenance::Axiom { axiom } => {
+            format!("由全称公理「{}」实例化推出", escape_control(axiom))
+        }
         Provenance::Interpretation { interpretation } => {
             match certificate.interpretations.get(*interpretation) {
                 Some(entry) => format!(
@@ -701,6 +780,8 @@ fn write_defeat(
         ResolutionBasis::Assumption => {
             let text = if matches!(lose_by, Provenance::Rules { .. }) {
                 "严格事实优先于可废止规则结论。"
+            } else if matches!(lose_by, Provenance::Axiom { .. }) {
+                "严格事实优先于公理实例结论。"
             } else if matches!(lose_by, Provenance::Interpretation { .. }) {
                 "严格事实优先于解释结论。"
             } else {
@@ -777,8 +858,12 @@ fn write_unresolved(
         UnresolvedReason::NoPriority => {
             let interpretation = matches!(conflict.left_by, Provenance::Interpretation { .. })
                 || matches!(conflict.right_by, Provenance::Interpretation { .. });
+            let axiom = matches!(conflict.left_by, Provenance::Axiom { .. })
+                || matches!(conflict.right_by, Provenance::Axiom { .. });
             if interpretation {
                 "解释结论与另一方之间没有可用的优先声明，不能判定谁胜出。".to_owned()
+            } else if axiom {
+                "公理实例结论与另一方之间没有可用的优先声明，不能判定谁胜出。".to_owned()
             } else {
                 "两侧规则之间没有声明优先级，不能判定谁胜出。".to_owned()
             }

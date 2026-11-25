@@ -16,6 +16,8 @@
 //!
 //! * a `rule_application` whose conclusion's predicate head is an open concept
 //!   (the step that turns premises into the open proposition);
+//! * an `axiom_instance` with such a conclusion — universal elimination
+//!   likewise turns a declared universal fact into a proved open proposition;
 //! * an `interpretation_application` with such a conclusion — it is likewise a
 //!   step that licenses the open proposition;
 //! * the root node itself when the root proposition is an open concept, even if
@@ -191,6 +193,16 @@ pub fn dependency(
                     ));
                 }
                 pending.push(*premise);
+            }
+            // Universal elimination derives a proposition from a declared
+            // universal fact. When that proposition states an open concept, the
+            // step has turned it into a proved statement, exactly like a rule
+            // application; it has no premise node.
+            Node::AxiomInstance { conclusion, .. } => {
+                if let Some(concept) = open_head(env, conclusion, &open)? {
+                    concepts.insert(concept);
+                    nodes.push(id);
+                }
             }
             // A gap can never be a premise of a proving step; nothing below
             // the root is expanded through it.

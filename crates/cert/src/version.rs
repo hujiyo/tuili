@@ -19,10 +19,15 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// rule application and gap candidate: the verdict, the reference dates and
 /// places, the rule's declared scope, the session fallback values actually
 /// used, the reason code and its explanation, plus each assumption's recorded
-/// `occurred_at` / `occurred_in`. Older certificates are refused rather than
-/// read with guessed evidence: a proof that silently drops an applicability
-/// judgement, or an interpretation step, cannot be checked.
-pub const FORMAT_VERSION: u32 = 7;
+/// `occurred_at` / `occurred_in`. Version 8 records universal elimination: an
+/// `axiom_instance` node naming the universal fact, the identity it is
+/// asserted under, the closed value of every binding variable and the
+/// substituted conclusion, plus the universal facts a gap goal could be
+/// instantiated from and why they were refused. Older certificates are
+/// refused rather than read with guessed evidence: a proof that silently drops
+/// an applicability judgement, an interpretation step or a universal
+/// elimination step cannot be checked.
+pub const FORMAT_VERSION: u32 = 8;
 
 /// A certificate format version.
 ///
