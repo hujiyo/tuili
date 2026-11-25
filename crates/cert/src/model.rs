@@ -297,6 +297,25 @@ impl Certificate {
                 } => {
                     check_expression(proposition, &format!("{place}的缺口命题"))?;
                     for candidate in candidates {
+                        for binding in &candidate.bindings {
+                            check_expression(
+                                &binding.value,
+                                &format!(
+                                    "{place}的缺口候选 `{}` 的参数 `{}` 绑定",
+                                    escape_control(&candidate.rule),
+                                    escape_control(&binding.parameter)
+                                ),
+                            )?;
+                        }
+                        for expression in &candidate.held {
+                            check_expression(
+                                expression,
+                                &format!(
+                                    "{place}的缺口候选 `{}` 已持有前提",
+                                    escape_control(&candidate.rule)
+                                ),
+                            )?;
+                        }
                         for expression in &candidate.missing {
                             check_expression(
                                 expression,
@@ -561,6 +580,15 @@ pub struct Binding {
 pub struct GapCandidate {
     /// The candidate rule constant.
     pub rule: String,
+    /// The parameter bindings that produced this candidate instance, so a
+    /// checker can re-instantiate the rule's premises without parsing the
+    /// rendering.
+    pub bindings: Vec<Binding>,
+    /// The rule premises that already hold, in the rule's premise order, each
+    /// an instantiated proposition. The checker looks these propositions up in
+    /// the environment's fact occurrence registry to rebuild the applicability
+    /// anchor; it does not trust the recorded dates directly.
+    pub held: Vec<CertExpr>,
     /// Premises that are not known.
     #[serde(default)]
     pub missing: Vec<CertExpr>,
@@ -572,8 +600,8 @@ pub struct GapCandidate {
     pub sources: Vec<Source>,
     /// The rule's temporal/spatial judgement for this case, recorded so a
     /// reader and the checker know why this candidate was excluded instead of
-    /// only what it lacks. Recomputing it uses the recorded reference inputs
-    /// and the rule's environment scope.
+    /// only what it lacks. The checker recomputes it from the candidate's
+    /// bindings and held premises against the rule's environment declaration.
     pub applicability: RuleApplicability,
 }
 

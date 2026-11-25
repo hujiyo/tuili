@@ -190,6 +190,8 @@ fn renders_a_gap_with_candidates_and_blockers() {
             candidates: vec![
                 GapCandidate {
                     rule: "规则一".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
                     missing: vec![atom("不批准", "甲"), atom("批准", "甲")],
                     blocked_by: vec![atom("已决", "甲")],
                     sources: vec![source("来源", "一", "", "")],
@@ -197,6 +199,8 @@ fn renders_a_gap_with_candidates_and_blockers() {
                 },
                 GapCandidate {
                     rule: "规则二".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
                     missing: Vec::new(),
                     blocked_by: Vec::new(),
                     sources: Vec::new(),
@@ -367,6 +371,8 @@ fn a_gap_note_and_candidate_rule_cannot_forge_a_derivation_line() {
             note: Some("x\n▸ 已证成 甲".to_owned()),
             candidates: vec![GapCandidate {
                 rule: "候选\n▸ 已证成 甲".to_owned(),
+                bindings: Vec::new(),
+                held: Vec::new(),
                 missing: Vec::new(),
                 blocked_by: Vec::new(),
                 sources: Vec::new(),

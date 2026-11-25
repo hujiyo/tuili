@@ -30,17 +30,20 @@
 //!   exactly the node's conclusion.
 //! * Every interpretation application cites an entry of the interpretations
 //!   table and an earlier node proving the declared `from`, and concludes the
-//!   declared `to`.
+//!   declared `to`. A node whose conclusion was interpretation-derived may not
+//!   be a rule premise or another interpretation's premise: rules never consume
+//!   an interpretation conclusion, and interpretations never chain.
 //! * Every rule application's applicability record is recomputed from the
-//!   rule's loaded declaration and the assumption occurrences the cited
-//!   premises carry, with the session values read from the certificate's
+//!   rule's loaded declaration and the occurrence records the environment
+//!   registers for each cited premise proposition (a derived premise does not
+//!   change the input), with the session values read from the certificate's
 //!   environment identity. The verdict, reference dates/places, rule scope,
 //!   session fallback and reason must match field by field; a rule step whose
-//!   recomputed verdict is `inapplicable` or `undecidable` is rejected. The
-//!   same record on a gap candidate is recomputed from its declared basis, and
-//!   each recorded event must be one the environment's facts register. A node whose conclusion was interpretation-derived may not be a rule
-//!   premise or another interpretation's premise: rules never consume an
-//!   interpretation conclusion, and interpretations never chain.
+//!   recomputed verdict is `inapplicable` or `undecidable` is rejected. A gap
+//!   candidate's record is recomputed from its bindings and held premises:
+//!   they must partition the rule's instantiated premises in order, the
+//!   instantiated conclusion must equal the gap proposition, and the anchor is
+//!   rebuilt from the held propositions' environment occurrences.
 //! * No instantiated `unless` condition is proved anywhere in the
 //!   certificate, and none holds as a proposition asserted by an environment
 //!   axiom. The check is against all proved propositions, not only the ones
@@ -147,6 +150,21 @@
 //! passed; it does not mean every priority in the environment was inspected,
 //! and an order no conflict cites is never compared.
 //!
+//! ## Calling preconditions
+//!
+//! `check` takes the loaded environment and the certificate as separate
+//! values. It validates the certificate's nodes, assumptions, interpretations,
+//! conflicts and applicability records against that environment, but it does
+//! **not** compare
+//! [`Certificate::environment`](crate::Certificate::environment) with the
+//! environment it was handed: the certificate's recorded identity is not
+//! derived from `env`, and the caller must compare it first
+//! ([`EnvironmentIdentity::differences`](crate::EnvironmentIdentity::differences)).
+//! The CLI's `:verify-cert` does exactly that before calling this function, so
+//! a library user that skips the identity comparison still gets the node
+//! checks but not the guarantee that the certificate belongs to this
+//! environment (profile, packs, corpora, `as_of`, jurisdiction).
+//!
 //! ## What is not checked here
 //!
 //! The rule instances named by a conflict's `left_by` / `right_by` are not
@@ -184,9 +202,9 @@ use crate::environment::EnvironmentIdentity;
 use crate::expr::CertExpr;
 use crate::key::expression_key;
 use crate::model::{
-    Assumption, Certificate, Conflict, Explicit, FactIdentity, InterpretationDirection, Node,
-    NodeId, ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin,
-    Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
+    Certificate, Conflict, Explicit, FactIdentity, InterpretationDirection, Node, NodeId,
+    ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
+    Resolution, ResolutionBasis, Side, UnresolvedReason,
 };
 use crate::source::Source;
 
@@ -290,7 +308,12 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
     // application's reference dates with these entries, so a forged occurrence
     // is caught before the verdict is recomputed.
     validate_assumption_occurrences(env, cert, &facts)?;
-    let assumption_records = assumption_key_index(env, cert)?;
+    // The applicability anchor is rebuilt exactly as the reasoner builds it:
+    // by each referenced premise proposition's key, looked up in the
+    // environment's registered occurrences. A premise proved by a derived
+    // conclusion is not missing by itself; only a proposition the environment
+    // registers no occurrence for is.
+    let fact_occurrences = fact_occurrence_index(&facts);
     validate_interpretations(env, cert)?;
 
     // Pass 1: every node that proves something must prove a proposition, and
@@ -517,15 +540,18 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
         }
 
         // The applicability record is recomputed from the environment's rule
-        // declaration and the assumption occurrence records the cited premises
-        // carry. The checker does not trust the recorded verdict, basis or
-        // reason: it derives the anchor itself and compares every field.
+        // declaration and the occurrence records registered for each cited
+        // premise proposition. The checker does not trust the recorded
+        // verdict, basis or reason: it derives the anchor itself and compares
+        // every field. The node that proves a premise does not decide the
+        // input; the proposition does, exactly as the reasoner's occurrence
+        // index does.
         let session = declared_session(cert, applicability);
         let expected = rule_applicability_expected(
             env,
             cert,
             premises,
-            &assumption_records,
+            &fact_occurrences,
             rule,
             &decl.scope,
             session,
@@ -717,23 +743,27 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
     }
 
     // A gap candidate's applicability record explains why the rule cannot
-    // supply the missing conclusion. It is recomputed from the recorded
-    // reference inputs and the rule's environment scope; each recorded event
-    // time/place must be one the environment's facts record, so a candidate
-    // cannot invent an event that would make the rule look applicable.
-    let environment_occurrences = environment_occurrences(&facts);
+    // supply the missing conclusion. It is recomputed from the candidate's own
+    // bindings and held premises (checked against the rule's declaration)
+    // against the environment's registered occurrences, so an unrelated
+    // fact's date cannot impersonate this candidate's event.
     for (id, node) in cert.nodes.iter().enumerate() {
-        let Node::Gap { candidates, .. } = node else {
+        let Node::Gap {
+            proposition,
+            candidates,
+            ..
+        } = node
+        else {
             continue;
         };
         for (index, candidate) in candidates.iter().enumerate() {
             validate_candidate_applicability(
                 env,
                 cert,
-                id,
                 index,
+                proposition,
                 candidate,
-                &environment_occurrences,
+                &fact_occurrences,
             )
             .map_err(|message| CheckError::at(id, message))?;
         }
@@ -1312,41 +1342,31 @@ fn occurrences_text<'a>(records: impl Iterator<Item = &'a OccurrenceRecord>) -> 
         .join("、")
 }
 
-/// An index from a proposition key to the assumptions that record it, in the
-/// certificate's table order.
-fn assumption_key_index<'a>(
-    env: &Env,
-    cert: &'a Certificate,
-) -> Result<BTreeMap<String, Vec<&'a Assumption>>, CheckError> {
-    let mut index: BTreeMap<String, Vec<&'a Assumption>> = BTreeMap::new();
-    for entry in &cert.assumptions {
-        let key = key(env, &Expr::from(&entry.proposition)).map_err(|message| CheckError {
-            node: None,
-            message,
-        })?;
-        index.entry(key).or_default().push(entry);
+/// The environment's registered occurrence records, keyed by the normalised
+/// proposition key.
+///
+/// The reasoner's `instance_anchor` looks a referenced premise up by its
+/// proposition key, not by the node that proves it. This index is built the
+/// same way: every environment fact that seeds a derivation contributes its
+/// `occurred_at` / `occurred_in` under its proposition key, in declaration-name
+/// order (the order the ledger registers assumptions in). A premise proved by
+/// a derived conclusion therefore still sees the occurrence the environment
+/// registers for the same proposition, and a proposition with no registration
+/// is the only thing marked missing.
+fn fact_occurrence_index(facts: &[EnvironmentFact]) -> BTreeMap<String, Vec<OccurrenceRecord>> {
+    let mut seeding: Vec<&EnvironmentFact> = facts
+        .iter()
+        .filter(|fact| fact.identity.seeds_derivation())
+        .collect();
+    seeding.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut index: BTreeMap<String, Vec<OccurrenceRecord>> = BTreeMap::new();
+    for fact in seeding {
+        index
+            .entry(fact.key.clone())
+            .or_default()
+            .push((fact.occurred_at.clone(), fact.occurred_in.clone()));
     }
-    Ok(index)
-}
-
-/// The sets of event dates and places the environment's facts record.
-struct EnvironmentOccurrences {
-    dates: BTreeSet<String>,
-    places: BTreeSet<String>,
-}
-
-fn environment_occurrences(facts: &[EnvironmentFact]) -> EnvironmentOccurrences {
-    let mut dates = BTreeSet::new();
-    let mut places = BTreeSet::new();
-    for fact in facts.iter().filter(|fact| fact.identity.seeds_derivation()) {
-        if let Some(date) = &fact.occurred_at {
-            dates.insert(date.clone());
-        }
-        if let Some(place) = &fact.occurred_in {
-            places.insert(place.clone());
-        }
-    }
-    EnvironmentOccurrences { dates, places }
+    index
 }
 
 /// The session values the certificate declares.
@@ -1375,19 +1395,63 @@ fn declared_session(
     }
 }
 
-/// Rebuild the anchor for one rule application from the nodes it cites.
+/// Append the registered occurrence records of one proposition to the anchor,
+/// deduplicating dates and places in first-seen order.
+fn collect_occurrence_records(records: &[OccurrenceRecord], anchor: &mut ApplicabilityAnchor) {
+    for (date, place) in records {
+        match date {
+            Some(date) => {
+                if !anchor.event_dates.contains(date) {
+                    anchor.event_dates.push(date.clone());
+                }
+            }
+            None => anchor.missing_event_date = true,
+        }
+        match place {
+            Some(place) => {
+                if !anchor.event_places.contains(place) {
+                    anchor.event_places.push(place.clone());
+                }
+            }
+            None => anchor.missing_event_place = true,
+        }
+    }
+}
+
+/// Add the occurrence records registered for one proposition key to the
+/// anchor. A key with no registration is missing input.
+fn collect_proposition_occurrences(
+    env: &Env,
+    proposition: &CertExpr,
+    occurrences: &BTreeMap<String, Vec<OccurrenceRecord>>,
+    anchor: &mut ApplicabilityAnchor,
+) -> Result<(), String> {
+    let key = key(env, &Expr::from(proposition))?;
+    match occurrences.get(&key) {
+        Some(records) => collect_occurrence_records(records, anchor),
+        None => {
+            anchor.missing_event_date = true;
+            anchor.missing_event_place = true;
+        }
+    }
+    Ok(())
+}
+
+/// Rebuild the anchor for one rule application from the propositions its
+/// cited premises prove.
 ///
-/// A cited assumption contributes the occurrence its environment fact
-/// registers. The reasoner indexes occurrences by proposition key, so every
-/// assumption entry recording the same proposition contributes its record, in
-/// table order; this is the same list the reasoner read. A cited rule or
-/// interpretation conclusion carries no occurrence of its own — it never
-/// inherits the event time of its premises — so it marks the input missing.
+/// The occurrence record is looked up by the premise proposition's key, not
+/// by whether the premise node is an assumption: the reasoner's occurrence
+/// index contains the environment registrations, so a derived conclusion of
+/// the same proposition carries the same event record. Only a proposition
+/// with no environment registration marks the input missing — a rule or
+/// interpretation conclusion never inherits the event time of its own
+/// premises.
 fn rule_applicability_expected(
     env: &Env,
     cert: &Certificate,
     premises: &[NodeId],
-    assumption_records: &BTreeMap<String, Vec<&Assumption>>,
+    occurrences: &BTreeMap<String, Vec<OccurrenceRecord>>,
     rule: &str,
     scope: &std_deduce_kernel::meta::Scope,
     session: (Option<String>, Option<String>),
@@ -1399,128 +1463,129 @@ fn rule_applicability_expected(
         ..ApplicabilityAnchor::default()
     };
     for premise in premises {
-        match cert.nodes.get(*premise) {
-            Some(Node::Assumption { assumption }) => {
-                let entry = cert
-                    .assumptions
-                    .get(*assumption)
-                    .ok_or_else(|| format!("前提 {premise} 引用了不存在的假设 {assumption}"))?;
-                let key = key(env, &Expr::from(&entry.proposition))?;
-                let records = assumption_records.get(&key).ok_or_else(|| {
-                    format!("规则 `{rule}` 的前提 {premise} 是假设，但证书的假设表里没有这个命题")
-                })?;
-                collect_occurrences(records, &mut anchor);
-            }
-            Some(Node::RuleApplication { .. } | Node::InterpretationApplication { .. }) => {
-                anchor.missing_event_date = true;
-                anchor.missing_event_place = true;
-            }
-            Some(Node::Gap { .. }) => {
-                return Err(format!(
-                    "规则 `{rule}` 的前提 {premise} 是缺口，不能充当适用性依据"
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "规则 `{rule}` 的前提 {premise} 越界：证书只有 {} 个节点",
-                    cert.nodes.len()
-                ));
-            }
-        }
+        let Some(proposition) = node_prop(cert, &cert.nodes[*premise]) else {
+            return Err(format!(
+                "规则 `{rule}` 的前提 {premise} 是缺口，不能充当适用性依据"
+            ));
+        };
+        collect_proposition_occurrences(env, proposition, occurrences, &mut anchor)?;
     }
     Ok(crate::applicability::judge(scope, &anchor))
 }
 
-/// Append the occurrence records of the assumptions recording one proposition
-/// to the anchor, deduplicating dates and places in first-seen order.
-fn collect_occurrences(records: &[&Assumption], anchor: &mut ApplicabilityAnchor) {
-    for record in records {
-        match record.occurred_at.as_ref() {
-            Some(date) => {
-                if !anchor.event_dates.contains(date) {
-                    anchor.event_dates.push(date.clone());
-                }
-            }
-            None => anchor.missing_event_date = true,
-        }
-        match record.occurred_in.as_ref() {
-            Some(place) => {
-                if !anchor.event_places.contains(place) {
-                    anchor.event_places.push(place.clone());
-                }
-            }
-            None => anchor.missing_event_place = true,
-        }
-    }
-}
-
 /// Validate one gap candidate's applicability record.
+///
+/// The candidate records the parameter bindings that produced it and the
+/// premises it already holds. The checker re-instantiates the rule's premises,
+/// verifies that the held and missing lists partition them in order, checks
+/// that the instantiated conclusion is the gap proposition, and only then
+/// rebuilds the anchor from the held propositions' environment occurrences.
+/// The recorded dates are never read as input.
 fn validate_candidate_applicability(
     env: &Env,
     cert: &Certificate,
-    node: NodeId,
     index: usize,
+    proposition: &CertExpr,
     candidate: &crate::model::GapCandidate,
-    environment: &EnvironmentOccurrences,
+    occurrences: &BTreeMap<String, Vec<OccurrenceRecord>>,
 ) -> Result<(), String> {
     let rule = escape_control(&candidate.rule);
     let Some(declaration) = env.get(&candidate.rule) else {
         return Err(format!("缺口候选规则 `{rule}` 不存在于当前环境"));
     };
-    let DeclKind::Rule(_) = &declaration.kind else {
+    let DeclKind::Rule(declared) = &declaration.kind else {
         return Err(format!("缺口候选 `{rule}` 不是规则"));
     };
-    let scope = &declaration.scope;
     let place = format!("缺口节点的第 {} 个候选规则 `{rule}`", index + 1);
     let recorded = &candidate.applicability;
 
-    // The recorded reference dates and places must be events the environment
-    // registers. The checker cannot reconstruct which facts the reasoner held,
-    // so this is what ties the declared input to the loaded fact ledger.
-    for dated in recorded
-        .basis
-        .dates
-        .iter()
-        .filter(|dated| !dated.query_date_fallback)
-    {
-        if !environment.dates.contains(&dated.date) {
+    let mut binding: BTreeMap<&str, Expr> = BTreeMap::new();
+    for entry in &candidate.bindings {
+        if !declared
+            .params
+            .iter()
+            .any(|(parameter, _)| parameter.as_ref() == entry.parameter)
+        {
             return Err(format!(
-                "{place}：记录的事件时间 `{}` 不是环境中任何事实记录的发生时间",
-                escape_control(&dated.date)
+                "{place}：绑定参数 `{}` 不是规则 `{rule}` 的参数",
+                entry.parameter
+            ));
+        }
+        if binding.contains_key(entry.parameter.as_str()) {
+            return Err(format!("{place}：参数 `{}` 被重复绑定", entry.parameter));
+        }
+        let value = Expr::from(&entry.value);
+        if !is_closed(&value) {
+            return Err(format!(
+                "{place}：参数 `{}` 的绑定值不是闭合项",
+                entry.parameter
+            ));
+        }
+        binding.insert(entry.parameter.as_str(), value);
+    }
+    let expected_premises: Vec<Expr> = (0..declared.premises.len())
+        .map(|i| close_pattern(&declared.open_premise(i), &binding))
+        .collect();
+    let conclusion = close_pattern(&declared.open_conclusion(), &binding);
+    if key(env, &conclusion)? != key(env, &Expr::from(proposition))? {
+        return Err(format!(
+            "{place}：绑定确立的实例结论是 `{}`，而缺口命题是 `{}`",
+            print_expr(&conclusion),
+            print_expr(&Expr::from(proposition))
+        ));
+    }
+
+    // Merge the held and missing lists against the rule's premise order. Both
+    // lists are subsequences of the instantiated premise list; a premise in
+    // neither list, a duplicate, or an unrelated proposition breaks the merge
+    // and is rejected.
+    let mut held_index = 0usize;
+    let mut missing_index = 0usize;
+    for (position, expected) in expected_premises.iter().enumerate() {
+        let expected_key = key(env, expected)?;
+        let held_matches = candidate.held.get(held_index).is_some_and(|held| {
+            key(env, &Expr::from(held)).is_ok_and(|held_key| held_key == expected_key)
+        });
+        let missing_matches = candidate.missing.get(missing_index).is_some_and(|missing| {
+            key(env, &Expr::from(missing)).is_ok_and(|missing_key| missing_key == expected_key)
+        });
+        if held_matches {
+            held_index += 1;
+        } else if missing_matches {
+            missing_index += 1;
+        } else {
+            return Err(format!(
+                "{place}：规则的第 {} 个前提实例是 `{}`，但候选既未把它列为已持有，\
+                 也未把它列为缺失",
+                position + 1,
+                print_expr(expected)
             ));
         }
     }
-    for place_evidence in &recorded.basis.places {
-        if !environment.places.contains(&place_evidence.place) {
-            return Err(format!(
-                "{place}：记录的事件地点 `{}` 不是环境中任何事实记录的发生地点",
-                escape_control(&place_evidence.place)
-            ));
-        }
+    if held_index != candidate.held.len() {
+        return Err(format!(
+            "{place}：已持有前提列表与规则前提不匹配（多出 {} 条）",
+            candidate.held.len() - held_index
+        ));
+    }
+    if missing_index != candidate.missing.len() {
+        return Err(format!(
+            "{place}：缺失前提列表与规则前提不匹配（多出 {} 条）",
+            candidate.missing.len() - missing_index
+        ));
     }
 
     let (as_of, jurisdiction) = declared_session(cert, recorded);
-    let anchor = ApplicabilityAnchor {
+    let mut anchor = ApplicabilityAnchor {
         as_of,
         jurisdiction,
-        event_dates: recorded
-            .basis
-            .dates
-            .iter()
-            .filter(|dated| !dated.query_date_fallback)
-            .map(|dated| dated.date.clone())
-            .collect(),
-        missing_event_date: recorded.basis.missing_event_date,
-        event_places: recorded
-            .basis
-            .places
-            .iter()
-            .map(|place| place.place.clone())
-            .collect(),
-        missing_event_place: recorded.basis.missing_event_place,
+        ..ApplicabilityAnchor::default()
     };
-    let expected = crate::applicability::judge(scope, &anchor);
-    compare_applicability_record(node, &place, recorded, &expected)
+    for held in &candidate.held {
+        collect_proposition_occurrences(env, held, occurrences, &mut anchor)?;
+    }
+    let expected = crate::applicability::judge(&declaration.scope, &anchor);
+    compare_applicability_record(&place, recorded, &expected)
 }
 
 /// Compare a rule application's applicability record, reporting the node and
@@ -1531,12 +1596,11 @@ fn compare_applicability(
     expected: &RuleApplicability,
 ) -> Result<(), CheckError> {
     let place = "适用性记录".to_owned();
-    compare_applicability_record(node, &place, recorded, expected)
+    compare_applicability_record(&place, recorded, expected)
         .map_err(|message| CheckError::at(node, message))
 }
 
 fn compare_applicability_record(
-    _node: NodeId,
     place: &str,
     recorded: &RuleApplicability,
     expected: &RuleApplicability,

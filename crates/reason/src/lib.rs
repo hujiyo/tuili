@@ -197,6 +197,14 @@ pub enum Node {
 #[derive(Debug, Clone)]
 pub struct GapCandidate {
     pub rule: Name,
+    /// The parameter bindings that produced this candidate instance. A
+    /// certificate records them so a checker can re-instantiate the rule's
+    /// premises instead of trusting the printed gap tree.
+    pub bindings: Vec<(Name, Expr)>,
+    /// The rule premises that already hold, in the rule's premise order. Their
+    /// propositions are how the certificate checker rebuilds the
+    /// applicability anchor from the environment's occurrence records.
+    pub held: Vec<Expr>,
     /// Premises that are not known.
     pub missing: Vec<Expr>,
     /// `unless` conditions that *are* known, i.e. why this rule is blocked.
@@ -705,17 +713,19 @@ impl<'a> Reasoner<'a> {
         &self,
         premises: &[Expr],
         facts: &BTreeMap<String, Expr>,
-    ) -> (Vec<String>, Vec<Expr>) {
+    ) -> (Vec<String>, Vec<Expr>, Vec<Expr>) {
         let mut held_keys = Vec::new();
+        let mut held = Vec::new();
         let mut missing = Vec::new();
         for premise in premises {
             if premise_satisfied(self.env, facts, premise) {
                 held_keys.push(self.key_of(premise));
+                held.push(premise.clone());
             } else {
                 missing.push(premise.clone());
             }
         }
-        (held_keys, missing)
+        (held_keys, held, missing)
     }
 
     /// The priority cycles of the environment: every strongly connected
@@ -2003,7 +2013,7 @@ impl<'a> Reasoner<'a> {
                 let premises: Vec<Expr> = (0..rule.premises.len())
                     .map(|index| close_pattern(&rule.open_premise(index), &binding))
                     .collect();
-                let (held_keys, _) = self.premise_status(&premises, &facts);
+                let (held_keys, _, _) = self.premise_status(&premises, &facts);
                 let verdict = self.judge_instance(&decl.scope, &held_keys);
                 // The conclusion is an issue even when this instance is
                 // excluded: the gap tree must show why the rule did not fire.
@@ -2285,7 +2295,7 @@ impl<'a> Reasoner<'a> {
             // reports as missing. The candidate's instance references only the
             // premise facts that already hold; a still-missing premise is not
             // a fact yet, so it does not contribute an event record.
-            let (held_keys, missing) = self.premise_status(&premises, &facts);
+            let (held_keys, held, missing) = self.premise_status(&premises, &facts);
             let blocked_by: Vec<Expr> = rule
                 .unlesses
                 .iter()
@@ -2294,6 +2304,8 @@ impl<'a> Reasoner<'a> {
                 .collect();
             candidates.push(GapCandidate {
                 rule: decl.name.clone(),
+                bindings: binding,
+                held,
                 missing,
                 blocked_by,
                 sources: decl.sources.clone(),
@@ -3658,6 +3670,39 @@ pub fn certificate(
             } => {
                 let mut converted = Vec::with_capacity(candidates.len());
                 for candidate in candidates {
+                    let bindings = candidate
+                        .bindings
+                        .iter()
+                        .map(|(parameter, value)| {
+                            Ok(std_deduce_cert::Binding {
+                                parameter: parameter.to_string(),
+                                value: cert_expr(
+                                    value,
+                                    Some(id),
+                                    &format!(
+                                        "候选规则 `{}` 的参数 `{parameter}` 绑定值",
+                                        candidate.rule
+                                    ),
+                                )?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    let held = candidate
+                        .held
+                        .iter()
+                        .enumerate()
+                        .map(|(i, expr)| {
+                            cert_expr(
+                                expr,
+                                Some(id),
+                                &format!(
+                                    "候选规则 `{}` 的第 {} 个已持有前提",
+                                    candidate.rule,
+                                    i + 1
+                                ),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
                     let missing = candidate
                         .missing
                         .iter()
@@ -3685,6 +3730,8 @@ pub fn certificate(
                     let scope = rule_scope(env, &candidate.rule, id)?;
                     converted.push(std_deduce_cert::GapCandidate {
                         rule: candidate.rule.to_string(),
+                        bindings,
+                        held,
                         missing,
                         blocked_by,
                         sources: candidate

@@ -153,6 +153,8 @@ fn sample_certificate() -> Certificate {
                 proposition: app(constant("赔偿"), constant("张三")),
                 candidates: vec![GapCandidate {
                     rule: "侵权赔偿".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
                     missing: vec![app(constant("损害"), constant("张三"))],
                     blocked_by: Vec::new(),
                     sources: vec![source(

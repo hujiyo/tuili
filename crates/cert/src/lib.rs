@@ -91,22 +91,25 @@
 //! it never depends on the reasoner.
 //!
 //! Version 7's applicability records are recomputed, never trusted. For a
-//! rule application the checker rebuilds the anchor from the cited nodes:
-//! a cited assumption contributes the `occurred_at` / `occurred_in` its
-//! environment fact registers (aggregated over assumptions of the same
-//! proposition), and a cited rule or interpretation conclusion contributes no
-//! occurrence. The session `:asof` and jurisdiction come from the recorded
+//! rule application the checker looks up the environment's registered
+//! `occurred_at` / `occurred_in` by each cited premise **proposition's** key —
+//! a premise proved by a derived conclusion therefore still reads the
+//! registered occurrence, and only a proposition with no registration is
+//! missing input. The session `:asof` and jurisdiction come from the recorded
 //! environment identity, not from the record, so a certificate cannot invent a
 //! fallback date. The rule's declared range, jurisdiction and territory, and
 //! each field's origin, are compared with the loaded rule declaration. The
 //! checker then computes the verdict, basis and reason and compares every
 //! field with the record, naming the node and field on any difference. A rule
 //! application whose verdict does not allow firing is rejected. A gap
-//! candidate's record is recomputed from its declared basis, and every
-//! recorded event time/place must be one the environment's facts register.
-//! Assumption occurrences are compared as sets with the environment's fact
-//! registrations, so a certificate cannot drop or edit them. Missing
-//! applicability fields are a format error, never a defaulted `unchecked`.
+//! candidate's record is recomputed from its recorded bindings and held
+//! premises: the checker re-instantiates the rule premises, requires the held
+//! and missing lists to partition them in order, checks the instantiated
+//! conclusion is the gap proposition, and rebuilds the anchor from the held
+//! propositions' environment occurrences. Assumption occurrences are compared
+//! as sets with the environment's fact registrations, so a certificate cannot
+//! drop or edit them. Missing applicability fields are a format error, never a
+//! defaulted `unchecked`.
 //!
 //! Every recorded conflict resolution is checked too. A priority-based defeat
 //! must cite edges the environment really declares, in the direction of the

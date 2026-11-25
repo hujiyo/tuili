@@ -192,6 +192,8 @@ fn a_certificate_over_the_node_limit_is_rejected() {
 fn gap_candidate() -> Value {
     json!({
         "rule": "r",
+        "bindings": [],
+        "held": [],
         "missing": [],
         "blocked_by": [],
         "sources": [],

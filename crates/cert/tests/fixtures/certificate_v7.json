@@ -202,6 +202,8 @@
       "candidates": [
         {
           "rule": "侵权赔偿",
+          "bindings": [],
+          "held": [],
           "missing": [
             {
               "kind": "app",

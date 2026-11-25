@@ -276,6 +276,8 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
             candidates: vec![
                 GapCandidate {
                     rule: "规则一".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
                     missing: vec![atom("不批准", "甲"), atom("批准", "甲")],
                     blocked_by: Vec::new(),
                     sources: vec![source("来源", "一", "", "")],
@@ -283,6 +285,8 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
                 },
                 GapCandidate {
                     rule: "规则二".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
                     missing: Vec::new(),
                     blocked_by: vec![atom("已决", "甲")],
                     sources: Vec::new(),
@@ -290,6 +294,8 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
                 },
                 GapCandidate {
                     rule: "规则三".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
                     missing: Vec::new(),
                     blocked_by: Vec::new(),
                     sources: Vec::new(),
@@ -297,6 +303,8 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
                 },
                 GapCandidate {
                     rule: "规则四".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
                     missing: Vec::new(),
                     blocked_by: vec![atom("其他", "甲")],
                     sources: Vec::new(),
@@ -349,6 +357,8 @@ fn an_ambiguous_blocker_is_not_attributed_to_a_fact() {
                 note: None,
                 candidates: vec![GapCandidate {
                     rule: "规则一".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
                     missing: Vec::new(),
                     blocked_by: vec![atom("已决", "甲")],
                     sources: Vec::new(),
@@ -378,6 +388,8 @@ fn a_duplicate_blocker_fact_is_not_attributed() {
             note: None,
             candidates: vec![GapCandidate {
                 rule: "规则一".to_owned(),
+                bindings: Vec::new(),
+                held: Vec::new(),
                 missing: Vec::new(),
                 blocked_by: vec![atom("已决", "甲")],
                 sources: Vec::new(),

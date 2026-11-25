@@ -11,6 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std_deduce_cert::{
+    judge_applicability, ApplicabilityAnchor, Assumption, Binding, CertExpr, Certificate,
+    EnvironmentIdentity, FactIdentity, Metadata, Node,
+};
+use std_deduce_lang::Library;
+
 const PROVED: i32 = 0;
 const GAP: i32 = 1;
 const ERROR: i32 = 2;
@@ -513,6 +519,76 @@ rule 规则 :
     );
 }
 
+/// The P1 channel end to end: a gap candidate's recorded dates cannot be
+/// swapped for an unrelated fact's dates, because the checker rebuilds the
+/// anchor from the held premise and the environment occurrences.
+#[test]
+fn a_forged_gap_candidate_date_is_rejected() {
+    let root = TempRoot::new("candidate-forgery");
+    let theory = root.write(
+        "case.std",
+        r#"
+sort 人
+pred 行为 : 人 → Prop
+pred 结论 : 人 → Prop
+pred 别的 : 人 → Prop
+obj 甲 : 人
+axiom 行为事实 : 行为 甲
+  source text "材料" locator "一"
+  occurred_at 2019-05-01
+axiom 无关事实 : 别的 甲
+  source text "材料" locator "二"
+  occurred_at 2023-01-01
+rule 后规 :
+  params x : 人
+  premise 行为 x
+  conclude 结论 x
+  effective 2021-01-01
+  source text "新法" locator "第一条"
+"#,
+    );
+    let output = root.session(
+        &[],
+        &[
+            format!(":load {}", theory.display()),
+            ":cert 结论 甲".to_owned(),
+        ],
+    );
+    assert_exit(&output, GAP);
+    let certificate = certificate_json(&output);
+    let root_index = certificate["root"].as_u64().expect("a gap root") as usize;
+    let candidate = &certificate["nodes"][root_index]["candidates"][0];
+    assert_eq!(candidate["held"].as_array().unwrap().len(), 1);
+    let mut forged = certificate.clone();
+    let record = &mut forged["nodes"][root_index]["candidates"][0]["applicability"];
+    record["verdict"] = serde_json::Value::from("applicable");
+    record["reason"] = serde_json::Value::Null;
+    record["basis"]["dates"][0]["date"] = serde_json::Value::from("2023-01-01");
+    record["basis"]["dates"][0]["covered"] = serde_json::Value::from(true);
+    let path = write_certificate(&root, "forged-candidate", &forged);
+    let checked = verify(&root, &[], &theory, &path);
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    let err = stderr(&checked);
+    assert!(err.contains("候选规则"), "{err}");
+    assert!(err.contains("applicable"), "{err}");
+
+    // Swapping the held premise to the unrelated fact is rejected before the
+    // verdict is compared: it is not an instance of the rule's premise.
+    let mut swapped = certificate;
+    swapped["nodes"][root_index]["candidates"][0]["held"][0] = serde_json::json!({
+        "kind": "app",
+        "func": { "kind": "const", "name": "别的" },
+        "arg": { "kind": "const", "name": "甲" }
+    });
+    let path = write_certificate(&root, "swapped-held", &swapped);
+    let checked = verify(&root, &[], &theory, &path);
+    assert_exit(&checked, ERROR);
+    let err = stderr(&checked);
+    assert!(err.contains("既未把它列为已持有"), "{err}");
+}
+
 /// Changing one reference event time is rejected at the named basis field.
 #[test]
 fn a_changed_basis_date_is_rejected() {
@@ -598,4 +674,170 @@ fn an_edited_scope_text_is_rejected() {
         serde_json::Value::from("CN-BJ");
     let err = reject_edit(&root, &["--jurisdiction", "CN"], &theory, &certificate);
     assert!(err.contains("territory"), "{err}");
+}
+
+/// Changing only the certificate's environment `as_of` and verifying with the
+/// same value is accepted: the session value is a declared input, not a
+/// forged conclusion, and the event-time record does not use it.
+#[test]
+fn a_changed_environment_asof_with_the_same_value_verifies() {
+    let root = TempRoot::new("identity-asof");
+    let theory = root.write("case.std", EVENT_TIME_THEORY);
+    let (mut certificate, _) = generate(&root, &["--jurisdiction", "CN"], &theory, "结论 甲");
+    certificate["environment"]["as_of"] = serde_json::Value::from("2026-11-23");
+    let path = write_certificate(&root, "edited-identity", &certificate);
+    let checked = verify(
+        &root,
+        &["--as-of", "2026-11-23", "--jurisdiction", "CN"],
+        &theory,
+        &path,
+    );
+    assert_exit(&checked, PROVED);
+    let out = stdout(&checked);
+    assert!(out.contains("环境校验：通过"), "{out}");
+    assert!(out.contains("逻辑校验：通过"), "{out}");
+    assert!(out.contains("内核证明：通过"), "{out}");
+}
+
+/// The P0 channel end to end: a scoped rule step whose premise is proved by a
+/// derived conclusion still reads the occurrence the environment registers for
+/// that premise, so the forged `unchecked` certificate is rejected. The same
+/// certificate passes when the environment registers no occurrence for that
+/// proposition — the checker must not become stricter than the reasoner.
+#[test]
+fn a_derived_premise_attack_follows_the_environment_registration() {
+    let registered = TempRoot::new("derived-registered");
+    let registered_theory = registered.write(
+        "case.std",
+        r#"
+sort 人
+pred 其他 : 人 → Prop
+pred 行为 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 其他事实 : 其他 甲
+  source text "材料" locator "一"
+axiom 行为登记 : 行为 甲
+  source text "材料" locator "二"
+  occurred_at 2019-05-01
+rule 派生行为 :
+  params x : 人
+  premise 其他 x
+  conclude 行为 x
+  source text "派生法" locator "第一条"
+rule 后规 :
+  params x : 人
+  premise 行为 x
+  conclude 结论 x
+  effective 2021-01-01
+  source text "新法" locator "第一条"
+"#,
+    );
+    let pure = TempRoot::new("derived-pure");
+    let pure_theory = pure.write(
+        "case.std",
+        r#"
+sort 人
+pred 其他 : 人 → Prop
+pred 行为 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 其他事实 : 其他 甲
+  source text "材料" locator "一"
+rule 派生行为 :
+  params x : 人
+  premise 其他 x
+  conclude 行为 x
+  source text "派生法" locator "第一条"
+rule 后规 :
+  params x : 人
+  premise 行为 x
+  conclude 结论 x
+  effective 2021-01-01
+  source text "新法" locator "第一条"
+"#,
+    );
+
+    // Build the forged certificate the reviewer used: omission of the
+    // registered `行为 甲` assumption, the derived node as `后规`'s premise,
+    // and a self-consistent `unchecked / no_case_date` record.
+    let mut library = Library::new();
+    let source = fs::read_to_string(&pure_theory).expect("read theory");
+    library.load("pure", &source).expect("load pure theory");
+    let env = &library.env;
+    let no_input = ApplicabilityAnchor {
+        missing_event_date: true,
+        missing_event_place: true,
+        ..ApplicabilityAnchor::default()
+    };
+    let applicability = |rule: &str| {
+        let declaration = env
+            .get(&std_deduce_kernel::name(rule))
+            .expect("the rule exists");
+        judge_applicability(&declaration.scope, &no_input)
+    };
+    let rule_node =
+        |rule: &str, conclusion: CertExpr, premises: Vec<usize>| Node::RuleApplication {
+            rule: rule.to_owned(),
+            conclusion,
+            premises,
+            bindings: vec![Binding {
+                parameter: "x".to_owned(),
+                value: CertExpr::Const {
+                    name: "甲".to_owned(),
+                },
+            }],
+            sources: Vec::new(),
+            applicability: Box::new(applicability(rule)),
+        };
+    let atom = |predicate: &str| CertExpr::App {
+        func: Box::new(CertExpr::Const {
+            name: predicate.to_owned(),
+        }),
+        arg: Box::new(CertExpr::Const {
+            name: "甲".to_owned(),
+        }),
+    };
+    let certificate = Certificate {
+        format_version: std_deduce_cert::FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::none(),
+        assumptions: vec![Assumption {
+            proposition: atom("其他"),
+            identity: FactIdentity::UserAsserted,
+            sources: Vec::new(),
+            label: None,
+            occurred_at: std_deduce_cert::Explicit::none(),
+            occurred_in: std_deduce_cert::Explicit::none(),
+        }],
+        interpretations: Vec::new(),
+        nodes: vec![
+            Node::Assumption { assumption: 0 },
+            rule_node("派生行为", atom("行为"), vec![0]),
+            rule_node("后规", atom("结论"), vec![1]),
+        ],
+        root: Some(2),
+        conflicts: Vec::new(),
+        open_obligations: Vec::new(),
+        metadata: Metadata::default(),
+    };
+    let json = serde_json::to_value(&certificate).expect("the certificate serializes");
+
+    // Registered `行为 甲`: recomputation reads 2019-05-01 and rejects.
+    let registered_path = write_certificate(&registered, "derived-attack", &json);
+    let checked = verify(&registered, &[], &registered_theory, &registered_path);
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：失败"), "{out}");
+    let err = stderr(&checked);
+    assert!(err.contains("节点 2"), "{err}");
+    assert!(err.contains("适用性记录"), "{err}");
+    assert!(err.contains("inapplicable"), "{err}");
+
+    // Without any registration for `行为 甲`, missing input is correct.
+    let pure_path = write_certificate(&pure, "pure-derived", &json);
+    let checked = verify(&pure, &[], &pure_theory, &pure_path);
+    assert_exit(&checked, PROVED);
+    let out = stdout(&checked);
+    assert!(out.contains("逻辑校验：通过"), "{out}");
+    assert!(out.contains("内核证明：通过"), "{out}");
 }
