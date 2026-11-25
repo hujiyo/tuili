@@ -204,8 +204,9 @@ fn a_deeply_nested_certificate_is_rejected_before_checking() {
         ",\"arg\":{\"kind\":\"const\",\"name\":\"x\"}}".repeat(depth)
     );
     let certificate = format!(
-        "{{\"format_version\":5,\"environment\":{{\"profile\":null,\"packs\":[],\
+        "{{\"format_version\":6,\"environment\":{{\"profile\":null,\"packs\":[],\
          \"corpora\":[],\"as_of\":null,\"jurisdiction\":null}},\"assumptions\":[],\
+         \"interpretations\":[],\
          \"nodes\":[{{\"kind\":\"gap\",\"proposition\":{expression}}}],\"root\":null,\
          \"conflicts\":[],\"open_obligations\":[],\"metadata\":{{}}}}"
     );

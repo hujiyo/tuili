@@ -1,5 +1,6 @@
 //! End-to-end tests for `interpret`: loading, `:inspect`, the closed
-//! environment, and the fact that a loaded interpretation changes nothing yet.
+//! environment, and the fact that a loaded-but-unenabled interpretation still
+//! changes no derivation. Enabling it is covered by `interpret_apply.rs`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -322,17 +323,20 @@ fn a_loaded_interpretation_does_not_make_its_target_provable() {
             ":why Q 张三".to_owned(),
         ]),
         GAP,
-        &["+ 解释", "? Q 张三", "根为缺口"],
+        &[
+            "+ 解释",
+            "? Q 张三",
+            "根为缺口",
+            // The default is still inert, but the gap now offers the explicit
+            // way out instead of silently ignoring the declaration.
+            "存在未启用解释 `解释`",
+        ],
     );
 
     let out = stdout(&output);
-    let result = out
-        .split_once("? Q 张三")
-        .map(|(_, result)| result)
-        .unwrap_or_else(|| panic!("no gap result:\n{out}"));
     assert!(
-        !result.contains("解释"),
-        "an interpretation must not enter the derivation:\n{out}"
+        !out.contains("由解释推出") && !out.contains("〈解释 解释"),
+        "an unenabled interpretation must not enter the derivation:\n{out}"
     );
     assert!(
         !out.contains("推导已通过独立校验。"),
@@ -346,8 +350,8 @@ fn gap_and_cert_do_not_apply_a_loaded_interpretation() {
     let case = temp.write("case.std", INERT_CASE);
     let path = case.display().to_string();
 
-    // `:gap` reports the missing rule; the interpretation is not offered as a
-    // way to bridge the two propositions.
+    // `:gap` reports the missing rule and the hint; the interpretation is not
+    // offered as a derivation step.
     let output = run(&[
         "--no-default-packs".to_owned(),
         path.clone(),
@@ -361,12 +365,16 @@ fn gap_and_cert_do_not_apply_a_loaded_interpretation() {
         .map(|(_, gap)| gap)
         .unwrap_or_else(|| panic!("no gap explanation:\n{out}"));
     assert!(
-        gap.contains("没有任何规则") && !gap.contains("解释"),
-        "the interpretation must not be a candidate:\n{out}"
+        gap.contains("没有任何规则") && gap.contains("存在未启用解释"),
+        "the interpretation must be a hint, not a candidate:\n{out}"
+    );
+    assert!(
+        !gap.contains("▸ Q 张三"),
+        "the interpretation must not be applied:\n{out}"
     );
 
-    // `:cert` records the gap root. Its JSON contains no interpretation: the
-    // declaration is not an assumption, a rule step, or a candidate.
+    // `:cert` records the gap root. Its v6 interpretations table is empty:
+    // the declaration is not an assumption, a rule step, or a candidate.
     let output = run(&[
         "--no-default-packs".to_owned(),
         path,
@@ -375,15 +383,21 @@ fn gap_and_cert_do_not_apply_a_loaded_interpretation() {
     assert_exit(&output, GAP);
     let json = certificate_json(&output);
     assert!(
-        !json.contains("解释"),
-        "the certificate mentions the inert interpretation:\n{json}"
+        !json.contains("interpretation_application"),
+        "the certificate applies the inert interpretation:\n{json}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&json).expect("certificate JSON parses");
+    assert_eq!(value["format_version"], 6);
+    assert_eq!(
+        value["interpretations"].as_array().map(Vec::len),
+        Some(0),
+        "an unenabled interpretation must not be listed:\n{json}"
     );
     assert!(json.contains("\"kind\": \"gap\""), "no gap node:\n{json}");
     assert!(
         json.contains("\"kind\": \"missing_premise\""),
         "no missing-premise obligation:\n{json}"
     );
-    let value: serde_json::Value = serde_json::from_str(&json).expect("certificate JSON parses");
     let root = value["root"].as_u64().expect("the gap root is recorded") as usize;
     assert_eq!(
         value["nodes"][root]["kind"], "gap",

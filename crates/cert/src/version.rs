@@ -12,9 +12,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// priority edges with their origins and sources), and an unresolved conflict
 /// carries the reason. Version 5 records the fact identity of every
 /// assumption and the reason for an unresolved claim that met a rule
-/// conclusion. Older certificates are refused rather than read with guessed
-/// evidence: a conflict whose fact identities are unknown cannot be checked.
-pub const FORMAT_VERSION: u32 = 5;
+/// conclusion. Version 6 records the enabled interpretations: a mandatory
+/// `interpretations` table (empty when none were used) sorted by id, the
+/// `interpretation_application` node, and the interpretation witness of a
+/// conflict. Older certificates are refused rather than read with guessed
+/// evidence: a proof that silently drops an interpretation step cannot be
+/// checked.
+pub const FORMAT_VERSION: u32 = 6;
 
 /// A certificate format version.
 ///

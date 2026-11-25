@@ -102,7 +102,8 @@ pub enum Item {
     },
     /// `interpret 解释A : P → Q` followed by a required `direction` line and
     /// at least one `source` line. Both sides must be propositions; the
-    /// declaration is recorded as an opaque, inert constant.
+    /// declaration is recorded as a constant that the reasoner applies only
+    /// when the query explicitly enables it.
     Interpretation {
         name: String,
         from: Term,

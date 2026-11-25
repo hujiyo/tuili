@@ -154,8 +154,8 @@ use crate::closure;
 use crate::expr::CertExpr;
 use crate::key::expression_key;
 use crate::model::{
-    Certificate, Conflict, FactIdentity, Node, NodeId, PriorityClause, PriorityEdge,
-    PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
+    Certificate, Conflict, FactIdentity, InterpretationDirection, Node, NodeId, PriorityClause,
+    PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
 };
 use crate::source::Source;
 
@@ -254,6 +254,7 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
     // provenance checks.
     let facts = environment_facts(env)?;
     validate_assumptions(env, cert, &facts)?;
+    validate_interpretations(env, cert)?;
 
     // Pass 1: every node that proves something must prove a proposition, and
     // its proposition is collected for the `unless` check. Gaps prove
@@ -274,6 +275,7 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
                 ("假设", Expr::from(&entry.proposition))
             }
             Node::RuleApplication { conclusion, .. } => ("结论", Expr::from(conclusion)),
+            Node::InterpretationApplication { conclusion, .. } => ("结论", Expr::from(conclusion)),
             Node::Gap { .. } => continue,
         };
         kernel_check::check(env, &Ctx::new(), &proposition, &Expr::Sort(0))
@@ -332,6 +334,78 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
 
     // Pass 2: rebuild each rule application from its own evidence.
     for (id, node) in cert.nodes.iter().enumerate() {
+        if let Node::InterpretationApplication {
+            interpretation,
+            premise,
+            conclusion,
+        } = node
+        {
+            let Some(entry) = cert.interpretations.get(*interpretation) else {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "引用了不存在的解释 {interpretation}：证书只有 {} 条解释",
+                        cert.interpretations.len()
+                    ),
+                ));
+            };
+            if *premise >= cert.nodes.len() {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "前提节点索引 {premise} 越界：证书只有 {} 个节点",
+                        cert.nodes.len()
+                    ),
+                ));
+            }
+            if *premise >= id {
+                return Err(CheckError::at(
+                    id,
+                    format!("前提 {premise} 必须是当前节点之前的节点"),
+                ));
+            }
+            let Some(proved) = node_prop(cert, &cert.nodes[*premise]) else {
+                return Err(CheckError::at(
+                    id,
+                    format!("前提 {premise} 是缺口，不能充当解释的前提"),
+                ));
+            };
+            let premise_expr = Expr::from(proved);
+            let from = Expr::from(&entry.from);
+            let same_from =
+                convertible(env, &Ctx::new(), &premise_expr, &from).map_err(|error| {
+                    CheckError::at(id, format!("无法判定解释的前提是否等价：{error}"))
+                })?;
+            if !same_from {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "解释 `{}` 的 from 是 `{}`，而前提 {premise} 证成的是 `{}`",
+                        entry.id,
+                        print_expr(&from),
+                        print_expr(&premise_expr)
+                    ),
+                ));
+            }
+            let conclusion_expr = Expr::from(conclusion);
+            let to = Expr::from(&entry.to);
+            let same_to =
+                convertible(env, &Ctx::new(), &conclusion_expr, &to).map_err(|error| {
+                    CheckError::at(id, format!("无法判定解释的结论是否等价：{error}"))
+                })?;
+            if !same_to {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "解释 `{}` 的 to 是 `{}`，而本步的结论是 `{}`",
+                        entry.id,
+                        print_expr(&to),
+                        print_expr(&conclusion_expr)
+                    ),
+                ));
+            }
+            continue;
+        }
         let Node::RuleApplication {
             rule,
             conclusion,
@@ -1007,6 +1081,149 @@ fn validate_assumptions(
     Ok(())
 }
 
+/// Validate the certificate's interpretation table against the environment.
+///
+/// Version 6 lists the interpretations the derivation enabled. Each entry must
+/// name an environment declaration of kind `Interpretation`, whose `from` and
+/// `to` are kernel-equivalent to the recorded ones, whose direction and
+/// sources agree field by field, and the table must be sorted by `id` with no
+/// duplicate. A missing entry is a refusal, never a silent downgrade: the
+/// proof's interpretation step would lose its licence.
+fn validate_interpretations(env: &Env, cert: &Certificate) -> Result<(), CheckError> {
+    for pair in cert.interpretations.windows(2) {
+        if pair[0].id >= pair[1].id {
+            return Err(CheckError {
+                node: None,
+                message: format!(
+                    "证书的解释表必须按 id 严格排序且不能重复：`{}` 与 `{}` 顺序不符",
+                    pair[0].id, pair[1].id
+                ),
+            });
+        }
+    }
+    for (index, entry) in cert.interpretations.iter().enumerate() {
+        let fail = |message: String| CheckError {
+            node: None,
+            message: format!("第 {} 条解释 `{}`：{message}", index + 1, entry.id),
+        };
+        let Some(decl) = env.get(&entry.id) else {
+            return Err(fail("当前环境没有声明这个解释".to_owned()));
+        };
+        let DeclKind::Interpretation(declared) = &decl.kind else {
+            return Err(fail("环境中的同名声明不是解释".to_owned()));
+        };
+        let from = Expr::from(&entry.from);
+        let same_from = convertible(env, &Ctx::new(), &from, &declared.from)
+            .map_err(|error| fail(format!("无法判定 from 是否与环境的解释声明等价：{error}")))?;
+        if !same_from {
+            return Err(fail(format!(
+                "证书的 from 是 `{}`，环境声明的 from 是 `{}`，两者在内核下不等价",
+                print_expr(&from),
+                print_expr(&declared.from)
+            )));
+        }
+        let to = Expr::from(&entry.to);
+        let same_to = convertible(env, &Ctx::new(), &to, &declared.to)
+            .map_err(|error| fail(format!("无法判定 to 是否与环境的解释声明等价：{error}")))?;
+        if !same_to {
+            return Err(fail(format!(
+                "证书的 to 是 `{}`，环境声明的 to 是 `{}`，两者在内核下不等价",
+                print_expr(&to),
+                print_expr(&declared.to)
+            )));
+        }
+        if InterpretationDirection::from(&declared.direction) != entry.direction {
+            return Err(fail(format!(
+                "证书的方向是 `{}`，环境声明的方向是 `{}`",
+                entry.direction.keyword(),
+                InterpretationDirection::from(&declared.direction).keyword()
+            )));
+        }
+        if entry.sources.len() != declared.sources.len() {
+            return Err(fail(format!(
+                "证书记录了 {} 条来源，环境声明有 {} 条",
+                entry.sources.len(),
+                declared.sources.len()
+            )));
+        }
+        for (source_index, source) in entry.sources.iter().enumerate() {
+            let kernel_source = std_deduce_kernel::env::SourceRef::from(source);
+            if kernel_source != declared.sources[source_index] {
+                return Err(fail(format!(
+                    "第 {} 条来源与环境的解释声明逐字段不一致",
+                    source_index + 1
+                )));
+            }
+        }
+    }
+
+    // Every listed interpretation must be referenced by an application node
+    // or by a conflict witness, and two listed interpretations may not license
+    // kernel-equivalent conclusions: the reasoner refuses to enable such a
+    // pair, so a certificate that lists both was not produced by it.
+    let mut referenced = BTreeSet::new();
+    for node in &cert.nodes {
+        if let Node::InterpretationApplication { interpretation, .. } = node {
+            referenced.insert(*interpretation);
+        }
+    }
+    for conflict in &cert.conflicts {
+        for provenance in [&conflict.left_by, &conflict.right_by] {
+            if let Provenance::Interpretation { interpretation } = provenance {
+                referenced.insert(*interpretation);
+            }
+        }
+    }
+    for index in &referenced {
+        if *index >= cert.interpretations.len() {
+            return Err(CheckError {
+                node: None,
+                message: format!(
+                    "解释应用或冲突见证引用了不存在的解释 {index}：证书只有 {} 条解释",
+                    cert.interpretations.len()
+                ),
+            });
+        }
+    }
+    for index in 0..cert.interpretations.len() {
+        if !referenced.contains(&index) {
+            return Err(CheckError {
+                node: None,
+                message: format!(
+                    "第 {} 条解释 `{}` 没有被任何解释应用节点或冲突见证引用；\
+                     证书只列本次启用且被引用的解释",
+                    index + 1,
+                    cert.interpretations[index].id
+                ),
+            });
+        }
+    }
+    for left in 0..cert.interpretations.len() {
+        for right in (left + 1)..cert.interpretations.len() {
+            let same = convertible(
+                env,
+                &Ctx::new(),
+                &Expr::from(&cert.interpretations[left].to),
+                &Expr::from(&cert.interpretations[right].to),
+            )
+            .map_err(|error| CheckError {
+                node: None,
+                message: format!("无法判定两条解释的 to 是否等价：{error}"),
+            })?;
+            if same {
+                return Err(CheckError {
+                    node: None,
+                    message: format!(
+                        "解释 `{}` 与 `{}` 的 to 在内核下等价，不能同时启用",
+                        cert.interpretations[left].id, cert.interpretations[right].id
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One environment fact, with the normalized proposition and its comparison key.
 struct EnvironmentFact {
     name: String,
@@ -1206,6 +1423,72 @@ fn validate_provenance(
                     }
                 }
             }
+            Provenance::Interpretation { interpretation } => {
+                let Some(entry) = cert.interpretations.get(*interpretation) else {
+                    return Err(fail(format!(
+                        "{label}侧记录为解释推出，但证书只有 {} 条解释，没有第 {interpretation} 条",
+                        cert.interpretations.len()
+                    )));
+                };
+                let proposition_expr = Expr::from(proposition);
+                let to = Expr::from(&entry.to);
+                let same =
+                    convertible(env, &Ctx::new(), &to, &proposition_expr).map_err(|error| {
+                        fail(format!("无法判定{label}侧命题是否等于解释的 to：{error}"))
+                    })?;
+                if !same {
+                    return Err(fail(format!(
+                        "{label}侧命题「{}」与解释 `{}` 的 to「{}」在内核下不等价",
+                        print_expr(&proposition_expr),
+                        entry.id,
+                        print_expr(&to)
+                    )));
+                }
+                // A proposition is one thing: a side recorded as licensed by
+                // an interpretation cannot also be an assumed fact or an
+                // environment fact. The reasoner never produces that
+                // combination, so it is a hand-edited record.
+                for assumption in &cert.assumptions {
+                    let same = assumption.proposition == *proposition
+                        || convertible(
+                            env,
+                            &Ctx::new(),
+                            &Expr::from(&assumption.proposition),
+                            &proposition_expr,
+                        )
+                        .map_err(|error| {
+                            fail(format!(
+                                "无法判定{label}侧命题是否与证书假设表等价：{error}"
+                            ))
+                        })?;
+                    if same {
+                        return Err(fail(format!(
+                            "{label}侧命题「{}」已作为事实列在假设表里，不能同时记为解释推出",
+                            print_expr(&proposition_expr)
+                        )));
+                    }
+                }
+                let proposition_key = key(env, &proposition_expr).map_err(fail)?;
+                for fact in facts {
+                    if !fact.identity.seeds_derivation() {
+                        continue;
+                    }
+                    let same = fact.key == proposition_key
+                        || convertible(env, &Ctx::new(), &fact.proposition, &proposition_expr)
+                            .map_err(|error| {
+                                fail(format!(
+                                    "无法判定{label}侧命题是否与环境中事实 `{}` 等价：{error}",
+                                    fact.name
+                                ))
+                            })?;
+                    if same {
+                        return Err(fail(format!(
+                            "{label}侧命题「{}」已在环境中登记为事实，不能同时记为解释推出",
+                            print_expr(&proposition_expr)
+                        )));
+                    }
+                }
+            }
             Provenance::Assumption => {
                 if !cert
                     .assumptions
@@ -1366,18 +1649,21 @@ fn validate_resolution(
                 Ok(0)
             }
             UnresolvedReason::NonStrictFact { identity } => {
-                // The reason is about one claim facing one rule conclusion.
+                // The reason is about one claim facing one conclusion: a rule
+                // application or an interpretation application.
                 let (fact_side, fact_prop) = match (&conflict.left_by, &conflict.right_by) {
-                    (Provenance::Assumption, Provenance::Rules { .. }) => {
-                        (Side::Left, &conflict.left)
-                    }
-                    (Provenance::Rules { .. }, Provenance::Assumption) => {
-                        (Side::Right, &conflict.right)
-                    }
+                    (
+                        Provenance::Assumption,
+                        Provenance::Rules { .. } | Provenance::Interpretation { .. },
+                    ) => (Side::Left, &conflict.left),
+                    (
+                        Provenance::Rules { .. } | Provenance::Interpretation { .. },
+                        Provenance::Assumption,
+                    ) => (Side::Right, &conflict.right),
                     _ => {
                         return Err(fail(
-                            "记录为未经证明的主张与规则结论之间的未决冲突，\
-                             但两侧必须一侧是事实、另一侧是规则"
+                            "记录为未经证明的主张与规则或解释结论之间的未决冲突，\
+                             但两侧必须一侧是事实、另一侧是规则或解释"
                                 .to_owned(),
                         ));
                     }
@@ -1410,14 +1696,22 @@ fn validate_resolution(
             UnresolvedReason::UnknownWitnesses => {
                 // A fact can never leave a conflict unresolved for want of
                 // rule witnesses: a strict fact wins, and a claim facing a
-                // rule conclusion is recorded as `non_strict_fact`. The
-                // reasoner never labels a fact side this way, so a hand-edited
-                // record must not relabel that outcome as a lost witness.
+                // rule conclusion is recorded as `non_strict_fact`. The same
+                // holds for an interpretation witness, which is never a lost
+                // rule list.
                 if matches!(conflict.left_by, Provenance::Assumption)
                     || matches!(conflict.right_by, Provenance::Assumption)
                 {
                     return Err(fail(
                         "一侧是事实时，只能是事实胜出或主张未决，不能记录为见证无法重建".to_owned(),
+                    ));
+                }
+                if matches!(conflict.left_by, Provenance::Interpretation { .. })
+                    || matches!(conflict.right_by, Provenance::Interpretation { .. })
+                {
+                    return Err(fail(
+                        "一侧是解释推出的结论时，解释见证就是解释声明，不能记录为见证无法重建"
+                            .to_owned(),
                     ));
                 }
                 let lost = matches!(&conflict.left_by, Provenance::Rules { rules } if rules.is_empty())
@@ -1428,6 +1722,23 @@ fn validate_resolution(
                 Ok(0)
             }
             UnresolvedReason::NoPriority => {
+                let interpretation = matches!(conflict.left_by, Provenance::Interpretation { .. })
+                    || matches!(conflict.right_by, Provenance::Interpretation { .. });
+                if interpretation {
+                    // A priority orders rules only, so no declared edge can
+                    // involve an interpretation. A fact side, however, must be
+                    // recorded as a defeat or as `non_strict_fact`.
+                    if matches!(conflict.left_by, Provenance::Assumption)
+                        || matches!(conflict.right_by, Provenance::Assumption)
+                    {
+                        return Err(fail(
+                            "一侧是事实、另一侧是解释时，应记录事实胜出或主张未决，\
+                             不能记录为没有优先关系"
+                                .to_owned(),
+                        ));
+                    }
+                    return Ok(0);
+                }
                 let left = rule_side(priority, conflict, Side::Left).map_err(fail)?;
                 let right = rule_side(priority, conflict, Side::Right).map_err(fail)?;
                 let declared = priority.declared_between(&left, &right);
@@ -1656,6 +1967,7 @@ fn node_prop<'a>(cert: &'a Certificate, node: &'a Node) -> Option<&'a CertExpr> 
             .get(*assumption)
             .map(|entry| &entry.proposition),
         Node::RuleApplication { conclusion, .. } => Some(conclusion),
+        Node::InterpretationApplication { conclusion, .. } => Some(conclusion),
         Node::Gap { .. } => None,
     }
 }

@@ -189,6 +189,7 @@ fn an_unencodable_expression_is_a_clear_error() {
         }],
         root: Some(0),
         conflicts: Vec::new(),
+        interpretations: Vec::new(),
     };
     let error = certificate(&d, &PriorityOrder::default())
         .expect_err("the index does not fit the certificate format");

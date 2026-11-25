@@ -3,14 +3,16 @@
 use serde_json::Value;
 use std_deduce_cert::{
     Assumption, Binding, CertExpr, Certificate, Conflict, CorpusRecord, EnvironmentIdentity,
-    EnvironmentRecord, ExplicitText, FactIdentity, FormatVersion, GapCandidate, Metadata, Node,
-    ObligationKind, OpenObligation, PackRecord, PriorityClause, PriorityEdge, PriorityOrigin,
-    Provenance, Resolution, ResolutionBasis, Side, Source, TrustLevel, UnresolvedReason,
+    EnvironmentRecord, ExplicitText, FactIdentity, FormatVersion, GapCandidate, Interpretation,
+    InterpretationDirection, Metadata, Node, ObligationKind, OpenObligation, PackRecord,
+    PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side,
+    Source, TrustLevel, UnresolvedReason,
 };
 use std_deduce_kernel::env::SourceRef;
 use std_deduce_kernel::{name, Expr};
 
-const SNAPSHOT: &str = include_str!("fixtures/certificate_v5.json");
+const SNAPSHOT: &str = include_str!("fixtures/certificate_v6.json");
+const V5_SNAPSHOT: &str = include_str!("fixtures/certificate_v5.json");
 const V4_SNAPSHOT: &str = include_str!("fixtures/certificate_v4.json");
 const V3_SNAPSHOT: &str = include_str!("fixtures/certificate_v3.json");
 const V2_SNAPSHOT: &str = include_str!("fixtures/certificate_v2.json");
@@ -70,6 +72,7 @@ fn strip_new_source_fields(value: &mut Value) {
 fn sample_certificate() -> Certificate {
     let defence = app(constant("不法侵害"), constant("张三"));
     let justified = app(constant("不负刑事责任"), constant("张三"));
+    let self_defence = app(constant("正当防卫"), constant("张三"));
     Certificate {
         format_version: FormatVersion::CURRENT,
         environment: EnvironmentIdentity::Recorded(EnvironmentRecord {
@@ -97,8 +100,20 @@ fn sample_certificate() -> Certificate {
             )],
             label: Some("事实：不法侵害正在进行".to_owned()),
         }],
+        interpretations: vec![Interpretation {
+            id: "防卫解释".to_owned(),
+            direction: InterpretationDirection::Expand,
+            from: defence.clone(),
+            to: self_defence.clone(),
+            sources: vec![source("正当防卫的解释", "第一条")],
+        }],
         nodes: vec![
             Node::Assumption { assumption: 0 },
+            Node::InterpretationApplication {
+                interpretation: 0,
+                premise: 0,
+                conclusion: self_defence,
+            },
             Node::RuleApplication {
                 rule: "正当防卫".to_owned(),
                 conclusion: justified.clone(),
@@ -126,7 +141,7 @@ fn sample_certificate() -> Certificate {
                 note: Some("缺少损害事实".to_owned()),
             },
         ],
-        root: Some(1),
+        root: Some(2),
         conflicts: vec![Conflict {
             left: justified,
             right: app(constant("应负刑事责任"), constant("张三")),
@@ -195,6 +210,7 @@ fn field_names_are_stable() {
         "conflicts",
         "environment",
         "format_version",
+        "interpretations",
         "metadata",
         "nodes",
         "open_obligations",
@@ -205,7 +221,7 @@ fn field_names_are_stable() {
         assert!(object.contains_key(field), "missing field `{field}`");
     }
 
-    assert_eq!(value["format_version"], 5);
+    assert_eq!(value["format_version"], 6);
     let environment = value["environment"]
         .as_object()
         .expect("the environment is an inline object");
@@ -226,10 +242,15 @@ fn field_names_are_stable() {
     assert!(environment["as_of"].is_null());
     assert!(environment["jurisdiction"].is_null());
     assert_eq!(value["nodes"][0]["kind"], "assumption");
-    assert_eq!(value["nodes"][1]["kind"], "rule_application");
-    assert_eq!(value["nodes"][2]["kind"], "gap");
+    assert_eq!(value["nodes"][1]["kind"], "interpretation_application");
+    assert_eq!(value["nodes"][2]["kind"], "rule_application");
+    assert_eq!(value["nodes"][3]["kind"], "gap");
+    assert_eq!(value["nodes"][1]["interpretation"], 0);
+    assert_eq!(value["nodes"][1]["premise"], 0);
+    assert_eq!(value["interpretations"][0]["id"], "防卫解释");
+    assert_eq!(value["interpretations"][0]["direction"], "expand");
     assert_eq!(value["assumptions"][0]["identity"], "user_asserted");
-    assert_eq!(value["nodes"][1]["bindings"][0]["parameter"], "p");
+    assert_eq!(value["nodes"][2]["bindings"][0]["parameter"], "p");
     assert_eq!(
         value["assumptions"][0]["sources"][0]["locator"],
         "中华人民共和国刑法第二十条第一款"
@@ -277,7 +298,7 @@ fn a_v3_certificate_is_rejected_before_its_missing_resolution_basis() {
         message.contains("unsupported certificate format version 3"),
         "{message}"
     );
-    assert!(message.contains("this build supports 5"), "{message}");
+    assert!(message.contains("this build supports 6"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -292,8 +313,24 @@ fn a_v4_certificate_is_rejected_before_its_missing_assumption_identity() {
         message.contains("unsupported certificate format version 4"),
         "{message}"
     );
-    assert!(message.contains("this build supports 5"), "{message}");
+    assert!(message.contains("this build supports 6"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
+}
+
+#[test]
+fn a_v5_certificate_is_rejected_before_its_missing_interpretations() {
+    // `certificate_v5.json` predates the interpretation table. The version
+    // probe must reject it on the version, not report the missing field the
+    // old writer could not have written.
+    let error = Certificate::from_json(V5_SNAPSHOT).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported certificate format version 5"),
+        "{message}"
+    );
+    assert!(message.contains("this build supports 6"), "{message}");
+    assert!(!message.contains("missing field"), "{message}");
+    assert!(!message.contains("interpretations"), "{message}");
 }
 
 #[test]
@@ -307,7 +344,7 @@ fn a_true_v1_certificate_is_rejected_with_a_version_error() {
         message.contains("unsupported certificate format version 1"),
         "{message}"
     );
-    assert!(message.contains("supports 5"), "{message}");
+    assert!(message.contains("supports 6"), "{message}");
 }
 
 #[test]
@@ -321,7 +358,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
         message.contains("unsupported certificate format version 2"),
         "{message}"
     );
-    assert!(message.contains("this build supports 5"), "{message}");
+    assert!(message.contains("this build supports 6"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -329,7 +366,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
 fn source_fields_added_in_v2_still_use_defaults() {
     let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
     strip_new_source_fields(&mut value);
-    assert_eq!(value["format_version"], 5);
+    assert_eq!(value["format_version"], 6);
     let certificate = Certificate::from_json(&value.to_string())
         .expect("source fields added with #[serde(default)] may be omitted");
     let source = &certificate.assumptions[0].sources[0];
@@ -496,7 +533,7 @@ fn every_source_field_survives_a_json_round_trip() {
 
 #[test]
 fn unknown_format_version_is_rejected() {
-    let text = SNAPSHOT.replace("\"format_version\": 5", "\"format_version\": 999");
+    let text = SNAPSHOT.replace("\"format_version\": 6", "\"format_version\": 999");
     let error = Certificate::from_json(&text).unwrap_err();
     assert!(
         error
@@ -569,7 +606,7 @@ fn sources_and_bindings_survive_round_trip() {
 
     let Node::RuleApplication {
         bindings, sources, ..
-    } = &certificate.nodes[1]
+    } = &certificate.nodes[2]
     else {
         panic!("node 1 is not a rule application");
     };

@@ -60,14 +60,22 @@ pub fn render(certificate: &Certificate) -> Result<String, String> {
 pub(crate) fn root_nodes(certificate: &Certificate) -> Vec<NodeId> {
     let mut used = BTreeSet::new();
     for node in &certificate.nodes {
-        if let Node::RuleApplication { premises, .. } = node {
-            used.extend(premises.iter().copied());
+        match node {
+            Node::RuleApplication { premises, .. } => {
+                used.extend(premises.iter().copied());
+            }
+            Node::InterpretationApplication { premise, .. } => {
+                used.insert(*premise);
+            }
+            Node::Assumption { .. } | Node::Gap { .. } => {}
         }
     }
     let mut roots = Vec::new();
     for (id, node) in certificate.nodes.iter().enumerate() {
         match node {
-            Node::Assumption { .. } | Node::RuleApplication { .. } => {
+            Node::Assumption { .. }
+            | Node::RuleApplication { .. }
+            | Node::InterpretationApplication { .. } => {
                 if !used.contains(&id) {
                     roots.push(id);
                 }
@@ -106,6 +114,24 @@ pub(crate) fn validate(certificate: &Certificate) -> Result<(), String> {
                             certificate.nodes.len()
                         ));
                     }
+                }
+            }
+            Node::InterpretationApplication {
+                interpretation,
+                premise,
+                ..
+            } => {
+                if *interpretation >= certificate.interpretations.len() {
+                    return Err(format!(
+                        "节点 {id}：引用了不存在的解释 {interpretation}：证书只有 {} 条解释",
+                        certificate.interpretations.len()
+                    ));
+                }
+                if *premise >= certificate.nodes.len() {
+                    return Err(format!(
+                        "节点 {id}：前提 {premise} 越界：证书只有 {} 个节点",
+                        certificate.nodes.len()
+                    ));
                 }
             }
             Node::Gap { .. } => {}
@@ -148,10 +174,16 @@ fn detect_cycle(certificate: &Certificate) -> Result<(), String> {
 
         state[id] = State::OnPath;
         path.push(id);
-        if let Node::RuleApplication { premises, .. } = &certificate.nodes[id] {
-            for premise in premises {
+        match &certificate.nodes[id] {
+            Node::RuleApplication { premises, .. } => {
+                for premise in premises {
+                    visit(certificate, *premise, state, path)?;
+                }
+            }
+            Node::InterpretationApplication { premise, .. } => {
                 visit(certificate, *premise, state, path)?;
             }
+            Node::Assumption { .. } | Node::Gap { .. } => {}
         }
         path.pop();
         state[id] = State::Done;
@@ -239,6 +271,34 @@ fn render_node(
             for premise in premises {
                 render_node(certificate, *premise, depth + 1, out)?;
             }
+        }
+        Node::InterpretationApplication {
+            interpretation,
+            premise,
+            conclusion,
+        } => {
+            let Some(entry) = certificate.interpretations.get(*interpretation) else {
+                return Err(format!(
+                    "节点 {id}：引用了不存在的解释 {interpretation}：证书只有 {} 条解释",
+                    certificate.interpretations.len()
+                ));
+            };
+            out.push_str(&format!(
+                "{pad}▸ {}  〈解释 {}（{}）〉",
+                print_expr(&Expr::from(conclusion)),
+                escape_control(&entry.id),
+                entry.direction.keyword()
+            ));
+            if let Some(source) = entry.sources.first() {
+                out.push_str(&format!(" ← {}", source.one_line()));
+            }
+            out.push('\n');
+            if let Some(source) = entry.sources.first() {
+                if !source.note.is_empty() {
+                    out.push_str(&format!("{pad}  注：{}\n", escape_control(&source.note)));
+                }
+            }
+            render_node(certificate, *premise, depth + 1, out)?;
         }
         Node::Gap {
             proposition,

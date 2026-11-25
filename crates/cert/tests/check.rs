@@ -1148,6 +1148,7 @@ fn certificate(assumptions: Vec<Assumption>, nodes: Vec<Node>, root: Option<usiz
         format_version: FormatVersion::CURRENT,
         environment: EnvironmentIdentity::Unrecorded,
         assumptions,
+        interpretations: Vec::new(),
         nodes,
         root,
         conflicts: Vec::new(),

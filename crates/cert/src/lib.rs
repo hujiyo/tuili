@@ -36,17 +36,19 @@
 //!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 5. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 6. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
-//! Version 5 records the fact identity of every assumption and the reason for
-//! an unresolved claim that met a rule conclusion; version 4 adds the
-//! conflict-resolution basis and the unresolved reason; version 3 makes the
-//! environment identity mandatory; version 2 adds the source fields; version 1
-//! predates them. All older versions are refused with a version error before
-//! any missing-field error is reported.
+//! Version 6 records the enabled interpretations: a mandatory
+//! `interpretations` table, the `interpretation_application` node and the
+//! interpretation witness of a conflict; version 5 records the fact identity
+//! of every assumption and the reason for an unresolved claim that met a rule
+//! conclusion; version 4 adds the conflict-resolution basis and the unresolved
+//! reason; version 3 makes the environment identity mandatory; version 2 adds
+//! the source fields; version 1 predates them. All older versions are refused
+//! with a version error before any missing-field error is reported.
 //!
 //! ## Checking
 //!
@@ -61,6 +63,13 @@
 //! counts, whether or not a node cites it, and each must be a proposition
 //! carrying a fact identity: a disputed proposition cannot be listed as an
 //! assumption, and one proposition cannot appear under two identities.
+//! Version 6 also lists the enabled interpretations the proof cites: each entry
+//! must name an environment `interpret` declaration with kernel-equivalent
+//! `from`/`to`, identical direction and sources, and the table must be sorted
+//! by id; every entry must be referenced, and an `interpretation_application`
+//! node must cite an earlier node proving `from` and conclude the declared
+//! `to`. A conflict witness may be an interpretation index; it is validated
+//! against the declaration and is never treated as a lost rule witness.
 //! The closure is computed only when a rule step has an `unless`. Rules that
 //! depend on a premise binder
 //! are rejected rather than checked with an open `?name`; a rule that cannot
@@ -95,7 +104,9 @@
 //!
 //! [`render`] prints the user-facing derivation tree from the certificate
 //! alone, so what a user sees is the object that [`check`] and
-//! [`kernel_proof`] inspect. It rejects an out-of-range node reference or a
+//! [`kernel_proof`] inspect. An interpretation application is printed as a
+//! separate `〈解释 …〉` step with its premise; it is never rendered as a rule.
+//! It rejects an out-of-range node reference or a
 //! cyclic node graph with an error naming the node; it never falls back to a
 //! placeholder. [`render_narrative`] renders the same certificate as a Chinese
 //! because-so explanation. It attributes every fact to its recorded identity,
@@ -123,10 +134,11 @@ pub use environment::{
 pub use expr::{CertExpr, ExprEncodeError};
 pub use key::expression_key;
 pub use model::{
-    Assumption, Binding, Certificate, Conflict, FactIdentity, GapCandidate, Metadata, Node, NodeId,
-    ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
-    Resolution, ResolutionBasis, Side, UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES,
-    MAX_CERT_JSON_BYTES, MAX_CERT_NODES,
+    Assumption, Binding, Certificate, Conflict, FactIdentity, GapCandidate, Interpretation,
+    InterpretationDirection, Metadata, Node, NodeId, ObligationKind, OpenObligation,
+    PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side,
+    UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES, MAX_CERT_JSON_BYTES,
+    MAX_CERT_NODES,
 };
 pub use narrative::render_narrative;
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};

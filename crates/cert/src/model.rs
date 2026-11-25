@@ -47,8 +47,9 @@ pub const MAX_CERT_EXPR_NODES: usize = 10_000;
 /// A proof certificate.
 ///
 /// The JSON object has exactly the fields below, in this order:
-/// `format_version`, `environment`, `assumptions`, `nodes`, `root`,
-/// `conflicts`, `open_obligations`, `metadata`. Unknown fields are rejected.
+/// `format_version`, `environment`, `assumptions`, `interpretations`, `nodes`,
+/// `root`, `conflicts`, `open_obligations`, `metadata`. Unknown fields are
+/// rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Certificate {
@@ -61,6 +62,13 @@ pub struct Certificate {
     /// label. [`Node::Assumption`] refers to entries here by index.
     #[serde(default)]
     pub assumptions: Vec<Assumption>,
+    /// The interpretations enabled for this certificate, sorted by `id` and
+    /// limited to those the derivation actually cites (an application node or
+    /// a conflict witness). Mandatory in version 6: an empty array means the
+    /// derivation used no interpretation, not that the writer forgot to say.
+    /// [`Node::InterpretationApplication`] and
+    /// [`Provenance::Interpretation`] refer to entries here by index.
+    pub interpretations: Vec<Interpretation>,
     /// The proof graph, in dependency order.
     pub nodes: Vec<Node>,
     /// The node that proves the requested conclusion. `null` means the
@@ -166,6 +174,11 @@ impl Certificate {
                 &format!("第 {} 条假设的命题", index + 1),
             )?;
         }
+        for (index, interpretation) in self.interpretations.iter().enumerate() {
+            let place = format!("第 {} 条解释 `{}`", index + 1, interpretation.id);
+            check_expression(&interpretation.from, &format!("{place} 的 from"))?;
+            check_expression(&interpretation.to, &format!("{place} 的 to"))?;
+        }
         for (index, node) in self.nodes.iter().enumerate() {
             let place = format!("第 {} 个证书节点", index + 1);
             match node {
@@ -185,6 +198,9 @@ impl Certificate {
                             ),
                         )?;
                     }
+                }
+                Node::InterpretationApplication { conclusion, .. } => {
+                    check_expression(conclusion, &format!("{place}的结论"))?;
                 }
                 Node::Gap {
                     proposition,
@@ -307,9 +323,75 @@ pub struct Assumption {
     pub label: Option<String>,
 }
 
+/// How an interpretation moves between the two propositions it relates.
+///
+/// The direction is declared data, not an inferred property: a legal
+/// interpretation is a choice someone makes and must be able to audit. It is
+/// recorded verbatim and never applied as a rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterpretationDirection {
+    /// The words are applied as written.
+    Literal,
+    /// The proposition is read more broadly than its wording.
+    Expand,
+    /// The proposition is read more narrowly than its wording.
+    Narrow,
+    /// The proposition is carried over to a similar case.
+    Analogy,
+}
+
+impl InterpretationDirection {
+    /// The surface keyword, as the ledger writes it.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            InterpretationDirection::Literal => "literal",
+            InterpretationDirection::Expand => "expand",
+            InterpretationDirection::Narrow => "narrow",
+            InterpretationDirection::Analogy => "analogy",
+        }
+    }
+}
+
+impl From<&std_deduce_kernel::InterpretationDirection> for InterpretationDirection {
+    fn from(direction: &std_deduce_kernel::InterpretationDirection) -> Self {
+        match direction {
+            std_deduce_kernel::InterpretationDirection::Literal => InterpretationDirection::Literal,
+            std_deduce_kernel::InterpretationDirection::Expand => InterpretationDirection::Expand,
+            std_deduce_kernel::InterpretationDirection::Narrow => InterpretationDirection::Narrow,
+            std_deduce_kernel::InterpretationDirection::Analogy => InterpretationDirection::Analogy,
+        }
+    }
+}
+
+/// One interpretation enabled for this derivation.
+///
+/// The entry is an environment declaration, not a proof step: it records an
+/// explicit, auditable permission to move from `from` to `to`. The derivation
+/// cites it through a [`Node::InterpretationApplication`] or as a conflict
+/// witness ([`Provenance::Interpretation`]). Kernel definitional equality,
+/// not the printed form, decides whether a certificate's `from`/`to` still
+/// match the environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Interpretation {
+    /// The declaration's name in the environment.
+    pub id: String,
+    /// The declared direction.
+    pub direction: InterpretationDirection,
+    /// The proposition the interpretation consumes.
+    pub from: CertExpr,
+    /// The proposition it licenses.
+    pub to: CertExpr,
+    /// Where the interpretation comes from.
+    #[serde(default)]
+    pub sources: Vec<Source>,
+}
+
 /// One node of the proof graph.
 ///
-/// The `kind` tag is stable: `assumption`, `rule_application`, `gap`.
+/// The `kind` tag is stable: `assumption`, `rule_application`,
+/// `interpretation_application`, `gap`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
@@ -332,6 +414,16 @@ pub enum Node {
         /// Where the applied rule comes from.
         #[serde(default)]
         sources: Vec<Source>,
+    },
+    /// One application of an enabled interpretation: its `from` is proved by
+    /// `premise`, its `to` is the recorded conclusion.
+    InterpretationApplication {
+        /// Zero-based index into [`Certificate::interpretations`].
+        interpretation: usize,
+        /// The node that proves the interpretation's `from`.
+        premise: NodeId,
+        /// The instantiated conclusion, which must be the entry's `to`.
+        conclusion: CertExpr,
     },
     /// An unclosed goal: the explicit replacement for `sorry`.
     Gap {
@@ -383,6 +475,10 @@ pub enum Provenance {
     /// The conclusion was derived by these rules. An empty list means it was
     /// derived but its witnesses can no longer be rebuilt.
     Rules { rules: Vec<String> },
+    /// The conclusion was licensed by an enabled interpretation. The index
+    /// names the entry in [`Certificate::interpretations`]; the witness is a
+    /// declared permission, not an inferred fact.
+    Interpretation { interpretation: usize },
 }
 
 /// How a conflict was adjudicated.

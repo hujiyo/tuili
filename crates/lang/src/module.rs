@@ -666,12 +666,11 @@ impl Library {
                     direction,
                     sources,
                 } => {
-                    // An interpretation is a named, sourced claim, but in this
-                    // step it is deliberately inert: it enters the ledger as
-                    // an opaque constant of type `from → to`, and neither the
-                    // reasoner nor the certificate layer inspects it. This is
-                    // what makes "loaded but not enabled" checkable instead of
-                    // letting a half-implemented syntax look supported.
+                    // An interpretation is a named, sourced claim. The
+                    // loader only registers it as an opaque constant of type
+                    // `from → to`: whether the reasoner applies it is the
+                    // query's explicit decision (`--interpret` /
+                    // `:interpret enable`), never a loading side effect.
                     // The parser already requires at least one `source` line
                     // and non-empty text/locator/version, so the loader does
                     // not repeat that line-oriented check. What only the

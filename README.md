@@ -148,7 +148,9 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 `--closed-env` 打开封闭环境：顶层文件只能是案件文件（无 `namespace`），案件只能使用已加载法律包
 里的声明与规则；`--allow-case-rules` 允许封闭环境中的案件本地声明（`:inspect` 标 ` [案件扩展]`；
 证书的 `local-extension` 义务只覆盖实际应用的案件规则），它必须与 `--closed-env` 同用。两者默认
-关闭，原有加载行为不变；
+关闭，原有加载行为不变；`--interpret <解释名>` 在会话中启用一个已声明的解释（可重复，默认一个也
+不启用；等价于会话命令 `:interpret enable`）；启用的解释在每次成功 `:load` 后复核仍然存在且两两
+`to` 不内核等价，不满足时该次加载失败、会话保持原状；
 `--as-of <YYYY-MM-DD>` 与 `--jurisdiction <代码>` 设置会话的法律基准日和管辖代码；
 `:asof [YYYY-MM-DD]` / `:jurisdiction [代码]` 在会话中显示或修改同一组值。无参数时显示当前值与
 来源（`命令行` / `会话命令` / `未设置`）。这两个值只作为证书的环境身份：`:cert` 记录它们，
@@ -162,7 +164,8 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 未知选项报用法错误（`2`），不会被当成文件读取，也不会被静默忽略。`--profile` 缺值、重复使用或与
 `--no-default-packs` 同时出现都是用法错误；`--allow-case-rules` 未与 `--closed-env` 同用也是用法错误；
 `--as-of`/`--jurisdiction` 缺值、重复、非法值或
-值看起来像另一个选项也是用法错误。`env` 后的多余参数同样报用法错误，并提示选项要写在
+值看起来像另一个选项也是用法错误；`--interpret` 缺值、值看起来像选项，或同一个 id 重复写在
+命令行上，同样是用法错误。`env` 后的多余参数同样报用法错误，并提示选项要写在
 `env` 之前。文件名本身以 `-` 开头时写 `./-名字`；文件名正好是 `env` 时写 `./env`。
 
 交互命令：
@@ -172,15 +175,16 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 | `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则 |
 | `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签；解释显示为 `interpret` 并附方向与来源摘要（`〔方向 …〕〔来源 …〕`）。规则与事实已记录的生效区间、管辖、地域和发生时间/地点以 `〔生效 from..to〕`、`〔管辖 CN〕`、`〔地域 CN-HN〕`、`〔发生 2020-05-06〕`、`〔发生地 CN-HN〕` 显示，未声明的字段不打印占位符；区间端点继承自包清单时标 `（继承）`，规则自写时标 `（规则）`。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
 | `:given <命题>` | 以「用户陈述」身份手工登记一条事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示。手工登记的事实不记录发生时间/地点（不会被会话基准日填充） |
+| `:interpret [list]` / `:interpret enable <解释名>` / `:interpret disable <解释名>` | 查看、启用或停用解释声明。`list` 按 id 列出每条解释的状态、方向与 `from → to`；`enable` 立即校验 id 存在、不得重复启用、不得与另一条已启用解释的 `to` 内核等价（后者报错并提示分别查询或先 disable）；`disable` 恢复默认的不启用状态。必须已 `:load`。启用只改变之后的查询，不改变已加载的声明或既有证书。等价于 `--interpret` 的会话内写法 |
 | `:asof [YYYY-MM-DD]` | 无参数打印会话基准日与来源（`命令行` / `会话命令` / `未设置`）；带参数校验并设置同一会话值，供 `:cert` 记录、`:verify-cert` 比对。不参与推理，也不改变规则是否触发 |
 | `:jurisdiction [代码]` | 无参数打印会话管辖与来源；带参数校验并设置同一会话值。它是多法域门禁的答案，也是证书环境身份的一部分；不会用代码过滤规则 |
 | `:fact [list]` / `:fact show <命题>` / `:fact add <命题>` / `:fact assumed <命题>` / `:fact disputed <命题>` | 查看和登记带身份的事实。`list` 列出账本里所有事实，每行是 `身份标签  命题  [名称]  ← 第一条来源`，争议事实注明“争议事实，不参与推导”；`show` 按内核定义等价查找并打印身份、名称、命题与全部来源，找不到时报“没有登记为事实的命题”；`add` / `assumed` / `disputed` 分别以用户陈述、分析假设、对方争议登记本次会话的事实（来源「用户输入交互会话」，名称 `事实N`），争议事实不参与推导。`verified` / `stipulated` 只能在案件文件里随 `source` 声明，交互命令拒绝 |
-| `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导，左右行带事实身份，并说明原因（没有声明、声明了但不足以裁决时逐条列出声明与出处、见证无法重建、两侧都是严格事实、两侧都只是主张；主张对规则时点名主张侧命题与身份）；已裁决时打印胜出方（带身份）、被否决方与裁决依据（严格事实优先于可废止规则结论或未经证明的主张，或哪条边、谁声明、出处）。当前环境有优先级环时先打印一行环警告。加载的规则涉及两个及以上 `jurisdiction` 且会话未选管辖时，先报错并以 `2` 退出；`:asof` 不改变结论、退出码或推导树。规则或候选规则的管辖与查询管辖不同时，打印 `注：规则 … 的管辖 … 与查询管辖 … 不同；本步不判定适用性`，不过滤规则、不改退出码。证书若应用了案件本地规则，会在未决义务汇总前打印 `  本地扩展：…`，按未决义务退出 `1`，不打印 `推导已通过独立校验。` |
-| `:explain <命题>` | 与 `:why` 使用同一份证书和同样的两层校验，但把推导树换成中文「因为……所以……」说明：结论、逐步推理、实例、来源（法名/条号/版本/生效/管辖/引文摘要/说明/链接）、事实身份（据用户陈述 / 根据法院查明 / 作为分析假设 / 双方无争议）、冲突的胜出/否决/未决及依据、`unless` 阻断、缺口与未决义务。证书没记录来源时写「证书未记录来源」，不补造；未决冲突写「此处未决」，已裁决的败方写「已被否决，依据见冲突记录」，不会写成未决。冲突已由叙述完整报告，`:explain` 不再追加 `:why` 的冲突汇总、`注：…` 或 `依据：…` 后记。`:why` 的形式树仍可查看，`:cert` 的 JSON 不变；退出码与 `:why` 相同 |
-| `:gap <命题>` | 说明为什么推不出，打印一棵递归缺口树。每个候选规则显示缺哪些前提、哪些 `unless` 已成立及其出处；每条缺失前提继续展开成自己的缺口，直到没有规则以它为结论、目标处于未决冲突或已裁决冲突的败方、前提含未闭合的规则参数或不是命题，或同一命题已在本路径上展开（规则环）。重复展开按规范化命题的结构键去重（与证书的结构键编码相同），不比较打印文本；候选匹配也先规范化，因此 `def` 别名能找到其定义对应的规则。展开有显式上限：最大深度 6、每棵树最多 128 个节点、同一棵树里每条规则最多尝试 8 次；超限时在停止处打印 `已截断：…` 与原因，不静默截断。冲突与缺口分开报告；有优先级环时同样先打印环警告。树中的候选规则若管辖与查询管辖不同，会追加同样的 `注：…` 提示，但不过滤。目标可推出时打印 `目标可以推出。` 并退出 `0` |
+| `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导，左右行带事实身份，并说明原因（没有声明、声明了但不足以裁决时逐条列出声明与出处、见证无法重建、两侧都是严格事实、两侧都只是主张；主张对规则时点名主张侧命题与身份）；已裁决时打印胜出方（带身份）、被否决方与裁决依据（严格事实优先于可废止规则结论或未经证明的主张，或哪条边、谁声明、出处）。当前环境有优先级环时先打印一行环警告。加载的规则涉及两个及以上 `jurisdiction` 且会话未选管辖时，先报错并以 `2` 退出；`:asof` 不改变结论、退出码或推导树。规则或候选规则的管辖与查询管辖不同时，打印 `注：规则 … 的管辖 … 与查询管辖 … 不同；本步不判定适用性`，不过滤规则、不改退出码。证书若应用了案件本地规则，会在未决义务汇总前打印 `  本地扩展：…`，按未决义务退出 `1`，不打印 `推导已通过独立校验。`。目标有缺口时，若某个**未启用**的解释的 `to` 与目标或缺失前提内核等价、且它的 `from` 已成立，再打印：``  存在未启用解释 `<id>`（from → to）；用 :interpret enable <id> 后重查`` |
+| `:explain <命题>` | 与 `:why` 使用同一份证书和同样的两层校验，但把推导树换成中文「因为……所以……」说明：结论、逐步推理、实例、来源（法名/条号/版本/生效/管辖/引文摘要/说明/链接）、事实身份（据用户陈述 / 根据法院查明 / 作为分析假设 / 双方无争议）、解释应用步（「根据解释「…」（方向 …），所以…」）、冲突的胜出/否决/未决及依据、`unless` 阻断、缺口与未决义务。证书没记录来源时写「证书未记录来源」，不补造；未决冲突写「此处未决」，已裁决的败方写「已被否决，依据见冲突记录」，不会写成未决。冲突已由叙述完整报告，`:explain` 不再追加 `:why` 的冲突汇总、`注：…` 或 `依据：…` 后记。`:why` 的形式树仍可查看，`:cert` 的 JSON 不变；退出码与 `:why` 相同 |
+| `:gap <命题>` | 说明为什么推不出，打印一棵递归缺口树。每个候选规则显示缺哪些前提、哪些 `unless` 已成立及其出处；每条缺失前提继续展开成自己的缺口，直到没有规则以它为结论、目标处于未决冲突或已裁决冲突的败方、前提含未闭合的规则参数或不是命题，或同一命题已在本路径上展开（规则环）。重复展开按规范化命题的结构键去重（与证书的结构键编码相同），不比较打印文本；候选匹配也先规范化，因此 `def` 别名能找到其定义对应的规则。展开有显式上限：最大深度 6、每棵树最多 128 个节点、同一棵树里每条规则最多尝试 8 次；超限时在停止处打印 `已截断：…` 与原因，不静默截断。冲突与缺口分开报告；有优先级环时同样先打印环警告。树中的候选规则若管辖与查询管辖不同，会追加同样的 `注：…` 提示，但不过滤。目标或缺口中的缺失前提若只差一条未启用解释（与该解释的 `to` 内核等价、其 `from` 已成立），打印 ``  存在未启用解释 `<id>`（from → to）；用 :interpret enable <id> 后重查``；它只是提示，不是候选规则，也不改变退出码。目标可推出时打印 `目标可以推出。` 并退出 `0` |
 | `:issues` | 必须已 `:load`。不回答单个目标，而是扫描当前事实集下所有可争的结论：按已声明常量逐个实例化每条规则（参数按依赖类型取值），列出尚未证明的结论与**未决**冲突的每一侧，每条附同一棵递归缺口树；已裁决冲突的胜方已在事实库、败方按记录不再询问，两者都不计为争点。有规则来源的结论按规则名、再按结构键稳定排序，没有规则来源的冲突侧排在最前；最多列出 32 条，超出打印 `已截断`。无法实例化的规则（参数类型没有已声明常量，或结论依赖前提证明）单独报告，不静默漏掉。没有可争结论时退出 `0` |
 | `:cert <命题>` | 先跑推理，再用当前环境身份（规范 profile 名、`--as-of`/`:asof` 记录的基准日与 `--jurisdiction`/`:jurisdiction` 记录的管辖代码、包名/版本/锁哈希/信任级别、链接语料文件的哈希；未设置时为显式 `null`）盖章，最后把证书 JSON（缩进）写到 stdout。这两个字段只记录、不参与推理。加载的规则涉及两个及以上 `jurisdiction` 且未选管辖时以 `2` 退出。必须先 `:load`。推不出的目标导出为缺口根，缺口与未决冲突写入 `open_obligations`；身份构建或序列化失败时不写任何 JSON：非交互入口（命令行参数）把错误写到 stderr，交互 REPL 沿用命令错误写 stdout 的既有约定。封闭环境里应用了案件本地规则时，`open_obligations` 追加 `local-extension` 项；退出码仍只按根是否可达决定（根可达时为 `0`） |
-| `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 v5 JSON：先把证书环境身份与当前环境逐项比较（profile、`as_of`、管辖精确相等，包按名字集合、语料按 `(law, version)` 集合比较；差异逐条打印并转义），不一致或身份缺失时退出 `2`，两层证明检查都不运行。生成证书时用了 `--as-of`/`--jurisdiction` 或 `:asof`/`:jurisdiction`，校验时必须带同一组会话值；不带就等于记 `null`，会按差异拒绝。环境校验通过后，若证书记录了低于 `official` 的包，再追加一行 `  注意：证书记录了非官方包：…；结论依赖这些包的定义`（只提示，不改退出码与后面的四行结果）。一致后才跑 `cert::check` 与 `kernel_proof`，两段分开报告；`cert::check` 同时逐字段复核每条冲突裁决的优先边与出处、复核假设身份与环境登记及裁决一致，侧条件行据此报告 `优先关系已核验（n 条边）` 或 `没有记录优先关系`。当前环境的优先级声明有环时，侧条件行后追加一行环警告（不改退出码）。必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标。证书带 `local-extension` 时，在四行检查后打印 `  本地扩展：…`，按未决义务退出 `1` |
+| `:verify-cert <证书文件> [目标命题]` | 只凭**已加载的环境**检查证书 v6 JSON：先把证书环境身份与当前环境逐项比较（profile、`as_of`、管辖精确相等，包按名字集合、语料按 `(law, version)` 集合比较；差异逐条打印并转义），不一致或身份缺失时退出 `2`，两层证明检查都不运行。生成证书时用了 `--as-of`/`--jurisdiction` 或 `:asof`/`:jurisdiction`，校验时必须带同一组会话值；不带就等于记 `null`，会按差异拒绝。环境校验通过后，若证书记录了低于 `official` 的包，再追加一行 `  注意：证书记录了非官方包：…；结论依赖这些包的定义`（只提示，不改退出码与后面的四行结果）。一致后才跑 `cert::check` 与 `kernel_proof`，两段分开报告；`cert::check` 同时逐字段复核每条冲突裁决的优先边与出处、复核假设身份与环境登记及裁决一致，并按 id 找环境的解释声明、用内核等价比较 `from`/`to`、逐字段比较 `direction`/`sources`，侧条件行据此报告 `优先关系已核验（n 条边）` 或 `没有记录优先关系`。当前环境的优先级声明有环时，侧条件行后追加一行环警告（不改退出码）。必须先 `:load`，不重跑推理器。给了目标时，再要求证书根命题与目标内核等价；不等价、根为缺口或没有根都退出 `2`。路径含空格时在目标前用双引号括起路径；不加引号时，整串若正好是已存在文件则视为仅路径（兼容旧用法），否则按第一个空白分隔路径与目标。证书带 `local-extension` 时，在四行检查后打印 `  本地扩展：…`，按未决义务退出 `1` |
 | `:packs [目录]` | 扫描目录（默认当前目录下的 `lawpacks`）并列出法律包清单：名称、版本、辖区/地域、生效范围、信任标签、带 `  说明：` 前缀的描述与文件数；`maintainers` 非空时打印维护者，`audit_status = "reviewed"` 时打印审核人与日期；`official` 声明必须先用目录里的 `official.toml` 与 `std.lock` 核对名称、版本和锁哈希，通过才显示 `official（本项目审核）` 与 `  白名单：通过（official.toml）`，否则显示 `official（未通过白名单核对）`、打印 `路径: error: ...` 并退出 `2`（锁校验失败时只打印锁的错误行、不打印逐包白名单错误行，细节见「信任标签与官方白名单」）；清单声明 `corpus` 时再读取链接的条级语料并打印覆盖计数与本体缺口；若目录里有 `std.lock`，再重新哈希并校验；不导入规则，不要求 `:load`。校验清单、链接语料、锁与官方白名单，不检查 namespace 唯一性，也不保证包可导入——这些由 `:load` 检查 |
 | `:lock [目录]` | 对目录（默认 `lawpacks`）里的所有包计算内容哈希，写入 `<目录>/std.lock`；坏包/坏文件/重复包名时打印错误并退出 `2`，不写部分锁 |
 | `:audit [目录]` | 只核对已加载理论里 `quote` 非空的 `source`：法名匹配语料标题/别名，版本、条号、引文（删除全部空白后逐字比较）、条文哈希（条文原文含换行的 SHA-256）与管辖逐项检查；`quote` 为空的来源不参与核对，单独计数且不影响退出码。默认语料目录 `law/corpus`，按 `<law>/<version>.json` 严格布局。至少一条带引文来源且全部命中才退出 `0`；一条带引文来源都没有时报“没有可核对的引文”并退出 `1`；坏语料退出 `2` |
@@ -206,16 +210,17 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
 cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load examples/constitution-39.std' ':verify-cert cert.json'
 ```
 
-证书 v5 的顶层字段顺序固定为 `format_version`、`environment`、`assumptions`、
-`nodes`、`root`、`conflicts`、`open_obligations`、`metadata`，其中 `environment`
-必填，序列化为内联对象。下面是字段布局的**节选**：`nodes`/`conflicts`/
-`open_obligations` 按空数组示意，`assumptions` 给出一条记录（每条都必须带 `identity`），
-`hash`/`file_sha256` 的省略号处是 64 位小写十六进制；
-`metadata` 是 `:cert` 的实际输出（`generated_at` 当前不填，序列化为 `null`）：
+证书 v6 的顶层字段顺序固定为 `format_version`、`environment`、`assumptions`、
+`interpretations`、`nodes`、`root`、`conflicts`、`open_obligations`、`metadata`，其中
+`environment` 与 `interpretations` 必填，`environment` 序列化为内联对象。下面是字段布局的
+**节选**：`conflicts`/`open_obligations` 按空数组示意，`assumptions` 给出一条记录（每条都必带
+`identity`），`interpretations` 给出一条被应用节点引用的解释（空数组表示本次没有用解释），
+`hash`/`file_sha256` 的省略号处是 64 位小写十六进制；`metadata` 是 `:cert` 的实际输出
+（`generated_at` 当前不填，序列化为 `null`）：
 
 ```json
 {
-  "format_version": 5,
+  "format_version": 6,
   "environment": {
     "profile": "cn.default",
     "packs": [
@@ -248,8 +253,43 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
       "label": "违法事实"
     }
   ],
-  "nodes": [],
-  "root": null,
+  "interpretations": [
+    {
+      "id": "处罚解释",
+      "direction": "narrow",
+      "from": {
+        "kind": "app",
+        "func": { "kind": "const", "name": "违法" },
+        "arg": { "kind": "const", "name": "张三" }
+      },
+      "to": {
+        "kind": "app",
+        "func": { "kind": "const", "name": "应受处罚" },
+        "arg": { "kind": "const", "name": "张三" }
+      },
+      "sources": [
+        {
+          "text": "行政处罚法",
+          "locator": "第五条",
+          "version": "2021"
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    { "kind": "assumption", "assumption": 0 },
+    {
+      "kind": "interpretation_application",
+      "interpretation": 0,
+      "premise": 0,
+      "conclusion": {
+        "kind": "app",
+        "func": { "kind": "const", "name": "应受处罚" },
+        "arg": { "kind": "const", "name": "张三" }
+      }
+    }
+  ],
+  "root": 1,
   "conflicts": [],
   "open_obligations": [],
   "metadata": {
@@ -259,6 +299,15 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
   }
 }
 ```
+
+`interpretations` 按 `id` 严格排序、不得重复，只列本次启用且被 `interpretation_application`
+节点或冲突见证引用的解释；每条是 `{id, direction, from, to, sources}`。`direction` 取
+`literal` / `expand` / `narrow` / `analogy`。手工删掉整张表是缺必填字段，删掉一条被引用的记录、
+改 `from`/`to`/`direction`/任一来源字段、或把下标指到表外都会被拒绝。
+`interpretation_application` 节点的 `interpretation` 是解释表下标，`premise` 是证明 `from` 的
+先前节点，`conclusion` 必须与 `to` 内核等价；它可以用作根，但不是规则步骤。
+冲突见证也可以是解释：`provenance` 写作 `{"kind": "interpretation", "interpretation": 0}`，
+与规则见证一样参与裁决检查，且永远不会被记成“规则见证无法重建”。
 
 `environment` 的字段顺序是 `profile`、`packs`、`corpora`、`as_of`、`jurisdiction`。
 `profile`、`as_of`、`jurisdiction` 的键必须存在，值可以是 `null`；缺键会被拒绝，
@@ -278,8 +327,8 @@ cargo run -q -p std-deduce-cli -- --as-of 2026-11-23 --jurisdiction CN ':load ex
 `conflicts` 非空时每条记录都带 `resolution`：已裁决记录写胜方与裁决依据（严格事实或优先边
 及其声明者、出处），未决记录写原因（`non_strict_fact` 带主张侧身份）；形状与检查范围见
 「跨包冲突与优先级出处」。
-版本 4、3、2、1 证书都被拒绝（`unsupported certificate format version 4` 等），
-必须按当前理论重新生成；推理器内部生成的 `Unrecorded` 证书没有环境身份，不能导出。
+版本 5、4、3、2、1 证书都被拒绝（例如 `unsupported certificate format version 5; this build
+supports 6`），必须按当前理论重新生成；推理器内部生成的 `Unrecorded` 证书没有环境身份，不能导出。
 
 非交互模式（命令行参数）的退出码如下：
 
@@ -543,7 +592,7 @@ cargo run -q -p std-deduce-cli -- ':load case.std' ':inspect'
 失败时批处理入口退出 `1`，显式 `:load` 退出 `2`；诊断仍以 `path: error: ...`（或带行列号的
 `path:line:col: error: ...`）开头，包解析错误含包名与相关路径。默认环境的 profile、锁、版本、
 信任或包错误同样让本次加载失败；`std-deduce env` 的环境错误单独以 `2` 退出。`:packs` / `:lock`
-不参与这条加载路径；`--packs`、远程 registry、`std build/update` 仍未实现。证书 v5 记录
+不参与这条加载路径；`--packs`、远程 registry、`std build/update` 仍未实现。证书 v6 记录
 profile、包版本/锁哈希/信任级别与链接语料文件的哈希；这些是导出时点的身份，不是持续校验。
 
 ### 信任标签与官方白名单
@@ -723,7 +772,7 @@ cargo run -q -p std-deduce-cli -- --closed-env --allow-case-rules examples/宪�
 cargo run -q -p std-deduce-cli -- --closed-env examples/宪法案例-齐玉苓.std ':why cn.constitution.受教育权 齐玉苓'
 ```
 
-### 解释（`interpret`）：可加载，但不启用
+### 解释（`interpret`）：显式启用的单前提许可
 
 解释把一个命题读成另一个命题，并必须由一个**命名的方向**和**可核对的出处**来支撑：
 
@@ -736,21 +785,33 @@ interpret 住宅解释 : 非法搜查 张三 甲宅 → 侵犯 张三 甲宅
 - 头行只写 `interpret <id> : <from> → <to>`。`from`/`to` 都按**应用项**解析：
   任何一边本身是箭头类型时必须加括号，例如 `interpret i : P → (Q → P)`。
 - `direction` 必须另起一行且必填，没有默认：`literal`（字面）、`expand`（扩展）、
-  `narrow`（限缩）、`analogy`（类推）。本步只记录这个选择，不给它任何推理语义。
+  `narrow`（限缩）、`analogy`（类推）。加载期两个命题都必须是命题（`Sort 0`）；
+  概念到概念的解释（`sort` 之间）明确拒绝。失败信息指出解释 id 与原因。
 - `source` 至少一条，也必须另起一行；每条来源的 `text`、`locator`、`version` 都必须非空。
   头行里夹写 `direction` / `source` 会被拒绝并提示“必须另起一行”。
-- 加载期两个命题都必须是命题（`Sort 0`）；概念到概念的解释（`sort` 之间）明确拒绝，留给后续分支。
-  失败信息指出解释 id 与原因。
-- 解释作为**不透明常量**登记进环境，类型是 `from → to`，方向与来源随声明保存；它不产生事实、
-  不产生规则、不改变任何推导或证书。
-- `:inspect` 显示 `interpret <id> : from → to 〔方向 …〕〔来源 locator/version〕`，来源按既有的
-  转义与单行渲染规则输出；包内的解释标 `[name@version]`，封闭环境里案件文件声明的解释标
-  ` [案件扩展]`。
+- 解释默认**不启用**：不启用时它的存在不改变任何推导、缺口或证书。启用只有两条路径：
+  命令行 `--interpret <id>`（可重复）或会话命令 `:interpret enable <id>`；`:interpret list`
+  查看声明与状态，`:interpret disable <id>` 恢复默认。启用一个不存在的 id、重复启用、
+  或启用两条 `to` 内核等价的解释都报错，后者提示分别查询或先 `disable`。
+- 启用后的语义是**显式的一步**：某条解释的 `from` 已由已登记事实或规则结论成立时，
+  它的 `to` 进入该次查询的事实库。解释不伪装成规则：它是独立的 `interpretation_application`
+  证书节点；它**不触发规则**，也**不消费另一条解释的结论**，所以不存在解释链，一次只前进一步。
+- 冲突见证：解释推出的命题参与冲突时，证书把该侧记为解释见证
+  （`provenance.kind = "interpretation"`），不会落进“规则见证无法重建”。优先级只排规则，
+  因此解释与规则/另一条解释冲突时未决；严格事实仍胜过解释结论。
+- 证书 v6 必填 `interpretations: [...]`，按 id 排序，只列本次启用且被引用的解释；
+  每条是 `{id, direction, from, to, sources}`。`:verify-cert` 按 id 在环境中找声明，
+  用内核等价比较 `from`/`to`，并逐字段比较方向与来源。
+- `:gap` / `:why` 发现目标或缺失前提只差一条未启用解释时打印提示：
+
+  ```text
+    存在未启用解释 `<id>`（from → to）；用 :interpret enable <id> 后重查
+  ```
 - 封闭环境：案件文件写解释默认拒绝，`--allow-case-rules` 才允许；带 `namespace` 的包内解释
   可正常 `import` 并加载。
 
-**当前边界**：`--interpret` 启用、解释在推理中的应用、证书里的解释节点、解释候选与 `open`
-都还没有实现；加载解释不代表系统已经“支持解释”，也不改变任何结论。
+**当前边界**：解释只做“一步许可”，不是蕴含关系或等价重写：启用的解释不会反向使用 `to` 证明
+`from`，也不会在规则前提里当作已证明命题继续链式推导；`open` 概念与多解释分支仍属于后续步骤（M2-9）。
 
 ### 跨包冲突与优先级出处
 
@@ -790,7 +851,7 @@ priority pkg.special.适用特别法 over pkg.general.适用一般法
   在结果前打印一行 `注意：当前环境的优先级声明存在环：…；环内的优先关系不生效。`，
   `:verify-cert` 在侧条件行后打印同一行；警告不改变退出码。
 
-证书 v5 与校验：
+证书 v6 与校验：
 
 - `assumptions[]` 的每条记录都在 `proposition` 之后带必填的 `identity`；`sources` 与 `label`
   可省略。`disputed` 不能作为假设，同一命题不能出现两种身份。
@@ -952,7 +1013,7 @@ priority pkg.special.适用特别法 over pkg.general.适用一般法
 
 核对边界：`:audit` 只证明"引文与仓库语料中的条文一致"，不证明规则忠实于条文、不判断条文是否适用于
 具体案件、也不判断法律结论正确。语料是仓库内的静态文件，没有爬取或版本历史；`:audit` 不读取
-`lawpacks/` 或锁。`:audit` 的条文正文哈希不进入证书；证书 v5 的环境身份记录的是语料**文件**
+`lawpacks/` 或锁。`:audit` 的条文正文哈希不进入证书；证书 v6 的环境身份记录的是语料**文件**
 （原始字节，CRLF→LF）的 SHA-256。仓库里多数 `examples/` 的 `source` 仍没有 `quote`，
 对它们运行 `:audit` 会逐条显示无引文，并因“没有可核对的引文”退出 `1`；
 `examples/宪法第三十九条-导入包.std` 通过官方包引入带引文的规则，可以直接审计。
@@ -1156,7 +1217,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   树结构；`:asof` 换到规则区间之外也一样。规则是否落在适用区间、案件是否在管辖范围内、从旧兼从轻
   如何表达，都是 M2-20 的显式推理判定，M2-6/M2-7 不做。多法域门禁只要求用户选一个会话管辖，
   选定后也不过滤规则。
-- 证书 v5 的环境身份记录会话的 `as_of` 与管辖；规则生效区间和事实发生记录尚未进入证书（M2-20）。
+- 证书 v6 的环境身份记录会话的 `as_of` 与管辖；规则生效区间和事实发生记录尚未进入证书（M2-20）。
 
 出处要求的当前范围：
 
@@ -1166,7 +1227,8 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 - `contrary` / `unique` 豁免：冲突与唯一性声明不是事实断言，来源核验留给审计层。
 - `interpret` 必须有另起一行的 `direction`（literal / expand / narrow / analogy，无默认）与至少一条
   另起一行的 `source`，来源的 `text`、`locator`、`version` 都非空；`from`/`to` 必须是命题（`Sort 0`），
-  概念到概念的解释明确拒绝。加载后它是不透明常量，不进入推理，也不改变证书。
+  概念到概念的解释明确拒绝。加载后它是可启用、可审计的单前提许可；默认不启用，启用/停用的规则见
+  「解释（`interpret`）：显式启用的单前提许可」。
 
 ## 架构与职责边界
 
@@ -1177,7 +1239,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   推导由推理器按自己的语义产生；把证书的单调骨架翻译成证明项、再交给内核检查，
   是 `crates/cert::kernel_proof` 的职责。
 - **`crates/lang`**：词法、语法、精化、理论文件加载。**不可信**——它产出的每个项都会被内核重新检查。
-  `interpret` 精化为不透明常量（类型 `from → to`），方向与出处随声明保存；本步不产生任何推理行为。
+  `interpret` 精化为类型 `from → to` 的常量，方向与出处随声明保存；它是否被应用由推理层按会话的显式启用决定，加载器不做推理。
 - **`crates/reason`**：可废止前向链、推导树、缺口诊断，以及推导到证书的转换。
   缺口诊断是递归的 `GapTree`：候选规则、缺失前提的子缺口、`unless` 阻断、按结构键的路径去重与
   显式上限都在这里计算；`:issues` 的规则实例枚举（按参数的依赖类型取已声明常量）也在同一层，
@@ -1195,15 +1257,17 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   与内核证明项构造 `kernel_proof`（版本化格式，反序列化拒绝未知版本与未知字段）。
   结构键编码 `expression_key` 也在这里实现并公开：它按表达式结构编码、忽略 binder 名、长度前缀
   常量名，推理器的缺口树用它去重（不比较打印文本）。
-  当前格式版本为 5：`assumptions[]` 的每条记录带必填的 `identity`，未决冲突可记
-  `non_strict_fact`。`format_version` 之后是必填的 `environment` 内联对象：规范 profile 名、
+  当前格式版本为 6：`assumptions[]` 的每条记录带必填的 `identity`，未决冲突可记
+  `non_strict_fact`；`interpretations[]` 必填，只列本次启用且被节点或冲突见证引用的解释，
+  `interpretation_application` 节点按下标引用它，冲突见证也可记为解释。
+  `format_version` 之后是必填的 `environment` 内联对象：规范 profile 名、
   按名字排序的包（版本、锁哈希、信任级别）、按 `(law, version)` 排序的语料文件哈希，以及
   显式的 `as_of` / 管辖（来自 `--as-of` / `--jurisdiction` 或 `:asof` / `:jurisdiction`，
   未设置时为 `null`）。
   `profile`/`as_of`/`jurisdiction` 的键存在但值可为
   `null`，缺键报 `missing field`；证书记录的环境身份在反序列化时校验（重复包名/语料键、空名、
-  非法哈希或信任级别、坏日期或管辖都拒绝）。v4、v3、v2 与 v1 证书都按版本拒绝
-  （`unsupported certificate format version 4`、`... version 3` 等），不按缺字段猜测，
+  非法哈希或信任级别、坏日期或管辖都拒绝）。v5、v4、v3、v2 与 v1 证书都按版本拒绝
+  （`unsupported certificate format version 5`、`... version 4` 等），不按缺字段猜测，
   需要按当前理论重新生成。版本政策是：加字段、删字段或改变字段含义都必须升版本，
   没有迁移、兼容读取或降级修复。推理器生成的证书环境为 `Unrecorded`，序列化直接报错；
   只有 CLI 在 `:cert` 导出前盖章。
@@ -1352,7 +1416,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 - `:verify-cert` 的环境校验通过后，若证书记录了低于 `official` 的包，会打印一行
   `注意：证书记录了非官方包：a@1.0.0（community）、…；结论依赖这些包的定义`。这一行只说明
   结论依赖了未经本项目审计的定义，不改变退出码，也不改变逻辑、内核、侧条件、需人判断四行结果。
-- 证书 v5 的环境身份是**导出时点**的快照：profile、包版本/锁哈希/信任级别、链接语料的文件哈希与
+- 证书 v6 的环境身份是**导出时点**的快照：profile、包版本/锁哈希/信任级别、链接语料的文件哈希与
   可选的 `as_of` / 管辖。`:verify-cert` 在两层证明检查之前逐项比较这份身份与当前环境，任一差异都
   退出 `2`。语料不在 `std.lock` 里，所以改一个语料文件不会让锁失效，但会让证书的环境校验失败。
   `--as-of` / `:asof` 与 `--jurisdiction` / `:jurisdiction` 只把值记录进身份：它们不参与推理，
@@ -1382,10 +1446,10 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   `:jurisdiction`，证书身份也会记录这两个会话值。但这些字段目前只是记录：推理器不按基准日或管辖
   筛选规则，也不检查案件发生地或时间；规则落在区间外仍然触发，事实的发生时间不参与推理。把时空
   变成规则守卫（含同一法条多个历史版本、从旧兼从轻、事件级时间）是 M2-20。
-- **解释只是登记，不是启发。** `interpret` 已能声明、装载并在 `:inspect` 中查看，但方向
-  （literal / expand / narrow / analogy）只是被保存的元数据：解释不会改写前提、不会产生候选、
-  不进入推导树，也不写进证书。`--interpret` 启用、推理应用、解释节点与 `open` 都尚未实现；
-  加载解释本身不改变任何结论。
+- **解释是单步许可，不是蕴含或重写。** 启用后的解释只在已登记事实与规则结论上应用一次：
+  `from` 成立时推出 `to`，不触发规则，也不消费另一条解释的结论，所以没有解释链；它不会反向
+  用 `to` 证明 `from`。方向（literal / expand / narrow / analogy）是声明的选择而非推理行为；
+  多解释分支、`open` 开放概念与“需要人判断”的节点仍属于 M2-9。
 
 ### 宇宙：Prop 不可预测，Type 层可预测
 
@@ -1418,9 +1482,10 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 
 ### 其余已确认缺陷
 
-- **`interpret` 有声明与装载，没有推理语义。** `interpret 名称 : from → to` 必须带 `direction` 与
-  `source`，加载为不透明常量并能在 `:inspect` 中看到；但它不产生事实、规则或推导，也不进入证书。
-  `--interpret` 启用、推理应用、解释节点与解释候选都还没实现；详见「解释（`interpret`）：可加载，但不启用」。
+- **`interpret` 已启用并进入证书，但仍是单步许可。** `interpret 名称 : from → to` 必须带
+  `direction` 与 `source`；`--interpret` / `:interpret enable` 启用后，它的 `from` 已成立时
+  `to` 进入该次查询，证书记录 `interpretation_application` 节点与冲突见证。它不触发规则、
+  不链式应用，也不把 `to` 反向当作 `from` 的证明；多解释分支与 `open` 是 M2-9。
 - **规则参数必须被前提约束。** 出现在结论却没有出现在任何前提里的参数，
   加载时即被拒绝——否则实例化后结论会是 `?x`，那是一个不闭合的洞。
   代价是完全没有前提的规则暂时写不了；「凡公民皆有 X」现在可以写成
@@ -1436,7 +1501,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   孙志刚的宪法权利来自官方包；批复、收容与位阶内容属于包外或案件级法源，不冒充官方包内容。
   `law/corpus/cn.constitution/2018.json` 已收宪法 143 条并维护完整覆盖台账（6 formalized /
   15 partial / 17 indexed / 105 needs_ontology），`:audit` 显示它、`:packs` 通过清单的 `corpus`
-  链接显示计数与本体缺口；`:load` 不读取语料。证书 v5 记录导出时的包身份/哈希、profile 与
+  链接显示计数与本体缺口；`:load` 不读取语料。证书 v6 记录导出时的包身份/哈希、profile 与
   链接语料的文件哈希，但多个文件加载后仍合并成一个扁平环境。
 - **同一结论多路径只留一条。** `build_nodes` 用 `or_insert`，另一条推导及其出处丢失。
 
@@ -1526,10 +1591,13 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   由解析层保留；案件与模块文件都可 import 已加载 namespace，报告按首次出现去重，未加载时报“尚未加载”
   且不改变库，同名但非 namespace 的 theory 不满足 import，模块可 import 已加载模块（含带点包名），
   失败加载不记录 import，重载同一 theory 时 `requires` 合并去重，import 不豁免声明名检查。
-- `crates/cert/tests/json.rs`（35）：证书 v5 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
-  v5 快照比对、假设记录的必填 `identity` 与 `non_strict_fact` 原因形状、顶层与 `environment`
-  字段名/顺序固定（`profile`、`packs`、`corpora`、`as_of`、
-  `jurisdiction`）、未知版本或未知字段被拒；v4 证书先报版本错误而不是缺 `identity`，
+- `crates/cert/tests/json.rs`（36）：证书 v6 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
+  v6 快照比对、假设记录的必填 `identity` 与 `non_strict_fact` 原因形状、解释表与
+  `interpretation_application` 节点形状、顶层与 `environment`
+  字段名/顺序固定（`format_version`、`environment`、`assumptions`、`interpretations`、`nodes`、
+  `root`、`conflicts`、`open_obligations`、`metadata`；`environment` 内为 `profile`、`packs`、
+  `corpora`、`as_of`、`jurisdiction`）、未知版本或未知字段被拒；v5 证书先报版本错误而不是缺
+  `interpretations`，v4 证书先报版本错误而不是缺 `identity`，
   v3 证书先报版本错误而不是缺 `resolution` 依据，v2 证书先报版本错误而不是缺 `environment`，v1 同理；
   `environment` 缺失或其 `profile`/`packs`/`corpora`/`as_of`/`jurisdiction` 任一缺键都报
   `missing field`，三个可选字段的显式 `null` 接受；
@@ -1635,7 +1703,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   退出 `1` 并点名 `「批准 甲」只是「用户陈述」`，
   `:cert` 的 `resolution.reason.kind` 是 `non_strict_fact`、身份 `user_asserted`，`:verify-cert`
   退出 `1`；两主张冲突退出 `1` 且原因写“两侧都只是主张”，证书记 `conflicting_assumptions`；
-  把 v5 证书的 `format_version` 改回 4 后 `:verify-cert` 退出 `2` 并报 `supports 5`；
+  把 v6 证书的 `format_version` 改回 4 后 `:verify-cert` 退出 `2` 并报 `supports 6`；
   篡改假设身份（`user_asserted` → `verified`）后逻辑校验失败并指出环境登记不符（`在环境中登记为
   「用户陈述」，证书写作「法院查明」`）；`:given` / `:fact add` 之后 `:inspect` 与 `:why` 的假设行
   都显示 `〔用户陈述〕`。此外 `:given` 不能改写环境已登记的 `verified` 身份；`:fact assumed` 之后
@@ -1673,8 +1741,15 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 - `crates/cli/tests/interpretation.rs`（6）：`:inspect` 显示 `interpret` 的方向与来源摘要并保留全部
   来源字段、来源里的换行/双向覆盖字符被转义、模块解释标 `[ns]`；封闭环境默认拒绝案件解释并提示
   `--allow-case-rules`，允许后标 `[案件扩展]`；临时包里的解释经 `import` 加载并标
-  `[pkg@版本]`；惰性用例不含任何规则：`:why` / `:gap` 都以缺口退出 `1`，`:cert` 的 JSON 根是缺口
-  节点、没有解释名，解释不进推导树也不作为缺口候选。
+  `[pkg@版本]`；惰性用例不含任何规则：`:why` / `:gap` 都以缺口退出 `1` 并打印未启用提示，`:cert`
+  的 JSON 根是缺口节点、`interpretations` 是空数组，没有应用节点，解释不进推导树也不作为缺口候选。
+- `crates/cli/tests/interpret_apply.rs`（11）：解释启用的端到端用例——未启用时 `:gap` / `:why`
+  打印 `存在未启用解释 ...` 提示；`--interpret` 与 `:interpret enable` 都让 `:why` 通过两层校验、
+  树里出现 `〈解释 id（方向）〉`；`:interpret list` 的状态翻转与 `disable` 后提示回归；不存在的 id、
+  重复启用、两条 `to` 内核等价的解释是命令错误；两条解释的证书按 id 排序且与启用顺序无关；
+  `:cert` 产出 v6 解释表、应用节点与下标；v5 证书被版本探针拒绝；伪造证书（错下标、未列出的
+  解释、`from`/`to`/结论/前提不符、缺 `interpretations` 字段、环境没有该 id）都被 `:verify-cert`
+  退出 `2`；解释参与冲突时离开 `unknown_witnesses`、进 `unresolved_conflict` 义务。
 - `crates/cli/tests/imports.rs`（31）：注册表导入端到端——临时 `lawpacks` + `std.lock` 后案件
   `import` 一个包并 `:why`；无 import 时没有注册表也能加载；缺锁、哈希不符（两个包的错误都列出）、
   锁缺包/多包、版本不符；坏清单、重复包名、重复 namespace、缺包；两个包同名后缀的限定名各自解析；
@@ -1685,7 +1760,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   回滚声明与包信息；向自己 import 的包 namespace 声明同样被拒绝；`:inspect` 显示 `[a@0.1.0]`，
   直接按文件加载的 namespaced 模块仍是 `[a]`；已由文件加载的 namespace 被 import 时跳过注册表，
   混合 import 只解析包；批处理失败退出 `1`、显式 `:load` 退出 `2`。
-- `crates/cli/tests/cert.rs`（21）：`:cert` / `:verify-cert` 端到端——导出的 v5 JSON 记录环境身份，
+- `crates/cli/tests/cert.rs`（22）：`:cert` / `:verify-cert` 端到端——导出的 v6 JSON 记录环境身份，
   往返并通过检查器；`:verify-cert` 先打印环境校验行，再分行报告逻辑与内核两段；缺口证书退出 `1`
   且产生 `MissingPremise`；未决冲突产生 `UnresolvedConflict`；篡改结论或绑定在环境校验通过后于
   逻辑层失败；逻辑层接受、内核因绑定类型不符拒绝时退出 `2` 并给出节点；证书不存在、不是 JSON、
@@ -1695,7 +1770,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   以及含空格路径（不加引号只当路径、加引号可带目标）、缺根、目标无法解析；
   读证书失败的路径把换行/ESC/U+202E 转义成一行诊断；
   旧 `:check` 不再作为别名，报改名错误并退出 `2`。
-- `crates/cli/tests/cert_environment.rs`（21）：证书 v5 环境门禁端到端——合法 v5 生成/校验在同一
+- `crates/cli/tests/cert_environment.rs`（21）：证书 v6 环境门禁端到端——合法 v6 生成/校验在同一
   环境通过并记录 profile、包版本/锁哈希/信任级别与语料文件哈希；没有默认环境时显式
   `profile:null`、空 `packs`/`corpora`、`as_of:null`、`jurisdiction:null` 且校验通过；v2 证书、
   缺 `environment`/`profile` 的证书被拒；同一注册表里改语料文件后校验失败（语料不在锁内）；
@@ -1704,7 +1779,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   `--no-default-packs` 加显式 import 时证书无 profile，同一包集合在默认 profile 下因 profile 漂移失败；
   `--profile` 用别名时记录规范 profile 名；手改 trust 失败；`:cert` 未 `:load` 时退出 `2` 且 stdout 为空；
   语料不可读时 `:cert` 退出 `2` 且不输出半个 JSON；手改证书 profile/包名中的换行、ESC 在差异行
-  里被转义，一条差异一行；`--as-of 2026-11-23` + `--jurisdiction CN` 生成 v5 后 JSON 两字段有值、
+  里被转义，一条差异一行；`--as-of 2026-11-23` + `--jurisdiction CN` 生成 v6 后 JSON 两字段有值、
   同值校验通过；换值、不带值、证书记 `null` 而当前给了值都按差异拒绝；带值不改变
   profile/packs/corpora，也不改变 `:packs`/`env`/`:why` 的输出。
 - `crates/cli/tests/scope.rs`（9）：生效时间与管辖端到端——`:inspect` 显示规则作用域与事实发生记录、
@@ -1809,7 +1884,18 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   超长标识符报长度上限（含边界）；未闭合字符串与尾随反斜杠报在开引号位置；裸控制字符在源码里
   和字符串里分别被拒并转义；无换行的行注释是完整注释；规则参数与前提合计超限报错（含混合边界）；
   普通嵌套、应用与规则仍解析。
-- `crates/cert/tests/limits.rs`（14）：证书 JSON 边界——v5 夹具仍能解析；缺字段/错类型报错并指出字段；
+- `crates/cert/tests/interpretations.rs`（13）：证书 v6 解释表与解释应用节点——合法证书通过
+  `check` 且 `kernel_proof` 根证明成功；id 不在环境、方向不符、来源任一字段不符、`from`/`to`
+  与声明不等价、下标越界、前提不是先前节点或不等价于 `from`、结论不是 `to`、表项无人引用、
+  两条 `to` 等价、表未按 id 排序都被拒绝；冲突见证可以是解释下标，越界/`to` 不符/改记成
+  `unknown_witnesses` 都被拒绝，事实与解释之间必须记成事实胜出或主张未决。
+- `crates/reason/tests/interpretation.rs`（7）：解释的推理语义——默认不启用；启用后 `to` 得到
+  解释应用节点；`from` 只读已登记事实与规则结论（含一条 `from` 由规则结论成立的用例，应用节点的
+  前提正是那条规则步），解释不链式、也不触发规则；未启用提示按 id
+  排序且只在 `from` 已成立时出现；不存在的 id、重复启用、`to` 内核等价的第二个解释都报错；
+  解释参与冲突时见证是 `Interpretation`、裁决为没有优先关系而不是见证无法重建，转换出的 v6
+  证书两段检查都通过。
+- `crates/cert/tests/limits.rs`（14）：证书 JSON 边界——v6 夹具仍能解析；缺字段/错类型报错并指出字段；
   `NaN` 与 5000 层嵌套表达式在反序列化阶段被拒（不栈溢出）；超过 8 MiB 的文档在解析前被拒；
   节点/假设数量在恰好上限时接受、超一个即拒绝；表达式是二叉树、节点数总是奇数，最大可接受 9999 个
   节点，10001 个即拒绝并报上限；超限证书不能序列化；根索引越界由检查器报错。
