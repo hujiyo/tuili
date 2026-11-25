@@ -322,16 +322,66 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
 【缺口】
   · 「可复议 甲」没有可闭合的推导。
   · 说明：目标处于冲突中
-  · 候选规则「规则一」：缺少前提「不批准 甲」、「批准 甲」。
+  · 候选规则「规则一」：缺少前提「不批准 甲」、「批准 甲」（未找到规则声明，无法报告）。
      来源：「来源一」
-  · 候选规则「规则二」：unless 条件「已决 甲」（分析假设）已成立，故该规则被阻断。
+  · 候选规则「规则二」：unless 条件「已决 甲」（分析假设）已成立，故该规则被阻断（例外未找到规则声明，无法报告）。
      来源：证书未记录来源。
   · 候选规则「规则三」：证书没有记录它缺少什么。
      来源：证书未记录来源。
-  · 候选规则「规则四」：unless 条件「其他 甲」（证书未记录身份）已成立，故该规则被阻断。
+  · 候选规则「规则四」：unless 条件「其他 甲」（证书未记录身份）已成立，故该规则被阻断（例外未找到规则声明，无法报告）。
      来源：证书未记录来源。
 ";
     assert_eq!(out, expected);
+}
+
+#[test]
+fn a_gap_without_declaration_context_says_the_declaration_was_not_found() {
+    let certificate = certificate(
+        vec![assumption(
+            atom("已决", "甲"),
+            FactIdentity::Assumed,
+            Vec::new(),
+            None,
+        )],
+        vec![Node::Gap {
+            proposition: atom("可复议", "甲"),
+            note: None,
+            candidates: vec![
+                GapCandidate {
+                    rule: "规则一".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
+                    missing: vec![atom("批准", "甲")],
+                    blocked_by: Vec::new(),
+                    sources: Vec::new(),
+                    applicability: unscoped_candidate_applicability(),
+                },
+                GapCandidate {
+                    rule: "规则二".to_owned(),
+                    bindings: Vec::new(),
+                    held: Vec::new(),
+                    missing: Vec::new(),
+                    blocked_by: vec![atom("已决", "甲")],
+                    sources: Vec::new(),
+                    applicability: unscoped_candidate_applicability(),
+                },
+            ],
+        }],
+        Some(0),
+    );
+    let out = render_narrative(&certificate).unwrap();
+    assert!(
+        out.contains("缺少前提「批准 甲」（未找到规则声明，无法报告）"),
+        "a caller without declarations must be told so: {out}"
+    );
+    assert!(
+        out.contains("故该规则被阻断（例外未找到规则声明，无法报告）"),
+        "a caller without declarations must be told so: {out}"
+    );
+    assert!(
+        !out.contains("缺少前提「批准 甲」。"),
+        "the annotation must not be silently dropped: {out}"
+    );
 }
 
 #[test]
@@ -370,7 +420,7 @@ fn an_ambiguous_blocker_is_not_attributed_to_a_fact() {
     );
     let out = render_narrative(&certificate).unwrap();
     assert!(
-        out.contains("unless 条件「已决 甲」（证书未记录身份）已成立，故该规则被阻断。"),
+        out.contains("unless 条件「已决 甲」（证书未记录身份）已成立，故该规则被阻断（例外未找到规则声明，无法报告）。"),
         "{out}"
     );
     assert!(!out.contains("（分析假设）"), "{out}");
@@ -400,7 +450,7 @@ fn a_duplicate_blocker_fact_is_not_attributed() {
     );
     let out = render_narrative(&certificate).unwrap();
     assert!(
-        out.contains("unless 条件「已决 甲」（证书未记录身份）已成立，故该规则被阻断。"),
+        out.contains("unless 条件「已决 甲」（证书未记录身份）已成立，故该规则被阻断（例外未找到规则声明，无法报告）。"),
         "{out}"
     );
 }

@@ -613,6 +613,276 @@ fn each_missing_premise_carries_only_its_own_rules_burden() {
     );
 }
 
+/// The line `:explain` prints for one gap candidate rule.
+fn candidate_line(out: &str, rule: &str) -> String {
+    let prefix = format!("  · 候选规则「{rule}」：");
+    out.lines()
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("no narrative line for rule {rule}:\n{out}"))
+        .to_owned()
+}
+
+/// A rule with both groups declared, a missing premise and a blocked `unless`:
+/// the missing line takes the requirement group and the blocker line takes the
+/// exception group, with no borrowing in either direction.
+const BOTH_GROUPS_THEORY: &str = r#"
+sort 人
+pred 侵占 : 人 → Prop
+pred 违法 : 人 → Prop
+pred 免责 : 人 → Prop
+obj 张三 : 人
+axiom 免责事实 : 免责 张三
+  source text "测试" locator "免责事实"
+
+rule 两组 :
+  params p : 人
+  premise 侵占 p
+  conclude 违法 p
+  unless 免责 p
+  burden claimant
+  standard preponderance
+  exception_burden respondent
+  exception_standard clear_and_convincing
+  source text "测试" locator "两组"
+"#;
+
+#[test]
+fn both_groups_are_reported_without_borrowing_from_each_other() {
+    let theory = TempTheory::new("both-groups", BOTH_GROUPS_THEORY);
+    let gap = check(
+        load_and(&theory, ":gap 违法 张三"),
+        GAP,
+        &[
+            "缺 ⟨侵占 张三⟩〔举证：主张方 / 优势证据〕",
+            "被阻断：「免责 张三」〔用户陈述〕已成立，故本规则不触发 〔例外举证：相对方 / 清楚可信〕",
+        ],
+    );
+    let out = stdout(&gap);
+    let missing = line_starting_with(&out, "缺 ⟨侵占 张三⟩");
+    assert!(
+        !missing.contains("相对方") && !missing.contains("清楚可信"),
+        "the exception group must not leak into the requirement line: {missing}"
+    );
+    let blocked = line_starting_with(&out, "被阻断：");
+    assert!(
+        !blocked.contains("主张方") && !blocked.contains("优势证据"),
+        "the requirement group must not leak into the exception line: {blocked}"
+    );
+
+    let explain = check(
+        load_and(&theory, ":explain 违法 张三"),
+        GAP,
+        &[
+            "缺少前提「侵占 张三」（这条证据由主张方提出，标准是优势证据）",
+            "unless 条件「免责 张三」（用户陈述）已成立，故该规则被阻断（例外由相对方提出，标准是清楚可信）",
+        ],
+    );
+    let explain_out = stdout(&explain);
+    let line = candidate_line(&explain_out, "两组");
+    let blocked_part = line.split("；unless").nth(1).unwrap_or_default();
+    assert!(
+        !blocked_part.contains("主张方") && !blocked_part.contains("优势证据"),
+        "the narrative must not borrow the requirement group for the exception: {line}"
+    );
+}
+
+/// Only the exception group is declared: the missing premise must stay
+/// undeclared, and the blocker line takes the exception group.
+const ONLY_EXCEPTION_THEORY: &str = r#"
+sort 人
+pred 侵占 : 人 → Prop
+pred 违法 : 人 → Prop
+pred 免责 : 人 → Prop
+obj 张三 : 人
+axiom 免责事实 : 免责 张三
+  source text "测试" locator "免责事实"
+
+rule 只有例外 :
+  params p : 人
+  premise 侵占 p
+  conclude 违法 p
+  unless 免责 p
+  exception_burden respondent
+  exception_standard clear_and_convincing
+  source text "测试" locator "只有例外"
+"#;
+
+#[test]
+fn an_exception_only_rule_does_not_borrow_for_the_missing_premise() {
+    let theory = TempTheory::new("only-exception", ONLY_EXCEPTION_THEORY);
+    let gap = check(
+        load_and(&theory, ":gap 违法 张三"),
+        GAP,
+        &[
+            "缺 ⟨侵占 张三⟩〔举证：未声明举证责任 / 未声明证明标准〕",
+            "〔例外举证：相对方 / 清楚可信〕",
+        ],
+    );
+    let out = stdout(&gap);
+    let missing = line_starting_with(&out, "缺 ⟨侵占 张三⟩");
+    assert!(
+        !missing.contains("相对方") && !missing.contains("清楚可信"),
+        "an undeclared requirement group must not take the exception values: {missing}"
+    );
+
+    let explain = check(
+        load_and(&theory, ":explain 违法 张三"),
+        GAP,
+        &[
+            "缺少前提「侵占 张三」（这条证据未声明举证责任，未声明证明标准）",
+            "例外由相对方提出，标准是清楚可信",
+        ],
+    );
+    let explain_out = stdout(&explain);
+    let line = candidate_line(&explain_out, "只有例外");
+    let missing_part = line.split("；unless").next().unwrap_or_default();
+    assert!(
+        !missing_part.contains("相对方") && !missing_part.contains("清楚可信"),
+        "the narrative must not borrow the exception values for a missing premise: {line}"
+    );
+}
+
+/// Only the requirement group is declared: the blocker must stay undeclared.
+const ONLY_REQUIREMENT_THEORY: &str = r#"
+sort 人
+pred 占有 : 人 → Prop
+pred 违法 : 人 → Prop
+pred 免责 : 人 → Prop
+obj 张三 : 人
+axiom 免责事实 : 免责 张三
+  source text "测试" locator "免责事实"
+
+rule 只有本体 :
+  params p : 人
+  premise 占有 p
+  conclude 违法 p
+  unless 免责 p
+  burden claimant
+  standard preponderance
+  source text "测试" locator "只有本体"
+"#;
+
+#[test]
+fn a_requirement_only_rule_does_not_borrow_for_the_blocker() {
+    let theory = TempTheory::new("only-requirement", ONLY_REQUIREMENT_THEORY);
+    let gap = check(
+        load_and(&theory, ":gap 违法 张三"),
+        GAP,
+        &[
+            "缺 ⟨占有 张三⟩〔举证：主张方 / 优势证据〕",
+            "〔例外举证：未声明举证责任 / 未声明证明标准〕",
+        ],
+    );
+    let out = stdout(&gap);
+    let blocked = line_starting_with(&out, "被阻断：");
+    assert!(
+        !blocked.contains("主张方") && !blocked.contains("优势证据"),
+        "an undeclared exception group must not take the requirement values: {blocked}"
+    );
+
+    let explain = check(
+        load_and(&theory, ":explain 违法 张三"),
+        GAP,
+        &[
+            "缺少前提「占有 张三」（这条证据由主张方提出，标准是优势证据）",
+            "例外未声明举证责任，未声明证明标准",
+        ],
+    );
+    let explain_out = stdout(&explain);
+    let line = candidate_line(&explain_out, "只有本体");
+    let blocked_part = line.split("；unless").nth(1).unwrap_or_default();
+    assert!(
+        !blocked_part.contains("主张方") && !blocked_part.contains("优势证据"),
+        "the narrative must not borrow the requirement values for the exception: {line}"
+    );
+}
+
+/// Each group declares only one of its two fields, and the missing field is in
+/// the *other* group. Every field must be reported as undeclared on its own;
+/// a per-field fallback would fill it in from the other group.
+const CROSS_FIELD_THEORY: &str = r#"
+sort 人
+pred 侵占 : 人 → Prop
+pred 占有 : 人 → Prop
+pred 违法 : 人 → Prop
+pred 免责 : 人 → Prop
+obj 张三 : 人
+axiom 免责事实 : 免责 张三
+  source text "测试" locator "免责事实"
+
+rule 跨组一 :
+  params p : 人
+  premise 侵占 p
+  conclude 违法 p
+  unless 免责 p
+  burden claimant
+  exception_standard clear_and_convincing
+  source text "测试" locator "跨组一"
+
+rule 跨组二 :
+  params p : 人
+  premise 占有 p
+  conclude 违法 p
+  unless 免责 p
+  standard preponderance
+  exception_burden court
+  source text "测试" locator "跨组二"
+"#;
+
+#[test]
+fn each_undeclared_field_stays_undeclared_without_a_group_fallback() {
+    let theory = TempTheory::new("cross-field", CROSS_FIELD_THEORY);
+    let gap = check(
+        load_and(&theory, ":gap 违法 张三"),
+        GAP,
+        &[
+            "缺 ⟨侵占 张三⟩〔举证：主张方 / 未声明证明标准〕",
+            "缺 ⟨占有 张三⟩〔举证：未声明举证责任 / 优势证据〕",
+            "〔例外举证：未声明举证责任 / 清楚可信〕",
+            "〔例外举证：法院职权 / 未声明证明标准〕",
+        ],
+    );
+    let out = stdout(&gap);
+    let first = line_starting_with(&out, "缺 ⟨侵占 张三⟩");
+    let second = line_starting_with(&out, "缺 ⟨占有 张三⟩");
+    assert!(
+        first.contains("主张方") && !first.contains("清楚可信"),
+        "the declared burden must not borrow the exception standard: {first}"
+    );
+    assert!(
+        second.contains("优势证据") && !second.contains("法院职权"),
+        "the declared standard must not borrow the exception burden: {second}"
+    );
+    assert!(
+        out.lines()
+            .any(|line| line.contains("〔例外举证：法院职权 / 未声明证明标准〕")),
+        "the exception burden must not borrow the requirement standard:\n{out}"
+    );
+
+    let explain = check(
+        load_and(&theory, ":explain 违法 张三"),
+        GAP,
+        &[
+            "缺少前提「侵占 张三」（这条证据由主张方提出，但未声明证明标准）",
+            "缺少前提「占有 张三」（这条证据未声明举证责任，标准是优势证据）",
+            "例外未声明举证责任，标准是清楚可信",
+            "例外由法院依职权查明，但未声明证明标准",
+        ],
+    );
+    let explain_out = stdout(&explain);
+    let first_line = candidate_line(&explain_out, "跨组一");
+    assert!(
+        !first_line.contains("清楚可信")
+            || first_line.contains("例外未声明举证责任，标准是清楚可信"),
+        "the declared burden must not borrow the exception standard: {first_line}"
+    );
+    let second_line = candidate_line(&explain_out, "跨组二");
+    assert!(
+        second_line.contains("例外由法院依职权查明，但未声明证明标准"),
+        "the court role must read naturally and the standard must stay undeclared: {second_line}"
+    );
+}
+
 #[test]
 fn declaring_burden_and_standard_does_not_change_why_on_a_gap() {
     let base = TempTheory::new("why-gap-base", REPORT_THEORY_UNDECLARED);

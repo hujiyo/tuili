@@ -93,8 +93,9 @@ pub fn render_narrative(certificate: &Certificate) -> Result<String, String> {
 /// them; a missing-premise sentence then says who must present the evidence
 /// and to what standard. An undeclared burden or standard reads `未声明举证责任`
 /// / `未声明证明标准`, never a default; the standard itself is only a label and
-/// is never turned into a number. A rule absent from the map is rendered with
-/// no burden sentence, exactly like a caller without this context.
+/// is never turned into a number. A rule the map has no entry for is reported
+/// as `未找到规则声明，无法报告` in the sentence, the same marker `:gap` prints,
+/// instead of silently dropping the annotation.
 pub fn render_narrative_with_context(
     certificate: &Certificate,
     open_concepts: &[String],
@@ -486,9 +487,14 @@ fn write_gap_candidate(
             .collect::<Vec<_>>()
             .join("、");
         let mut clause = format!("缺少前提{missing}");
-        if let Some(pleading) = pleadings.get(&candidate.rule) {
-            clause.push_str(&format!("（{}）", pleading.requirements.sentence_zh(false)));
-        }
+        let requirement = match pleadings.get(&candidate.rule) {
+            Some(pleading) => pleading.requirements.sentence_zh(false),
+            // The caller supplied no declaration for this rule. Saying so
+            // matches `:gap`, which writes the same marker instead of
+            // silently dropping the annotation.
+            None => "未找到规则声明，无法报告".to_owned(),
+        };
+        clause.push_str(&format!("（{requirement}）"));
         clauses.push(clause);
     }
     if !candidate.blocked_by.is_empty() {
@@ -499,9 +505,11 @@ fn write_gap_candidate(
             .collect::<Vec<_>>()
             .join("、");
         let mut clause = format!("unless 条件{blockers}已成立，故该规则被阻断");
-        if let Some(pleading) = pleadings.get(&candidate.rule) {
-            clause.push_str(&format!("（{}）", pleading.exceptions.sentence_zh(true)));
-        }
+        let exception = match pleadings.get(&candidate.rule) {
+            Some(pleading) => pleading.exceptions.sentence_zh(true),
+            None => "例外未找到规则声明，无法报告".to_owned(),
+        };
+        clause.push_str(&format!("（{exception}）"));
         clauses.push(clause);
     }
     if clauses.is_empty() {
@@ -883,19 +891,19 @@ fn obligation_line(
                 if candidate.missing.is_empty() {
                     continue;
                 }
-                let Some(pleading) = pleadings.get(&candidate.rule) else {
-                    continue;
-                };
                 let premises = candidate
                     .missing
                     .iter()
                     .map(|proposition| format!("「{}」", print_expr(&Expr::from(proposition))))
                     .collect::<Vec<_>>()
                     .join("、");
+                let requirement = match pleadings.get(&candidate.rule) {
+                    Some(pleading) => pleading.requirements.sentence_zh(false),
+                    None => "未找到规则声明，无法报告".to_owned(),
+                };
                 missing.push(format!(
-                    "规则「{}」缺少前提{premises}：{}",
-                    escape_control(&candidate.rule),
-                    pleading.requirements.sentence_zh(false)
+                    "规则「{}」缺少前提{premises}：{requirement}",
+                    escape_control(&candidate.rule)
                 ));
             }
         }

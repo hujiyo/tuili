@@ -254,6 +254,18 @@ impl Burden {
         }
     }
 
+    /// The role as the actor of the report's plain-language sentence:
+    /// `主张方提出`, `相对方提出`, `法院依职权查明`. `court` is not a
+    /// person, so the sentence names the court's own inquiry instead of
+    /// saying that the role "presents" evidence.
+    pub fn actor_zh(self) -> &'static str {
+        match self {
+            Burden::Claimant => "主张方提出",
+            Burden::Respondent => "相对方提出",
+            Burden::Court => "法院依职权查明",
+        }
+    }
+
     /// The values the clause accepts, in a stable order. Error messages list
     /// the same set, so a near miss can be corrected from the diagnostic.
     pub fn labels() -> &'static [&'static str] {
@@ -385,10 +397,14 @@ impl ProofBurden {
     /// [`ProofBurden::pair_zh`] writes, so the two reports cannot disagree.
     pub fn sentence_zh(self, exceptions: bool) -> String {
         let (burden, standard) = self.labels_zh();
+        let actor = match self.burden {
+            Some(burden) => burden.actor_zh(),
+            None => burden,
+        };
         let subject = if exceptions { "例外" } else { "这条证据" };
         match (self.burden, self.standard) {
-            (Some(_), Some(_)) => format!("{subject}由{burden}提出，标准是{standard}"),
-            (Some(_), None) => format!("{subject}由{burden}提出，但{standard}"),
+            (Some(_), Some(_)) => format!("{subject}由{actor}，标准是{standard}"),
+            (Some(_), None) => format!("{subject}由{actor}，但{standard}"),
             (None, Some(_)) => format!("{subject}{burden}，标准是{standard}"),
             (None, None) => format!("{subject}{burden}，{standard}"),
         }

@@ -897,13 +897,14 @@ fn burden_and_standard_round_trip_their_labels() {
 /// never becomes a number.
 #[test]
 fn burden_report_spells_out_declared_and_undeclared_values() {
-    for (burden, keyword, label) in [
-        (Burden::Claimant, "claimant", "主张方"),
-        (Burden::Respondent, "respondent", "相对方"),
-        (Burden::Court, "court", "法院职权"),
+    for (burden, keyword, label, actor) in [
+        (Burden::Claimant, "claimant", "主张方", "主张方提出"),
+        (Burden::Respondent, "respondent", "相对方", "相对方提出"),
+        (Burden::Court, "court", "法院职权", "法院依职权查明"),
     ] {
         assert_eq!(burden.label(), keyword);
         assert_eq!(burden.label_zh(), label);
+        assert_eq!(burden.actor_zh(), actor);
     }
     for (standard, keyword, label) in [
         (Standard::Preponderance, "preponderance", "优势证据"),
@@ -933,6 +934,20 @@ fn burden_report_spells_out_declared_and_undeclared_values() {
         "这条证据由主张方提出，标准是优势证据"
     );
     assert_eq!(both.sentence_zh(true), "例外由主张方提出，标准是优势证据");
+
+    let court = ProofBurden {
+        burden: Some(Burden::Court),
+        standard: Some(Standard::ClearAndConvincing),
+    };
+    assert_eq!(
+        court.sentence_zh(false),
+        "这条证据由法院依职权查明，标准是清楚可信",
+        "a court's own inquiry is not a party presenting evidence"
+    );
+    assert_eq!(
+        court.sentence_zh(true),
+        "例外由法院依职权查明，标准是清楚可信"
+    );
 
     let burden_only = ProofBurden {
         burden: Some(Burden::Respondent),
