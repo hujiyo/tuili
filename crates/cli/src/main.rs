@@ -119,6 +119,8 @@
 //! :why <term>             derive, print the certificate's tree, and check it
 //! :explain <term>         derive, print a Chinese because-so explanation, and
 //!                         check the same certificate
+//! :labels <term>          derive and print the certificate's full trust labels
+//!                         with their evidence
 //! :gap <term>             explain what is missing, as a recursive gap tree
 //! :issues                 list every conclusion the current facts can contest
 //! :applicability [term]   list temporal/spatial verdicts: every rule, or the
@@ -280,6 +282,22 @@
 //! prints the formal tree, so the certificate remains expandable; `:cert` JSON
 //! is unchanged.
 //!
+//! `:why`, `:explain` and `:labels` print the certificate's trust labels.
+//! The labels are a derived view of the certificate's own fields (`root` and
+//! its reachable proof graph, assumption identities, interpretation
+//! applications, conflicts and open obligations), computed by
+//! `std_deduce_cert::derive_trust`; no renderer guesses one from printed text
+//! and no label is stored in the certificate. `:why` and `:explain` print the
+//! one-line summary next to their result line (after a proved result, before a
+//! unresolved or defeated conflict report), and `:labels` prints the same
+//! summary plus every applicable label and its evidence. The five labels are
+//! `已验证`, `依赖假设`, `事实待举证`, `争点未决` and `需律师判断`; a gap root
+//! is never `已验证`, an unresolved conflict always makes `争点未决` appear,
+//! and `已验证` says only that the certificate proves the root under strict
+//! facts with nothing left open — it is not a claim that the conclusion is
+//! legally correct. `:cert` JSON is unchanged: the labels are not a certificate
+//! field and the format stays v7.
+//!
 //! `:why` and `:explain` also report the `open` concept marker. A rule step
 //! whose conclusion head is an open predicate, or a root that is one, makes the
 //! derivation depend on a human judgement: the certificate records one
@@ -416,10 +434,10 @@ use std::path::{Path, PathBuf};
 use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
-    render_narrative_with_context, render_with_annotations, Certificate, CheckReport,
+    derive_trust, render_narrative_with_context, render_with_annotations, Certificate, CheckReport,
     EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, Node as CertNode,
     ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, ResolutionBasis,
-    Source, TrustLevel,
+    Source, TrustLabel, TrustLevel, TrustReport, LOCAL_EXTENSION_OBLIGATION_ID,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
@@ -1130,6 +1148,7 @@ impl Session {
                 }
                 "applicability" => self.applicability_command(arg, out),
                 "issues" => self.issues_command(arg, out),
+                "labels" => self.labels_command(arg, out),
                 "cert" => self.export_certificate(arg, out),
                 "verify-cert" => self.verify_certificate(arg, out),
                 "check" => Err(
@@ -1532,29 +1551,74 @@ impl Session {
         // `:explain` deliberately skips these early reports: it builds the
         // certificate and narrates the conflict together with the proof (or
         // the gap), so the reader gets one coherent explanation.
+        let reachable = r.knows(&goal);
+        // The certificate is built before the conflict report so `:why` and
+        // `:explain` attach the same derived trust labels even when the goal
+        // takes part in an unresolved or defeated conflict.
+        let derivation = if cmd == "why" || cmd == "explain" {
+            let mut d = r.derivation();
+            if reachable {
+                d.root = r.root_for(&goal);
+            } else {
+                let ex = r.explain(&goal);
+                let id = d.nodes.len();
+                d.nodes.push(std_deduce_reason::Node::Gap {
+                    prop: goal.clone(),
+                    candidates: ex.candidates,
+                    note: ex.note,
+                });
+                d.root = Some(id);
+            }
+            Some(d)
+        } else {
+            None
+        };
+        let certificate = match &derivation {
+            Some(d) => {
+                let mut certificate = reason_certificate(&self.lib.env, d, &r.priority_order())?;
+                self.mark_case_extensions(&mut certificate);
+                Some(certificate)
+            }
+            None => None,
+        };
+        // The concepts the root's proof graph decided. This is the certificate
+        // layer's own recomputation, the same one `cert::check` runs, so the
+        // notice printed here and the recorded obligation cannot disagree.
+        let open_concepts = match &certificate {
+            Some(certificate) => self.open_concepts(certificate)?,
+            None => Vec::new(),
+        };
+        let trust = match &certificate {
+            Some(certificate) => Some(derive_trust(certificate)?),
+            None => None,
+        };
+
         if cmd != "explain" {
             if let Some(c) = r.conflict_for(&goal) {
                 match &c.resolution {
                     Resolution::Unresolved { reason } => {
+                        if let Some(trust) = &trust {
+                            write_trust_line(out, trust);
+                        }
                         report_unresolved(out, &r, &goal, &c, reason);
                         return Ok(Outcome::Unresolved);
                     }
                     Resolution::Defeated { winner, basis } => {
                         let side = r.conflict_side(&c, &goal);
                         if side != Some(*winner) {
+                            if let Some(trust) = &trust {
+                                write_trust_line(out, trust);
+                            }
                             report_defeated(out, &r, &goal, &c, *winner, basis);
                             return Ok(Outcome::Gap);
                         }
                         // The winner is asserted; fall through and show it as
                         // proved, with a note about the defeated competitor.
-                        let reachable = r.knows(&goal);
                         debug_assert!(reachable);
                     }
                 }
             }
         }
-
-        let reachable = r.knows(&goal);
 
         if cmd == "gap" {
             if reachable {
@@ -1577,26 +1641,15 @@ impl Session {
             return Ok(Outcome::Gap);
         }
 
-        let mut d = r.derivation();
-        if reachable {
-            d.root = r.root_for(&goal);
-        } else {
-            let ex = r.explain(&goal);
-            let id = d.nodes.len();
-            d.nodes.push(std_deduce_reason::Node::Gap {
-                prop: goal.clone(),
-                candidates: ex.candidates,
-                note: ex.note,
-            });
-            d.root = Some(id);
-        }
-
-        let mut certificate = reason_certificate(&self.lib.env, &d, &r.priority_order())?;
-        self.mark_case_extensions(&mut certificate);
-        // The concepts the root's proof graph decided. This is the certificate
-        // layer's own recomputation, the same one `cert::check` runs, so the
-        // notice printed here and the recorded obligation cannot disagree.
-        let open_concepts = self.open_concepts(&certificate)?;
+        let Some(d) = derivation else {
+            return Err("内部状态错误：只有 :why / :explain / :gap 会到达查询路径".to_owned());
+        };
+        let Some(certificate) = certificate else {
+            return Err("内部状态错误：:why / :explain 应当已经构建证书".to_owned());
+        };
+        let Some(trust) = trust else {
+            return Err("内部状态错误：:why / :explain 应当已经派生信任标签".to_owned());
+        };
         // The tree or the narrative is printed from the certificate, then that
         // same certificate is checked by both layers: what the user sees and
         // the object being checked cannot diverge. `:why` keeps the formal
@@ -1678,6 +1731,7 @@ impl Session {
             .ok_or_else(|| "推理器生成的证书没有根节点：无法确认结论".to_owned())?;
         if matches!(certificate.nodes.get(root), Some(CertNode::Gap { .. })) {
             writeln!(out, "证书有效，但根为缺口，结论未被证明。").ok();
+            write_trust_line(out, &trust);
             if cmd != "explain" {
                 report_conflicts(out, &certificate);
             }
@@ -1685,6 +1739,7 @@ impl Session {
         }
         if !report.root_proved || !kernel_report.root_proved {
             writeln!(out, "证书有效，但根未被证明，结论未被证明。").ok();
+            write_trust_line(out, &trust);
             if cmd != "explain" {
                 report_conflicts(out, &certificate);
             }
@@ -1712,6 +1767,7 @@ impl Session {
                 unresolved
             )
             .ok();
+            write_trust_line(out, &trust);
             if cmd != "explain" {
                 report_conflicts(out, &certificate);
             }
@@ -1729,6 +1785,7 @@ impl Session {
         };
 
         writeln!(out, "推导已通过独立校验。").ok();
+        write_trust_line(out, &trust);
         if cmd != "explain" {
             report_conflicts(out, &certificate);
             if let Some((other, other_by, basis)) = won_conflict {
@@ -2008,6 +2065,75 @@ impl Session {
             .map_err(|e| format!("证书序列化失败：{e}"))?;
         writeln!(out, "{json}").ok();
         Ok(if reachable {
+            Outcome::Proved
+        } else {
+            Outcome::Gap
+        })
+    }
+
+    /// `:labels <term>` — derive the goal's certificate and print its full
+    /// trust-label report.
+    ///
+    /// The report is the same [`derive_trust`] view `:why` and `:explain` print
+    /// near their result line, expanded to every label and its evidence. It is
+    /// recomputed from a certificate built exactly as `:cert` builds one, so a
+    /// target cannot receive different labels in different commands. The
+    /// certificate is checked by both layers before any label is printed; a
+    /// certificate that fails either layer is an error, never a labelled
+    /// conclusion.
+    fn labels_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if !self.loaded {
+            return Err(
+                "尚未加载理论：:labels 需要已加载的环境才能生成证书，请先 :load <文件>".into(),
+            );
+        }
+        if arg.is_empty() {
+            return Err("用法：:labels <目标命题>".into());
+        }
+        self.require_jurisdiction()?;
+        let goal = self.goal(arg)?;
+        let mut r = self.reasoner()?;
+        r.assume_ledger_axioms()?;
+        r.saturate()?;
+        write_priority_cycle_warning(out, &r.priority_cycles());
+
+        let reachable = r.knows(&goal);
+        let mut d = r.derivation();
+        if reachable {
+            d.root = r.root_for(&goal);
+        } else {
+            let ex = r.explain(&goal);
+            let id = d.nodes.len();
+            d.nodes.push(std_deduce_reason::Node::Gap {
+                prop: goal.clone(),
+                candidates: ex.candidates,
+                note: ex.note,
+            });
+            d.root = Some(id);
+        }
+        let mut certificate = reason_certificate(&self.lib.env, &d, &r.priority_order())?;
+        self.mark_case_extensions(&mut certificate);
+
+        if let Err(error) = std_deduce_cert::check(&self.lib.env, &certificate) {
+            return Err(format!("证书逻辑校验失败：{error}"));
+        }
+        if let Err(error) = std_deduce_cert::kernel_proof(&self.lib.env, &certificate) {
+            return Err(format!("证书内核校验失败：{error}"));
+        }
+
+        let trust = derive_trust(&certificate)?;
+        writeln!(out, "{}", trust.summary()).ok();
+        writeln!(out, "标签与依据（目标：{}）：", print_expr(&goal)).ok();
+        for label in trust.labels() {
+            writeln!(out, "  {}", label.name_zh()).ok();
+            for evidence in trust.evidence(*label) {
+                writeln!(out, "    - {evidence}").ok();
+            }
+        }
+        let proved_without_open = !trust.contains(TrustLabel::FactNeedsEvidence)
+            && !trust.contains(TrustLabel::DisputeUnresolved)
+            && !trust.contains(TrustLabel::NeedsLawyerJudgment);
+        Ok(if proved_without_open {
             Outcome::Proved
         } else {
             Outcome::Gap
@@ -2781,8 +2907,9 @@ fn reject_pack_namespace(
     Ok(())
 }
 
-/// The obligation id a certificate uses to list case-local rules it applied.
-const LOCAL_EXTENSION_ID: &str = "local-extension";
+/// The obligation id a certificate uses to list case-local rules it applied;
+/// the certificate layer also recognizes it when it derives `需律师判断`.
+const LOCAL_EXTENSION_ID: &str = LOCAL_EXTENSION_OBLIGATION_ID;
 
 /// Check a top-level file against the closed-environment rules.
 ///
@@ -3749,6 +3876,15 @@ fn root_summary(certificate: &Certificate, report: &CheckReport) -> String {
         }
         Some(_) => "根未被证明".to_owned(),
     }
+}
+
+/// Print the one-line trust summary next to a query's result line.
+///
+/// The line is [`TrustReport::summary`], which comes from [`derive_trust`] over
+/// the certificate the command is also rendering and checking. `:why`,
+/// `:explain` and `:labels` all print this same string for the same target.
+fn write_trust_line(out: &mut impl Write, trust: &TrustReport) {
+    writeln!(out, "{}", trust.summary()).ok();
 }
 
 /// Explain why a human is or is not needed, using the recorded obligations.
@@ -4777,7 +4913,15 @@ fn print_help(out: &mut impl Write) {
     .ok();
     writeln!(
         out,
-        "形式推导：:why <命题>；中文「因为……所以……」说明：:explain <命题>。"
+        "形式推导：:why <命题>；中文「因为……所以……」说明：:explain <命题>；\
+         信任标签与依据：:labels <命题>。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "信任标签是证书的派生视图，不写入证书：:why / :explain 在结果行旁打印一行，\
+         :labels 打印该目标的全套标签与依据。已验证只表示证书内仅用严格事实且无未决义务，\
+         不等于法律上正确。"
     )
     .ok();
     writeln!(
@@ -4847,7 +4991,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
                 ":load <文件>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
                  :asof [YYYY-MM-DD]  :jurisdiction [代码]  \
                  :interpret [list|enable|disable <解释名>]  \
-                 :why <命题>  :explain <命题>  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
+                 :why <命题>  :explain <命题>  :labels <命题>  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )
             .ok();
