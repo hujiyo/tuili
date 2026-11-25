@@ -28,6 +28,11 @@
 //! * Instantiating the rule's premises with those bindings yields exactly the
 //!   propositions of the cited nodes; instantiating the conclusion yields
 //!   exactly the node's conclusion.
+//! * Every interpretation application cites an entry of the version 6 table and
+//!   an earlier node proving the declared `from`, and concludes the declared
+//!   `to`. A node whose conclusion was interpretation-derived may not be a rule
+//!   premise or another interpretation's premise: rules never consume an
+//!   interpretation conclusion, and interpretations never chain.
 //! * No instantiated `unless` condition is proved anywhere in the
 //!   certificate, and none holds as a proposition asserted by an environment
 //!   axiom. The check is against all proved propositions, not only the ones
@@ -333,6 +338,13 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
     };
 
     // Pass 2: rebuild each rule application from its own evidence.
+    //
+    // `interpretation_derived[id]` marks a node whose conclusion was licensed
+    // by an interpretation, directly or through a premise. The reasoner never
+    // produces either a chain (an interpretation reading another's
+    // conclusion) or a rule consuming one, so a certificate that does is not a
+    // derivation this build accepts, even if every individual step typechecks.
+    let mut interpretation_derived = vec![false; cert.nodes.len()];
     for (id, node) in cert.nodes.iter().enumerate() {
         if let Node::InterpretationApplication {
             interpretation,
@@ -362,6 +374,15 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
                 return Err(CheckError::at(
                     id,
                     format!("前提 {premise} 必须是当前节点之前的节点"),
+                ));
+            }
+            if interpretation_derived[*premise] {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "前提 {premise} 由解释推出，而解释不能消费另一条解释的结论：\
+                         禁止解释链，一次只前进一步"
+                    ),
                 ));
             }
             let Some(proved) = node_prop(cert, &cert.nodes[*premise]) else {
@@ -404,6 +425,7 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
                     ),
                 ));
             }
+            interpretation_derived[id] = true;
             continue;
         }
         let Node::RuleApplication {
@@ -448,6 +470,15 @@ pub fn check(env: &Env, cert: &Certificate) -> Result<CheckReport, CheckError> {
                 return Err(CheckError::at(
                     id,
                     format!("前提 {premise} 必须是当前节点之前的节点"),
+                ));
+            }
+            if interpretation_derived[*premise] {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "前提 {premise} 由解释推出，而规则不消费解释结论：\
+                         解释不触发规则，也不能伪装成规则前提"
+                    ),
                 ));
             }
         }

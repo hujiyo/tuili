@@ -70,6 +70,10 @@
 //! node must cite an earlier node proving `from` and conclude the declared
 //! `to`. A conflict witness may be an interpretation index; it is validated
 //! against the declaration and is never treated as a lost rule witness.
+//! An interpretation is one explicit step: neither an `interpretation_application`
+//! premise nor a `rule_application` premise may be interpretation-derived, so a
+//! certificate can express neither an interpretation chain nor a rule that
+//! consumes an interpretation conclusion.
 //! The closure is computed only when a rule step has an `unless`. Rules that
 //! depend on a premise binder
 //! are rejected rather than checked with an open `?name`; a rule that cannot

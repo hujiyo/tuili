@@ -5,7 +5,7 @@
 use std_deduce_kernel::Expr;
 use std_deduce_lang::Library;
 use std_deduce_reason::{
-    certificate, Node as ReasonNode, Provenance, Reasoner, Resolution, UnresolvedReason,
+    certificate, GapStatus, Node as ReasonNode, Provenance, Reasoner, Resolution, UnresolvedReason,
 };
 
 fn load(src: &str) -> Library {
@@ -126,6 +126,168 @@ interpret i : Q 张三 → R 张三
 }
 
 #[test]
+fn gap_candidates_judge_premises_against_the_rule_stage() {
+    // An enabled interpretation licenses `Q`, but the rule stage never
+    // consumes it. `:gap S` must therefore still report `Q` as missing (and
+    // `:gap T` must not claim the rule has everything it needs).
+    let lib = load(
+        r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+pred Z : 人 → Prop
+pred S : 人 → Prop
+pred T : 人 → Prop
+obj 张三 : 人
+axiom 事实P : P 张三
+  source text "案情" locator "一"
+interpret i : P 张三 → Q 张三
+  direction literal
+  source text "解释" locator "一" version "2020"
+rule 规则S :
+  premise Q 张三
+  premise Z 张三
+  conclude S 张三
+  source text "规则" locator "一"
+rule 规则T :
+  premise Q 张三
+  conclude T 张三
+  source text "规则" locator "二"
+"#,
+    );
+    let reasoner = reasoner(&lib, &["i"]);
+    assert!(reasoner.knows(&atom("Q")), "the interpretation proves `to`");
+
+    let s = reasoner.explain(&atom("S"));
+    assert_eq!(s.candidates.len(), 1, "{s:?}");
+    assert_eq!(
+        s.candidates[0].missing,
+        vec![atom("Q"), atom("Z")],
+        "`Q` is an interpretation conclusion, not a rule-stage fact"
+    );
+
+    let t = reasoner.explain(&atom("T"));
+    assert_eq!(t.candidates.len(), 1, "{t:?}");
+    assert_eq!(
+        t.candidates[0].missing,
+        vec![atom("Q")],
+        "the rule remains blocked by its interpretation-only premise"
+    );
+
+    // The child node under the missing premise must not claim the premise is
+    // satisfied: it is proved by an interpretation, which no rule may consume.
+    let tree = reasoner.gap_tree(&atom("S"));
+    assert_eq!(tree.candidates.len(), 1, "{tree:?}");
+    let q = tree.candidates[0].missing[0]
+        .gap
+        .as_ref()
+        .expect("`Q` expands as a premise");
+    assert_eq!(q.status, GapStatus::InterpretedOnly);
+}
+
+#[test]
+fn hints_cover_only_the_root_goal_and_the_pre_application_facts() {
+    // i1 is enabled; i2 consumes i1's conclusion. Enabling i2 would not help
+    // (that is an interpretation chain), so `R` must not be hinted.
+    let lib = load(
+        r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+pred R : 人 → Prop
+obj 张三 : 人
+axiom 事实P : P 张三
+  source text "案情" locator "一"
+interpret i1 : P 张三 → Q 张三
+  direction literal
+  source text "解释" locator "一" version "2020"
+interpret i2 : Q 张三 → R 张三
+  direction analogy
+  source text "解释" locator "二" version "2020"
+"#,
+    );
+    let chained = reasoner(&lib, &["i1"]);
+    assert!(chained.knows(&atom("Q")));
+    let hints = chained
+        .unused_interpretation_hints(&atom("R"))
+        .expect("conversion is decidable");
+    assert!(
+        hints.is_empty(),
+        "an unenabled interpretation whose `from` only holds after another \
+         application is a dead end: {hints:?}"
+    );
+
+    // The root-only rule: `i2` licenses `R`, and `R` is a premise of a rule
+    // for `S`; `S` itself is not made provable by enabling `i2`.
+    let lib = load(
+        r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+pred R : 人 → Prop
+pred S : 人 → Prop
+obj 张三 : 人
+axiom 事实P : P 张三
+  source text "案情" locator "一"
+interpret i : P 张三 → R 张三
+  direction literal
+  source text "解释" locator "一" version "2020"
+rule 规则S :
+  premise R 张三
+  conclude S 张三
+  source text "规则" locator "一"
+"#,
+    );
+    let reasoner = reasoner(&lib, &[]);
+    let hints = reasoner
+        .unused_interpretation_hints(&atom("R"))
+        .expect("conversion is decidable");
+    assert_eq!(hints.len(), 1, "the root goal is hinted");
+    assert_eq!(hints[0].id.as_ref(), "i");
+    let hints = reasoner
+        .unused_interpretation_hints(&atom("S"))
+        .expect("conversion is decidable");
+    assert!(
+        hints.is_empty(),
+        "a missing rule premise is not hinted: rules do not consume \
+         interpretation conclusions: {hints:?}"
+    );
+}
+
+#[test]
+fn a_convertible_to_does_not_produce_a_second_application_step() {
+    // The assumption and the interpretation's `to` are alpha variants of the
+    // same quantified proposition. The structural key differs, but the kernel
+    // says they are the same proposition, so no second step is licensed.
+    let lib = load(
+        r#"
+sort 人
+pred P : 人 → Prop
+obj 张三 : 人
+axiom 全称 : ∀ (x : 人), P x → P x
+  source text "案情" locator "一"
+axiom 事实P : P 张三
+  source text "案情" locator "二"
+interpret i : P 张三 → ∀ (y : 人), P y → P y
+  direction literal
+  source text "解释" locator "一" version "2020"
+"#,
+    );
+    let reasoner = reasoner(&lib, &["i"]);
+    let derivation = reasoner.derivation();
+    let applications = derivation
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, ReasonNode::InterpretationApplication { .. }))
+        .count();
+    assert_eq!(
+        applications, 0,
+        "a kernel-convertible `to` already holds; a second step is redundant"
+    );
+    assert_eq!(derivation.interpretations.len(), 1);
+}
+
+#[test]
 fn an_interpretation_step_never_chains_and_never_feeds_a_rule() {
     // i1: P -> Q, i2: Q -> R, ruleS: Q -> S. Even with both interpretations
     // and the rule enabled, only `Q` is licensed: i2 would consume another
@@ -142,7 +304,7 @@ fn an_interpretation_hint_lists_the_unenabled_declaration() {
     let lib = load(BASE);
     let disabled = reasoner(&lib, &[]);
     let hints = disabled
-        .unused_interpretation_hints(&[atom("Q")])
+        .unused_interpretation_hints(&atom("Q"))
         .expect("conversion is decidable");
     assert_eq!(hints.len(), 1);
     assert_eq!(hints[0].id.as_ref(), "i1");
@@ -151,13 +313,13 @@ fn an_interpretation_hint_lists_the_unenabled_declaration() {
 
     // `i2` is not offered while its premise is not established.
     let hints = disabled
-        .unused_interpretation_hints(&[atom("R")])
+        .unused_interpretation_hints(&atom("R"))
         .expect("conversion is decidable");
     assert!(hints.is_empty(), "{hints:?}");
 
     let enabled = reasoner(&lib, &["i1"]);
     let hints = enabled
-        .unused_interpretation_hints(&[atom("Q")])
+        .unused_interpretation_hints(&atom("Q"))
         .expect("conversion is decidable");
     assert!(hints.is_empty(), "an enabled interpretation is not a hint");
 }

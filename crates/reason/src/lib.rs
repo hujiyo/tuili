@@ -62,6 +62,13 @@
 //! lost rule list; priorities order rules only, so such a conflict is
 //! unresolved unless a strict fact wins.
 //!
+//! Gap diagnostics keep the two stages apart: a rule's premises are judged
+//! against the facts and rule conclusions (never against an interpretation
+//! conclusion, which rules cannot consume), while whether the queried goal is
+//! proved uses the full settled base. The "only an unenabled interpretation is
+//! missing" hint likewise covers only the root goal, and only when the
+//! interpretation's `from` holds before any application would run.
+//!
 //! ## Certificates
 //!
 //! [`certificate`] converts a derivation into the versioned certificate
@@ -403,7 +410,14 @@ impl Support {
 
 /// The settled result: the set of facts and a derivation for each.
 struct Fixed {
+    /// The settled fact base, including the conclusions an interpretation
+    /// licensed. A queried goal is proved against this set.
     facts: BTreeMap<String, Expr>,
+    /// The facts the rule stage could see: registered facts and rule
+    /// conclusions, without any interpretation application. Rules never
+    /// consume an interpretation's conclusion, so gap candidates must judge a
+    /// rule's premises against this set, not against [`Fixed::facts`].
+    rule_facts: BTreeMap<String, Expr>,
     nodes: Vec<Node>,
     ids: BTreeMap<String, usize>,
     conflicts: Vec<Conflict>,
@@ -587,16 +601,24 @@ impl<'a> Reasoner<'a> {
         Ok(false)
     }
 
-    /// Unenabled interpretations that would have applied to one of
-    /// `propositions`: the interpretation's `to` is kernel-equivalent to the
-    /// proposition, and its `from` already holds.
+    /// Unenabled interpretations that could prove the queried `goal` in one
+    /// more step: the interpretation's `to` is kernel-equivalent to the goal,
+    /// and its `from` already holds in the fact set *before* any interpretation
+    /// application.
+    ///
+    /// Only the root goal is considered. An unenabled interpretation is never
+    /// offered for a rule's missing premise: rules do not consume
+    /// interpretation conclusions, so enabling it could not close that gap.
+    /// The `from` check reads the rule-visible set for the same reason — an
+    /// already enabled interpretation's conclusion is not available to another
+    /// interpretation, so a hint built on it would be a dead end.
     ///
     /// These are hints, not derivations: nothing is applied, and the result is
     /// sorted by id so the printed suggestion does not depend on declaration
     /// order.
     pub fn unused_interpretation_hints(
         &self,
-        propositions: &[Expr],
+        goal: &Expr,
     ) -> Result<Vec<InterpretationHint>, String> {
         let Some(fixed) = &self.fixed else {
             return Ok(Vec::new());
@@ -606,33 +628,25 @@ impl<'a> Reasoner<'a> {
             if self.enabled.contains(&record.id) {
                 continue;
             }
-            if !self.holds(&fixed.facts, &record.from)? {
+            let same_to = self.key_of(goal) == self.key_of(&record.to)
+                || convertible(self.env, &Ctx::new(), &record.to, goal).map_err(|error| {
+                    format!(
+                        "无法判定目标「{}」是否与解释 `{}` 的 to 等价：{error}",
+                        print_expr(goal),
+                        record.id
+                    )
+                })?;
+            if !same_to {
                 continue;
             }
-            let mut matches = false;
-            for proposition in propositions {
-                let same = self.key_of(proposition) == self.key_of(&record.to)
-                    || convertible(self.env, &Ctx::new(), &record.to, proposition).map_err(
-                        |error| {
-                            format!(
-                                "无法判定「{}」是否与解释 `{}` 的 to 等价：{error}",
-                                print_expr(proposition),
-                                record.id
-                            )
-                        },
-                    )?;
-                if same {
-                    matches = true;
-                    break;
-                }
+            if !self.holds(&fixed.rule_facts, &record.from)? {
+                continue;
             }
-            if matches {
-                out.push(InterpretationHint {
-                    id: record.id,
-                    from: record.from,
-                    to: record.to,
-                });
-            }
+            out.push(InterpretationHint {
+                id: record.id,
+                from: record.from,
+                to: record.to,
+            });
         }
         Ok(out)
     }
@@ -787,6 +801,10 @@ impl<'a> Reasoner<'a> {
 
         for _ in 0..self.max_rounds {
             let mut facts = self.fixed_point(&removed)?;
+            // Snapshot the rule-visible set before any interpretation runs:
+            // rules never consume an interpretation conclusion, so a gap
+            // candidate must not treat one as a satisfied premise.
+            let rule_facts = facts.clone();
             // Interpretations are one explicit step after the rule fixed
             // point. They read only the registered facts and rule conclusions;
             // no rule runs afterwards, and no interpretation reads another
@@ -829,7 +847,8 @@ impl<'a> Reasoner<'a> {
                     contested.insert(self.key_of(&c.left), c.clone());
                     contested.insert(self.key_of(&c.right), c.clone());
                 }
-                let fixed = self.build_nodes(facts, conflicts, contested, applications)?;
+                let fixed =
+                    self.build_nodes(facts, rule_facts, conflicts, contested, applications)?;
                 self.fixed = Some(fixed);
                 return Ok(());
             }
@@ -846,6 +865,10 @@ impl<'a> Reasoner<'a> {
     /// interpretation just licensed. The result maps a conclusion key to the
     /// interpretation that licensed it; an interpretation whose `to` is
     /// already established by a fact or a rule is not applied again.
+    ///
+    /// "Already established" is kernel conversion, not the structural key: an
+    /// alpha variant of a quantified fact is the same proposition, and adding
+    /// a second step for it would be a redundant interpretation application.
     fn apply_interpretations(
         &self,
         facts: &mut BTreeMap<String, Expr>,
@@ -858,7 +881,10 @@ impl<'a> Reasoner<'a> {
         let base = facts.clone();
         for record in self.enabled_records() {
             let key = self.key_of(&record.to);
-            if removed.contains(&key) || base.contains_key(&key) {
+            if removed.contains(&key) {
+                continue;
+            }
+            if self.holds(&base, &record.to)? {
                 continue;
             }
             if !self.holds(&base, &record.from)? {
@@ -1201,6 +1227,7 @@ impl<'a> Reasoner<'a> {
     fn build_nodes(
         &self,
         facts: BTreeMap<String, Expr>,
+        rule_facts: BTreeMap<String, Expr>,
         conflicts: Vec<Conflict>,
         contested: BTreeMap<String, Conflict>,
         applications: BTreeMap<String, Name>,
@@ -1289,6 +1316,7 @@ impl<'a> Reasoner<'a> {
 
         Ok(Fixed {
             facts,
+            rule_facts,
             nodes,
             ids,
             conflicts,
@@ -1457,13 +1485,18 @@ impl<'a> Reasoner<'a> {
             // rule can still conclude it; otherwise the rule is the witness
             // the conflict recorded.
             if self.derivers(&k, &facts).is_empty() {
-                if let Ok(Some(interpretation)) = self.interpretation_for(&k, &base.facts) {
+                if let Ok(Some(interpretation)) = self.interpretation_for(&k, prop, &base.facts) {
                     applications.insert(k.clone(), interpretation);
                 }
             }
         }
+        let rule_facts: BTreeMap<String, Expr> = facts
+            .iter()
+            .filter(|(key, _)| !applications.contains_key(*key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         let fixed = self
-            .build_nodes(facts, Vec::new(), BTreeMap::new(), applications)
+            .build_nodes(facts, rule_facts, Vec::new(), BTreeMap::new(), applications)
             .ok()?;
         Some(Derivation {
             root: fixed.ids.get(&k).copied(),
@@ -1473,15 +1506,25 @@ impl<'a> Reasoner<'a> {
         })
     }
 
-    /// The enabled interpretation whose `to` is `target` and whose `from`
-    /// already holds in `base`.
+    /// The enabled interpretation whose `to` is kernel-equivalent to `target`
+    /// and whose `from` already holds in `base`.
+    ///
+    /// The structural key is only a fast path: a converted-but-differently-keyed
+    /// `to` (an alpha variant of a quantified proposition, an eta variant) must
+    /// still be recognised as the same conclusion, so a rebuilt derivation never
+    /// invents a second interpretation step for it.
     fn interpretation_for(
         &self,
         target: &str,
+        target_expr: &Expr,
         base: &BTreeMap<String, Expr>,
     ) -> Result<Option<Name>, String> {
         for record in self.enabled_records() {
-            if self.key_of(&record.to) != target {
+            let same = self.key_of(&record.to) == target
+                || convertible(self.env, &Ctx::new(), &record.to, target_expr).map_err(
+                    |error| format!("无法判定解释 `{}` 的 to 是否与结论等价：{error}", record.id),
+                )?;
+            if !same {
                 continue;
             }
             if self.holds(base, &record.from)? {
@@ -1519,6 +1562,9 @@ impl<'a> Reasoner<'a> {
                 },
                 None => "目标已可推出".to_string(),
             }),
+            GapStatus::InterpretedOnly => {
+                Some("目标由解释推出，但规则阶段不消费解释结论".to_string())
+            }
             GapStatus::Conflicted => {
                 Some("目标处于冲突中：未决的结论不进入事实库，需要人工裁决".to_string())
             }
@@ -1823,8 +1869,20 @@ impl<'a> Reasoner<'a> {
             GapStatus::NotAProposition
         } else if self.knows(goal) {
             // A defeated winner is in the fact base; `Proved` is the honest
-            // status even though the proposition took part in a conflict.
-            GapStatus::Proved
+            // status even though the proposition took part in a conflict. A
+            // conclusion only an enabled interpretation licensed is marked
+            // separately: as a rule premise it is still missing, because rules
+            // never consume interpretation conclusions.
+            let key = self.key_of(goal);
+            let rule_visible = self
+                .fixed
+                .as_ref()
+                .is_some_and(|fixed| fixed.rule_facts.contains_key(&key));
+            if rule_visible {
+                GapStatus::Proved
+            } else {
+                GapStatus::InterpretedOnly
+            }
         } else if let Some(conflict) = self.conflict_for(goal) {
             match &conflict.resolution {
                 Resolution::Unresolved { .. } => GapStatus::Conflicted,
@@ -1838,18 +1896,22 @@ impl<'a> Reasoner<'a> {
     /// Every rule whose head matches `goal`, in rule-name order, with the
     /// premises still missing and the blocking conditions that already hold.
     ///
-    /// This is the single-level candidate search shared by `explain` and the
+    /// The single-level candidate search is shared by `explain` and the
     /// recursive gap tree; the tree wraps each entry in a child node instead of
-    /// reimplementing the match. Both sides of the head match are normalised
-    /// first, so matching uses the same definitional identity as the keys that
-    /// deduplicate the tree: a `def` alias of the goal's head finds the rule
-    /// that concludes the definition, exactly as `convertible` and
-    /// [`structural_key`] would.
+    /// reimplementing the match. Premises and `unless` blockers are judged
+    /// against the rule-visible fact set, never against the interpretation
+    /// conclusions: rules do not consume those, so counting one as satisfied
+    /// would hide the very premise that keeps the rule from firing.
+    ///
+    /// Both sides of the head match are normalised first, so matching uses the
+    /// same definitional identity as the keys that deduplicate the tree: a
+    /// `def` alias of the goal's head finds the rule that concludes the
+    /// definition, exactly as `convertible` and [`structural_key`] would.
     fn gap_candidates(&self, goal: &Expr) -> Vec<GapCandidate> {
         let facts: BTreeMap<String, Expr> = self
             .fixed
             .as_ref()
-            .map(|f| f.facts.clone())
+            .map(|f| f.rule_facts.clone())
             .unwrap_or_default();
         let goal = normalize(self.env, &Ctx::new(), goal).unwrap_or_else(|_| goal.clone());
         let mut candidates = Vec::new();
@@ -2331,6 +2393,11 @@ pub enum GapStatus {
     Unreachable,
     /// It is in the settled fact base.
     Proved,
+    /// It is in the settled fact base only because an enabled interpretation
+    /// licensed it. Rules never consume an interpretation conclusion, so as a
+    /// rule premise it is still missing: the gap is real even though the
+    /// proposition is proved in the query's one-step sense.
+    InterpretedOnly,
     /// It is a side of an unresolved conflict, so it is not asserted and a
     /// human still has to decide between the sides.
     Conflicted,
@@ -3080,21 +3147,29 @@ pub fn certificate(
             UnresolvedReason::NonStrictFact { identity } => {
                 // The fact side is the one the conflict records as an
                 // assumption. `resolve` records this reason only for a
-                // fact-versus-rule pair, so a missing fact side is an internal
-                // inconsistency, never a reason to invent one.
+                // fact-versus-conclusion pair (a rule application or an
+                // interpretation application); a missing fact side is an
+                // internal inconsistency, never a reason to invent one.
                 let fact_side = match (&conflict.left_by, &conflict.right_by) {
                     (Provenance::Assumption, _) => &conflict.left,
                     (_, Provenance::Assumption) => &conflict.right,
                     _ => {
                         return Err(format!(
-                            "第 {} 个冲突记录为「主张与规则」未决，但两侧都不是事实：\
+                            "第 {} 个冲突记录为「主张与结论」未决，但两侧都不是事实：\
                              内部状态不一致",
                             index + 1
                         ));
                     }
                 };
+                let beaten = if matches!(conflict.left_by, Provenance::Interpretation(_))
+                    || matches!(conflict.right_by, Provenance::Interpretation(_))
+                {
+                    "解释结论"
+                } else {
+                    "规则结论"
+                };
                 format!(
-                    "「{}」只是「{}」，未经证明，不能自动胜过规则结论",
+                    "「{}」只是「{}」，未经证明，不能自动胜过{beaten}",
                     print_expr(fact_side),
                     identity.label_zh()
                 )

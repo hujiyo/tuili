@@ -1490,9 +1490,7 @@ impl Session {
                     writeln!(out, "  {note}").ok();
                 }
             }
-            let mut propositions = vec![goal.clone()];
-            collect_gap_propositions(&tree, &mut propositions);
-            write_interpretation_hints(out, &r, &propositions)?;
+            write_interpretation_hints(out, &r, &goal)?;
             return Ok(Outcome::Gap);
         }
 
@@ -1529,18 +1527,11 @@ impl Session {
         }
         // An unreachable `:why` reports the same kind of gap as `:gap`, so it
         // offers the same "only an unenabled interpretation is missing" hint.
+        // The hint is about the queried goal only: a rule's missing premise is
+        // never bridged by enabling an interpretation, because rules do not
+        // consume interpretation conclusions.
         if cmd == "why" && !reachable {
-            let mut propositions = vec![goal.clone()];
-            if let Some(root) = certificate.root {
-                if let CertNode::Gap { candidates, .. } = &certificate.nodes[root] {
-                    propositions.extend(
-                        candidates
-                            .iter()
-                            .flat_map(|candidate| candidate.missing.iter().map(Expr::from)),
-                    );
-                }
-            }
-            write_interpretation_hints(out, &r, &propositions)?;
+            write_interpretation_hints(out, &r, &goal)?;
         }
 
         let checked = std_deduce_cert::check(&self.lib.env, &certificate);
@@ -3600,23 +3591,32 @@ fn write_unresolved_reason(
         UnresolvedReason::NonStrictFact { identity } => {
             // The reason records only the claim's identity; the claim's
             // proposition comes from the conflict, whose fact side is the one
-            // `resolve` recorded as an assumption.
+            // `resolve` recorded as an assumption. The other side names what
+            // the claim does not automatically beat: a rule conclusion, or an
+            // interpretation conclusion (which is never a rule step).
             let fact_side = match (&c.left_by, &c.right_by) {
                 (Provenance::Assumption, _) => Some(&c.left),
                 (_, Provenance::Assumption) => Some(&c.right),
                 _ => None,
             };
+            let beaten = if matches!(c.left_by, Provenance::Interpretation(_))
+                || matches!(c.right_by, Provenance::Interpretation(_))
+            {
+                "解释结论"
+            } else {
+                "规则结论"
+            };
             match fact_side {
                 Some(prop) => writeln!(
                     out,
-                    "  原因：「{}」只是「{}」，未经证明，不能自动胜过规则结论",
+                    "  原因：「{}」只是「{}」，未经证明，不能自动胜过{beaten}",
                     print_expr(prop),
                     identity.label_zh()
                 )
                 .ok(),
                 None => writeln!(
                     out,
-                    "  原因：一侧只是「{}」，未经证明，不能自动胜过规则结论",
+                    "  原因：一侧只是「{}」，未经证明，不能自动胜过{beaten}",
                     identity.label_zh()
                 )
                 .ok(),
@@ -3906,27 +3906,14 @@ fn collect_gap_rules(tree: &GapTree, out: &mut BTreeSet<String>) {
     }
 }
 
-/// Collect the goal and every missing premise of a gap tree, for the
-/// "only an unenabled interpretation is missing" hint.
-fn collect_gap_propositions(tree: &GapTree, out: &mut Vec<Expr>) {
-    for candidate in &tree.candidates {
-        for premise in &candidate.missing {
-            out.push(premise.premise.clone());
-            if let Some(child) = &premise.gap {
-                collect_gap_propositions(child, out);
-            }
-        }
-    }
-}
-
-/// Print one hint per unenabled interpretation that would have bridged the
-/// goal or a missing premise. The reasoner only suggests: nothing is applied.
+/// Print one hint per unenabled interpretation that could prove the queried
+/// goal in one more step. The reasoner only suggests: nothing is applied.
 fn write_interpretation_hints(
     out: &mut impl Write,
     reasoner: &Reasoner<'_>,
-    propositions: &[Expr],
+    goal: &Expr,
 ) -> Result<(), String> {
-    for hint in reasoner.unused_interpretation_hints(propositions)? {
+    for hint in reasoner.unused_interpretation_hints(goal)? {
         writeln!(
             out,
             "  存在未启用解释 `{}`（{} → {}）；用 :interpret enable {} 后重查",
@@ -3984,6 +3971,14 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
     match tree.status {
         GapStatus::Proved => {
             writeln!(out, "{pad}目标已可推出。").ok();
+            return;
+        }
+        GapStatus::InterpretedOnly => {
+            writeln!(
+                out,
+                "{pad}该命题已由解释推出，但规则阶段不消费解释结论，因此作为规则前提仍不算满足。"
+            )
+            .ok();
             return;
         }
         GapStatus::Conflicted => {

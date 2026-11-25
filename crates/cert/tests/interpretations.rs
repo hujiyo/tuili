@@ -34,9 +34,16 @@ interpret i2 : R 张三 → S 张三
 interpret i3 : P 张三 → Q 张三
   direction expand
   source text "解释" locator "三" version "2020"
+interpret i4 : Q 张三 → R 张三
+  direction narrow
+  source text "解释" locator "四" version "2020"
 rule 规则R :
   conclude R 张三
   source text "规则" locator "一"
+rule 规则S :
+  premise Q 张三
+  conclude S 张三
+  source text "规则" locator "二"
 "#;
 
 fn load() -> Library {
@@ -363,4 +370,50 @@ fn a_fact_against_an_interpretation_is_a_defeat_or_an_unresolved_claim() {
         .expect_err("a fact side cannot be recorded as no priority")
         .to_string();
     assert!(error.contains("没有优先关系"), "{error}");
+}
+
+#[test]
+fn a_rule_premise_cannot_be_an_interpretation_application() {
+    let lib = load();
+    let mut cert = certificate(&lib);
+    let rule = lib.env.get(&name("规则S")).expect("the rule exists");
+    cert.nodes.push(Node::RuleApplication {
+        rule: "规则S".to_owned(),
+        conclusion: cert_expr("S"),
+        // Node 1 is the interpretation application that licenses `Q`, which
+        // is this rule's premise. Every step typechecks on its own; only the
+        // product invariant "rules do not consume interpretation conclusions"
+        // rejects it.
+        premises: vec![1],
+        bindings: Vec::new(),
+        sources: rule.sources.iter().map(Source::from).collect(),
+    });
+    cert.root = Some(2);
+    let error = reject(&cert);
+    assert!(error.contains("规则不消费解释结论"), "{error}");
+}
+
+#[test]
+fn an_interpretation_cannot_consume_another_interpretation() {
+    let lib = load();
+    let mut cert = certificate(&lib);
+    cert.interpretations = vec![interpretation(&lib, "i1"), interpretation(&lib, "i4")];
+    cert.nodes = vec![
+        Node::Assumption { assumption: 0 },
+        Node::InterpretationApplication {
+            interpretation: 0,
+            premise: 0,
+            conclusion: cert_expr("Q"),
+        },
+        // `i4` reads `Q`, which only `i1`'s application licenses: an
+        // interpretation chain the reasoner can never produce.
+        Node::InterpretationApplication {
+            interpretation: 1,
+            premise: 1,
+            conclusion: cert_expr("R"),
+        },
+    ];
+    cert.root = Some(2);
+    let error = reject(&cert);
+    assert!(error.contains("禁止解释链"), "{error}");
 }

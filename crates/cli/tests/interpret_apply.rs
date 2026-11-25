@@ -594,12 +594,21 @@ fn a_forged_interpretation_application_is_rejected() {
     check_stderr(verify(&case, &cert), COMMAND_ERROR, &["解释", "7"]);
     drop(temp);
 
-    // 2. The referenced entry is not listed (the node was never enabled).
+    // 2. The table is emptied while the application node still cites entry 0.
+    // The rejection must name the missing entry, not fail for some unrelated
+    // reason that merely happens to mention interpretations.
     let (temp, case, cert) = forged_certificate(
         |value| value["interpretations"] = serde_json::Value::Array(Vec::new()),
         "unlisted",
     );
-    check_stderr(verify(&case, &cert), COMMAND_ERROR, &["解释"]);
+    check_stderr(
+        verify(&case, &cert),
+        COMMAND_ERROR,
+        &[
+            "解释应用或冲突见证引用了不存在的解释 0：证书只有 0 条解释",
+            "证书校验失败（逻辑层）",
+        ],
+    );
     drop(temp);
 
     // 3. The `from` does not match the environment declaration.
@@ -683,4 +692,274 @@ fn the_interpretations_field_is_mandatory() {
         &["missing field `interpretations`"],
     );
     drop(temp);
+}
+
+/// `Q` is only an interpretation conclusion; the rule needs `Q` and `Z`.
+const RULE_GAP_CASE: &str = r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+pred Z : 人 → Prop
+pred S : 人 → Prop
+obj 张三 : 人
+axiom 事实 : P 张三
+  source text "案情" locator "一"
+interpret 解释 : P 张三 → Q 张三
+  direction literal
+  source text "解释文本" locator "一" version "2020"
+rule 规则S :
+  premise Q 张三
+  premise Z 张三
+  conclude S 张三
+  source text "规则文本" locator "一"
+"#;
+
+#[test]
+fn gap_diagnostics_do_not_count_interpretation_conclusions_as_rule_premises() {
+    let temp = TempDir::new("rule-gap");
+    let case = temp.write("case.std", RULE_GAP_CASE);
+    let path = case.display().to_string();
+
+    // Without enabling, `Q` is missing too, and the hint is not offered for a
+    // rule premise: enabling the interpretation cannot make the rule fire.
+    let output = check_stdout(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":gap S 张三".to_owned(),
+        ]),
+        GAP,
+        &["缺 ⟨Q 张三⟩", "缺 ⟨Z 张三⟩"],
+    );
+    assert!(
+        !stdout(&output).contains("存在未启用解释"),
+        "a rule premise is not an interpretation hint:\n{}",
+        stdout(&output)
+    );
+
+    // `:why` reads the same candidate list from the certificate: `Q` stays
+    // missing even though an enabled interpretation licenses it.
+    let output = check_stdout(
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "解释".to_owned(),
+            path.clone(),
+            ":why S 张三".to_owned(),
+        ]),
+        GAP,
+        &["缺：Q 张三；Z 张三"],
+    );
+    assert!(
+        !stdout(&output).contains("存在未启用解释"),
+        "the enabled interpretation is not a hint:\n{}",
+        stdout(&output)
+    );
+
+    // `:issues` expands the same gap tree and must not call `Q` satisfied.
+    check_stdout(
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "解释".to_owned(),
+            path.clone(),
+            ":issues".to_owned(),
+        ]),
+        GAP,
+        &[
+            "争点 ⟨S 张三⟩",
+            "缺 ⟨Q 张三⟩",
+            "缺 ⟨Z 张三⟩",
+            "该命题已由解释推出，但规则阶段不消费解释结论",
+        ],
+    );
+
+    // The certificate's gap candidate records both missing premises.
+    let output = run(&[
+        "--no-default-packs".to_owned(),
+        "--interpret".to_owned(),
+        "解释".to_owned(),
+        path,
+        ":cert S 张三".to_owned(),
+    ]);
+    assert_exit(&output, GAP);
+    let value = certificate_value(&output);
+    let root = value["root"].as_u64().expect("the gap root is recorded") as usize;
+    assert_eq!(value["nodes"][root]["kind"], "gap");
+    let missing = value["nodes"][root]["candidates"][0]["missing"]
+        .as_array()
+        .expect("the candidate records its missing premises");
+    assert_eq!(missing.len(), 2, "{value:#}");
+    let names: Vec<&str> = missing
+        .iter()
+        .map(|premise| {
+            premise["func"]["name"]
+                .as_str()
+                .expect("a missing premise is an application")
+        })
+        .collect();
+    assert_eq!(names, ["Q", "Z"], "{value:#}");
+}
+
+/// `i1 : P → Q` and `i2 : Q → R`: enabling `i2` would consume `i1`'s
+/// conclusion, which this build never does.
+const CHAIN_CASE: &str = r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+pred R : 人 → Prop
+obj 张三 : 人
+axiom 事实 : P 张三
+  source text "案情" locator "一"
+interpret i1 : P 张三 → Q 张三
+  direction literal
+  source text "解释文本" locator "一" version "2020"
+interpret i2 : Q 张三 → R 张三
+  direction analogy
+  source text "解释文本二" locator "二" version "2020"
+"#;
+
+#[test]
+fn a_hint_is_not_offered_when_enabling_would_chain() {
+    let temp = TempDir::new("hint-chain");
+    let case = temp.write("case.std", CHAIN_CASE);
+    let path = case.display().to_string();
+
+    let output = check_stdout(
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "i1".to_owned(),
+            path.clone(),
+            ":gap R 张三".to_owned(),
+        ]),
+        GAP,
+        &["无法推出 R 张三"],
+    );
+    assert!(
+        !stdout(&output).contains("存在未启用解释"),
+        "`i2` reads `i1`'s conclusion, so enabling it is a dead end:\n{}",
+        stdout(&output)
+    );
+
+    // With nothing enabled, the direct root hint for `Q` is still printed.
+    check_stdout(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path,
+            ":gap Q 张三".to_owned(),
+        ]),
+        GAP,
+        &["存在未启用解释 `i1`"],
+    );
+}
+
+#[test]
+fn a_chained_certificate_is_rejected_by_verify_cert() {
+    let temp = TempDir::new("chain-cert");
+    let case = temp.write("case.std", CHAIN_CASE);
+    let output = run(&[
+        "--no-default-packs".to_owned(),
+        "--interpret".to_owned(),
+        "i1".to_owned(),
+        case.display().to_string(),
+        ":cert Q 张三".to_owned(),
+    ]);
+    assert_exit(&output, PROVED);
+    let mut value = certificate_value(&output);
+    // Append `i2` and an application that reads node 1 (`Q`, licensed by
+    // `i1`). Every step typechecks on its own; only the "no interpretation
+    // chain" invariant rejects the graph.
+    value["interpretations"]
+        .as_array_mut()
+        .expect("the v6 table is an array")
+        .push(serde_json::json!({
+            "id": "i2",
+            "direction": "analogy",
+            "from": {"kind": "app", "func": {"kind": "const", "name": "Q"},
+                     "arg": {"kind": "const", "name": "张三"}},
+            "to": {"kind": "app", "func": {"kind": "const", "name": "R"},
+                   "arg": {"kind": "const", "name": "张三"}},
+            "sources": [{"text": "解释文本二", "locator": "二", "version": "2020"}]
+        }));
+    value["nodes"]
+        .as_array_mut()
+        .expect("the node list is an array")
+        .push(serde_json::json!({
+            "kind": "interpretation_application",
+            "interpretation": 1,
+            "premise": 1,
+            "conclusion": {"kind": "app", "func": {"kind": "const", "name": "R"},
+                           "arg": {"kind": "const", "name": "张三"}}
+        }));
+    value["root"] = serde_json::Value::from(2);
+    let cert = temp.write("cert.json", &serde_json::to_string_pretty(&value).unwrap());
+    check_stderr(
+        verify(&case, &cert),
+        COMMAND_ERROR,
+        &["禁止解释链", "证书校验失败（逻辑层）"],
+    );
+}
+
+/// A non-strict claim against an interpretation conclusion.
+const CLAIM_CASE: &str = r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+pred R : 人 → Prop
+obj 张三 : 人
+contrary Q R
+axiom 事实P : P 张三
+  source text "案情" locator "一"
+axiom 主张R : R 张三
+  source text "案情" locator "二"
+interpret 解释 : P 张三 → Q 张三
+  direction literal
+  source text "解释文本" locator "一" version "2020"
+"#;
+
+#[test]
+fn a_non_strict_claim_against_an_interpretation_says_so() {
+    let temp = TempDir::new("claim-vs-interpretation");
+    let case = temp.write("case.std", CLAIM_CASE);
+    let path = case.display().to_string();
+
+    let output = check_stdout(
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "解释".to_owned(),
+            path.clone(),
+            ":why Q 张三".to_owned(),
+        ]),
+        GAP,
+        &["未经证明，不能自动胜过解释结论"],
+    );
+    assert!(
+        !stdout(&output).contains("不能自动胜过规则结论"),
+        "an interpretation is not a rule:\n{}",
+        stdout(&output)
+    );
+
+    // The certificate's unresolved-conflict description uses the same wording.
+    let output = run(&[
+        "--no-default-packs".to_owned(),
+        "--interpret".to_owned(),
+        "解释".to_owned(),
+        path,
+        ":cert Q 张三".to_owned(),
+    ]);
+    assert_exit(&output, GAP);
+    let value = certificate_value(&output);
+    let description = value["open_obligations"]
+        .as_array()
+        .expect("the certificate records open obligations")
+        .iter()
+        .find(|obligation| obligation["id"] == "conflict-0")
+        .and_then(|obligation| obligation["description"].as_str())
+        .expect("the unresolved conflict has a description");
+    assert!(
+        description.contains("不能自动胜过解释结论"),
+        "{description}"
+    );
 }
