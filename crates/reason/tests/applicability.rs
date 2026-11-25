@@ -1,6 +1,7 @@
 //! Reasoner-level applicability integration: an inapplicable rule never fires,
-//! its candidate stays visible in a gap, and unchecked/undecidable rules keep
-//! their old firing behaviour while the verdict is recorded.
+//! its candidate stays visible in a gap, an event time is the reference point
+//! even at a later as-of date, and unchecked/undecidable rules keep their old
+//! firing behaviour while the verdict is recorded.
 
 use std_deduce_kernel::Expr;
 use std_deduce_lang::Library;
@@ -56,28 +57,54 @@ fn an_inapplicable_rule_never_fires_and_the_gap_still_lists_it() {
         .expect("the excluded rule is still a candidate");
     match &candidate.applicability {
         Applicability::Inapplicable {
-            reason: InapplicableReason::NotYetInForce { day, .. },
-        } => assert_eq!(day, "2019-05-01"),
+            reason: InapplicableReason::NotYetInForce { dates, .. },
+            basis,
+        } => {
+            assert_eq!(dates, &["2019-05-01"]);
+            assert_eq!(basis.dates.len(), 1);
+            assert!(!basis.dates[0].covered);
+        }
         other => panic!("expected a not-yet-in-force exclusion, got {other:?}"),
     }
+}
 
-    // The scan records the skipped rule instead of looking complete.
-    let scan = r.issues();
+const OLD_RULE: &str = r#"
+sort 人
+pred 起算 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 合同 : 起算 甲
+  source text "合同" locator "第一条"
+  occurred_at 2019-05-01
+rule 旧法 :
+  params x : 人
+  premise 起算 x
+  conclude 结论 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  source text "旧法" locator "第一条"
+"#;
+
+#[test]
+fn an_old_rule_governs_an_old_event_even_at_a_later_asof() {
+    let lib = load(OLD_RULE);
+    let target = goal("结论", "甲");
+    let r = reasoner(&lib, Some("2026-01-01"), None);
     assert!(
-        scan.inapplicable
-            .iter()
-            .any(|rule| rule.as_ref() == "二〇二一年规则"),
-        "{:?}",
-        scan.inapplicable
+        r.knows(&target),
+        "the event time decides, not the query date"
     );
-
-    let verdicts = r.rule_applicability();
-    let verdict = verdicts
-        .iter()
-        .find(|(rule, _)| rule.as_ref() == "二〇二一年规则")
-        .map(|(_, verdict)| verdict)
-        .expect("every rule is judged");
-    assert!(!verdict.allows_firing());
+    let d = r.derivation_for(&target).expect("a derivation");
+    let root = d.root.expect("a root");
+    let std_deduce_reason::Node::RuleApplication { applicability, .. } = &d.nodes[root] else {
+        panic!("the root is a rule application");
+    };
+    let Applicability::Applicable { basis } = applicability else {
+        panic!("expected applicable, got {applicability:?}");
+    };
+    assert_eq!(basis.dates.len(), 1);
+    assert_eq!(basis.dates[0].date, "2019-05-01");
+    assert!(!basis.dates[0].query_date_fallback);
 }
 
 const UNSCOPED_RULE: &str = r#"
@@ -106,12 +133,13 @@ fn an_unscoped_rule_fires_but_is_recorded_as_unchecked() {
         .find(|(rule, _)| rule.as_ref() == "规则")
         .map(|(_, verdict)| verdict)
         .expect("every rule is judged");
-    assert_eq!(
+    assert!(matches!(
         verdict,
         Applicability::Unchecked {
-            missing: MissingInput::RuleHasNoScope
+            missing: MissingInput::RuleHasNoScope,
+            ..
         }
-    );
+    ));
     assert!(verdict.allows_firing());
 }
 
@@ -131,46 +159,51 @@ rule 二〇二一年规则 :
 "#;
 
 #[test]
-fn moving_the_asof_date_moves_the_verdict_and_the_conclusion() {
+fn moving_the_asof_date_moves_the_fallback_verdict() {
     let lib = load(NO_OCCURRENCE_RULE);
     let target = goal("结论", "甲");
 
-    // No date to compare: unchecked, old behaviour.
+    // No event time and no as-of: unchecked, old firing behaviour.
     let plain = reasoner(&lib, None, None);
     assert!(plain.knows(&target));
-    assert_eq!(
-        plain
-            .rule_applicability()
-            .into_iter()
-            .find(|(rule, _)| rule.as_ref() == "二〇二一年规则")
-            .map(|(_, verdict)| verdict),
+    let verdict = plain
+        .rule_applicability()
+        .into_iter()
+        .find(|(rule, _)| rule.as_ref() == "二〇二一年规则")
+        .map(|(_, verdict)| verdict);
+    assert!(matches!(
+        verdict,
         Some(Applicability::Unchecked {
-            missing: MissingInput::NoCaseDate
+            missing: MissingInput::NoCaseDate,
+            ..
         })
-    );
+    ));
 
-    // Before the rule starts: inapplicable, no conclusion.
+    // Before the rule starts: the fallback date is outside, inapplicable.
     let before = reasoner(&lib, Some("2019-06-01"), None);
     assert!(!before.knows(&target));
     let tree = before.gap_tree(&target);
     assert!(matches!(
         tree.candidates[0].applicability,
         Applicability::Inapplicable {
-            reason: InapplicableReason::NotYetInForce { .. }
+            reason: InapplicableReason::NotYetInForce { .. },
+            ..
         }
     ));
 
-    // Inside the range: applicable, no warning state.
+    // Inside the range: applicable, with the as-of fallback recorded.
     let inside = reasoner(&lib, Some("2022-01-01"), None);
     assert!(inside.knows(&target));
-    assert_eq!(
-        inside
-            .rule_applicability()
-            .into_iter()
-            .find(|(rule, _)| rule.as_ref() == "二〇二一年规则")
-            .map(|(_, verdict)| verdict),
-        Some(Applicability::Applicable)
-    );
+    let verdict = inside
+        .rule_applicability()
+        .into_iter()
+        .find(|(rule, _)| rule.as_ref() == "二〇二一年规则")
+        .map(|(_, verdict)| verdict);
+    let Applicability::Applicable { basis } = verdict.expect("a verdict") else {
+        panic!("expected applicable");
+    };
+    assert!(basis.dates[0].query_date_fallback);
+    assert_eq!(basis.dates[0].date, "2022-01-01");
 }
 
 const TERRITORY_RULE: &str = r#"
@@ -196,19 +229,12 @@ fn a_territory_mismatch_excludes_the_rule() {
     let r = reasoner(&lib, None, Some("CN"));
     let target = goal("北京规则适用", "甲");
     assert!(!r.knows(&target));
-    let verdict = r
-        .rule_applicability()
-        .into_iter()
-        .find(|(rule, _)| rule.as_ref() == "北京规则")
-        .map(|(_, verdict)| verdict)
-        .expect("every rule is judged");
-    assert_eq!(
-        verdict,
+    let tree = r.gap_tree(&target);
+    assert!(matches!(
+        tree.candidates[0].applicability,
         Applicability::Inapplicable {
-            reason: InapplicableReason::TerritoryMismatch {
-                rule: "CN-BJ".into(),
-                case: "CN-HN".into(),
-            }
-        }
-    );
+            reason: InapplicableReason::TerritoryMismatch { ref places, .. },
+            ..
+        } if places == &["CN-HN"]
+    ));
 }

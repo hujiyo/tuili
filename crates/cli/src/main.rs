@@ -30,19 +30,24 @@
 //! as-of date and jurisdiction code; `:asof` / `:jurisdiction` print or replace
 //! the same session values and report whether they came from the command line
 //! or a session command. They are stamped into a `:cert` certificate and
-//! compared exactly by `:verify-cert`, and they are also reference values of
-//! the temporal/spatial applicability judgement. If the loaded rules name two
-//! or more jurisdictions and the session has no jurisdiction, `:why` and
-//! `:cert` refuse with exit `2` instead of silently picking one; `:gap`,
-//! `:issues`, `:applicability` and `:inspect` are not gated.
+//! compared exactly by `:verify-cert`. `:jurisdiction` is the case's legal
+//! system in the applicability judgement; `:asof` is only a fallback when the
+//! judged rule instance references no fact with an occurrence time. If the
+//! loaded rules name two or more jurisdictions and the session has no
+//! jurisdiction, `:why` and `:cert` refuse with exit `2` instead of silently
+//! picking one; `:gap`, `:issues`, `:applicability` and `:inspect` are not
+//! gated.
 //!
 //! Rule scope (`effective` / `repealed` / `jurisdiction` / `territory`) and a
 //! fact's occurrence (`occurred_at` / `occurred_in`) are judged before a rule
-//! may fire: a rule whose recorded range excludes the as-of date or the
-//! recorded occurrence, or whose jurisdiction/territory does not cover the
-//! case, is inapplicable and is never applied. An *unchecked* judgement (a
-//! needed input is missing) and an *undecidable* one (complete input that
-//! cannot conclude) keep the old firing behaviour, but the state is printed by
+//! instantiates: the reference point is the event time/place of the premise
+//! facts the instance consumes, not the query date. Every event time must be
+//! inside the range and every event place inside the territory; all-out is
+//! inapplicable and partial coverage is undecidable, never rounded. A rule
+//! that does not apply is never applied. An *unchecked* judgement (a needed
+//! input is missing, e.g. no event time and no `:asof`) and an *undecidable*
+//! one (complete input that cannot conclude) keep the old firing behaviour,
+//! but the verdict, its reason and the event times/places are printed by
 //! `:why` / `:explain` / `:gap` and listed by `:applicability`. The
 //! certificate format records no verdict yet.
 //!
@@ -247,12 +252,13 @@
 //! print one warning line before their result: an edge inside a cycle cannot
 //! decide anything, and the warning does not change the exit code.
 //!
-//! After the derivation, `:why` prints a `时空适用性：` block for every rule in
-//! the goal's derivation whose verdict is not a clean `适用`: an unchecked
-//! (missing input) or undecidable rule fired anyway, and the block names the
-//! reason, so a rule with an incomplete scope record never looks fully judged.
-//! An inapplicable rule cannot appear there because it never fired; `:gap` and
-//! `:applicability` show it.
+//! After the derivation, `:why` prints a `时空适用性：` block for every rule
+//! the derivation cites, with the per-instance verdict and the event times and
+//! places behind it. An applicable verdict says which event time is covered; an
+//! unchecked or undecidable one names the missing input or the partial
+//! coverage; an inapplicable rule cannot appear because it never fired (`:gap`
+//! and `:applicability` show it). The same block is printed after each conflict
+//! side's tree.
 //!
 //! `:explain` uses exactly the same derivation and prints
 //! [`std_deduce_cert::render_narrative`] instead of the formal tree; the same
@@ -278,11 +284,13 @@
 //! same path (a rule cycle). Repeated expansions are recognised by a structural
 //! key of the normalised proposition, never by printed text, so an alpha
 //! variant cannot start a second, endless branch; the head match is normalised
-//! too, so a `def` alias finds the rule that concludes its definition. A
-//! candidate the temporal/spatial judgement excludes is still listed, with
-//! `〔不适用（原因）〕` and its missing premises but no deeper expansion (adding
-//! a premise cannot make an excluded rule fire); an unchecked or undecidable
-//! candidate is expanded as before and labelled `〔适用性未判定（原因）〕`.
+//! too, so a `def` alias finds the rule that concludes its definition. Every
+//! candidate line carries its per-instance verdict and evidence:
+//! `〔适用（事件时间 …）〕`, `〔不适用（原因）〕`, `〔适用性未判定（原因）〕` or
+//! `〔适用性无法判定（原因）〕`. A candidate the judgement excludes is still
+//! listed, with its missing premises but no deeper expansion (adding a
+//! premise cannot make an excluded rule fire); unchecked and undecidable
+//! candidates are expanded as before.
 //! The recursion is bounded by explicit limits — depth 6, 128 nodes, 8 attempts
 //! per rule — and a limit that stops a branch is printed as `已截断：…` where it
 //! applies. `:issues` requires a loaded theory and runs the same machinery over
@@ -295,11 +303,13 @@
 //! and its loser is reported by `:gap`/`:why` as decided, never as unresolved.
 //! Neither command touches the certificate format.
 //!
-//! `:applicability [term]` is a report, not a query: with no argument it lists
-//! every rule of the loaded environment; with a goal it lists the rules the
-//! goal's derivation or root gap tree uses. Each line is `⟨rule⟩：` followed by
-//! `适用`, `不适用（…）`, `适用性未判定（…）` or `适用性无法判定（…）`. It always
-//! exits `0`, because "this rule does not apply" is information.
+//! `:applicability [term]` is a report, not a query: with no argument it judges
+//! every rule as an empty instance (declarations plus `:asof` when set); with
+//! a goal it lists the per-instance verdicts of the rules the goal's derivation
+//! or gap tree uses. Each line is `⟨rule⟩：` followed by the verdict and the
+//! event times/places it relied on (`适用（事件时间 …）`, `不适用（…）`,
+//! `适用性未判定（…）` or `适用性无法判定（…）`). It always exits `0`, because
+//! "this rule does not apply" is information.
 //!
 //! `:cert` requires a loaded theory and writes only the certificate JSON to
 //! stdout; a gap becomes a `MissingPremise` obligation and an unresolved
@@ -389,8 +399,8 @@ use std_deduce_lawpack::{
     OFFICIAL_FILE,
 };
 use std_deduce_reason::{
-    certificate as reason_certificate, Applicability, Conflict, Derivation, GapLimit, GapLimits,
-    GapStatus, GapTree, Node as ReasonNode, Provenance, Reasoner, Resolution, Side,
+    certificate as reason_certificate, Conflict, Derivation, GapLimit, GapLimits, GapStatus,
+    GapTree, Node as ReasonNode, Provenance, Reasoner, Resolution, Side,
 };
 
 /// How a query ended. Only `Proved` is a success; the other two make the
@@ -1543,11 +1553,10 @@ impl Session {
             render(&certificate)?
         };
         writeln!(out, "{rendered}").ok();
-        // A rule that fired without a complete applicability judgement is
-        // still kept, but its state is printed next to the derivation: an
-        // unchecked or undecidable rule must never look like a clean one.
+        // The derivation carries the per-instance applicability of every rule
+        // it cites, including the event times/places behind the verdict.
         if let Some(root) = d.root {
-            write_applicability_notes(out, &r, &d, root);
+            write_applicability_notes(out, &d, root);
         }
         // `:why` reports an unresolved or defeated goal before it builds this
         // certificate, so its conflict sides carry their own labels. `:explain`
@@ -1555,8 +1564,23 @@ impl Session {
         // label the rules that argued on the goal's side.
         if cmd == "explain" {
             if let Some(conflict) = r.conflict_for(&goal) {
-                let rules = conflict_rule_witnesses(&r, &goal, &conflict);
-                write_applicability_rule_notes(out, &r, &rules);
+                let side_of_goal = r.conflict_side(&conflict, &goal);
+                let mut verdicts = BTreeSet::new();
+                for (side, prop) in [(Side::Left, &conflict.left), (Side::Right, &conflict.right)] {
+                    let include = match &conflict.resolution {
+                        Resolution::Unresolved { .. } => true,
+                        Resolution::Defeated { .. } => side_of_goal == Some(side),
+                    };
+                    if !include {
+                        continue;
+                    }
+                    if let Some(side_derivation) = r.derivation_for(prop) {
+                        if let Some(side_root) = side_derivation.root {
+                            collect_derivation_verdicts(&side_derivation, side_root, &mut verdicts);
+                        }
+                    }
+                }
+                write_applicability_verdicts(out, &verdicts);
             }
         }
         // An unreachable `:why` reports the same kind of gap as `:gap`, so it
@@ -1738,11 +1762,12 @@ impl Session {
 
     /// `:applicability [<命题>]` — report the temporal/spatial judgement.
     ///
-    /// With no goal it lists every rule of the environment. With a goal it
-    /// lists every rule the goal's derivation or its root gap tree uses, in
-    /// rule-name order, each with the recorded verdict and its reason. This is
-    /// a report, not a query: it never changes a conclusion and always exits
-    /// `0`, because "this rule does not apply" is information, not a failure.
+    /// With no goal it lists every rule judged as an empty instance (the
+    /// rule's declarations plus `:asof` when set). With a goal it lists every
+    /// rule the goal's derivation or gap tree uses, with the per-instance
+    /// verdict and the event times/places it relied on. This is a report, not
+    /// a query: it never changes a conclusion and always exits `0`, because
+    /// "this rule does not apply" is information, not a failure.
     fn applicability_command(
         &mut self,
         arg: &str,
@@ -1757,9 +1782,14 @@ impl Session {
         let mut r = self.reasoner()?;
         r.assume_ledger_axioms()?;
         r.saturate()?;
-        let all = r.rule_applicability();
         if arg.is_empty() {
-            writeln!(out, "时空适用性（环境中 {} 条规则）：", all.len()).ok();
+            let all = r.rule_applicability();
+            writeln!(
+                out,
+                "时空适用性（规则级；未给定目标，按空实例与 :asof 判定，共 {} 条规则）：",
+                all.len()
+            )
+            .ok();
             if all.is_empty() {
                 writeln!(out, "  环境中没有规则。").ok();
             }
@@ -1770,23 +1800,38 @@ impl Session {
         }
 
         let goal = self.goal(arg)?;
-        let mut rules = BTreeSet::new();
+        let mut verdicts = BTreeSet::new();
         if r.knows(&goal) {
             let mut d = r.derivation();
             d.root = r.root_for(&goal);
             if let Some(root) = d.root {
-                collect_derivation_rules(&d, root, &mut rules);
+                collect_derivation_verdicts(&d, root, &mut verdicts);
             }
         } else if let Some(conflict) = r.conflict_for(&goal) {
-            // A conflicted goal is not in the fact base and has no gap tree,
-            // but the rules that argued for it are recorded as its witnesses.
-            rules = conflict_rule_witnesses(&r, &goal, &conflict);
+            // A conflicted goal is not in the fact base and has no gap tree.
+            // An unresolved conflict needs both sides' rules; a decided one
+            // needs only the goal's own side.
+            let side_of_goal = r.conflict_side(&conflict, &goal);
+            for (side, prop) in [(Side::Left, &conflict.left), (Side::Right, &conflict.right)] {
+                let include = match &conflict.resolution {
+                    Resolution::Unresolved { .. } => true,
+                    Resolution::Defeated { .. } => side_of_goal == Some(side),
+                };
+                if !include {
+                    continue;
+                }
+                if let Some(side_derivation) = r.derivation_for(prop) {
+                    if let Some(side_root) = side_derivation.root {
+                        collect_derivation_verdicts(&side_derivation, side_root, &mut verdicts);
+                    }
+                }
+            }
         } else {
             let tree = r.gap_tree(&goal);
-            collect_gap_rules(&tree, &mut rules);
+            collect_gap_verdicts(&tree, &mut verdicts);
         }
         writeln!(out, "时空适用性（目标：{}）：", print_expr(&goal)).ok();
-        if rules.is_empty() {
+        if verdicts.is_empty() {
             writeln!(
                 out,
                 "  目标没有用到任何规则：它要么由已登记事实（或解释应用）直接成立，要么没有任何候选规则。"
@@ -1794,17 +1839,8 @@ impl Session {
             .ok();
             return Ok(Outcome::Proved);
         }
-        let verdicts: BTreeMap<&str, &Applicability> = all
-            .iter()
-            .map(|(rule, verdict)| (rule.as_ref(), verdict))
-            .collect();
-        for rule in rules {
-            let Some(verdict) = verdicts.get(rule.as_str()) else {
-                return Err(format!(
-                    "内部错误：规则 `{rule}` 不在当前环境的适用性判定结果中"
-                ));
-            };
-            writeln!(out, "  ⟨{rule}⟩：{}", verdict.summary_zh()).ok();
+        for (rule, verdict) in &verdicts {
+            writeln!(out, "  ⟨{rule}⟩：{verdict}").ok();
         }
         Ok(Outcome::Proved)
     }
@@ -3972,10 +4008,10 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
     match render(&certificate) {
         Ok(rendered) => {
             writeln!(out, "{rendered}").ok();
-            // A conflict side is a derivation too: a rule that fired under an
-            // unchecked/undecidable verdict must be labelled here as well.
+            // A conflict side is a derivation too: its rules and their
+            // event-time/place basis must be visible here as well.
             if let Some(root) = d.root {
-                write_applicability_notes(out, r, &d, root);
+                write_applicability_notes(out, &d, root);
             }
         }
         Err(error) => {
@@ -4018,123 +4054,79 @@ fn report_conflicts(out: &mut impl Write, certificate: &Certificate) {
     }
 }
 
-/// Collect every rule named anywhere in a gap tree, including nested
+/// Collect every rule and its verdict anywhere in a gap tree, including nested
 /// candidates, so the report covers the whole tree.
-fn collect_gap_rules(tree: &GapTree, out: &mut BTreeSet<String>) {
-    for rule in &tree.candidates {
-        out.insert(rule.rule.to_string());
-        for premise in &rule.missing {
+fn collect_gap_verdicts(tree: &GapTree, out: &mut BTreeSet<(String, String)>) {
+    for candidate in &tree.candidates {
+        out.insert((
+            candidate.rule.to_string(),
+            candidate.applicability.summary_zh(),
+        ));
+        for premise in &candidate.missing {
             if let Some(child) = &premise.gap {
-                collect_gap_rules(child, out);
+                collect_gap_verdicts(child, out);
             }
         }
     }
 }
 
 /// Collect the rules a derivation actually cites, walking from the root
-/// through the premises that support it. Rules that happen to be applied
-/// elsewhere in the settled state but not in this goal's cone are not listed:
-/// `:applicability <goal>` answers for the goal.
-fn collect_derivation_rules(derivation: &Derivation, node: usize, out: &mut BTreeSet<String>) {
+/// through the premises that support it, together with the per-instance
+/// verdict and the event times/places it relied on.
+///
+/// Rules that happen to be applied elsewhere in the settled state but not in
+/// this goal's cone are not listed: `:applicability <goal>` answers for the
+/// goal. A gap node carries its candidates' verdicts; a rule-application node
+/// carries the verdict it fired under.
+fn collect_derivation_verdicts(
+    derivation: &Derivation,
+    node: usize,
+    out: &mut BTreeSet<(String, String)>,
+) {
     match &derivation.nodes[node] {
         ReasonNode::Assumption { .. } => {}
-        ReasonNode::RuleApplication { rule, premises, .. } => {
-            out.insert(rule.to_string());
+        ReasonNode::RuleApplication {
+            rule,
+            premises,
+            applicability,
+            ..
+        } => {
+            out.insert((rule.to_string(), applicability.summary_zh()));
             for premise in premises {
-                collect_derivation_rules(derivation, *premise, out);
+                collect_derivation_verdicts(derivation, *premise, out);
             }
         }
         ReasonNode::InterpretationApplication { premise, .. } => {
-            collect_derivation_rules(derivation, *premise, out);
+            collect_derivation_verdicts(derivation, *premise, out);
         }
         ReasonNode::Gap { candidates, .. } => {
-            out.extend(
-                candidates
-                    .iter()
-                    .map(|candidate| candidate.rule.to_string()),
-            );
-        }
-    }
-}
-
-/// Print the recorded applicability of the rules a derivation cites, but only
-/// the ones that are not a clean `适用`.
-///
-/// The block is printed after the derivation and before any conflict report:
-/// a rule that fired under an incomplete judgement (`未判定` / `无法判定`)
-/// must never look like a rule whose scope was fully checked. An inapplicable
-/// rule cannot appear here because the reasoner never applies one; it is
-/// reported by `:gap` and `:applicability` instead.
-fn write_applicability_notes(
-    out: &mut impl Write,
-    reasoner: &Reasoner<'_>,
-    derivation: &Derivation,
-    root: usize,
-) {
-    let mut rules = BTreeSet::new();
-    collect_derivation_rules(derivation, root, &mut rules);
-    write_applicability_rule_notes(out, reasoner, &rules);
-}
-
-/// The recorded rule witnesses of the side(s) of a conflict a goal belongs to.
-///
-/// An unresolved conflict needs both sides; a decided one needs only the
-/// goal's own side, because the winner's derivation is not what the goal's
-/// verdict rests on.
-fn conflict_rule_witnesses(
-    reasoner: &Reasoner<'_>,
-    goal: &Expr,
-    conflict: &Conflict,
-) -> BTreeSet<String> {
-    let mut rules = BTreeSet::new();
-    let include = |side: Side| match &conflict.resolution {
-        Resolution::Unresolved { .. } => true,
-        Resolution::Defeated { .. } => reasoner.conflict_side(conflict, goal) == Some(side),
-    };
-    for (side, provenance) in [
-        (Side::Left, &conflict.left_by),
-        (Side::Right, &conflict.right_by),
-    ] {
-        if !include(side) {
-            continue;
-        }
-        if let Provenance::Rules(witnesses) = provenance {
-            rules.extend(witnesses.iter().map(ToString::to_string));
-        }
-    }
-    rules
-}
-
-/// Print the recorded applicability of a rule set, but only the rules that
-/// are not a clean `适用`.
-fn write_applicability_rule_notes(
-    out: &mut impl Write,
-    reasoner: &Reasoner<'_>,
-    rules: &BTreeSet<String>,
-) {
-    let verdicts: BTreeMap<String, Applicability> = reasoner
-        .rule_applicability()
-        .into_iter()
-        .map(|(rule, verdict)| (rule.to_string(), verdict))
-        .collect();
-    let mut lines = Vec::new();
-    for rule in rules {
-        match verdicts.get(rule) {
-            Some(verdict) if !verdict.is_applicable() => {
-                lines.push(format!("  ⟨{rule}⟩：{}", verdict.summary_zh()));
+            for candidate in candidates {
+                out.insert((
+                    candidate.rule.to_string(),
+                    candidate.applicability.summary_zh(),
+                ));
             }
-            Some(_) => {}
-            // A derivation can only cite a declared rule; if the recorded
-            // judgement lacks it, say so instead of printing nothing.
-            None => lines.push(format!("  ⟨{rule}⟩：未找到适用性判定（内部不一致）")),
         }
     }
-    if lines.is_empty() {
+}
+
+/// Print the applicability of every rule a derivation cites, with the event
+/// times/places each verdict relied on.
+fn write_applicability_notes(out: &mut impl Write, derivation: &Derivation, root: usize) {
+    let mut verdicts = BTreeSet::new();
+    collect_derivation_verdicts(derivation, root, &mut verdicts);
+    write_applicability_verdicts(out, &verdicts);
+}
+
+/// Print one `⟨rule⟩：verdict` line per distinct verdict, sorted by rule and
+/// then by the rendered verdict (so the order never depends on traversal).
+fn write_applicability_verdicts(out: &mut impl Write, verdicts: &BTreeSet<(String, String)>) {
+    if verdicts.is_empty() {
         return;
     }
     writeln!(out, "时空适用性：").ok();
-    for line in lines {
-        writeln!(out, "{line}").ok();
+    for (rule, verdict) in verdicts {
+        writeln!(out, "  ⟨{rule}⟩：{verdict}").ok();
     }
 }
 
@@ -4247,15 +4239,16 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
         .ok();
     }
     for candidate in &tree.candidates {
-        // A judgement that is not a positive `applicable` is printed on the
-        // candidate line itself: an excluded rule is listed, not hidden, and
-        // an unchecked one cannot pass for a normal candidate.
-        let verdict = if candidate.applicability.is_applicable() {
-            String::new()
-        } else {
-            format!("〔{}〕", candidate.applicability.summary_zh())
-        };
-        writeln!(out, "{pad}候选 ⟨{}⟩{verdict}", candidate.rule).ok();
+        // Every candidate carries its per-instance verdict and the event
+        // times/places it relied on: an excluded rule is listed, not hidden,
+        // and an unchecked one cannot pass for a normal candidate.
+        writeln!(
+            out,
+            "{pad}候选 ⟨{}⟩〔{}〕",
+            candidate.rule,
+            candidate.applicability.summary_zh()
+        )
+        .ok();
         for source in &candidate.sources {
             writeln!(out, "{pad}  ← {}", source.one_line()).ok();
         }
@@ -4565,13 +4558,14 @@ fn print_help(out: &mut impl Write) {
     writeln!(
         out,
         ":asof / :jurisdiction 与 --as-of / --jurisdiction 写同一组会话值；\
-         :cert / :verify-cert 记录并比对这些值，时空适用性判定也以它们为基准。"
+         :cert / :verify-cert 记录并比对这些值。适用性判定先按事件时间/地点，\
+         只有实例没有任何事件时间时 :asof 才作为兜底。"
     )
     .ok();
     writeln!(
         out,
-        "时空适用性：规则按 effective/repealed/jurisdiction/territory 与案件发生时间/地点判定；\
-         不适用则不触发，未判定/无法判定仍触发但会标注。:applicability [命题] 列出判定与原因。"
+        "时空适用性：按实例前提事实的发生时间/地点判定（事件时优先；无事件时间才用 :asof 兜底）；\
+         不适用则不触发，未判定/无法判定仍触发但会标注。:applicability [命题] 列出判定与依据。"
     )
     .ok();
     writeln!(

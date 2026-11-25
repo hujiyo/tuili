@@ -545,13 +545,13 @@ fn cert_records_the_session_asof_and_jurisdiction() {
     );
 }
 
-/// With no `:asof`, the rule's recorded facts keep it inside its range and an
-/// unchecked jurisdiction verdict does not block it: the conclusion and the
-/// exit code stay what they were, and the state is printed. A later date
-/// outside the range makes the rule inapplicable, so the conclusion disappears
-/// and the reason is readable.
+/// The event time is the reference: with no `:asof` the rule's recorded fact
+/// keeps it inside its range and an unchecked jurisdiction verdict does not
+/// block it (the conclusion, exit code and tree stay the old ones, and the
+/// state is printed). A later `:asof` does not turn the old rule
+/// inapplicable for an old event; the verdict and its basis are printed.
 #[test]
-fn asof_judges_applicability_and_an_unchecked_rule_still_fires() {
+fn event_time_drives_applicability_and_an_unchecked_rule_still_fires() {
     let temp = TempRoot::new("asof-judges");
     let theory = temp.write("case.std", &scoped_theory());
 
@@ -570,9 +570,9 @@ fn asof_judges_applicability_and_an_unchecked_rule_still_fires() {
     );
     assert!(
         plain_out.contains(
-            "时空适用性：\n  ⟨已废止规则⟩：适用性未判定（规则声明了管辖，但会话未设置 :jurisdiction）"
+            "时空适用性：\n  ⟨已废止规则⟩：适用性未判定（规则声明了管辖，但会话未设置 :jurisdiction；已记录：事件时间 2020-05-06（区间内）；事件地点 CN-HN（覆盖））"
         ),
-        "an unchecked judgement must be labelled:\n{plain_out}"
+        "an unchecked judgement must be labelled with its evidence:\n{plain_out}"
     );
     // The derivation part is the old one; only the applicability block is new.
     let tree = |out: &str| -> String {
@@ -586,8 +586,8 @@ fn asof_judges_applicability_and_an_unchecked_rule_still_fires() {
             .to_owned()
     };
 
-    // A date inside the range plus the matching jurisdiction is a positive
-    // judgement: the same tree, no warning.
+    // A matching jurisdiction turns the same event into a positive judgement;
+    // the event date, not the query date, is the reference.
     let applicable = run_in(
         temp.root(),
         &[
@@ -600,8 +600,10 @@ fn asof_judges_applicability_and_an_unchecked_rule_still_fires() {
     assert_exit(&applicable, PROVED);
     let applicable_out = stdout(&applicable);
     assert!(
-        !applicable_out.contains("时空适用性："),
-        "a fully applicable rule needs no applicability block:\n{applicable_out}"
+        applicable_out.contains(
+            "⟨已废止规则⟩：适用（事件时间 2020-05-06（区间内）；事件地点 CN-HN（覆盖））"
+        ),
+        "an applicable verdict prints the covered event time and place:\n{applicable_out}"
     );
     assert_eq!(
         tree(&plain_out),
@@ -609,8 +611,9 @@ fn asof_judges_applicability_and_an_unchecked_rule_still_fires() {
         "an applicable rule's derivation tree must be the old one"
     );
 
-    // A query date at the rule's repeal day makes it inapplicable.
-    let repealed = run_in(
+    // The query date is 2022, after the rule's repeal day, but the contract
+    // was signed in 2020: the old rule still governs it.
+    let later = run_in(
         temp.root(),
         &[
             format!(":load {}", theory.display()),
@@ -619,38 +622,28 @@ fn asof_judges_applicability_and_an_unchecked_rule_still_fires() {
             ":why 处罚 甲".to_string(),
         ],
     );
-    assert_exit(&repealed, GAP);
-    let repealed_out = stdout(&repealed);
+    assert_exit(&later, PROVED);
+    let later_out = stdout(&later);
     assert!(
-        repealed_out.contains("证书有效，但根为缺口，结论未被证明。"),
-        "{repealed_out}"
-    );
-    assert!(
-        repealed_out.contains(
-            "⟨已废止规则⟩：不适用（案件日期 2022-01-01 已达到规则废止日 2021-01-01，规则已经失效）"
-        ),
-        "the reason names the date that excluded the rule:\n{repealed_out}"
+        later_out.contains("⟨已废止规则⟩：适用（事件时间 2020-05-06（区间内）"),
+        "a later query date must not override an event time:\n{later_out}"
     );
 
-    // `:gap` lists the excluded candidate instead of hiding it.
-    let gap = run_in(
+    // `:applicability` shows the same verdict and its basis.
+    let report = run_in(
         temp.root(),
         &[
             format!(":load {}", theory.display()),
             ":asof 2022-01-01".to_string(),
             ":jurisdiction CN".to_string(),
-            ":gap 处罚 甲".to_string(),
+            ":applicability 处罚 甲".to_string(),
         ],
     );
-    assert_exit(&gap, GAP);
-    let gap_out = stdout(&gap);
+    assert_exit(&report, PROVED);
     assert!(
-        gap_out.contains("候选 ⟨已废止规则⟩〔不适用（案件日期 2022-01-01"),
-        "an inapplicable candidate is listed with its reason:\n{gap_out}"
-    );
-    assert!(
-        gap_out.contains("候选 ⟨无作用域规则⟩〔适用性未判定（规则没有声明任何范围）〕"),
-        "an unscoped candidate is shown as unchecked:\n{gap_out}"
+        stdout(&report).contains("⟨已废止规则⟩：适用（事件时间 2020-05-06（区间内）"),
+        "{}",
+        stdout(&report)
     );
 
     // `:cert` records the date by design, but an applicable date leaves the
@@ -723,12 +716,13 @@ rule 二〇二一年生效规则 :
     let plain_out = stdout(&plain);
     assert!(
         plain_out.contains(
-            "⟨二〇二一年生效规则⟩：不适用（案件日期 2019-05-01 早于规则生效日 2021-01-01，规则当时尚未生效）"
+            "⟨二〇二一年生效规则⟩：不适用（事件时间 2019-05-01 早于规则生效日 2021-01-01，规则当时尚未生效）"
         ),
         "{plain_out}"
     );
 
-    // `:asof 2019-…`: the query date names the same exclusion.
+    // `:asof 2019-…` cannot override the recorded event time: the reference
+    // stays 2019-05-01 and the rule is still inapplicable.
     let dated = run_in(
         temp.root(),
         &[
@@ -741,7 +735,7 @@ rule 二〇二一年生效规则 :
     let dated_out = stdout(&dated);
     assert!(
         dated_out.contains(
-            "⟨二〇二一年生效规则⟩：不适用（案件日期 2019-06-01 早于规则生效日 2021-01-01，规则当时尚未生效）"
+            "⟨二〇二一年生效规则⟩：不适用（事件时间 2019-05-01 早于规则生效日 2021-01-01，规则当时尚未生效）"
         ),
         "{dated_out}"
     );
@@ -759,7 +753,7 @@ rule 二〇二一年生效规则 :
     assert_exit(&later, GAP);
     let later_out = stdout(&later);
     assert!(
-        later_out.contains("案件日期 2019-05-01 早于规则生效日 2021-01-01"),
+        later_out.contains("事件时间 2019-05-01 早于规则生效日 2021-01-01"),
         "{later_out}"
     );
 
@@ -775,7 +769,7 @@ rule 二〇二一年生效规则 :
     let report_out = stdout(&report);
     assert!(
         report_out.contains(
-            "时空适用性（目标：可撤销 甲）：\n  ⟨二〇二一年生效规则⟩：不适用（案件日期 2019-05-01"
+            "时空适用性（目标：可撤销 甲）：\n  ⟨二〇二一年生效规则⟩：不适用（事件时间 2019-05-01"
         ),
         "{report_out}"
     );
@@ -816,7 +810,7 @@ rule 二〇二一年规则 :
     let plain_out = stdout(&plain);
     assert!(
         plain_out.contains(
-            "⟨二〇二一年规则⟩：适用性未判定（规则声明了生效区间，但未设置 :asof，案件事实也没有记录发生时间）"
+            "⟨二〇二一年规则⟩：适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）"
         ),
         "{plain_out}"
     );
@@ -833,7 +827,7 @@ rule 二〇二一年规则 :
     let before_out = stdout(&before);
     assert!(
         before_out.contains(
-            "⟨二〇二一年规则⟩：不适用（案件日期 2019-06-01 早于规则生效日 2021-01-01，规则当时尚未生效）"
+            "⟨二〇二一年规则⟩：不适用（事件时间 2019-06-01 早于规则生效日 2021-01-01，规则当时尚未生效）；依据：以查询基准日 2019-06-01 代替行为时（区间外）"
         ),
         "{before_out}"
     );
@@ -849,8 +843,9 @@ rule 二〇二一年规则 :
     assert_exit(&inside, PROVED);
     let inside_out = stdout(&inside);
     assert!(
-        !inside_out.contains("时空适用性："),
-        "the rule is applicable on this date:\n{inside_out}"
+        inside_out
+            .contains("⟨二〇二一年规则⟩：适用（以查询基准日 2022-01-01 代替行为时（区间内））"),
+        "the fallback date is labelled as a substitute for the event time:\n{inside_out}"
     );
 }
 
@@ -891,7 +886,7 @@ rule 北京规则 :
     assert_exit(&output, GAP);
     let out = stdout(&output);
     assert!(
-        out.contains("⟨北京规则⟩：不适用（规则地域 CN-BJ 与案件发生地 CN-HN 不同）"),
+        out.contains("⟨北京规则⟩：不适用（规则地域 CN-BJ 不覆盖事件地点 CN-HN）"),
         "{out}"
     );
 
@@ -905,15 +900,15 @@ rule 北京规则 :
     );
     assert_exit(&report, PROVED);
     assert!(
-        stdout(&report).contains("⟨北京规则⟩：不适用（规则地域 CN-BJ 与案件发生地 CN-HN 不同）"),
+        stdout(&report).contains("⟨北京规则⟩：不适用（规则地域 CN-BJ 不覆盖事件地点 CN-HN）"),
         "{}",
         stdout(&report)
     );
 }
 
-/// A repealed rule does not fire at a query date on or after its repeal day:
-/// the conclusion disappears, the gap names the repeal, and `:applicability`
-/// records the verdict.
+/// A rule is inapplicable for an event that happened on or after its repeal
+/// day, and the reason names the event time and the repeal day. The query
+/// date is not what decides this.
 #[test]
 fn a_repealed_rule_does_not_silently_fire() {
     let temp = TempRoot::new("repealed");
@@ -926,7 +921,7 @@ pred 处罚 : 人 → Prop
 obj 甲 : 人
 axiom 事实 : 事实前提 甲
   source text "案件材料" locator "第一页"
-  occurred_at 2019-06-01
+  occurred_at 2022-01-01
 rule 旧规则 :
   params x : 人
   premise 事实前提 x
@@ -937,31 +932,12 @@ rule 旧规则 :
 "#,
     );
 
-    // Inside the range (the as-of date and the fact's date are both before the
-    // repeal day): the rule applies.
-    let inside = run_in(
-        temp.root(),
-        &[
-            format!(":load {}", theory.display()),
-            ":asof 2020-01-01".to_string(),
-            ":why 处罚 甲".to_string(),
-        ],
-    );
-    assert_exit(&inside, PROVED);
-    assert!(
-        !stdout(&inside).contains("时空适用性："),
-        "{}",
-        stdout(&inside)
-    );
-
-    // On the repeal day the rule is already out of force; no as-of date at
-    // all also uses the fact's date and stays inside, so the change is the
-    // session value.
+    // The event happened after the repeal: the rule never fires, whatever
+    // the query date says.
     let repealed = run_in(
         temp.root(),
         &[
             format!(":load {}", theory.display()),
-            ":asof 2021-01-01".to_string(),
             ":why 处罚 甲".to_string(),
         ],
     );
@@ -969,27 +945,28 @@ rule 旧规则 :
     let repealed_out = stdout(&repealed);
     assert!(
         repealed_out.contains(
-            "⟨旧规则⟩：不适用（案件日期 2021-01-01 已达到规则废止日 2021-01-01，规则已经失效）"
+            "⟨旧规则⟩：不适用（事件时间 2022-01-01 已达到规则废止日 2021-01-01，规则已经失效）"
         ),
         "{repealed_out}"
     );
 
+    // `:applicability <goal>` reports the same verdict.
     let report = run_in(
         temp.root(),
         &[
             format!(":load {}", theory.display()),
-            ":asof 2021-01-01".to_string(),
             ":applicability 处罚 甲".to_string(),
         ],
     );
     assert_exit(&report, PROVED);
     assert!(
-        stdout(&report).contains("⟨旧规则⟩：不适用（案件日期 2021-01-01"),
+        stdout(&report).contains("⟨旧规则⟩：不适用（事件时间 2022-01-01"),
         "{}",
         stdout(&report)
     );
 
-    // Without a goal, `:applicability` lists every rule of the environment.
+    // Without a goal, `:applicability` uses an empty instance: the rule's
+    // range is judged against `:asof` and the fallback is labelled.
     let all = run_in(
         temp.root(),
         &[
@@ -1001,12 +978,85 @@ rule 旧规则 :
     assert_exit(&all, PROVED);
     let all_out = stdout(&all);
     assert!(
-        all_out.contains("时空适用性（环境中 1 条规则）："),
+        all_out.contains("时空适用性（规则级；未给定目标，按空实例与 :asof 判定，共 1 条规则）："),
         "{all_out}"
     );
     assert!(
-        all_out.contains("⟨旧规则⟩：不适用（案件日期 2021-01-01"),
+        all_out.contains(
+            "⟨旧规则⟩：不适用（事件时间 2021-01-01 已达到规则废止日 2021-01-01，规则已经失效）；依据：以查询基准日 2021-01-01 代替行为时（区间外）"
+        ),
         "{all_out}"
+    );
+}
+
+/// A contract signed in 2019 is governed by the law in force in 2019 even
+/// when the query is made in 2026. The later rule must not reach back to the
+/// earlier event, so the two rules never fire together.
+#[test]
+fn an_old_rule_governs_the_2019_contract_at_a_2026_asof() {
+    let temp = TempRoot::new("no-retroactivity");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred 合同签订 : 人 → Prop
+pred 合同有效 : 人 → Prop
+pred 合同无效 : 人 → Prop
+obj 甲 : 人
+contrary 合同有效 合同无效
+axiom 签订 : 合同签订 甲
+  source text "合同" locator "第一条"
+  occurred_at 2019-05-01
+rule 旧法 :
+  params x : 人
+  premise 合同签订 x
+  conclude 合同有效 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  source text "旧法" locator "第一条"
+rule 新法 :
+  params x : 人
+  premise 合同签订 x
+  conclude 合同无效 x
+  effective 2021-01-01
+  source text "新法" locator "第一条"
+"#,
+    );
+
+    let old = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":asof 2026-01-01".to_string(),
+            ":why 合同有效 甲".to_string(),
+        ],
+    );
+    assert_exit(&old, PROVED);
+    let old_out = stdout(&old);
+    assert!(
+        old_out.contains("⟨旧法⟩：适用（事件时间 2019-05-01（区间内））"),
+        "the old law covers the event time:\n{old_out}"
+    );
+
+    let new = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":asof 2026-01-01".to_string(),
+            ":why 合同无效 甲".to_string(),
+        ],
+    );
+    assert_exit(&new, GAP);
+    let new_out = stdout(&new);
+    assert!(
+        new_out.contains(
+            "⟨新法⟩：不适用（事件时间 2019-05-01 早于规则生效日 2021-01-01，规则当时尚未生效）"
+        ),
+        "the later law must not reach back:\n{new_out}"
+    );
+    assert!(
+        !new_out.contains("冲突未决"),
+        "only one side fired, so there is no conflict:\n{new_out}"
     );
 }
 
@@ -1061,7 +1111,7 @@ rule 新规则 :
     assert!(plain_out.contains("冲突未决：批准 甲"), "{plain_out}");
     assert!(
         plain_out.contains(
-            "⟨旧规则⟩：适用性未判定（规则声明了生效区间，但未设置 :asof，案件事实也没有记录发生时间）"
+            "⟨旧规则⟩：适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）"
         ),
         "each conflict side labels its unchecked state:\n{plain_out}"
     );
@@ -1079,13 +1129,13 @@ rule 新规则 :
     let plain_report_out = stdout(&plain_report);
     assert!(
         plain_report_out.contains(
-            "⟨旧规则⟩：适用性未判定（规则声明了生效区间，但未设置 :asof，案件事实也没有记录发生时间）"
+            "⟨旧规则⟩：适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）"
         ),
         "{plain_report_out}"
     );
     assert!(
         plain_report_out.contains(
-            "⟨新规则⟩：适用性未判定（规则声明了生效区间，但未设置 :asof，案件事实也没有记录发生时间）"
+            "⟨新规则⟩：适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）"
         ),
         "{plain_report_out}"
     );
@@ -1119,7 +1169,7 @@ rule 新规则 :
     let report_out = stdout(&report);
     assert!(
         report_out.contains(
-            "⟨旧规则⟩：不适用（案件日期 2022-01-01 已达到规则废止日 2021-01-01，规则已经失效）"
+            "⟨旧规则⟩：不适用（事件时间 2022-01-01 已达到规则废止日 2021-01-01，规则已经失效）；依据：以查询基准日 2022-01-01 代替行为时（区间外）"
         ),
         "{report_out}"
     );
@@ -1133,9 +1183,123 @@ rule 新规则 :
     );
     assert_exit(&new_side, PROVED);
     assert!(
-        stdout(&new_side).contains("⟨新规则⟩：适用"),
+        stdout(&new_side)
+            .contains("⟨新规则⟩：适用（以查询基准日 2022-01-01 代替行为时（区间内））"),
         "{}",
         stdout(&new_side)
+    );
+}
+
+/// One premise event inside the range and another outside it is undecidable,
+/// never rounded to "the applicable one"; both dates are shown. The rule still
+/// fires (an undecidable verdict does not block) and the conclusion is labelled.
+#[test]
+fn partial_event_time_coverage_is_undecidable_and_lists_both_dates() {
+    let temp = TempRoot::new("partial-time");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred 前期 : 人 → Prop
+pred 后期 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 一 : 前期 甲
+  source text "材料" locator "一"
+  occurred_at 2019-05-01
+axiom 二 : 后期 甲
+  source text "材料" locator "二"
+  occurred_at 2022-06-01
+rule 跨期规则 :
+  params x : 人
+  premise 前期 x
+  premise 后期 x
+  conclude 结论 x
+  effective 1999-01-01
+  repealed 2021-01-01
+  source text "旧法" locator "第一条"
+"#,
+    );
+
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":asof 2026-01-01".to_string(),
+            ":why 结论 甲".to_string(),
+        ],
+    );
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("▸ 结论 甲"),
+        "an undecidable verdict still fires:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "⟨跨期规则⟩：适用性无法判定（事件时间 2019-05-01 在生效区间 1999-01-01..2021-01-01 内，2022-06-01 不在其中；部分覆盖不能当作适用）"
+        ),
+        "{out}"
+    );
+
+    let report = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":applicability 结论 甲".to_string(),
+        ],
+    );
+    assert_exit(&report, PROVED);
+    let report_out = stdout(&report);
+    assert!(
+        report_out.contains("2019-05-01") && report_out.contains("2022-06-01"),
+        "both event times are listed:\n{report_out}"
+    );
+}
+
+/// One premise event place covered by the territory and another not is
+/// undecidable; both places are listed.
+#[test]
+fn partial_event_place_coverage_is_undecidable_and_lists_both_places() {
+    let temp = TempRoot::new("partial-place");
+    let theory = temp.write(
+        "case.std",
+        r#"
+sort 人
+pred 河南事实 : 人 → Prop
+pred 北京事实 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 甲 : 人
+axiom 一 : 河南事实 甲
+  source text "材料" locator "一"
+  occurred_in CN-HN
+axiom 二 : 北京事实 甲
+  source text "材料" locator "二"
+  occurred_in CN-BJ
+rule 河南规则 :
+  params x : 人
+  premise 河南事实 x
+  premise 北京事实 x
+  conclude 结论 x
+  territory CN-HN
+  source text "河南条例" locator "第一条"
+"#,
+    );
+
+    let output = run_in(
+        temp.root(),
+        &[
+            format!(":load {}", theory.display()),
+            ":why 结论 甲".to_string(),
+        ],
+    );
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains(
+            "⟨河南规则⟩：适用性无法判定（事件地点 CN-HN 在规则地域 CN-HN 内，CN-BJ 不在其中；部分覆盖不能当作适用）"
+        ),
+        "{out}"
     );
 }
 

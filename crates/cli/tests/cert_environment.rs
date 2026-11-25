@@ -900,7 +900,7 @@ fn certificate_identity_options_do_not_affect_packs_env_or_why() {
     );
     assert!(
         dated_out.contains(
-            "⟨test.law.侵占即侵犯⟩：适用性未判定（规则声明了地域，但案件事实没有记录发生地点）"
+            "⟨test.law.侵占即侵犯⟩：适用性未判定（规则声明了地域，但实例引用的前提事实都没有记录发生地点）"
         ),
         "{dated_out}"
     );
