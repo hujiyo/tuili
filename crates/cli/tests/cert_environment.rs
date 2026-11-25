@@ -865,13 +865,63 @@ fn certificate_identity_options_do_not_affect_packs_env_or_why() {
     assert_exit(&dated, PROVED);
     assert_eq!(stdout(&plain), stdout(&dated), "`env` must not change");
 
-    // An ordinary `:why` does not stamp a certificate identity either.
+    // An ordinary `:why` does not stamp a certificate identity, but the
+    // session's as-of date and jurisdiction are inputs of the applicability
+    // judgement: the derivation is the same, while the labelled applicability
+    // state may differ (the pack rules inherit `jurisdiction = "CN"` and
+    // `territory = "CN"` from the manifest, and the case records no place).
     let why = vec![format!(":load {CASE}"), format!(":why {GOAL}")];
     let plain = root.session(&[], &why);
     let dated = root.session(&options, &why);
     assert_exit(&plain, PROVED);
     assert_exit(&dated, PROVED);
-    assert_eq!(stdout(&plain), stdout(&dated), "`:why` must not change");
+    let derivation = |out: &str| {
+        let start = out
+            .find('▸')
+            .unwrap_or_else(|| panic!("no derivation tree:\n{out}"));
+        out[start..]
+            .split("\n\n")
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    // The inline applicability verdict is part of the line; strip it to compare
+    // the derivation's own structure, which the identity options must not touch.
+    let without_verdict = |block: String| {
+        let mut stripped = String::new();
+        for line in block.lines() {
+            if let (Some(open), Some(close)) = (line.find('〔'), line.find('〕')) {
+                if close > open {
+                    stripped.push_str(&line[..open]);
+                    stripped.push_str(&line[close + '〕'.len_utf8()..]);
+                    stripped.push('\n');
+                    continue;
+                }
+            }
+            stripped.push_str(line);
+            stripped.push('\n');
+        }
+        stripped
+    };
+    assert_eq!(
+        without_verdict(derivation(&stdout(&plain))),
+        without_verdict(derivation(&stdout(&dated))),
+        "the identity options must not change the derivation itself"
+    );
+    let plain_out = stdout(&plain);
+    let dated_out = stdout(&dated);
+    assert!(
+        plain_out.contains(
+            "⟨test.law.侵占即侵犯⟩〔适用性未判定（规则声明了管辖，但会话未设置 :jurisdiction）〕"
+        ),
+        "{plain_out}"
+    );
+    assert!(
+        dated_out.contains(
+            "⟨test.law.侵占即侵犯⟩〔适用性未判定（规则声明了地域，但实例引用的前提事实都没有记录发生地点）〕"
+        ),
+        "{dated_out}"
+    );
 }
 
 #[test]

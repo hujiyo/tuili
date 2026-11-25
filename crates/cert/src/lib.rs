@@ -150,11 +150,11 @@ pub use model::{
     UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES, MAX_CERT_JSON_BYTES,
     MAX_CERT_NODES,
 };
-pub use narrative::{render_narrative, render_narrative_with_open_concepts};
+pub use narrative::{render_narrative, render_narrative_with_context};
 pub use open::{
     dependency as open_concept_dependency, OpenConceptDependency, OPEN_CONCEPT_OBLIGATION_ID,
 };
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
-pub use render::render;
+pub use render::{render, render_with_annotations};
 pub use source::Source;
 pub use version::{FormatVersion, FORMAT_VERSION};

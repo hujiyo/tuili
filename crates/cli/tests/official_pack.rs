@@ -635,7 +635,7 @@ axiom 存在违法失职 : cn.constitution.国家机关或国家工作人员违�
         ),
         PROVED,
         &[
-            "▸ cn.constitution.检举权 赵六  ⟨cn.constitution.公民有检举权⟩ ← 「宪法第四十一条」（2018）",
+            "▸ cn.constitution.检举权 赵六  ⟨cn.constitution.公民有检举权⟩〔适用性未判定（规则声明了生效区间，但实例引用的前提事实没有发生时间，会话也未设置 :asof）〕 ← 「宪法第四十一条」（2018）",
             "推导已通过独立校验。",
         ],
     );

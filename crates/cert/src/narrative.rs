@@ -51,15 +51,16 @@ const QUOTE_SUMMARY_CHARS: usize = 60;
 /// every conflict resolution and every open obligation. An invalid node
 /// reference or a cyclic node graph is an error naming the offending node.
 ///
-/// This entry point prints no open-concept notice; use
-/// [`render_narrative_with_open_concepts`] when the caller has recomputed the
-/// concepts the root derivation depends on.
+/// This entry point prints no open-concept notice and no applicability
+/// annotation; use [`render_narrative_with_context`] when the caller has
+/// recomputed the concepts the root derivation depends on, or knows the
+/// derivation's per-node applicability verdicts.
 pub fn render_narrative(certificate: &Certificate) -> Result<String, String> {
-    render_narrative_with_open_concepts(certificate, &[])
+    render_narrative_with_context(certificate, &[], &BTreeMap::new())
 }
 
-/// Render as [`render_narrative`], with a "needs human judgement" notice after
-/// the conclusion for each open concept the root derivation depends on.
+/// Render as [`render_narrative`], with the parts of the derivation the
+/// certificate itself does not record.
 ///
 /// `open_concepts` is the recomputed list ([`crate::open::dependency`]) of the
 /// certificate in its environment: the narrative never parses an obligation's
@@ -67,22 +68,33 @@ pub fn render_narrative(certificate: &Certificate) -> Result<String, String> {
 /// rejects a certificate whose recorded obligation disagrees with that
 /// recomputation. Naming the concepts here is what keeps a conclusion over
 /// 「重大」 from reading as an unconditional proof; the names are escaped, so a
-/// concept name cannot forge another explanation line.
-pub fn render_narrative_with_open_concepts(
+/// concept name cannot forge another explanation line. One
+/// `此处需人判断：`<concept>`` line is printed per concept, after the root
+/// conclusion and before the numbered steps.
+///
+/// `annotations` carries one applicability verdict per rule-application node
+/// id. The certificate records no verdict, so a caller that knows the
+/// derivation's judgements passes them by node id; each is appended to the
+/// step's conclusion sentence (and to the one-line root conclusion), escaped
+/// like every other external value. A node without an annotation, like a
+/// caller with no recomputed open concepts, renders exactly as
+/// [`render_narrative`] does.
+pub fn render_narrative_with_context(
     certificate: &Certificate,
     open_concepts: &[String],
+    annotations: &BTreeMap<NodeId, String>,
 ) -> Result<String, String> {
     validate(certificate)?;
 
     let mut out = String::new();
     match certificate.root {
         Some(root) => {
-            write_conclusion(certificate, root, &mut out)?;
+            write_conclusion(certificate, root, annotations, &mut out)?;
             write_open_concept_notice(open_concepts, &mut out);
             let mut order = Vec::new();
             let mut seen = vec![false; certificate.nodes.len()];
             collect_postorder(certificate, root, &mut seen, &mut order)?;
-            write_proof(certificate, &order, &mut out)?;
+            write_proof(certificate, &order, annotations, &mut out)?;
         }
         None => {
             out.push_str("【结论】证书没有根节点，不能给出单一结论。\n");
@@ -91,7 +103,7 @@ pub fn render_narrative_with_open_concepts(
             for root in root_nodes(certificate) {
                 collect_postorder(certificate, root, &mut seen, &mut order)?;
             }
-            write_proof(certificate, &order, &mut out)?;
+            write_proof(certificate, &order, annotations, &mut out)?;
         }
     }
 
@@ -111,6 +123,7 @@ fn write_open_concept_notice(open_concepts: &[String], out: &mut String) {
 fn write_conclusion(
     certificate: &Certificate,
     root: NodeId,
+    annotations: &BTreeMap<NodeId, String>,
     out: &mut String,
 ) -> Result<(), String> {
     let Some(node) = certificate.nodes.get(root) else {
@@ -128,9 +141,13 @@ fn write_conclusion(
         }
         Node::RuleApplication { conclusion, .. } => {
             out.push_str(&format!(
-                "【结论】「{}」由规则推出。\n",
+                "【结论】「{}」由规则推出。",
                 print_expr(&Expr::from(conclusion))
             ));
+            if let Some(annotation) = annotations.get(&root) {
+                out.push_str(&format!(" 〔{}〕", escape_control(annotation)));
+            }
+            out.push('\n');
         }
         Node::InterpretationApplication { conclusion, .. } => {
             out.push_str(&format!(
@@ -184,6 +201,7 @@ fn collect_postorder(
 fn write_proof(
     certificate: &Certificate,
     order: &[NodeId],
+    annotations: &BTreeMap<NodeId, String>,
     out: &mut String,
 ) -> Result<(), String> {
     let mut steps = Vec::new();
@@ -210,7 +228,7 @@ fn write_proof(
         let mut step_of: BTreeMap<NodeId, usize> = BTreeMap::new();
         for (index, id) in steps.iter().enumerate() {
             step_of.insert(*id, index + 1);
-            write_step(certificate, *id, index + 1, &step_of, out)?;
+            write_step(certificate, *id, index + 1, &step_of, annotations, out)?;
         }
     }
 
@@ -229,6 +247,7 @@ fn write_step(
     id: NodeId,
     number: usize,
     step_of: &BTreeMap<NodeId, usize>,
+    annotations: &BTreeMap<NodeId, String>,
     out: &mut String,
 ) -> Result<(), String> {
     let Some(node) = certificate.nodes.get(id) else {
@@ -257,7 +276,7 @@ fn write_step(
             let conclusion = print_expr(&Expr::from(conclusion));
             if premises.is_empty() {
                 out.push_str(&format!(
-                    "  {number}. 根据规则「{}」（该规则没有前提），所以「{conclusion}」成立。\n",
+                    "  {number}. 根据规则「{}」（该规则没有前提），所以「{conclusion}」成立。",
                     escape_control(rule)
                 ));
             } else {
@@ -267,10 +286,14 @@ fn write_step(
                     .collect::<Result<Vec<_>, String>>()?
                     .join("、");
                 out.push_str(&format!(
-                    "  {number}. 因为{reasons}，根据规则「{}」，所以「{conclusion}」成立。\n",
+                    "  {number}. 因为{reasons}，根据规则「{}」，所以「{conclusion}」成立。",
                     escape_control(rule)
                 ));
             }
+            if let Some(annotation) = annotations.get(&id) {
+                out.push_str(&format!(" 〔{}〕", escape_control(annotation)));
+            }
+            out.push('\n');
             if !bindings.is_empty() {
                 let instance = bindings
                     .iter()

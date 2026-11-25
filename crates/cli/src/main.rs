@@ -26,21 +26,32 @@
 //! `--interpret <id>` enables one declared interpretation for the session (it
 //! may be repeated; two interpretations with kernel-equivalent `to`
 //! conclusions are refused), and
-//! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` set the session's legal
-//! as-of date and jurisdiction code; `:asof` / `:jurisdiction` print or replace
+//! `--as-of <YYYY-MM-DD>` / `--jurisdiction <code>` set the session's date
+//! value (a fallback only when a judged instance has no event time) and
+//! jurisdiction code; `:asof` / `:jurisdiction` print or replace
 //! the same session values and report whether they came from the command line
-//! or a session command. They are identity fields only: stamped into a `:cert`
-//! certificate and compared exactly by `:verify-cert`; they never affect
-//! preparation or reasoning. If the loaded rules name two or more
-//! jurisdictions and the session has no jurisdiction, `:why` and `:cert` refuse
-//! with exit `2` instead of silently picking one; `:gap` and `:inspect` are not
-//! gated, and a chosen jurisdiction does not filter any rule.
+//! or a session command. They are stamped into a `:cert` certificate and
+//! compared exactly by `:verify-cert`. `:jurisdiction` is the case's legal
+//! system in the applicability judgement; `:asof` is only a fallback when the
+//! judged rule instance references no fact with an occurrence time. If the
+//! loaded rules name two or more jurisdictions and the session has no
+//! jurisdiction, `:why` / `:explain` / `:cert` refuse with exit `2` instead of silently
+//! picking one; `:gap`, `:issues`, `:applicability` and `:inspect` are not
+//! gated.
 //!
 //! Rule scope (`effective` / `repealed` / `jurisdiction` / `territory`) and a
-//! fact's occurrence (`occurred_at` / `occurred_in`) are recorded metadata: a
-//! pack rule inherits the manifest's scope field by field, `:inspect` displays
-//! what is recorded, and the reasoner ignores all of it. Applicability is not
-//! judged here (M2-20).
+//! fact's occurrence (`occurred_at` / `occurred_in`) are judged before a rule
+//! instantiates: the reference point is the event time/place of the premise
+//! facts the instance consumes, not the query date. Every event time must be
+//! inside the range and every event place inside the territory; all-out is
+//! inapplicable and partial coverage is undecidable, never rounded. A rule
+//! that does not apply is never applied; a rule with partial coverage is also
+//! never applied (the evidence says it does not wholly govern the instance),
+//! while a rule judged *unchecked* (no evidence at all) keeps firing and every
+//! conclusion line it produces carries `适用性未判定（…）`. The verdict and
+//! the event times/places it relied on are printed on the conclusion line; a
+//! gap's candidates are listed by `:gap` and `:applicability`. The certificate
+//! format records no verdict yet.
 //!
 //! In the closed environment a top-level `:load` accepts only a case file (no
 //! `namespace`): modules are legal packs and must be imported. The case may
@@ -108,6 +119,8 @@
 //!                         check the same certificate
 //! :gap <term>             explain what is missing, as a recursive gap tree
 //! :issues                 list every conclusion the current facts can contest
+//! :applicability [term]   list temporal/spatial verdicts: every rule, or the
+//!                         rules the goal's derivation or gap tree uses
 //! :cert <term>            derive and print the goal's certificate JSON
 //! :verify-cert <file> [goal]
 //!                         check a certificate, optionally bound to a goal
@@ -241,10 +254,20 @@
 //! print one warning line before their result: an edge inside a cycle cannot
 //! decide anything, and the warning does not change the exit code.
 //!
+//! After the derivation, every rule application's conclusion line carries its
+//! applicability verdict and the event times/places behind it (after
+//! `⟨rule⟩`): an unchecked verdict says `适用性未判定（…）`, a clean one
+//! `适用（事件时间 …）`. An inapplicable or undecidable rule cannot appear
+//! because it never fired (`:gap` and `:applicability` show it, with the
+//! latter also listing gap candidates). The same annotation is printed on each
+//! conflict side's tree.
+//!
 //! `:explain` uses exactly the same derivation and prints
 //! [`std_deduce_cert::render_narrative`] instead of the formal tree; the same
 //! certificate is then checked by both layers, and the `0`/`1`/`2` outcomes
-//! match `:why`. A fact always carries its recorded identity (`据用户陈述`,
+//! match `:why`, including the same inline applicability annotations on its
+//! conclusion sentences. A fact always carries
+//! its recorded identity (`据用户陈述`,
 //! `根据法院查明`, `作为分析假设`, `双方无争议`), a step keeps its source and
 //! parameter bindings, a conflict is reported as decided or as `此处未决` with
 //! its recorded reason, and a gap lists its candidates, missing premises and
@@ -276,17 +299,33 @@
 //! same path (a rule cycle). Repeated expansions are recognised by a structural
 //! key of the normalised proposition, never by printed text, so an alpha
 //! variant cannot start a second, endless branch; the head match is normalised
-//! too, so a `def` alias finds the rule that concludes its definition. The
-//! recursion is bounded by explicit limits — depth 6, 128 nodes, 8 attempts per
-//! rule — and a limit that stops a branch is printed as `已截断：…` where it
+//! too, so a `def` alias finds the rule that concludes its definition. Every
+//! candidate line carries its per-instance verdict and evidence:
+//! `〔适用（事件时间 …）〕`, `〔不适用（原因）〕`, `〔适用性未判定（原因）〕` or
+//! `〔适用性无法判定（原因）〕`. An excluded candidate is still listed, with
+//! its missing premises but no deeper expansion (adding a premise cannot make
+//! an excluded rule fire); an undecidable one also points at the missing
+//! explicit reference time, which this version does not offer yet. Only an
+//! unchecked candidate is expanded further.
+//! The recursion is bounded by explicit limits — depth 6, 128 nodes, 8 attempts
+//! per rule — and a limit that stops a branch is printed as `已截断：…` where it
 //! applies. `:issues` requires a loaded theory and runs the same machinery over
 //! the whole fact set instead of one goal: it instantiates every rule over the
 //! declared constants, lists each conclusion that is not already proved (and
 //! each side of an unresolved conflict) with its own gap tree, reports rules it
-//! could not instantiate, and caps the list at 32 conclusions. A conflict the
+//! could not instantiate, reports rules the applicability judgement excluded,
+//! and caps the list at 32 conclusions. A conflict the
 //! theory already decided is not an open issue: its winner is in the fact base
 //! and its loser is reported by `:gap`/`:why` as decided, never as unresolved.
 //! Neither command touches the certificate format.
+//!
+//! `:applicability [term]` is a report, not a query: with no argument it judges
+//! every rule as an empty instance (declarations plus `:asof` when set); with
+//! a goal it lists the per-instance verdicts of the rules the goal's derivation
+//! or gap tree uses. Each line is `⟨rule⟩：` followed by the verdict and the
+//! event times/places it relied on (`适用（事件时间 …）`, `不适用（…）`,
+//! `适用性未判定（…）` or `适用性无法判定（…）`). It always exits `0`, because
+//! "this rule does not apply" is information.
 //!
 //! `:cert` requires a loaded theory and writes only the certificate JSON to
 //! stdout; a gap becomes a `MissingPremise` obligation, an unresolved
@@ -365,9 +404,10 @@ use std::path::{Path, PathBuf};
 use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
-    render, render_narrative_with_open_concepts, Certificate, CheckReport, EnvironmentDifference,
-    EnvironmentIdentity, EnvironmentRecord, Node as CertNode, ObligationKind, OpenObligation,
-    PriorityClause, PriorityEdge, PriorityOrigin, ResolutionBasis, Source, TrustLevel,
+    render_narrative_with_context, render_with_annotations, Certificate, CheckReport,
+    EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, Node as CertNode,
+    ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, ResolutionBasis,
+    Source, TrustLevel,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
@@ -382,8 +422,8 @@ use std_deduce_lawpack::{
     OFFICIAL_FILE,
 };
 use std_deduce_reason::{
-    certificate as reason_certificate, Conflict, GapLimit, GapLimits, GapStatus, GapTree,
-    Provenance, Reasoner, Resolution, Side,
+    certificate as reason_certificate, Applicability, Conflict, Derivation, GapLimit, GapLimits,
+    GapStatus, GapTree, Node as ReasonNode, Provenance, Reasoner, Resolution, Side,
 };
 
 /// How a query ended. Only `Proved` is a success; the other two make the
@@ -694,13 +734,17 @@ impl Session {
         )
     }
 
-    /// Build a reasoner with the session's enabled interpretations.
+    /// Build a reasoner with the session's enabled interpretations and its
+    /// legal as-of date and jurisdiction.
     ///
-    /// The default session has none, so this is the old `Reasoner::new` in
-    /// every respect: no derivation, source, conflict or certificate byte
-    /// changes until an interpretation is explicitly enabled.
+    /// The two session values are reference values of the applicability
+    /// judgement: a rule that records an effective range, jurisdiction or
+    /// territory is compared with them before it may fire. They still never
+    /// filter a rule by themselves; the judgement and its recorded reasons do.
     fn reasoner(&self) -> Result<Reasoner<'_>, String> {
-        configured_reasoner(&self.lib.env, &self.enabled_interpretations)
+        let mut reasoner = configured_reasoner(&self.lib.env, &self.enabled_interpretations)?;
+        reasoner.set_session_scope(self.environment.as_of(), self.environment.jurisdiction());
+        Ok(reasoner)
     }
 
     /// Load a theory file into the session and print the load report.
@@ -1065,7 +1109,14 @@ impl Session {
                     self.query(cmd, arg, out)
                 }
                 "gap" => self.query(cmd, arg, out),
-                "explain" => self.query(cmd, arg, out),
+                "explain" => {
+                    // The narrative uses the same certificate and the same
+                    // two proof layers as `:why`, so the multi-jurisdiction
+                    // ambiguity gate applies to it as well.
+                    self.require_jurisdiction()?;
+                    self.query(cmd, arg, out)
+                }
+                "applicability" => self.applicability_command(arg, out),
                 "issues" => self.issues_command(arg, out),
                 "cert" => self.export_certificate(arg, out),
                 "verify-cert" => self.verify_certificate(arg, out),
@@ -1277,9 +1328,11 @@ impl Session {
 
     /// `:asof [YYYY-MM-DD]` — show or set the session's legal as-of date.
     ///
-    /// The date is an identity field: `:cert` records it and `:verify-cert`
-    /// compares it. It never changes which rules load or how a goal is derived;
-    /// whether a rule applies on a date is M2-20's judgement.
+    /// The date is an identity field (`:cert` records it and `:verify-cert`
+    /// compares it) and a fallback date of the applicability judgement: it is
+    /// used only for an instance whose premise facts record no event time.
+    /// It never overrides a recorded `occurred_at` and never changes which
+    /// rules load.
     fn as_of_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if arg.is_empty() {
             let line = match (self.environment.as_of(), self.as_of_source) {
@@ -1302,7 +1355,9 @@ impl Session {
     /// `:jurisdiction [CODE]` — show or set the session's jurisdiction.
     ///
     /// The code is an identity field and answers the multi-jurisdiction gate.
-    /// It is not an applicability judgement: a chosen code does not filter rules.
+    /// It is also the case's jurisdiction in the applicability judgement: a
+    /// rule whose recorded `jurisdiction` differs is inapplicable and does not
+    /// fire. It never filters a rule without a recorded verdict.
     fn jurisdiction_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if arg.is_empty() {
             let line = match (self.environment.jurisdiction(), self.jurisdiction_source) {
@@ -1418,12 +1473,14 @@ impl Session {
         }
     }
 
-    /// Refuse `:why` / `:cert` when the loaded rules name two or more
-    /// jurisdictions and the session has not chosen one.
+    /// Refuse `:why` / `:explain` / `:cert` when the loaded rules name two or
+    /// more jurisdictions and the session has not chosen one.
     ///
-    /// This is a gate on ambiguity, not an applicability judgment: with one
-    /// jurisdiction the query proceeds unchanged, and a chosen jurisdiction
-    /// never filters a rule out (that is M2-20). The codes are listed sorted.
+    /// This is a gate on ambiguity, not an applicability judgment: it runs
+    /// before the reasoner, because without a case jurisdiction the judgement
+    /// could only leave every differing rule unchecked. With one jurisdiction
+    /// the query proceeds unchanged, and a chosen jurisdiction does not filter
+    /// a rule directly — the recorded applicability verdict does.
     fn require_jurisdiction(&self) -> Result<(), String> {
         if self.environment.jurisdiction().is_some() {
             return Ok(());
@@ -1442,44 +1499,6 @@ impl Session {
             "必须用 --jurisdiction 或 :jurisdiction 选择管辖：候选规则涉及 {}",
             codes.into_iter().collect::<Vec<_>>().join("、")
         ))
-    }
-
-    /// The warning line for one rule whose recorded jurisdiction differs from
-    /// the session's chosen jurisdiction, if it does.
-    ///
-    /// M2-6/M2-7 do not judge applicability, so a differing code is reported
-    /// instead of filtering the rule. The note never changes an exit code or a
-    /// conclusion; M2-20 owns the actual applicability decision.
-    fn jurisdiction_note(&self, rule: &str) -> Option<String> {
-        let query = self.environment.jurisdiction()?;
-        let code = self.lib.env.get(rule)?.scope.jurisdiction.as_deref()?;
-        if code == query {
-            return None;
-        }
-        Some(format!(
-            "注：规则 {} 的管辖 {code} 与查询管辖 {query} 不同；本步不判定适用性，M2-20 做适用性判定。",
-            escape_control(rule)
-        ))
-    }
-
-    /// One note per distinct applied or candidate rule in a certificate.
-    fn certificate_jurisdiction_notes(&self, certificate: &Certificate) -> Vec<String> {
-        let mut rules: BTreeSet<&str> = BTreeSet::new();
-        for node in &certificate.nodes {
-            match node {
-                CertNode::RuleApplication { rule, .. } => {
-                    rules.insert(rule.as_str());
-                }
-                CertNode::Gap { candidates, .. } => {
-                    rules.extend(candidates.iter().map(|candidate| candidate.rule.as_str()));
-                }
-                CertNode::Assumption { .. } | CertNode::InterpretationApplication { .. } => {}
-            }
-        }
-        rules
-            .into_iter()
-            .filter_map(|rule| self.jurisdiction_note(rule))
-            .collect()
     }
 
     fn query(&mut self, cmd: &str, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
@@ -1542,16 +1561,6 @@ impl Session {
             )
             .ok();
             render_gap_tree(out, &tree, &r, 2, "缺口");
-            // Candidates from another jurisdiction are called out, including
-            // nested ones; this is a warning, never a filter (M2-20 decides
-            // applicability).
-            let mut rules = BTreeSet::new();
-            collect_gap_rules(&tree, &mut rules);
-            for rule in rules {
-                if let Some(note) = self.jurisdiction_note(&rule) {
-                    writeln!(out, "  {note}").ok();
-                }
-            }
             write_interpretation_hints(out, &r, &goal)?;
             return Ok(Outcome::Gap);
         }
@@ -1580,19 +1589,47 @@ impl Session {
         // same certificate is checked by both layers: what the user sees and
         // the object being checked cannot diverge. `:why` keeps the formal
         // tree; `:explain` prints the Chinese because-so rendering of it.
+        // Every applied rule's conclusion line carries its applicability
+        // verdict inline, because the certificate itself does not store it.
+        let annotations = derivation_annotations(&d);
         let rendered = if cmd == "explain" {
-            render_narrative_with_open_concepts(&certificate, &open_concepts)?
+            render_narrative_with_context(&certificate, &open_concepts, &annotations)?
         } else {
-            render(&certificate)?
+            render_with_annotations(&certificate, &annotations)?
         };
         writeln!(out, "{rendered}").ok();
+        // A gap root's candidate lines cannot carry a verdict through the
+        // certificate, so its candidates are listed here with their state.
+        if let Some(root) = d.root {
+            write_gap_applicability_notes(out, &d, root);
+        }
+        // `:why` reports an unresolved or defeated goal before it builds this
+        // certificate, so its conflict sides carry their own labels. `:explain`
+        // narrates the conflict in the certificate instead, and still has to
+        // label the rules that argued on the goal's side.
+        if cmd == "explain" {
+            if let Some(conflict) = r.conflict_for(&goal) {
+                let side_of_goal = r.conflict_side(&conflict, &goal);
+                let mut verdicts = BTreeSet::new();
+                for (side, prop) in [(Side::Left, &conflict.left), (Side::Right, &conflict.right)] {
+                    let include = match &conflict.resolution {
+                        Resolution::Unresolved { .. } => true,
+                        Resolution::Defeated { .. } => side_of_goal == Some(side),
+                    };
+                    if !include {
+                        continue;
+                    }
+                    if let Some(side_derivation) = r.derivation_for(prop) {
+                        if let Some(side_root) = side_derivation.root {
+                            collect_derivation_verdicts(&side_derivation, side_root, &mut verdicts);
+                        }
+                    }
+                }
+                write_applicability_verdicts(out, &verdicts);
+            }
+        }
         if cmd == "why" {
             write_open_concept_lines(out, &open_concepts);
-        }
-        // Applied or candidate rules from another jurisdiction are called out;
-        // this is a warning, not a filter, and it never changes the exit code.
-        for note in self.certificate_jurisdiction_notes(&certificate) {
-            writeln!(out, "{note}").ok();
         }
         // An unreachable `:why` reports the same kind of gap as `:gap`, so it
         // offers the same "only an unenabled interpretation is missing" hint.
@@ -1755,11 +1792,145 @@ impl Session {
             )
             .ok();
         }
+        if !scan.excluded.is_empty() {
+            writeln!(
+                out,
+                "  另有 {} 条规则因所有可枚举实例都被时空适用性排除而未扫描：",
+                scan.excluded.len()
+            )
+            .ok();
+            let mut has_undecidable = false;
+            for excluded in &scan.excluded {
+                writeln!(out, "    ⟨{}⟩：", excluded.rule).ok();
+                for verdict in &excluded.verdicts {
+                    if matches!(verdict, Applicability::Undecidable { .. }) {
+                        has_undecidable = true;
+                    }
+                    writeln!(out, "      {}", verdict.summary_zh()).ok();
+                }
+            }
+            if has_undecidable {
+                writeln!(
+                    out,
+                    "    提示：无法判定的实例需要为该争点显式指定引用时间（尚未实现）。"
+                )
+                .ok();
+            }
+        }
         Ok(if scan.issues.is_empty() {
             Outcome::Proved
         } else {
             Outcome::Gap
         })
+    }
+
+    /// `:applicability [<命题>]` — report the temporal/spatial judgement.
+    ///
+    /// With no goal it lists every rule judged as an empty instance (the
+    /// rule's declarations plus `:asof` when set). With a goal it lists every
+    /// rule the goal's derivation or gap tree uses, with the per-instance
+    /// verdict and the event times/places it relied on. This is a report, not
+    /// a query: it never changes a conclusion and always exits `0`, because
+    /// "this rule does not apply" is information, not a failure.
+    fn applicability_command(
+        &mut self,
+        arg: &str,
+        out: &mut impl Write,
+    ) -> Result<Outcome, String> {
+        if !self.loaded {
+            return Err(
+                "尚未加载理论：:applicability 需要已加载的环境才能判定规则，请先 :load <文件>"
+                    .into(),
+            );
+        }
+        if arg.is_empty() {
+            // Without a goal there is no instance to judge: the command only
+            // reports the declarations. It must not judge an empty instance
+            // with `:asof` (that would present the query date as the event
+            // time), and it must not saturate the theory (oscillation would
+            // otherwise turn a report into an error).
+            let mut rules: Vec<&Decl> = self.lib.env.rules().into_iter().collect();
+            rules.sort_by(|a, b| a.name.cmp(&b.name));
+            writeln!(
+                out,
+                "时空适用性（未给定目标：不做判定，只列声明范围，共 {} 条规则）：",
+                rules.len()
+            )
+            .ok();
+            if rules.is_empty() {
+                writeln!(out, "  环境中没有规则。").ok();
+            }
+            for decl in rules {
+                let scope = declared_scope_text(&decl.scope);
+                let scope = if scope.is_empty() {
+                    "（无范围声明）".to_owned()
+                } else {
+                    scope
+                };
+                let sources = decl
+                    .sources
+                    .iter()
+                    .map(|source| source.one_line())
+                    .collect::<Vec<_>>()
+                    .join("；");
+                if sources.is_empty() {
+                    writeln!(out, "  ⟨{}⟩：{scope}", decl.name).ok();
+                } else {
+                    writeln!(out, "  ⟨{}⟩：{scope}  ← {sources}", decl.name).ok();
+                }
+            }
+            writeln!(out, "未判定：需要目标命题或带发生时间/地点的事实。").ok();
+            return Ok(Outcome::Proved);
+        }
+
+        let mut r = self.reasoner()?;
+        r.assume_ledger_axioms()?;
+        r.saturate()?;
+
+        let goal = self.goal(arg)?;
+        let mut verdicts = BTreeSet::new();
+        if r.knows(&goal) {
+            let mut d = r.derivation();
+            d.root = r.root_for(&goal);
+            if let Some(root) = d.root {
+                collect_derivation_verdicts(&d, root, &mut verdicts);
+            }
+        } else if let Some(conflict) = r.conflict_for(&goal) {
+            // A conflicted goal is not in the fact base and has no gap tree.
+            // An unresolved conflict needs both sides' rules; a decided one
+            // needs only the goal's own side.
+            let side_of_goal = r.conflict_side(&conflict, &goal);
+            for (side, prop) in [(Side::Left, &conflict.left), (Side::Right, &conflict.right)] {
+                let include = match &conflict.resolution {
+                    Resolution::Unresolved { .. } => true,
+                    Resolution::Defeated { .. } => side_of_goal == Some(side),
+                };
+                if !include {
+                    continue;
+                }
+                if let Some(side_derivation) = r.derivation_for(prop) {
+                    if let Some(side_root) = side_derivation.root {
+                        collect_derivation_verdicts(&side_derivation, side_root, &mut verdicts);
+                    }
+                }
+            }
+        } else {
+            let tree = r.gap_tree(&goal);
+            collect_gap_verdicts(&tree, &mut verdicts);
+        }
+        writeln!(out, "时空适用性（目标：{}）：", print_expr(&goal)).ok();
+        if verdicts.is_empty() {
+            writeln!(
+                out,
+                "  目标没有用到任何规则：它要么由已登记事实（或解释应用）直接成立，要么没有任何候选规则。"
+            )
+            .ok();
+            return Ok(Outcome::Proved);
+        }
+        for (rule, verdict) in &verdicts {
+            writeln!(out, "  ⟨{rule}⟩：{verdict}").ok();
+        }
+        Ok(Outcome::Proved)
     }
 
     /// Parse `arg` as a proposition in the current environment.
@@ -3961,8 +4132,14 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
             return;
         }
     };
-    match render(&certificate) {
-        Ok(rendered) => writeln!(out, "{rendered}").ok(),
+    let annotations = derivation_annotations(&d);
+    match render_with_annotations(&certificate, &annotations) {
+        Ok(rendered) => {
+            // Each rule application's conclusion line carries its verdict and
+            // evidence inline, so a conflict side is judged exactly as a
+            // normal derivation.
+            writeln!(out, "{rendered}").ok();
+        }
         Err(error) => {
             writeln!(out, "  （该推导的证书无法渲染：{error}）").ok();
             return;
@@ -4003,16 +4180,113 @@ fn report_conflicts(out: &mut impl Write, certificate: &Certificate) {
     }
 }
 
-/// Collect every rule named anywhere in a gap tree, including nested
-/// candidates, so the cross-jurisdiction warning covers the whole tree.
-fn collect_gap_rules(tree: &GapTree, out: &mut BTreeSet<String>) {
-    for rule in &tree.candidates {
-        out.insert(rule.rule.to_string());
-        for premise in &rule.missing {
+/// Collect every rule and its verdict anywhere in a gap tree, including nested
+/// candidates, so the report covers the whole tree.
+fn collect_gap_verdicts(tree: &GapTree, out: &mut BTreeSet<(String, String)>) {
+    for candidate in &tree.candidates {
+        out.insert((
+            candidate.rule.to_string(),
+            candidate.applicability.summary_zh(),
+        ));
+        for premise in &candidate.missing {
             if let Some(child) = &premise.gap {
-                collect_gap_rules(child, out);
+                collect_gap_verdicts(child, out);
             }
         }
+    }
+}
+
+/// Collect the rules a derivation actually cites, walking from the root
+/// through the premises that support it, together with the per-instance
+/// verdict and the event times/places it relied on.
+///
+/// Rules that happen to be applied elsewhere in the settled state but not in
+/// this goal's cone are not listed: `:applicability <goal>` answers for the
+/// goal. A gap node carries its candidates' verdicts; a rule-application node
+/// carries the verdict it fired under.
+fn collect_derivation_verdicts(
+    derivation: &Derivation,
+    node: usize,
+    out: &mut BTreeSet<(String, String)>,
+) {
+    match &derivation.nodes[node] {
+        ReasonNode::Assumption { .. } => {}
+        ReasonNode::RuleApplication {
+            rule,
+            premises,
+            applicability,
+            ..
+        } => {
+            out.insert((rule.to_string(), applicability.summary_zh()));
+            for premise in premises {
+                collect_derivation_verdicts(derivation, *premise, out);
+            }
+        }
+        ReasonNode::InterpretationApplication { premise, .. } => {
+            collect_derivation_verdicts(derivation, *premise, out);
+        }
+        ReasonNode::Gap { candidates, .. } => {
+            for candidate in candidates {
+                out.insert((
+                    candidate.rule.to_string(),
+                    candidate.applicability.summary_zh(),
+                ));
+            }
+        }
+    }
+}
+
+/// The per-node annotation the certificate renderer prints on a rule
+/// application's conclusion line.
+///
+/// The certificate format records no verdict, but the reasoner's derivation
+/// nodes do and keep the same order, so the node id is enough to line them up.
+/// Every applied rule is annotated: `适用性未判定（…）` when the judgement
+/// lacked input (the rule still fired), and `适用（事件时间 …）` for a clean
+/// verdict. An inapplicable or undecidable rule cannot appear here because it
+/// never fired.
+fn derivation_annotations(derivation: &Derivation) -> BTreeMap<usize, String> {
+    derivation
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(id, node)| match node {
+            ReasonNode::RuleApplication { applicability, .. } => {
+                Some((id, applicability.summary_zh()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Print the applicability of the gap candidates at the root of a derivation.
+///
+/// A gap root's candidate lines are rendered from the certificate, whose
+/// format has no verdict, so the state is printed here. A rule application's
+/// own conclusion line carries its verdict inline instead.
+fn write_gap_applicability_notes(out: &mut impl Write, derivation: &Derivation, root: usize) {
+    let ReasonNode::Gap { candidates, .. } = &derivation.nodes[root] else {
+        return;
+    };
+    let mut verdicts = BTreeSet::new();
+    for candidate in candidates {
+        verdicts.insert((
+            candidate.rule.to_string(),
+            candidate.applicability.summary_zh(),
+        ));
+    }
+    write_applicability_verdicts(out, &verdicts);
+}
+
+/// Print one `⟨rule⟩：verdict` line per distinct verdict, sorted by rule and
+/// then by the rendered verdict (so the order never depends on traversal).
+fn write_applicability_verdicts(out: &mut impl Write, verdicts: &BTreeSet<(String, String)>) {
+    if verdicts.is_empty() {
+        return;
+    }
+    writeln!(out, "时空适用性：").ok();
+    for (rule, verdict) in verdicts {
+        writeln!(out, "  ⟨{rule}⟩：{verdict}").ok();
     }
 }
 
@@ -4125,7 +4399,30 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
         .ok();
     }
     for candidate in &tree.candidates {
-        writeln!(out, "{pad}候选 ⟨{}⟩", candidate.rule).ok();
+        // Every candidate carries its per-instance verdict and the event
+        // times/places it relied on: an excluded rule is listed, not hidden,
+        // and an unchecked one cannot pass for a normal candidate.
+        writeln!(
+            out,
+            "{pad}候选 ⟨{}⟩〔{}〕",
+            candidate.rule,
+            candidate.applicability.summary_zh()
+        )
+        .ok();
+        if matches!(candidate.applicability, Applicability::Undecidable { .. }) {
+            writeln!(
+                out,
+                "{pad}  提示：需要为该争点显式指定引用时间（尚未实现）。"
+            )
+            .ok();
+        }
+        if !candidate.missing.is_empty() {
+            writeln!(
+                out,
+                "{pad}  判定口径：按已持有事实；补上缺失前提后判定可能变化。"
+            )
+            .ok();
+        }
         for source in &candidate.sources {
             writeln!(out, "{pad}  ← {}", source.one_line()).ok();
         }
@@ -4178,6 +4475,7 @@ fn gap_limit_text(limit: &GapLimit) -> String {
             format!("规则 ⟨{rule}⟩ 的尝试次数已达上限（{limit} 次）")
         }
         GapLimit::Issues { limit } => format!("可争的结论已达到上限（{limit} 条）"),
+        GapLimit::Excluded { limit } => format!("被排除的规则已达到上限（{limit} 条）"),
     }
 }
 
@@ -4392,12 +4690,12 @@ fn print_help(out: &mut impl Write) {
     .ok();
     writeln!(
         out,
-        "  --as-of <YYYY-MM-DD>         会话的法律基准日（:asof 可改；:cert 记录它，不参与推理）"
+        "  --as-of <YYYY-MM-DD>         实例完全没有事件时间时的兜底日期（:asof 可改；:cert 记录它）"
     )
     .ok();
     writeln!(
         out,
-        "  --jurisdiction <代码>        会话的管辖代码（:jurisdiction 可改；:cert 记录它，不参与推理）"
+        "  --jurisdiction <代码>        会话的管辖代码（:jurisdiction 可改；:cert 记录它，也是适用性判定的管辖）"
     )
     .ok();
     writeln!(
@@ -4435,12 +4733,19 @@ fn print_help(out: &mut impl Write) {
     writeln!(
         out,
         ":asof / :jurisdiction 与 --as-of / --jurisdiction 写同一组会话值；\
-         不参与推理，只由 :cert / :verify-cert 记录并比对。"
+         :cert / :verify-cert 记录并比对这些值。适用性判定先按事件时间/地点，\
+         只有实例没有任何事件时间时 :asof 才作为兜底。"
     )
     .ok();
     writeln!(
         out,
-        "环境里的规则涉及两个及以上 jurisdiction 且未选管辖时，:why 与 :cert 退出 2。"
+        "时空适用性：按实例前提事实的发生时间/地点判定（事件时优先；无事件时间才用 :asof 兜底）；\
+         不适用与部分覆盖（无法判定）不触发；无证据的未判定仍触发但每条结论行都会标注。:applicability [命题] 有目标列实例判定与依据，无目标只列声明范围。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "环境里的规则涉及两个及以上 jurisdiction 且未选管辖时，:why / :explain / :cert 退出 2。"
     )
     .ok();
     writeln!(
@@ -4515,7 +4820,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
                 ":load <文件>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
                  :asof [YYYY-MM-DD]  :jurisdiction [代码]  \
                  :interpret [list|enable|disable <解释名>]  \
-                 :why <命题>  :explain <命题>  :gap <命题>  :issues  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
+                 :why <命题>  :explain <命题>  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )
             .ok();

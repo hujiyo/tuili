@@ -68,7 +68,9 @@ fn check(output: Output, expected: i32, needles: &[&str]) -> Output {
 
 /// The whole stdout of the documented `:why` query, byte for byte. There is no
 /// snapshot file in this repository, so this constant is the regression test
-/// that adding `:explain` did not change the default output.
+/// that adding `:explain` did not change the default output. The applicability
+/// block is part of the current output: an unscoped case rule fires but says
+/// that its scope was never declared.
 const CONSTITUTION_39_WHY: &str = "\
 默认环境 cn.default：已加载 1 个包
   cn.constitution@0.4.0（official）
@@ -85,7 +87,7 @@ const CONSTITUTION_39_WHY: &str = "\
   + 某次搜查非法
   + 非法搜查即侵犯
   + 依法搜查不侵犯
-▸ 不受侵犯 张三 甲宅  ⟨非法搜查即侵犯⟩ ← 「宪法第三十九条」
+▸ 不受侵犯 张三 甲宅  ⟨非法搜查即侵犯⟩〔适用性未判定（规则没有声明任何范围）〕 ← 「宪法第三十九条」
   实例：p ↦ 张三，h ↦ 甲宅
   · 非法搜查 张三 甲宅  〔用户陈述〕  [某次搜查非法]  ← 「示例案情某次搜查」
 
@@ -116,6 +118,20 @@ fn explain_prints_a_because_so_narrative_with_sources_and_instances() {
             "来源：「示例案情某次搜查」；说明：教学示例事实，非真实证据",
             "来源：「宪法第三十九条」",
             "推导已通过独立校验。",
+        ],
+    );
+}
+
+/// An unchecked applicability state is printed on the conclusion's own step:
+/// the narrative form must not hide what `:why` labels.
+#[test]
+fn explain_labels_an_unchecked_applicability() {
+    check(
+        session("constitution-39.std", &[":explain 不受侵犯 张三 甲宅"]),
+        PROVED,
+        &[
+            "【结论】「不受侵犯 张三 甲宅」由规则推出。 〔适用性未判定（规则没有声明任何范围）〕",
+            "所以「不受侵犯 张三 甲宅」成立。 〔适用性未判定（规则没有声明任何范围）〕",
         ],
     );
 }
@@ -160,6 +176,9 @@ fn explain_reports_an_unresolved_conflict_as_pending() {
             "【冲突】",
             "冲突，此处未决。",
             "     原因：",
+            "时空适用性：",
+            "⟨主张适用省条例⟩：适用性未判定（规则没有声明任何范围）",
+            "⟨主张适用种子法⟩：适用性未判定（规则没有声明任何范围）",
             "证书有效，但根为缺口，结论未被证明。",
         ],
     );

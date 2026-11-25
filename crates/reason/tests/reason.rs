@@ -7,8 +7,8 @@ use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{name, Decl, Env, Expr};
 use std_deduce_lang::Library;
 use std_deduce_reason::{
-    verify, Conflict, PriorityClause, PriorityOrigin, Provenance, Reasoner, Resolution,
-    ResolutionBasis, Side, UnresolvedReason,
+    verify, Applicability, Conflict, PriorityClause, PriorityOrigin, Provenance, Reasoner,
+    Resolution, ResolutionBasis, Side, UnresolvedReason,
 };
 
 fn load(src: &str) -> Library {
@@ -208,6 +208,9 @@ rule r :
         premises: vec![],
         bindings: vec![],
         sources: vec![SourceRef::new("测试", "一")],
+        applicability: Applicability::Applicable {
+            basis: Default::default(),
+        },
     });
     assert!(
         verify(&lib.env, &d).is_err(),
@@ -221,6 +224,9 @@ rule r :
         premises: vec![],
         bindings: vec![],
         sources: vec![],
+        applicability: Applicability::Applicable {
+            basis: Default::default(),
+        },
     });
     assert!(verify(&lib.env, &d2).is_err());
 }
@@ -257,6 +263,9 @@ rule r :
         premises: vec![0],
         bindings: vec![],
         sources: vec![],
+        applicability: Applicability::Applicable {
+            basis: Default::default(),
+        },
     });
     assert!(
         verify(&lib.env, &d).is_err(),
@@ -295,6 +304,9 @@ rule r :
         premises: vec![0],
         bindings: vec![],
         sources: vec![],
+        applicability: Applicability::Applicable {
+            basis: Default::default(),
+        },
     });
     assert!(
         verify(&lib.env, &d).is_err(),
@@ -340,6 +352,9 @@ rule r :
         premises: vec![0],
         bindings: vec![],
         sources: vec![],
+        applicability: Applicability::Applicable {
+            basis: Default::default(),
+        },
     });
     assert!(
         verify(&lib.env, &d).is_err(),
@@ -388,6 +403,9 @@ rule r :
         premises: vec![0],
         bindings: vec![(name("p"), p("张三"))],
         sources: vec![],
+        applicability: Applicability::Applicable {
+            basis: Default::default(),
+        },
     });
     let err = verify(&lib.env, &d).expect_err("the alpha-variant blocker is proved");
     assert!(err.contains("阻断条件"), "got: {err}");

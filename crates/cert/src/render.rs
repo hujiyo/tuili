@@ -21,7 +21,7 @@
 //! is a legal instance, and whether a gap is used as a premise, is
 //! [`crate::check`]'s job, not this module's.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use std_deduce_kernel::env::escape_control;
 use std_deduce_kernel::pretty::print_expr;
@@ -34,11 +34,27 @@ use crate::model::{Certificate, Node, NodeId};
 /// The output is the tree the certificate records. An invalid node reference
 /// or a cyclic node graph is an error naming the offending node.
 pub fn render(certificate: &Certificate) -> Result<String, String> {
+    render_with_annotations(certificate, &BTreeMap::new())
+}
+
+/// Render a certificate, adding one per-node annotation to each rule
+/// application line.
+///
+/// The certificate format records no applicability verdict, so a caller that
+/// knows the derivation's verdicts can pass them by node id: the annotation is
+/// printed after `⟨rule⟩` on that step's conclusion line (e.g.
+/// `〔适用性未判定（…）〕`). The annotation is escaped like every other
+/// external value. A node without an annotation prints exactly as [`render`]
+/// does.
+pub fn render_with_annotations(
+    certificate: &Certificate,
+    annotations: &BTreeMap<NodeId, String>,
+) -> Result<String, String> {
     validate(certificate)?;
 
     let mut out = String::new();
     if let Some(root) = certificate.root {
-        render_node(certificate, root, 0, &mut out)?;
+        render_node(certificate, root, 0, annotations, &mut out)?;
         return Ok(out);
     }
 
@@ -49,7 +65,7 @@ pub fn render(certificate: &Certificate) -> Result<String, String> {
         if index > 0 {
             out.push('\n');
         }
-        render_node(certificate, id, 0, &mut out)?;
+        render_node(certificate, id, 0, annotations, &mut out)?;
     }
     Ok(out)
 }
@@ -202,6 +218,7 @@ fn render_node(
     certificate: &Certificate,
     id: NodeId,
     depth: usize,
+    annotations: &BTreeMap<NodeId, String>,
     out: &mut String,
 ) -> Result<(), String> {
     let pad = "  ".repeat(depth);
@@ -245,6 +262,9 @@ fn render_node(
                 print_expr(&Expr::from(conclusion)),
                 escape_control(rule)
             ));
+            if let Some(annotation) = annotations.get(&id) {
+                out.push_str(&format!("〔{}〕", escape_control(annotation)));
+            }
             if let Some(source) = sources.first() {
                 out.push_str(&format!(" ← {}", source.one_line()));
             }
@@ -269,7 +289,7 @@ fn render_node(
                 out.push_str(&format!("{pad}  实例：{instance}\n"));
             }
             for premise in premises {
-                render_node(certificate, *premise, depth + 1, out)?;
+                render_node(certificate, *premise, depth + 1, annotations, out)?;
             }
         }
         Node::InterpretationApplication {
@@ -298,7 +318,7 @@ fn render_node(
                     out.push_str(&format!("{pad}  注：{}\n", escape_control(&source.note)));
                 }
             }
-            render_node(certificate, *premise, depth + 1, out)?;
+            render_node(certificate, *premise, depth + 1, annotations, out)?;
         }
         Node::Gap {
             proposition,

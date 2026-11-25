@@ -80,6 +80,30 @@
 //! missing" hint likewise covers only the root goal, and only when the
 //! interpretation's `from` holds before any application would run.
 //!
+//! ## Temporal and spatial applicability
+//!
+//! A rule's recorded scope (`effective` / `repealed` / `jurisdiction` /
+//! `territory`) and the occurrence records of the premise facts an instance
+//! consumes (`occurred_at` / `occurred_in`) are judged before that instance
+//! may fire. The reference point is the event, not the query date: `:asof` is
+//! only a fallback when the instance references no event time. [`Applicability`]
+//! keeps four outcomes apart: applicable (with the covered event times/places),
+//! inapplicable (with the concrete dates/places that excluded the rule),
+//! unchecked (a needed input is missing), and undecidable (the inputs are
+//! present but the data cannot decide, including partial coverage). An
+//! inapplicable instance never fires and never becomes a conflict witness;
+//! an unchecked instance (no evidence at all) keeps firing; an undecidable
+//! instance (partial evidence) does not fire. Both excluded forms carry their
+//! verdict and evidence wherever a rule is shown, so missing input and partial
+//! coverage are visible instead of silently ignored.
+//!
+//! The judgement itself is [`applicability::judge`]: a pure function over the
+//! rule's [`Scope`](std_deduce_kernel::meta::Scope) and the instance's
+//! [`InstanceAnchor`] (the premise facts' occurrence records plus the session
+//! fallback values). The reasoner only supplies those records; the CLI only
+//! renders the recorded verdict. A certificate still records no applicability
+//! judgement (the format is unchanged), so `:verify-cert` does not re-judge it.
+//!
 //! ## Certificates
 //!
 //! [`certificate`] converts a derivation into the versioned certificate
@@ -104,7 +128,16 @@
 //! assumption premise is not counted. The candidate interpretations and the
 //! branch re-run this marker will eventually drive are not implemented yet.
 
+mod applicability;
+
+pub use applicability::{
+    Applicability, Basis, CodeDimension, DateField, DatedEvidence, InapplicableReason,
+    InstanceAnchor, MissingInput, PlaceEvidence, UndecidableReason,
+};
+
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use std_deduce_cert::CertExpr;
 use std_deduce_kernel::conv::convertible;
@@ -132,6 +165,10 @@ pub enum Node {
         /// The rule's parameters and the values this step bound them to.
         bindings: Vec<(Name, Expr)>,
         sources: Vec<SourceRef>,
+        /// The temporal/spatial judgement under which this instance fired,
+        /// with the event times/places it relied on. It is part of the
+        /// derivation's report; the certificate format does not record it.
+        applicability: Applicability,
     },
     /// One application of an enabled interpretation. It is a separate step,
     /// never a rule: the declaration licenses the move from `from` to `to`,
@@ -158,6 +195,12 @@ pub struct GapCandidate {
     /// `unless` conditions that *are* known, i.e. why this rule is blocked.
     pub blocked_by: Vec<Expr>,
     pub sources: Vec<SourceRef>,
+    /// The rule's temporal/spatial judgement for this case. An excluded
+    /// candidate is still listed: `:gap` says why it cannot be used instead of
+    /// hiding it. Unchecked candidates keep their missing premises and are
+    /// expanded; inapplicable/undecidable ones are listed but not expanded,
+    /// because adding a premise cannot make an excluded rule fire.
+    pub applicability: Applicability,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -392,11 +435,22 @@ pub struct InterpretationHint {
 
 // ---------------------------------------------------------------- internals
 
+/// One registered fact's occurrence record: `occurred_at`, `occurred_in`.
+type OccurrenceRecord = (Option<String>, Option<String>);
+/// Registered facts' occurrence records keyed by structural proposition key.
+type OccurrenceIndex = BTreeMap<String, Vec<OccurrenceRecord>>;
+
 struct Assumption {
     prop: Expr,
     identity: FactIdentity,
     sources: Vec<SourceRef>,
     label: Option<String>,
+    /// First day the fact occurred, copied from the ledger declaration. A
+    /// reasoner assumption registered by hand has none, so a missing
+    /// occurrence is not invented from the query date.
+    occurred_at: Option<String>,
+    /// Place the fact occurred in, copied from the ledger declaration.
+    occurred_in: Option<String>,
 }
 
 /// One instantiation of a rule against a set of known facts.
@@ -480,6 +534,17 @@ pub struct Reasoner<'a> {
     /// Interpretations this query enabled, sorted by id. Empty means the
     /// default: every interpretation stays inert, and output is unchanged.
     enabled: BTreeSet<Name>,
+    /// The session's legal as-of date, if one was set. It is a reference date
+    /// of the applicability judgement, never copied onto a fact.
+    as_of: Option<String>,
+    /// The session's jurisdiction code, if one was set. It is compared with a
+    /// rule's recorded `jurisdiction`; it never filters a rule by itself.
+    jurisdiction: Option<String>,
+    /// Assumption occurrence records indexed by the proposition's structural
+    /// key. Built lazily and invalidated when an assumption is registered, so
+    /// an instance judgement does not scan the whole assumption table for
+    /// every premise. The `Rc` is cloned per lookup, not the strings.
+    occurrence_index: RefCell<Option<Rc<OccurrenceIndex>>>,
     fixed: Option<Fixed>,
     max_rounds: usize,
 }
@@ -507,9 +572,143 @@ impl<'a> Reasoner<'a> {
             contraries,
             uniques,
             enabled: BTreeSet::new(),
+            as_of: None,
+            jurisdiction: None,
+            occurrence_index: RefCell::new(None),
             fixed: None,
             max_rounds: 256,
         }
+    }
+
+    /// Anchor the reasoner's applicability judgement to the session's legal
+    /// as-of date and jurisdiction code.
+    ///
+    /// Call this before [`Reasoner::saturate`]. `:asof` is only a fallback for
+    /// an instance whose premise facts record no occurrence date; an event
+    /// time, when present, is never replaced by it. `None` means "not set" and
+    /// is reported as missing input when a rule declares that dimension; it is
+    /// never filled in from a default. The values are validated by the command
+    /// layer, and a malformed stored value only ever makes a comparison
+    /// undecidable — it is not silently dropped.
+    pub fn set_session_scope(&mut self, as_of: Option<&str>, jurisdiction: Option<&str>) {
+        self.as_of = as_of.map(ToOwned::to_owned);
+        self.jurisdiction = jurisdiction.map(ToOwned::to_owned);
+    }
+
+    /// The assumption occurrence records, indexed by structural key.
+    ///
+    /// A proposition may be asserted by more than one fact declaration; both
+    /// records stay under the same key, so an instance that consumes the
+    /// proposition references every recorded event. The cache is invalidated
+    /// when a new assumption is registered.
+    fn occurrence_index(&self) -> Rc<OccurrenceIndex> {
+        if let Some(index) = self.occurrence_index.borrow().as_ref() {
+            return Rc::clone(index);
+        }
+        let mut built = OccurrenceIndex::new();
+        for assumption in &self.assumptions {
+            built
+                .entry(self.key_of(&assumption.prop))
+                .or_default()
+                .push((
+                    assumption.occurred_at.clone(),
+                    assumption.occurred_in.clone(),
+                ));
+        }
+        let built = Rc::new(built);
+        *self.occurrence_index.borrow_mut() = Some(Rc::clone(&built));
+        built
+    }
+
+    /// The occurrence records of the premise facts a rule instance references.
+    ///
+    /// A premise key that names a registered fact is looked up in the
+    /// occurrence index; one that names only a derived conclusion carries no
+    /// occurrence record, so it is flagged as missing rather than inherited
+    /// from its own premises. The session's as-of date and jurisdiction are
+    /// copied in as the fallback/legal-system values.
+    fn instance_anchor(&self, premise_keys: &[String]) -> InstanceAnchor {
+        let index = self.occurrence_index();
+        let mut event_dates: Vec<String> = Vec::new();
+        let mut event_places: Vec<String> = Vec::new();
+        let mut missing_event_date = false;
+        let mut missing_event_place = false;
+        for key in premise_keys {
+            match index.get(key) {
+                Some(records) => {
+                    for (date, place) in records {
+                        match date {
+                            Some(date) => {
+                                if !event_dates.contains(date) {
+                                    event_dates.push(date.clone());
+                                }
+                            }
+                            None => missing_event_date = true,
+                        }
+                        match place {
+                            Some(place) => {
+                                if !event_places.contains(place) {
+                                    event_places.push(place.clone());
+                                }
+                            }
+                            None => missing_event_place = true,
+                        }
+                    }
+                }
+                // A rule conclusion is a fact but not a registered occurrence:
+                // it does not inherit the event time/place of its premises.
+                None => {
+                    missing_event_date = true;
+                    missing_event_place = true;
+                }
+            }
+        }
+        InstanceAnchor {
+            as_of: self.as_of.clone(),
+            jurisdiction: self.jurisdiction.clone(),
+            event_dates,
+            missing_event_date,
+            event_places,
+            missing_event_place,
+        }
+    }
+
+    /// Judge one rule instance against the facts it consumes.
+    fn judge_instance(
+        &self,
+        scope: &std_deduce_kernel::meta::Scope,
+        premise_keys: &[String],
+    ) -> Applicability {
+        applicability::judge(scope, &self.instance_anchor(premise_keys))
+    }
+
+    /// Split one instantiated premise list into the facts it already holds and
+    /// the premises still missing.
+    ///
+    /// The keys of the held premises are how the ledger indexes a fact's
+    /// occurrence record, so they are the whole input of the applicability
+    /// judgement. One judgment ([`premise_satisfied`], shared with the
+    /// derivation) decides both lists: a premise the fixed point can consume
+    /// must contribute its event record, and a premise it cannot consume must
+    /// stay missing here as well. Computing the two lists from different
+    /// conditions would let a rule be judged inapplicable on the event record
+    /// of a fact it never used, or applicable while the gap tree reports the
+    /// same premise missing.
+    fn premise_status(
+        &self,
+        premises: &[Expr],
+        facts: &BTreeMap<String, Expr>,
+    ) -> (Vec<String>, Vec<Expr>) {
+        let mut held_keys = Vec::new();
+        let mut missing = Vec::new();
+        for premise in premises {
+            if premise_satisfied(self.env, facts, premise) {
+                held_keys.push(self.key_of(premise));
+            } else {
+                missing.push(premise.clone());
+            }
+        }
+        (held_keys, missing)
     }
 
     /// The priority cycles of the environment: every strongly connected
@@ -693,6 +892,25 @@ impl<'a> Reasoner<'a> {
         sources: Vec<SourceRef>,
         label: Option<String>,
     ) -> Result<(), String> {
+        // A hand-registered assumption records no occurrence: only a ledger
+        // fact carries `occurred_at` / `occurred_in`, and a query date is not
+        // the fact's date.
+        self.assume_with_occurrence(prop, identity, sources, label, None, None)
+    }
+
+    /// Register an assumption together with the occurrence the ledger fact
+    /// records. The public [`Reasoner::assume`] delegates here with `None`; the
+    /// occurrence is evidence about the case, so it travels with the
+    /// assumption instead of being looked up from a printed name later.
+    fn assume_with_occurrence(
+        &mut self,
+        prop: &Expr,
+        identity: FactIdentity,
+        sources: Vec<SourceRef>,
+        label: Option<String>,
+        occurred_at: Option<String>,
+        occurred_in: Option<String>,
+    ) -> Result<(), String> {
         if identity == FactIdentity::Disputed {
             return Err("争议事实不能作为假设：它断言的是对方的主张，不是已证明的命题".into());
         }
@@ -734,7 +952,12 @@ impl<'a> Reasoner<'a> {
             identity,
             sources,
             label,
+            occurred_at,
+            occurred_in,
         });
+        // The occurrence index must not keep serving a stale table after a new
+        // fact (with its own event records) was registered.
+        *self.occurrence_index.borrow_mut() = None;
         Ok(())
     }
 
@@ -800,11 +1023,13 @@ impl<'a> Reasoner<'a> {
             let DeclKind::Fact { identity } = &decl.kind else {
                 continue;
             };
-            self.assume(
+            self.assume_with_occurrence(
                 &decl.ty,
                 *identity,
                 decl.sources.clone(),
                 Some(decl.name.to_string()),
+                decl.occurred_at.clone(),
+                decl.occurred_in.clone(),
             )?;
         }
         Ok(())
@@ -934,10 +1159,22 @@ impl<'a> Reasoner<'a> {
 
         for _round in 0..self.max_rounds {
             let mut next = seeds.clone();
-            let rules = self.rules();
-            for (_name, rule) in &rules {
+            for decl in self.ordered_rules() {
+                let DeclKind::Rule(rule) = &decl.kind else {
+                    continue;
+                };
+                // A rule instance the case excludes contributes no conclusion
+                // at all. It is not merely hidden later: it must never seed a
+                // premise, an `unless` blocker or a conflict side. The verdict
+                // is per instance because it depends on the facts it consumes.
                 for inst in self.enumerate(rule, &k) {
                     if blocked(&inst.unlesses, &k, self.env) {
+                        continue;
+                    }
+                    if !self
+                        .judge_instance(&decl.scope, &inst.premise_keys)
+                        .allows_firing()
+                    {
                         continue;
                     }
                     next.entry(self.key_of(&inst.conclusion))
@@ -961,16 +1198,6 @@ impl<'a> Reasoner<'a> {
             k = next;
         }
         Err("推理在 256 轮内未收敛：可能存在规则环".into())
-    }
-
-    fn rules(&self) -> Vec<(Name, RuleDecl)> {
-        self.ordered_rules()
-            .into_iter()
-            .filter_map(|d| match &d.kind {
-                DeclKind::Rule(r) => Some((d.name.clone(), (**r).clone())),
-                _ => None,
-            })
-            .collect()
     }
 
     /// Every rule declaration of the environment, ordered by name, so that
@@ -1078,7 +1305,7 @@ impl<'a> Reasoner<'a> {
     /// premises already in `facts`.
     fn derivers(&self, target: &str, facts: &BTreeMap<String, Expr>) -> Vec<Name> {
         let mut out = BTreeSet::new();
-        for decl in self.env.rules() {
+        for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
@@ -1087,6 +1314,16 @@ impl<'a> Reasoner<'a> {
                     continue;
                 }
                 if blocked(&inst.unlesses, facts, self.env) {
+                    continue;
+                }
+                // A rule that does not apply to this instance is no witness.
+                // Counting it here would let a priority resolve a conflict
+                // through an inapplicable rule, and would make a rebuilt
+                // derivation cite a step that never fired.
+                if !self
+                    .judge_instance(&decl.scope, &inst.premise_keys)
+                    .allows_firing()
+                {
                     continue;
                 }
                 if inst.premise_keys.iter().all(|pk| facts.contains_key(pk)) {
@@ -1309,7 +1546,9 @@ impl<'a> Reasoner<'a> {
             let mut i = 0;
             while i < pending.len() {
                 let target = pending[i].clone();
-                if let Some((rule, inst, sources)) = self.witness(&target, &facts, &ids) {
+                if let Some((rule, inst, sources, applicability)) =
+                    self.witness(&target, &facts, &ids)
+                {
                     let id = nodes.len();
                     let premises: Vec<usize> = inst.premise_keys.iter().map(|pk| ids[pk]).collect();
                     nodes.push(Node::RuleApplication {
@@ -1318,6 +1557,7 @@ impl<'a> Reasoner<'a> {
                         premises,
                         bindings: inst.bindings,
                         sources,
+                        applicability,
                     });
                     ids.insert(target, id);
                     pending.remove(i);
@@ -1399,17 +1639,20 @@ impl<'a> Reasoner<'a> {
     }
 
     /// Find an unblocked rule application that concludes `target` and whose
-    /// premises already have node ids.
+    /// premises already have node ids, together with the applicability verdict
+    /// the instance fired under.
     fn witness(
         &self,
         target: &str,
         facts: &BTreeMap<String, Expr>,
         ids: &BTreeMap<String, usize>,
-    ) -> Option<(Name, Instance, Vec<SourceRef>)> {
+    ) -> Option<(Name, Instance, Vec<SourceRef>, Applicability)> {
         for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
+            // The witness is the argument shown to the reader, so it must be
+            // an instance that could actually fire under the case judgement.
             for inst in self.enumerate(rule, facts) {
                 if self.key_of(&inst.conclusion) != target {
                     continue;
@@ -1418,7 +1661,11 @@ impl<'a> Reasoner<'a> {
                     continue;
                 }
                 if inst.premise_keys.iter().all(|pk| ids.contains_key(pk)) {
-                    return Some((decl.name.clone(), inst, decl.sources.clone()));
+                    let verdict = self.judge_instance(&decl.scope, &inst.premise_keys);
+                    if !verdict.allows_firing() {
+                        continue;
+                    }
+                    return Some((decl.name.clone(), inst, decl.sources.clone(), verdict));
                 }
             }
         }
@@ -1689,12 +1936,18 @@ impl<'a> Reasoner<'a> {
             issues: Vec::new(),
             limits: Vec::new(),
             uninstantiable: Vec::new(),
+            excluded: Vec::new(),
         };
         let values = constant_values(self.env);
         // Keyed by structural identity: two rules that conclude the same
         // proposition are one issue with two candidate rules, and an alpha
         // variant does not create a second entry.
         let mut goals: BTreeMap<String, (Option<Name>, Expr)> = BTreeMap::new();
+        let facts: BTreeMap<String, Expr> = self
+            .fixed
+            .as_ref()
+            .map(|fixed| fixed.rule_facts.clone())
+            .unwrap_or_default();
 
         for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
@@ -1717,6 +1970,8 @@ impl<'a> Reasoner<'a> {
                 });
             }
             let mut stated = false;
+            let mut fired_any = false;
+            let mut excluded_verdicts: Vec<Applicability> = Vec::new();
             for binding in instances {
                 let conclusion = close_pattern(&rule.open_conclusion(), &binding);
                 // A conclusion that still mentions a premise binder is not a
@@ -1729,13 +1984,46 @@ impl<'a> Reasoner<'a> {
                     continue;
                 }
                 stated = true;
+                // Judge this instance on the premise facts it actually holds.
+                // A missing premise is not a fact and contributes no event
+                // record; the query date must never stand in for an event time
+                // that the held facts record. "Holds" is the derivation's own
+                // judgment, so an instance the fixed point can fire is not
+                // reported as excluded here just because its premise was
+                // written through a `def` alias.
+                let premises: Vec<Expr> = (0..rule.premises.len())
+                    .map(|index| close_pattern(&rule.open_premise(index), &binding))
+                    .collect();
+                let (held_keys, _) = self.premise_status(&premises, &facts);
+                let verdict = self.judge_instance(&decl.scope, &held_keys);
+                // The conclusion is an issue even when this instance is
+                // excluded: the gap tree must show why the rule did not fire.
                 let key = structural_key(self.env, &conclusion);
                 goals
                     .entry(key)
                     .or_insert_with(|| (Some(decl.name.clone()), conclusion));
+                if verdict.allows_firing() {
+                    fired_any = true;
+                } else if !excluded_verdicts.contains(&verdict) {
+                    excluded_verdicts.push(verdict);
+                }
             }
             if !stated {
                 scan.uninstantiable.push(decl.name.clone());
+            } else if !fired_any && !excluded_verdicts.is_empty() {
+                // The rule is reported as excluded only when every enumerable
+                // instance is excluded; one applicable instance keeps it out of
+                // this list.
+                if scan.excluded.len() < limits.max_excluded {
+                    scan.excluded.push(ExcludedRule {
+                        rule: decl.name.clone(),
+                        verdicts: excluded_verdicts,
+                    });
+                } else {
+                    scan.limits.push(GapLimit::Excluded {
+                        limit: limits.max_excluded,
+                    });
+                }
             }
         }
 
@@ -1786,6 +2074,8 @@ impl<'a> Reasoner<'a> {
         scan.limits.dedup();
         scan.uninstantiable.sort();
         scan.uninstantiable.dedup();
+        scan.excluded.sort_by(|a, b| a.rule.cmp(&b.rule));
+        scan.excluded.dedup();
         scan
     }
 
@@ -1839,6 +2129,14 @@ impl<'a> Reasoner<'a> {
                 continue;
             }
             let attempts = budget.attempts.entry(candidate.rule.clone()).or_default();
+            if !candidate.applicability.allows_firing() {
+                // The rule cannot fire in this case, so its missing premises
+                // are not a place to dig deeper: the candidate, what it lacks
+                // and the reason it does not apply are listed together. It
+                // consumes no attempt and sets no limit — nothing was cut off.
+                tree.candidates.push(GapRule::unexpanded(candidate, None));
+                continue;
+            }
             if *attempts >= budget.limits.max_rule_attempts {
                 let rule = candidate.rule.clone();
                 tree.candidates.push(GapRule::unexpanded(
@@ -1853,6 +2151,7 @@ impl<'a> Reasoner<'a> {
             *attempts += 1;
             let mut rule = GapRule {
                 rule: candidate.rule,
+                applicability: candidate.applicability,
                 missing: Vec::new(),
                 blocked_by: candidate.blocked_by,
                 sources: candidate.sources,
@@ -1968,10 +2267,16 @@ impl<'a> Reasoner<'a> {
             if !match_premise(self.env, &rule.open_conclusion(), goal, &mut binding) {
                 continue;
             }
-            let missing: Vec<Expr> = (0..rule.premises.len())
+            let premises: Vec<Expr> = (0..rule.premises.len())
                 .map(|i| close_pattern(&rule.open_premise(i), &binding))
-                .filter(|p| !premise_satisfied(self.env, &facts, p))
                 .collect();
+            // One judgment decides both sides of this candidate: a premise the
+            // fixed point can consume contributes the fact's occurrence record
+            // to the applicability anchor, and everything else is what the tree
+            // reports as missing. The candidate's instance references only the
+            // premise facts that already hold; a still-missing premise is not
+            // a fact yet, so it does not contribute an event record.
+            let (held_keys, missing) = self.premise_status(&premises, &facts);
             let blocked_by: Vec<Expr> = rule
                 .unlesses
                 .iter()
@@ -1983,6 +2288,7 @@ impl<'a> Reasoner<'a> {
                 missing,
                 blocked_by,
                 sources: decl.sources.clone(),
+                applicability: self.judge_instance(&decl.scope, &held_keys),
             });
         }
         candidates
@@ -2671,6 +2977,8 @@ pub enum GapLimit {
     RuleAttempts { rule: Name, limit: usize },
     /// The issue scan reached its maximum number of conclusions.
     Issues { limit: usize },
+    /// The issue scan reached its maximum number of excluded rules.
+    Excluded { limit: usize },
 }
 
 /// The bounds of a gap tree or an issue scan.
@@ -2691,6 +2999,8 @@ pub struct GapLimits {
     pub max_rule_attempts: usize,
     /// Maximum number of contestable conclusions the issue scan lists.
     pub max_issues: usize,
+    /// Maximum number of excluded rules the issue scan lists.
+    pub max_excluded: usize,
 }
 
 impl Default for GapLimits {
@@ -2700,6 +3010,7 @@ impl Default for GapLimits {
             max_nodes: 128,
             max_rule_attempts: 8,
             max_issues: 32,
+            max_excluded: 16,
         }
     }
 }
@@ -2721,6 +3032,12 @@ pub struct GapTree {
 #[derive(Debug, Clone)]
 pub struct GapRule {
     pub rule: Name,
+    /// The rule's temporal/spatial judgement for this case. An excluded
+    /// rule is still a candidate: the reader sees the rule, what it lacks and
+    /// the concrete reason it cannot apply. An unchecked rule is expanded
+    /// because it may still fire; an inapplicable/undecidable one is listed
+    /// but not expanded.
+    pub applicability: Applicability,
     /// Missing premises in the rule's own premise order, each with the gap
     /// that explains why it is missing.
     pub missing: Vec<GapPremise>,
@@ -2741,6 +3058,21 @@ pub struct GapPremise {
     pub gap: Option<Box<GapTree>>,
 }
 
+/// A rule whose every enumerated instance is excluded by the applicability
+/// judgement, with the distinct verdicts those instances produced.
+///
+/// The exclusion is per instance, not a rule-level shortcut: an instance with
+/// a held premise event inside the range is not excluded just because some
+/// other instance is. Only when no enumerable instance may fire is the rule
+/// reported here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExcludedRule {
+    /// The rule whose instances were all excluded.
+    pub rule: Name,
+    /// The distinct verdicts of the excluded instances, deduplicated.
+    pub verdicts: Vec<Applicability>,
+}
+
 /// Every contestable conclusion under the current fact set.
 #[derive(Debug, Clone)]
 pub struct IssueScan {
@@ -2748,13 +3080,18 @@ pub struct IssueScan {
     /// that first produced the goal and then by structural goal key; a
     /// conclusion no rule produces (a conflict side) sorts first.
     pub issues: Vec<GapTree>,
-    /// Limits that stopped the scan itself (an issue cap or a per-rule
-    /// enumeration cap), sorted and deduplicated.
+    /// Limits that stopped the scan itself (an issue cap, a per-rule
+    /// enumeration cap or an excluded-rule cap), sorted and deduplicated.
     pub limits: Vec<GapLimit>,
     /// Rules that produced no contestable conclusion because their parameter
     /// types have no declared constant, or because their conclusion depends on
     /// a premise proof and cannot be stated from facts.
     pub uninstantiable: Vec<Name>,
+    /// Rules every enumerable instance of which is excluded (`不适用` or
+    /// `无法判定`), with the per-instance verdicts. An undecidable instance
+    /// needs an explicit reference time that this version does not offer yet;
+    /// the rule is reported instead of silently absent from the scan.
+    pub excluded: Vec<ExcludedRule>,
 }
 
 impl GapRule {
@@ -2762,6 +3099,7 @@ impl GapRule {
     fn unexpanded(candidate: GapCandidate, limit: Option<GapLimit>) -> Self {
         GapRule {
             rule: candidate.rule,
+            applicability: candidate.applicability,
             missing: candidate
                 .missing
                 .into_iter()
