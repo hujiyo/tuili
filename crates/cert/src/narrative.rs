@@ -272,6 +272,7 @@ fn write_step(
             premises,
             bindings,
             sources,
+            ..
         } => {
             let conclusion = print_expr(&Expr::from(conclusion));
             if premises.is_empty() {

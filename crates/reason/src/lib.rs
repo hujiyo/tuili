@@ -97,12 +97,13 @@
 //! verdict and evidence wherever a rule is shown, so missing input and partial
 //! coverage are visible instead of silently ignored.
 //!
-//! The judgement itself is [`applicability::judge`]: a pure function over the
-//! rule's [`Scope`](std_deduce_kernel::meta::Scope) and the instance's
-//! [`InstanceAnchor`] (the premise facts' occurrence records plus the session
-//! fallback values). The reasoner only supplies those records; the CLI only
-//! renders the recorded verdict. A certificate still records no applicability
-//! judgement (the format is unchanged), so `:verify-cert` does not re-judge it.
+//! The judgement itself is [`std_deduce_cert::judge_applicability`]: a pure
+//! function over the rule's [`Scope`](std_deduce_kernel::meta::Scope) and
+//! the instance's anchor (the premise facts' occurrence records plus the
+//! session fallback values). The reasoner only supplies those records; the
+//! CLI only renders the recorded verdict. Certificate v7 records the verdict,
+//! basis, declared scope and reason on every rule application and gap
+//! candidate, and `:verify-cert` recomputes them independently.
 //!
 //! ## Certificates
 //!
@@ -157,6 +158,12 @@ pub enum Node {
         identity: FactIdentity,
         sources: Vec<SourceRef>,
         label: Option<String>,
+        /// The environment fact's recorded `occurred_at`, if any. It is
+        /// evidence about the case and travels with the assumption so a
+        /// certificate can record it; it is never defaulted.
+        occurred_at: Option<String>,
+        /// The environment fact's recorded `occurred_in`, if any.
+        occurred_in: Option<String>,
     },
     RuleApplication {
         rule: Name,
@@ -166,8 +173,8 @@ pub enum Node {
         bindings: Vec<(Name, Expr)>,
         sources: Vec<SourceRef>,
         /// The temporal/spatial judgement under which this instance fired,
-        /// with the event times/places it relied on. It is part of the
-        /// derivation's report; the certificate format does not record it.
+        /// with the event times/places it relied on. The certificate records it
+        /// together with the rule's declared scope.
         applicability: Applicability,
     },
     /// One application of an enabled interpretation. It is a separate step,
@@ -1530,6 +1537,8 @@ impl<'a> Reasoner<'a> {
                 identity: a.identity,
                 sources: a.sources.clone(),
                 label: a.label.clone(),
+                occurred_at: a.occurred_at.clone(),
+                occurred_in: a.occurred_in.clone(),
             });
             ids.insert(k, id);
         }
@@ -3584,6 +3593,8 @@ pub fn certificate(
                 identity,
                 sources,
                 label,
+                occurred_at,
+                occurred_in,
             } => {
                 let assumption = assumptions.len();
                 assumptions.push(std_deduce_cert::Assumption {
@@ -3591,6 +3602,8 @@ pub fn certificate(
                     identity: std_deduce_cert::FactIdentity::from(identity),
                     sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
                     label: label.clone(),
+                    occurred_at: explicit_option(occurred_at.clone()),
+                    occurred_in: explicit_option(occurred_in.clone()),
                 });
                 nodes.push(std_deduce_cert::Node::Assumption { assumption });
             }
@@ -3600,7 +3613,7 @@ pub fn certificate(
                 premises,
                 bindings,
                 sources,
-                ..
+                applicability,
             } => {
                 let mut converted = Vec::with_capacity(bindings.len());
                 for (parameter, value) in bindings {
@@ -3609,12 +3622,17 @@ pub fn certificate(
                         value: cert_expr(value, Some(id), &format!("参数 `{parameter}` 的绑定值"))?,
                     });
                 }
+                let scope = rule_scope(env, rule, id)?;
                 nodes.push(std_deduce_cert::Node::RuleApplication {
                     rule: rule.to_string(),
                     conclusion: cert_expr(conclusion, Some(id), "结论")?,
                     premises: premises.clone(),
                     bindings: converted,
                     sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
+                    applicability: Box::new(applicability::certificate_applicability(
+                        &scope,
+                        applicability,
+                    )),
                 });
             }
             Node::InterpretationApplication {
@@ -3664,6 +3682,7 @@ pub fn certificate(
                             )
                         })
                         .collect::<Result<Vec<_>, String>>()?;
+                    let scope = rule_scope(env, &candidate.rule, id)?;
                     converted.push(std_deduce_cert::GapCandidate {
                         rule: candidate.rule.to_string(),
                         missing,
@@ -3673,6 +3692,10 @@ pub fn certificate(
                             .iter()
                             .map(std_deduce_cert::Source::from)
                             .collect(),
+                        applicability: applicability::certificate_applicability(
+                            &scope,
+                            &candidate.applicability,
+                        ),
                     });
                 }
                 nodes.push(std_deduce_cert::Node::Gap {
@@ -3818,6 +3841,38 @@ pub fn certificate(
         certificate.open_obligations.push(dependency.obligation());
     }
     Ok(certificate)
+}
+
+/// The recorded scope of the rule a derivation step applies.
+///
+/// The applicability record must quote the environment's declaration, so the
+/// checker can compare it field by field. A step that names a declaration this
+/// environment no longer holds cannot be converted rather than being exported
+/// with a guessed scope.
+fn rule_scope(
+    env: &Env,
+    rule: &Name,
+    node: usize,
+) -> Result<std_deduce_kernel::meta::Scope, String> {
+    let Some(decl) = env.get(rule) else {
+        return Err(format!(
+            "节点 {node} 引用的规则 `{rule}` 不在当前环境中，无法记录其适用范围"
+        ));
+    };
+    let DeclKind::Rule(_) = &decl.kind else {
+        return Err(format!(
+            "节点 {node} 引用的 `{rule}` 不是规则，无法记录其适用范围"
+        ));
+    };
+    Ok(decl.scope.clone())
+}
+
+/// An optional string in the certificate's explicit form: a value or `null`.
+fn explicit_option(value: Option<String>) -> std_deduce_cert::Explicit<String> {
+    match value {
+        Some(value) => std_deduce_cert::Explicit::some(value),
+        None => std_deduce_cert::Explicit::none(),
+    }
 }
 
 /// Encode one kernel expression, naming its location on failure.

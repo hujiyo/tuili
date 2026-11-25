@@ -5,10 +5,11 @@
 //! certificate: the checker is tested on its own contract.
 
 use std_deduce_cert::{
-    check, Assumption, Binding, CertExpr, Certificate, CheckError, CheckReport, Conflict,
-    EnvironmentIdentity, FactIdentity, FormatVersion, Node, ObligationKind, OpenObligation,
-    PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side,
-    Source, UnresolvedReason,
+    check, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind, ApplicabilityVerdict,
+    Assumption, Binding, CertExpr, Certificate, CheckError, CheckReport, Conflict,
+    EnvironmentIdentity, Explicit, FactIdentity, FormatVersion, Node, ObligationKind,
+    OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution,
+    ResolutionBasis, RuleApplicability, Side, Source, UnresolvedReason,
 };
 use std_deduce_kernel::Env;
 use std_deduce_lang::Library;
@@ -1079,7 +1080,21 @@ fn fact(proposition: CertExpr, identity: FactIdentity) -> Assumption {
         identity,
         sources: Vec::new(),
         label: None,
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
     }
+}
+
+/// The record of a rule declared without any scope: unchecked because there is
+/// nothing to judge, with an empty basis.
+fn unscoped_applicability() -> Box<RuleApplicability> {
+    Box::new(RuleApplicability {
+        verdict: ApplicabilityVerdict::Unchecked,
+        basis: ApplicabilityBasis::default(),
+        reason: Explicit::some(ApplicabilityReason::new(
+            ApplicabilityReasonKind::RuleHasNoScope,
+        )),
+    })
 }
 
 /// A listed assumption with no source: enough for checking the proposition.
@@ -1118,6 +1133,7 @@ fn rule_node_for(
             })
             .collect(),
         sources: Vec::new(),
+        applicability: unscoped_applicability(),
     }
 }
 

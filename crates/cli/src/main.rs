@@ -50,8 +50,10 @@
 //! while a rule judged *unchecked* (no evidence at all) keeps firing and every
 //! conclusion line it produces carries `适用性未判定（…）`. The verdict and
 //! the event times/places it relied on are printed on the conclusion line; a
-//! gap's candidates are listed by `:gap` and `:applicability`. The certificate
-//! format records no verdict yet.
+//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v7
+//! records the verdict, its basis and its reason on every rule application and
+//! gap candidate, and `:verify-cert` recomputes it from the environment
+//! declaration and the certificate's own inputs.
 //!
 //! In the closed environment a top-level `:load` accepts only a case file (no
 //! `namespace`): modules are legal packs and must be imported. The case may
@@ -78,7 +80,7 @@
 //! without affecting explicit imports; `--profile` selects a profile by name or
 //! alias. The preload lines are printed only after the whole load commits, so a
 //! failed file never claims that the environment loaded. The profile and the
-//! packs it loaded are session objects, but a certificate v6 records the
+//! packs it loaded are session objects, but a certificate v7 records the
 //! environment identity it was produced in: the profile, the as-of date, the
 //! jurisdiction code and the loaded packs/corpora. `:cert` stamps it before
 //! writing, and `:verify-cert` compares it with the current environment before
@@ -331,7 +333,12 @@
 //! stdout; a gap becomes a `MissingPremise` obligation, an unresolved
 //! conflict becomes an `UnresolvedConflict` obligation, and a root derivation
 //! that turned an `open` concept into a proved proposition becomes one
-//! `open_concept` obligation in that JSON. Before
+//! `open_concept` obligation in that JSON. Version 7 also records one
+//! temporal/spatial applicability record per rule application and per gap
+//! candidate: the verdict, the reference event times/places, the rule's
+//! declared scope, the session fallback actually used and the reason code with
+//! its explanation. Each assumption records the environment fact's
+//! `occurred_at` / `occurred_in` as an explicit value or `null`. Before
 //! serialization the certificate is stamped with the environment identity:
 //! the canonical profile name, the session's as-of date and jurisdiction code
 //! (from `--as-of`/`--jurisdiction` or `:asof`/`:jurisdiction`; explicit `null`
@@ -351,8 +358,13 @@
 //! exit code nor the four proof lines. Only an environment match reaches the
 //! two layers, in order:
 //!
-//! 1. [`std_deduce_cert::check`] rebuilds every rule instance and checks the
-//!    recorded `unless` conditions and the root's conflict status;
+//! 1. [`std_deduce_cert::check`] rebuilds every rule instance, recomputes the
+//!    applicability record of every rule application and gap candidate from
+//!    the rule's environment declaration and the certificate's own inputs,
+//!    checks the recorded `unless` conditions and the root's conflict status;
+//!    a mismatch, a missing record or a record that was added to the wrong
+//!    place fails here and names the node and field. The logical line reports
+//!    how many applicability records were recomputed;
 //! 2. [`std_deduce_cert::kernel_proof`] turns the monotone skeleton into
 //!    kernel terms and has the kernel check every step.
 //!
@@ -1590,7 +1602,8 @@ impl Session {
         // the object being checked cannot diverge. `:why` keeps the formal
         // tree; `:explain` prints the Chinese because-so rendering of it.
         // Every applied rule's conclusion line carries its applicability
-        // verdict inline, because the certificate itself does not store it.
+        // verdict inline; the certificate stores the same verdict, and this
+        // annotation is rendered from the derivation's judgement.
         let annotations = derivation_annotations(&d);
         let rendered = if cmd == "explain" {
             render_narrative_with_context(&certificate, &open_concepts, &annotations)?
@@ -2127,10 +2140,24 @@ impl Session {
                 return Err(format!("证书校验失败（逻辑层）：{error}"));
             }
         };
+        // Every rule application and gap candidate carries one applicability
+        // record; `check` has just recomputed each one from the environment
+        // and the certificate's own inputs. Report the count instead of
+        // leaving the reader to assume the verdicts were trusted.
+        let applicability_records: usize = certificate
+            .nodes
+            .iter()
+            .map(|node| match node {
+                CertNode::RuleApplication { .. } => 1,
+                CertNode::Gap { candidates, .. } => candidates.len(),
+                _ => 0,
+            })
+            .sum();
         writeln!(
             out,
-            "逻辑校验：通过（检查 {} 个节点；{}）",
+            "逻辑校验：通过（检查 {} 个节点；适用性重算 {} 条；{}）",
             report.nodes_checked,
+            applicability_records,
             root_summary(&certificate, &report)
         )
         .ok();

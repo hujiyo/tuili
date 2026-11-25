@@ -329,7 +329,7 @@ pub enum DeclKind {
     Rule(Box<RuleDecl>),
     /// A marked interpretation: it turns a premise into another premise. The
     /// declaration is opaque under conversion; the reasoner applies it only
-    /// when the query explicitly enables it, and a v6 certificate records the
+    /// when the query explicitly enables it, and a certificate records the
     /// application step and its declaration. The kernel itself never applies
     /// it or interprets its direction.
     Interpretation(Box<Interpretation>),
@@ -418,7 +418,7 @@ pub struct PriorityDecl {
 /// The direction is declared data, not an inferred property: a legal
 /// interpretation is a choice someone makes and must be able to audit. The
 /// reasoner never derives behaviour from it; it is stored and copied into
-/// `:inspect` and v6 certificates.
+/// `:inspect` and certificates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InterpretationDirection {
     /// The words are applied as written.
@@ -464,7 +464,7 @@ pub struct Interpretation {
     pub from: Expr,
     pub to: Expr,
     /// The declared direction. It is declared data, not an inference: the
-    /// reasoner applies the permission, while inspection and v6 certificates
+    /// reasoner applies the permission, while inspection and certificates
     /// copy the keyword verbatim.
     pub direction: InterpretationDirection,
     pub sources: Vec<SourceRef>,

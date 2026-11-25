@@ -2,8 +2,9 @@
 //! own tree, including its labels, sources, bindings, gaps and errors.
 
 use std_deduce_cert::{
-    render, Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, FactIdentity,
-    FormatVersion, GapCandidate, Node, Source,
+    render, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind, ApplicabilityVerdict,
+    Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, Explicit, FactIdentity,
+    FormatVersion, GapCandidate, Node, RuleApplicability, Source,
 };
 use std_deduce_kernel::env::SourceRef;
 
@@ -45,7 +46,25 @@ fn assumption(proposition: CertExpr, sources: Vec<Source>, label: Option<&str>) 
         identity: FactIdentity::UserAsserted,
         sources,
         label: label.map(str::to_owned),
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
     }
+}
+
+/// The record of a rule declared without any scope.
+/// A gap candidate stores its record inline: the candidate list is already
+/// behind a `Vec`.
+fn unscoped_candidate_applicability() -> RuleApplicability {
+    *unscoped_applicability()
+}
+fn unscoped_applicability() -> Box<RuleApplicability> {
+    Box::new(RuleApplicability {
+        verdict: ApplicabilityVerdict::Unchecked,
+        basis: ApplicabilityBasis::default(),
+        reason: Explicit::some(ApplicabilityReason::new(
+            ApplicabilityReasonKind::RuleHasNoScope,
+        )),
+    })
 }
 
 fn root_line_count(out: &str) -> usize {
@@ -88,6 +107,7 @@ fn rule(
         premises,
         bindings,
         sources,
+        applicability: unscoped_applicability(),
     }
 }
 
@@ -147,6 +167,8 @@ fn an_assumption_shows_its_fact_identity_before_the_label_and_source() {
                 identity,
                 sources: vec![source("民法典", "第一条", "2020", "")],
                 label: Some("事实一".to_owned()),
+                occurred_at: Explicit::none(),
+                occurred_in: Explicit::none(),
             }],
             vec![Node::Assumption { assumption: 0 }],
             Some(0),
@@ -171,12 +193,14 @@ fn renders_a_gap_with_candidates_and_blockers() {
                     missing: vec![atom("不批准", "甲"), atom("批准", "甲")],
                     blocked_by: vec![atom("已决", "甲")],
                     sources: vec![source("来源", "一", "", "")],
+                    applicability: unscoped_candidate_applicability(),
                 },
                 GapCandidate {
                     rule: "规则二".to_owned(),
                     missing: Vec::new(),
                     blocked_by: Vec::new(),
                     sources: Vec::new(),
+                    applicability: unscoped_candidate_applicability(),
                 },
             ],
         }],
@@ -346,6 +370,7 @@ fn a_gap_note_and_candidate_rule_cannot_forge_a_derivation_line() {
                 missing: Vec::new(),
                 blocked_by: Vec::new(),
                 sources: Vec::new(),
+                applicability: unscoped_candidate_applicability(),
             }],
         }],
         Some(0),

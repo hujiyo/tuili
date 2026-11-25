@@ -10,8 +10,9 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std_deduce_cert::{
-    check, Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, FactIdentity,
-    FormatVersion, Metadata, Node, ObligationKind,
+    check, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind, ApplicabilityVerdict,
+    Assumption, Binding, CertExpr, Certificate, EnvironmentIdentity, Explicit, FactIdentity,
+    FormatVersion, Metadata, Node, ObligationKind, RuleApplicability,
 };
 use std_deduce_kernel::Expr;
 use std_deduce_lang::Library;
@@ -54,6 +55,17 @@ fn session(name: &str, commands: &[String]) -> Output {
 
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The record of a rule declared without any scope.
+fn unscoped_applicability() -> Box<RuleApplicability> {
+    Box::new(RuleApplicability {
+        verdict: ApplicabilityVerdict::Unchecked,
+        basis: ApplicabilityBasis::default(),
+        reason: Explicit::some(ApplicabilityReason::new(
+            ApplicabilityReasonKind::RuleHasNoScope,
+        )),
+    })
 }
 
 fn stderr(output: &Output) -> String {
@@ -400,6 +412,8 @@ fn tampered_conclusion_or_binding_is_rejected() {
             identity: FactIdentity::UserAsserted,
             sources: Vec::new(),
             label: None,
+            occurred_at: Explicit::none(),
+            occurred_in: Explicit::none(),
         }],
         interpretations: Vec::new(),
         nodes: vec![
@@ -415,6 +429,7 @@ fn tampered_conclusion_or_binding_is_rejected() {
                     },
                 }],
                 sources: Vec::new(),
+                applicability: unscoped_applicability(),
             },
         ],
         root: Some(1),
@@ -494,7 +509,7 @@ fn verify_cert_escapes_a_read_failure_path_onto_one_line() {
 #[test]
 fn verify_cert_requires_a_loaded_environment() {
     let certificate = Certificate::from_json(
-        r#"{"format_version": 6, "environment": {"profile": null, "packs": [],
+        r#"{"format_version": 7, "environment": {"profile": null, "packs": [],
             "corpora": [], "as_of": null, "jurisdiction": null},
             "interpretations": [], "nodes": [], "root": null}"#,
     )
@@ -632,6 +647,8 @@ fn adding_a_satisfied_unless_blocker_is_rejected() {
         identity: FactIdentity::UserAsserted,
         sources: Vec::new(),
         label: Some("变异：追加已成立的阻断条件".to_owned()),
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
     });
 
     let checked = verify_cert_file("刑法第二十条-基本.std", "satisfied-blocker", &certificate);

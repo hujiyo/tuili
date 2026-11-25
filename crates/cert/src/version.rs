@@ -15,10 +15,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// conclusion. Version 6 records the enabled interpretations: a mandatory
 /// `interpretations` table (empty when none were used) sorted by id, the
 /// `interpretation_application` node, and the interpretation witness of a
-/// conflict. Older certificates are refused rather than read with guessed
-/// evidence: a proof that silently drops an interpretation step cannot be
-/// checked.
-pub const FORMAT_VERSION: u32 = 6;
+/// conflict. Version 7 records the temporal/spatial applicability of every
+/// rule application and gap candidate: the verdict, the reference dates and
+/// places, the rule's declared scope, the session fallback values actually
+/// used, the reason code and its explanation, plus each assumption's recorded
+/// `occurred_at` / `occurred_in`. Older certificates are refused rather than
+/// read with guessed evidence: a proof that silently drops an applicability
+/// judgement, or an interpretation step, cannot be checked.
+pub const FORMAT_VERSION: u32 = 7;
 
 /// A certificate format version.
 ///

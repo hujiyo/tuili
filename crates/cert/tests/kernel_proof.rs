@@ -5,8 +5,9 @@
 //! proof term has the claimed conclusion.
 
 use std_deduce_cert::{
-    check as cert_check, kernel_proof, Assumption, Binding, CertExpr, Certificate,
-    EnvironmentIdentity, FactIdentity, FormatVersion, Node,
+    check as cert_check, kernel_proof, ApplicabilityBasis, ApplicabilityReason,
+    ApplicabilityReasonKind, ApplicabilityVerdict, Assumption, Binding, CertExpr, Certificate,
+    EnvironmentIdentity, Explicit, FactIdentity, FormatVersion, Node, RuleApplicability,
 };
 use std_deduce_kernel::check::check as kernel_check;
 use std_deduce_kernel::norm::spine;
@@ -81,7 +82,21 @@ fn premise(proposition: CertExpr) -> Assumption {
         identity: FactIdentity::UserAsserted,
         sources: Vec::new(),
         label: None,
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
     }
+}
+
+/// The record of a rule declared without any scope: unchecked because there is
+/// nothing to judge, with an empty basis.
+fn unscoped_applicability() -> Box<RuleApplicability> {
+    Box::new(RuleApplicability {
+        verdict: ApplicabilityVerdict::Unchecked,
+        basis: ApplicabilityBasis::default(),
+        reason: Explicit::some(ApplicabilityReason::new(
+            ApplicabilityReasonKind::RuleHasNoScope,
+        )),
+    })
 }
 
 fn assumption_node(assumption: usize) -> Node {
@@ -110,6 +125,7 @@ fn rule_node(
         premises,
         bindings: bindings(entries),
         sources: Vec::new(),
+        applicability: unscoped_applicability(),
     }
 }
 

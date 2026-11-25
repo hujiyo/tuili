@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use std_deduce_kernel::env::escape_control;
 
+use crate::applicability::RuleApplicability;
 use crate::environment::EnvironmentIdentity;
 use crate::expr::CertExpr;
 use crate::source::Source;
@@ -44,6 +45,75 @@ pub const MAX_CERT_ASSUMPTIONS: usize = 10_000;
 /// checker's own closure would refuse to normalize.
 pub const MAX_CERT_EXPR_NODES: usize = 10_000;
 
+/// A value that is always present in JSON but may be `null`.
+///
+/// `Option<T>` cannot express that: serde's derive reads a missing `Option`
+/// field as `None`, silently turning an absent key into a statement ("no
+/// value"). This wrapper deserializes the field with `serde_json::Value`, so a
+/// missing key reaches serde's missing-field error while an explicit `null`
+/// is accepted as `None`. It is the certificate model's counterpart of
+/// [`crate::environment::ExplicitText`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Explicit<T>(Option<T>);
+
+impl<T> Explicit<T> {
+    /// The explicit `null` value.
+    pub const fn none() -> Self {
+        Explicit(None)
+    }
+
+    /// A present value.
+    pub fn some(value: T) -> Self {
+        Explicit(Some(value))
+    }
+
+    /// The value, if present.
+    pub fn as_ref(&self) -> Option<&T> {
+        self.0.as_ref()
+    }
+
+    /// Whether the value is the explicit `null`.
+    pub fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// The underlying option.
+    pub fn into_option(self) -> Option<T> {
+        self.0
+    }
+}
+
+impl<T> Default for Explicit<T> {
+    fn default() -> Self {
+        Explicit(None)
+    }
+}
+
+impl<T: Serialize> Serialize for Explicit<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.0 {
+            Some(value) => serializer.serialize_some(value),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Explicit<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Parsing through `Value` keeps the strictness: a missing struct field
+        // calls this function with serde's missing-field deserializer, whose
+        // `deserialize_any` reports the missing field instead of yielding
+        // `null`.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::Null => Ok(Explicit::none()),
+            value => T::deserialize(value)
+                .map(Explicit::some)
+                .map_err(D::Error::custom),
+        }
+    }
+}
+
 /// A proof certificate.
 ///
 /// The JSON object has exactly the fields below, in this order:
@@ -64,8 +134,8 @@ pub struct Certificate {
     pub assumptions: Vec<Assumption>,
     /// The interpretations enabled for this certificate, sorted by `id` and
     /// limited to those the derivation actually cites (an application node or
-    /// a conflict witness). Mandatory in version 6: an empty array means the
-    /// derivation used no interpretation, not that the writer forgot to say.
+    /// a conflict witness). Mandatory: an empty array means the derivation
+    /// used no interpretation, not that the writer forgot to say.
     /// [`Node::InterpretationApplication`] and
     /// [`Provenance::Interpretation`] refer to entries here by index.
     pub interpretations: Vec<Interpretation>,
@@ -178,6 +248,24 @@ impl Certificate {
             let place = format!("第 {} 条解释 `{}`", index + 1, interpretation.id);
             check_expression(&interpretation.from, &format!("{place} 的 from"))?;
             check_expression(&interpretation.to, &format!("{place} 的 to"))?;
+        }
+        // One applicability record per rule application and per gap candidate.
+        // The node bound is the certificate's own bound, so the record count
+        // is limited with the same named constant instead of an extra budget.
+        let mut applicability_records = 0usize;
+        for (index, node) in self.nodes.iter().enumerate() {
+            match node {
+                Node::RuleApplication { .. } => applicability_records += 1,
+                Node::Gap { candidates, .. } => applicability_records += candidates.len(),
+                _ => {}
+            }
+            if applicability_records > MAX_CERT_NODES {
+                return Err(format!(
+                    "证书适用性记录数量超过上限 {MAX_CERT_NODES}：\n\
+                     第 {} 个证书节点处已达 {applicability_records} 条",
+                    index + 1
+                ));
+            }
         }
         for (index, node) in self.nodes.iter().enumerate() {
             let place = format!("第 {} 个证书节点", index + 1);
@@ -321,6 +409,17 @@ pub struct Assumption {
     /// A human-readable label, for example a fact-ledger identifier.
     #[serde(default)]
     pub label: Option<String>,
+    /// The `occurred_at` the environment fact records, or an explicit `null`
+    /// when the fact records no occurrence. This is an input of the
+    /// applicability judgement: the checker aligns a rule application's
+    /// reference dates with the assumptions it consumes. A session fact
+    /// (`:given`) records no occurrence, and the query date is never used
+    /// to fill it in.
+    pub occurred_at: Explicit<String>,
+    /// The `occurred_in` the environment fact records, or an explicit `null`
+    /// when the fact records no place. A missing place is missing input, never
+    /// inferred from the rule's territory.
+    pub occurred_in: Explicit<String>,
 }
 
 /// How an interpretation moves between the two propositions it relates.
@@ -414,6 +513,14 @@ pub enum Node {
         /// Where the applied rule comes from.
         #[serde(default)]
         sources: Vec<Source>,
+        /// The temporal/spatial judgement this instance fired under: the
+        /// verdict, the event times/places it relied on, the rule's declared
+        /// scope and the session fallback values. The checker recomputes it
+        /// from the rule's environment declaration and the recorded inputs;
+        /// a missing record is a format error, not a default. Boxed because
+        /// the record is much larger than the other node variants; the JSON
+        /// shape is unchanged.
+        applicability: Box<RuleApplicability>,
     },
     /// One application of an enabled interpretation: its `from` is proved by
     /// `premise`, its `to` is the recorded conclusion.
@@ -463,6 +570,11 @@ pub struct GapCandidate {
     /// Where the candidate rule comes from.
     #[serde(default)]
     pub sources: Vec<Source>,
+    /// The rule's temporal/spatial judgement for this case, recorded so a
+    /// reader and the checker know why this candidate was excluded instead of
+    /// only what it lacks. Recomputing it uses the recorded reference inputs
+    /// and the rule's environment scope.
+    pub applicability: RuleApplicability,
 }
 
 /// Where a conflicting conclusion came from.

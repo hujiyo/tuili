@@ -3,10 +3,11 @@
 //! an identity or a resolution the certificate does not contain.
 
 use std_deduce_cert::{
-    render_narrative, Assumption, Binding, CertExpr, Certificate, Conflict, EnvironmentIdentity,
-    FactIdentity, FormatVersion, GapCandidate, Node, ObligationKind, OpenObligation,
-    PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side,
-    Source, UnresolvedReason,
+    render_narrative, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind,
+    ApplicabilityVerdict, Assumption, Binding, CertExpr, Certificate, Conflict,
+    EnvironmentIdentity, Explicit, FactIdentity, FormatVersion, GapCandidate, Node, ObligationKind,
+    OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution,
+    ResolutionBasis, RuleApplicability, Side, Source, UnresolvedReason,
 };
 
 fn constant(name: &str) -> CertExpr {
@@ -52,7 +53,25 @@ fn assumption(
         identity,
         sources,
         label: label.map(str::to_owned),
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
     }
+}
+
+/// The record of a rule declared without any scope.
+/// A gap candidate stores its record inline: the candidate list is already
+/// behind a `Vec`.
+fn unscoped_candidate_applicability() -> RuleApplicability {
+    *unscoped_applicability()
+}
+fn unscoped_applicability() -> Box<RuleApplicability> {
+    Box::new(RuleApplicability {
+        verdict: ApplicabilityVerdict::Unchecked,
+        basis: ApplicabilityBasis::default(),
+        reason: Explicit::some(ApplicabilityReason::new(
+            ApplicabilityReasonKind::RuleHasNoScope,
+        )),
+    })
 }
 
 fn binding(parameter: &str, value: CertExpr) -> Binding {
@@ -75,6 +94,7 @@ fn rule(
         premises,
         bindings,
         sources,
+        applicability: unscoped_applicability(),
     }
 }
 
@@ -259,24 +279,28 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
                     missing: vec![atom("不批准", "甲"), atom("批准", "甲")],
                     blocked_by: Vec::new(),
                     sources: vec![source("来源", "一", "", "")],
+                    applicability: unscoped_candidate_applicability(),
                 },
                 GapCandidate {
                     rule: "规则二".to_owned(),
                     missing: Vec::new(),
                     blocked_by: vec![atom("已决", "甲")],
                     sources: Vec::new(),
+                    applicability: unscoped_candidate_applicability(),
                 },
                 GapCandidate {
                     rule: "规则三".to_owned(),
                     missing: Vec::new(),
                     blocked_by: Vec::new(),
                     sources: Vec::new(),
+                    applicability: unscoped_candidate_applicability(),
                 },
                 GapCandidate {
                     rule: "规则四".to_owned(),
                     missing: Vec::new(),
                     blocked_by: vec![atom("其他", "甲")],
                     sources: Vec::new(),
+                    applicability: unscoped_candidate_applicability(),
                 },
             ],
         }],
@@ -328,6 +352,7 @@ fn an_ambiguous_blocker_is_not_attributed_to_a_fact() {
                     missing: Vec::new(),
                     blocked_by: vec![atom("已决", "甲")],
                     sources: Vec::new(),
+                    applicability: unscoped_candidate_applicability(),
                 }],
             },
         ],
@@ -356,6 +381,7 @@ fn a_duplicate_blocker_fact_is_not_attributed() {
                 missing: Vec::new(),
                 blocked_by: vec![atom("已决", "甲")],
                 sources: Vec::new(),
+                applicability: unscoped_candidate_applicability(),
             }],
         }],
         Some(0),

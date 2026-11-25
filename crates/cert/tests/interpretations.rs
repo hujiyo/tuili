@@ -1,4 +1,4 @@
-//! Certificate v6 interpretation checks, independent of the reasoner.
+//! Certificate interpretation checks, independent of the reasoner.
 //!
 //! The certificate lists the enabled interpretations it cites, a node applies
 //! one to a premise, and a conflict may name an interpretation as its witness.
@@ -7,9 +7,10 @@
 //! `cert::check` / `cert::kernel_proof` rather than trusted.
 
 use std_deduce_cert::{
-    check, kernel_proof, Assumption, CertExpr, Certificate, Conflict, EnvironmentIdentity,
-    FactIdentity, FormatVersion, Interpretation, InterpretationDirection, Metadata, Node,
-    Provenance, Resolution, Source, UnresolvedReason,
+    check, kernel_proof, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind,
+    ApplicabilityVerdict, Assumption, CertExpr, Certificate, Conflict, EnvironmentIdentity,
+    Explicit, FactIdentity, FormatVersion, Interpretation, InterpretationDirection, Metadata, Node,
+    Provenance, Resolution, RuleApplicability, Source, UnresolvedReason,
 };
 use std_deduce_kernel::env::DeclKind;
 use std_deduce_kernel::{name, Expr};
@@ -85,7 +86,20 @@ fn fact_assumption(lib: &Library, id: &str) -> Assumption {
         identity: FactIdentity::from(identity),
         sources: decl.sources.iter().map(Source::from).collect(),
         label: Some(id.to_owned()),
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
     }
+}
+
+/// The record of a rule declared without any scope.
+fn unscoped_applicability() -> Box<RuleApplicability> {
+    Box::new(RuleApplicability {
+        verdict: ApplicabilityVerdict::Unchecked,
+        basis: ApplicabilityBasis::default(),
+        reason: Explicit::some(ApplicabilityReason::new(
+            ApplicabilityReasonKind::RuleHasNoScope,
+        )),
+    })
 }
 
 fn certificate(lib: &Library) -> Certificate {
@@ -214,6 +228,8 @@ fn the_premise_must_prove_from_and_must_be_earlier() {
         identity: FactIdentity::UserAsserted,
         sources: Vec::new(),
         label: None,
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
     });
     cert.nodes = vec![
         Node::Assumption { assumption: 0 },
@@ -283,6 +299,8 @@ fn the_interpretations_table_is_sorted_by_id() {
         identity: FactIdentity::UserAsserted,
         sources: Vec::new(),
         label: None,
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
     });
     cert.nodes = vec![
         Node::Assumption { assumption: 0 },
@@ -387,6 +405,7 @@ fn a_rule_premise_cannot_be_an_interpretation_application() {
         premises: vec![1],
         bindings: Vec::new(),
         sources: rule.sources.iter().map(Source::from).collect(),
+        applicability: unscoped_applicability(),
     });
     cert.root = Some(2);
     let error = reject(&cert);

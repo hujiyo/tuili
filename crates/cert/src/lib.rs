@@ -36,14 +36,18 @@
 //!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 6. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 7. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
-//! Version 6 records the enabled interpretations: a mandatory
-//! `interpretations` table, the `interpretation_application` node and the
-//! interpretation witness of a conflict; version 5 records the fact identity
+//! Version 7 records the temporal/spatial applicability of every rule
+//! application and gap candidate (verdict, reference dates and places, rule
+//! scope, session fallback values, reason code and explanation) and each
+//! assumption's recorded `occurred_at` / `occurred_in`; version 6 records the
+//! enabled interpretations: a mandatory `interpretations` table, the
+//! `interpretation_application` node and the interpretation witness of a
+//! conflict; version 5 records the fact identity
 //! of every assumption and the reason for an unresolved claim that met a rule
 //! conclusion; version 4 adds the conflict-resolution basis and the unresolved
 //! reason; version 3 makes the environment identity mandatory; version 2 adds
@@ -86,6 +90,24 @@
 //! step; it does not inspect `unless`. The crate depends on the kernel only;
 //! it never depends on the reasoner.
 //!
+//! Version 7's applicability records are recomputed, never trusted. For a
+//! rule application the checker rebuilds the anchor from the cited nodes:
+//! a cited assumption contributes the `occurred_at` / `occurred_in` its
+//! environment fact registers (aggregated over assumptions of the same
+//! proposition), and a cited rule or interpretation conclusion contributes no
+//! occurrence. The session `:asof` and jurisdiction come from the recorded
+//! environment identity, not from the record, so a certificate cannot invent a
+//! fallback date. The rule's declared range, jurisdiction and territory, and
+//! each field's origin, are compared with the loaded rule declaration. The
+//! checker then computes the verdict, basis and reason and compares every
+//! field with the record, naming the node and field on any difference. A rule
+//! application whose verdict does not allow firing is rejected. A gap
+//! candidate's record is recomputed from its declared basis, and every
+//! recorded event time/place must be one the environment's facts register.
+//! Assumption occurrences are compared as sets with the environment's fact
+//! registrations, so a certificate cannot drop or edit them. Missing
+//! applicability fields are a format error, never a defaulted `unchecked`.
+//!
 //! Every recorded conflict resolution is checked too. A priority-based defeat
 //! must cite edges the environment really declares, in the direction of the
 //! win, with the same origin and sources, and no cited edge may lie on a
@@ -125,6 +147,7 @@
 mod closure;
 mod key;
 
+pub mod applicability;
 pub mod check;
 pub mod environment;
 pub mod expr;
@@ -136,6 +159,11 @@ pub mod render;
 pub mod source;
 pub mod version;
 
+pub use applicability::{
+    judge as judge_applicability, ApplicabilityAnchor, ApplicabilityBasis, ApplicabilityReason,
+    ApplicabilityReasonKind, ApplicabilityVerdict, CodeDimension, DateField, DatedEvidence,
+    PlaceEvidence, RuleApplicability, ScopeEvidence, ScopeOriginRecord, SessionEvidence,
+};
 pub use check::{check, CheckError, CheckReport};
 pub use environment::{
     CorpusRecord, EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, ExplicitText,
@@ -144,11 +172,11 @@ pub use environment::{
 pub use expr::{CertExpr, ExprEncodeError};
 pub use key::expression_key;
 pub use model::{
-    Assumption, Binding, Certificate, Conflict, FactIdentity, GapCandidate, Interpretation,
-    InterpretationDirection, Metadata, Node, NodeId, ObligationKind, OpenObligation,
-    PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side,
-    UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES, MAX_CERT_JSON_BYTES,
-    MAX_CERT_NODES,
+    Assumption, Binding, Certificate, Conflict, Explicit, FactIdentity, GapCandidate,
+    Interpretation, InterpretationDirection, Metadata, Node, NodeId, ObligationKind,
+    OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution,
+    ResolutionBasis, Side, UnresolvedReason, MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES,
+    MAX_CERT_JSON_BYTES, MAX_CERT_NODES,
 };
 pub use narrative::{render_narrative, render_narrative_with_context};
 pub use open::{
