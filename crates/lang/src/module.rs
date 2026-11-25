@@ -544,6 +544,17 @@ impl Library {
                         }
                     }
 
+                    // Pleading clauses on the exceptions are vacuous without an
+                    // exception to plead: refuse the declaration instead of
+                    // storing metadata that can never be read.
+                    if unlesses.is_empty()
+                        && (exception_burden.is_some() || exception_standard.is_some())
+                    {
+                        return Err(LoadError::new(format!(
+                            "`rule {n}`：`exception_burden`/`exception_standard` 只对带 `unless` 的规则有意义，该规则没有例外"
+                        )));
+                    }
+
                     let rdecl = std_deduce_kernel::RuleDecl {
                         params: rule_params,
                         premises: rule_premises,

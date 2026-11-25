@@ -176,6 +176,7 @@ fn the_loader_carries_the_declared_pleading_into_the_rule() {
         &source_with(concat!(
             "  burden respondent\n",
             "  standard clear_and_convincing\n",
+            "  unless 免责 p\n",
             "  exception_burden claimant\n",
             "  exception_standard beyond_reasonable_doubt\n",
         )),
@@ -310,4 +311,32 @@ fn a_repeated_clause_is_rejected_at_its_own_keyword() {
             "the duplicate must be reported at the second `{field}`: {error}"
         );
     }
+}
+
+#[test]
+fn exception_clauses_without_any_unless_are_rejected_at_load() {
+    for extra in [
+        "  exception_burden respondent\n",
+        "  exception_standard clear_and_convincing\n",
+    ] {
+        let error = Library::new()
+            .load("test.std", &source_with(extra))
+            .expect_err("an exception clause without an exception must be refused")
+            .to_string();
+        assert!(
+            error.contains("`rule 规则`") && error.contains("unless"),
+            "the error must name the rule and the missing exception: {error}"
+        );
+    }
+}
+
+#[test]
+fn exception_clauses_load_when_the_rule_has_unless() {
+    let mut lib = Library::new();
+    lib.load(
+        "test.std",
+        &source_with("  unless 免责 p\n  exception_burden respondent\n"),
+    )
+    .expect("an exception clause on a rule with `unless` must load");
+    assert_eq!(loaded_pleading(&lib).2, Some(Burden::Respondent));
 }
