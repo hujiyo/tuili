@@ -41,10 +41,12 @@ pub const MAX_CERT_ASSUMPTIONS: usize = 10_000;
 ///
 /// A conclusion can be derived by several rules (or by a rule instance with
 /// different bindings). The reasoner keeps every distinct witness up to this
-/// bound and marks truncation beyond it; the certificate format cannot carry
-/// more than this per conclusion. The bound keeps the proof graph finite and
-/// readable: a legal rule chain rarely has more than a handful of independent
-/// arguments, while a pathological rule set must not grow without limit.
+/// fixed bound and marks truncation beyond it; the certificate format cannot
+/// carry more than this per conclusion. The bound is intentionally a constant,
+/// not a caller option: the checker's auditable boundary must not drift with
+/// the caller. It keeps the proof graph finite and readable: a legal rule chain
+/// rarely has more than a handful of independent arguments, while a
+/// pathological rule set must not grow without limit.
 pub const MAX_CERT_WITNESSES_PER_CONCLUSION: usize = 8;
 
 /// The largest number of expression nodes in one certificate term.
@@ -443,7 +445,10 @@ pub struct Alternative {
     pub witnesses: Vec<NodeId>,
     /// Whether more independent witnesses exist than the record can carry.
     /// A truncated group has exactly [`MAX_CERT_WITNESSES_PER_CONCLUSION`]
-    /// witnesses: the limit is visible in the certificate, never a silent cut.
+    /// witnesses; the flag says that at least one more argument exists, never
+    /// a silent cut. The exact number of omitted arguments is not recorded:
+    /// the checker does not re-run the reasoner, so an omitted count could not
+    /// be verified and is deliberately left out.
     pub truncated: bool,
 }
 

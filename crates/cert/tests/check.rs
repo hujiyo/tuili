@@ -5,11 +5,12 @@
 //! certificate: the checker is tested on its own contract.
 
 use std_deduce_cert::{
-    check, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind, ApplicabilityVerdict,
-    Assumption, Binding, CertExpr, Certificate, CheckError, CheckReport, Conflict,
-    EnvironmentIdentity, Explicit, FactIdentity, FormatVersion, Node, ObligationKind,
+    check, Alternative, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind,
+    ApplicabilityVerdict, Assumption, Binding, CertExpr, Certificate, CheckError, CheckReport,
+    Conflict, EnvironmentIdentity, Explicit, FactIdentity, FormatVersion, Node, ObligationKind,
     OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance, Resolution,
     ResolutionBasis, RuleApplicability, Side, Source, UnresolvedReason,
+    MAX_CERT_WITNESSES_PER_CONCLUSION,
 };
 use std_deduce_kernel::Env;
 use std_deduce_lang::Library;
@@ -1211,6 +1212,46 @@ fn legal_certificate_passes() {
             priority_edges_checked: 0,
             nodes_checked: 2,
         }
+    );
+}
+
+#[test]
+fn a_non_truncated_witness_group_may_not_exceed_the_bound() {
+    let mut cert = legal_certificate();
+    cert.alternatives = vec![Alternative {
+        proposition: atom("违法", "张三"),
+        witnesses: vec![1; MAX_CERT_WITNESSES_PER_CONCLUSION + 1],
+        truncated: false,
+    }];
+    let error = reject(&cert);
+    assert!(
+        error.to_string().contains("见证数量超过"),
+        "a group not marked truncated must stay within the bound: {error}"
+    );
+
+    // The same overlong list marked as truncated is not accepted either: a
+    // truncated group must hold exactly the bound, so the flag cannot excuse an
+    // overlong record.
+    cert.alternatives[0].truncated = true;
+    let error = reject(&cert);
+    assert!(
+        error.to_string().contains("见证数量超过"),
+        "the format bound applies before the truncation flag: {error}"
+    );
+}
+
+#[test]
+fn a_truncated_witness_group_must_hold_exactly_the_bound() {
+    let mut cert = legal_certificate();
+    cert.alternatives = vec![Alternative {
+        proposition: atom("违法", "张三"),
+        witnesses: vec![1],
+        truncated: true,
+    }];
+    let error = reject(&cert);
+    assert!(
+        error.to_string().contains("截断"),
+        "a truncated group with fewer than the bound witnesses is forged: {error}"
     );
 }
 

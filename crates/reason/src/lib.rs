@@ -153,10 +153,11 @@
 //! conclusion keeps at most
 //! [`std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION`] witnesses; beyond it
 //! the group is marked truncated. Witnesses sort by rule name and binding
-//! structure (universal instances after rules), so repeated generation of the
-//! same case is byte-identical. Keeping them changes neither the fixed point
-//! nor conflict adjudication: the same rules win and lose, but both paths stay
-//! visible.
+//! structure (universal instances after rules); the first in that order is the
+//! main path shown by `root`, which is deterministic but carries no claim of
+//! being the most credible argument. Repeated generation of the same case is
+//! byte-identical. Keeping them changes neither the fixed point nor conflict
+//! adjudication: the same rules win and lose, but both paths stay visible.
 //!
 //! ## Open concepts are not silently booleanised
 //!
@@ -2364,25 +2365,15 @@ impl<'a> Reasoner<'a> {
                     i += 1;
                     continue;
                 }
-                // The first candidate in rule-declaration order (and, within
-                // one rule, the first matching instance) is the main witness:
-                // it is the node the rest of the proof tree refers to. It is
-                // kept even when the sorted witness list is truncated.
-                let primary = candidates[0].identity_key(self.env);
+                // Witnesses are ordered by rule name and binding structure.
+                // The first in that order is the main witness: it is the node
+                // the rest of the proof tree refers to. The order is deterministic
+                // but says nothing about relative strength.
                 let mut sorted = candidates;
                 sorted.sort_by_key(|candidate| candidate.identity_key(self.env));
                 let truncated = sorted.len() > std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION;
-                while sorted.len() > std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION {
-                    let Some(last_other) = sorted
-                        .iter()
-                        .rposition(|candidate| candidate.identity_key(self.env) != primary)
-                    else {
-                        break;
-                    };
-                    sorted.remove(last_other);
-                }
+                sorted.truncate(std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION);
                 let mut witnesses = Vec::with_capacity(sorted.len());
-                let mut main_id = None;
                 let mut main_prop = None;
                 for candidate in &sorted {
                     let id = nodes.len();
@@ -2418,13 +2409,18 @@ impl<'a> Reasoner<'a> {
                             conclusion
                         }
                     };
-                    if candidate.identity_key(self.env) == primary {
-                        main_id = Some(id);
+                    if main_prop.is_none() {
                         main_prop = Some(conclusion);
                     }
                     witnesses.push(id);
                 }
-                let (Some(main_id), Some(main_prop)) = (main_id, main_prop) else {
+                let Some(main_prop) = main_prop else {
+                    return Err(format!(
+                        "内部状态错误：结论「{}」没有可用的见证",
+                        print_expr(&facts[&target])
+                    ));
+                };
+                let Some(main_id) = witnesses.first().copied() else {
                     return Err(format!(
                         "内部状态错误：结论「{}」的主见证没有进入见证列表",
                         print_expr(&facts[&target])

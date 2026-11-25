@@ -46,7 +46,8 @@
 //!   same universal fact) with the same binding values twice, because that is
 //!   one argument, not two. Binding values are compared by the collision-free
 //!   structural key of their normal forms. A group marked as truncated must
-//!   record exactly the per-conclusion bound. The root, when it is a derivation
+//!   record exactly the per-conclusion bound; a group not marked truncated
+//!   must stay within the bound. The root, when it is a derivation
 //!   step, must appear among the witnesses of its own conclusion. Groups are
 //!   optional for a hand-written certificate, but a listed group is
 //!   authoritative and an inconsistent one is rejected.
