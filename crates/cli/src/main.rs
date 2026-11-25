@@ -779,7 +779,7 @@ impl Session {
                             DeclKind::Fact { .. } => "fact ",
                             DeclKind::Def { .. } => "def  ",
                             DeclKind::Rule(_) => "rule ",
-                            DeclKind::Interpretation(_) => "interp",
+                            DeclKind::Interpretation(_) => "interpret",
                             DeclKind::Contrary { .. } => "contr ",
                             DeclKind::Unique { .. } => "uniq  ",
                             DeclKind::Priority { .. } => "prior ",
@@ -790,6 +790,26 @@ impl Session {
                         let identity = match &decl.kind {
                             DeclKind::Fact { identity } => {
                                 format!("  〔{}〕", identity.label_zh())
+                            }
+                            _ => String::new(),
+                        };
+                        // An interpretation is inert, so its direction and
+                        // provenance are the only things worth showing: the
+                        // direction is a declared choice, and the sources use
+                        // the same escaped one-line rendering as every other
+                        // declaration.
+                        let extra = match &decl.kind {
+                            DeclKind::Interpretation(interpretation) => {
+                                let sources = interpretation
+                                    .sources
+                                    .iter()
+                                    .map(|source| source.one_line())
+                                    .collect::<Vec<_>>()
+                                    .join("；");
+                                format!(
+                                    " 〔方向 {}〕〔来源 {sources}〕",
+                                    interpretation.direction.keyword()
+                                )
                             }
                             _ => String::new(),
                         };
@@ -818,7 +838,7 @@ impl Session {
                         };
                         writeln!(
                             out,
-                            "  {kind} {name} : {}{identity}{namespace}",
+                            "  {kind} {name} : {}{identity}{extra}{namespace}",
                             print_expr(&decl.ty)
                         )
                         .ok();
@@ -2127,7 +2147,7 @@ fn check_closed_case_file(
     Err(std_deduce_lang::LoadError::new(format!(
         "封闭环境（--closed-env）拒绝案件文件声明：{listed}。\
          案件文件只能 import 法律包并使用包内的 sort/pred/obj 与规则；\
-         确需案件本地规则时加 --allow-case-rules（证书会把它标记为本地扩展）。"
+         确需案件本地声明时加 --allow-case-rules（证书会把它标记为本地扩展）。"
     ))
     .render(path))
 }
@@ -2144,6 +2164,7 @@ fn case_declaration(item: &Item) -> Option<String> {
         Item::Pred { name, .. } => Some(format!("pred {name}")),
         Item::Def { name, .. } => Some(format!("def {name}")),
         Item::Rule { name, .. } => Some(format!("rule {name}")),
+        Item::Interpretation { name, .. } => Some(format!("interpret {name}")),
         Item::Contrary { left, right, .. } => Some(format!("contrary {left} {right}")),
         Item::Unique { pred, index, .. } => Some(format!("unique {pred} {index}")),
         _ => None,
@@ -2220,13 +2241,12 @@ fn record_case_extensions(
             DeclKind::Pred => "pred",
             DeclKind::Def { .. } => "def",
             DeclKind::Rule(_) => "rule",
+            DeclKind::Interpretation(_) => "interpret",
             DeclKind::Contrary { .. } => "contrary",
             DeclKind::Unique { .. } => "unique",
-            DeclKind::Obj
-            | DeclKind::Axiom
-            | DeclKind::Fact { .. }
-            | DeclKind::Interpretation(_)
-            | DeclKind::Priority { .. } => continue,
+            DeclKind::Obj | DeclKind::Axiom | DeclKind::Fact { .. } | DeclKind::Priority { .. } => {
+                continue
+            }
         };
         extensions.insert(name, label);
     }

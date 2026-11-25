@@ -163,8 +163,8 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std
 
 | 命令 | 作用 |
 |---|---|
-| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则 |
-| `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
+| `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则 |
+| `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签；解释显示为 `interpret` 并附方向与来源摘要（`〔方向 …〕〔来源 …〕`）。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
 | `:given <命题>` | 以「用户陈述」身份手工登记一条事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示 |
 | `:fact [list]` / `:fact show <命题>` / `:fact add <命题>` / `:fact assumed <命题>` / `:fact disputed <命题>` | 查看和登记带身份的事实。`list` 列出账本里所有事实，每行是 `身份标签  命题  [名称]  ← 第一条来源`，争议事实注明“争议事实，不参与推导”；`show` 按内核定义等价查找并打印身份、名称、命题与全部来源，找不到时报“没有登记为事实的命题”；`add` / `assumed` / `disputed` 分别以用户陈述、分析假设、对方争议登记本次会话的事实（来源「用户输入交互会话」，名称 `事实N`），争议事实不参与推导。`verified` / `stipulated` 只能在案件文件里随 `source` 声明，交互命令拒绝 |
 | `:why <命题>` | 先由推理结果生成证书，从证书渲染并打印推导树，再用 `cert::check` 与 `cert::kernel_proof` 复核同一份证书；冲突未决时打印两条推导，左右行带事实身份，并说明原因（没有声明、声明了但不足以裁决时逐条列出声明与出处、见证无法重建、两侧都是严格事实、两侧都只是主张；主张对规则时点名主张侧命题与身份）；已裁决时打印胜出方（带身份）、被否决方与裁决依据（严格事实优先于可废止规则结论或未经证明的主张，或哪条边、谁声明、出处）。当前环境有优先级环时先打印一行环警告。证书若应用了案件本地规则，会在未决义务汇总前打印 `  本地扩展：…`，按未决义务退出 `1`，不打印 `推导已通过独立校验。` |
@@ -617,13 +617,13 @@ cn.constitution 0.4.0  CN/CN  1982-12-04..未注明  official（本项目审核�
 `axiom` 的类型必须真的是命题（如 `cn.constitution.中国国籍 张三`），`axiom P : Prop`、
 `axiom P : Type`、函数类型都不是命题，拒绝。
 
-默认拒绝案件自己声明 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`，也拒绝上面这些违规
+默认拒绝案件自己声明 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret`，也拒绝上面这些违规
 `obj`/`axiom`；后两类会带原因后缀。错误一次列出最多 8 项，其余写“等 N 项”，并提示
 `--allow-case-rules`。例如：
 
 ```text
-examples/宪法案例-孙志刚.std: error: 封闭环境（--closed-env）拒绝案件文件声明：`sort 法源`、`pred 缺暂住证`、… 等 14 项。案件文件只能 import 法律包并使用包内的 sort/pred/obj 与规则；确需案件本地规则时加 --allow-case-rules（证书会把它标记为本地扩展）。
-case.std: error: 封闭环境（--closed-env）拒绝案件文件声明：`obj 恶意（类型必须是已加载法律包里的 sort）`、`axiom 法律命题（类型必须是命题，不能用 Prop/Type/函数类型造新概念）`。案件文件只能 import 法律包并使用包内的 sort/pred/obj 与规则；确需案件本地规则时加 --allow-case-rules（证书会把它标记为本地扩展）。
+examples/宪法案例-孙志刚.std: error: 封闭环境（--closed-env）拒绝案件文件声明：`sort 法源`、`pred 缺暂住证`、… 等 14 项。案件文件只能 import 法律包并使用包内的 sort/pred/obj 与规则；确需案件本地声明时加 --allow-case-rules（证书会把它标记为本地扩展）。
+case.std: error: 封闭环境（--closed-env）拒绝案件文件声明：`obj 恶意（类型必须是已加载法律包里的 sort）`、`axiom 法律命题（类型必须是命题，不能用 Prop/Type/函数类型造新概念）`。案件文件只能 import 法律包并使用包内的 sort/pred/obj 与规则；确需案件本地声明时加 --allow-case-rules（证书会把它标记为本地扩展）。
 ```
 
 错误文案里的“证书会把它标记”对应 `:inspect` 的 ` [案件扩展]`；证书的 `local-extension`
@@ -646,7 +646,7 @@ module.std: error: 封闭环境（--closed-env）只接受案件文件（不带 
 `--allow-case-rules` 下这些声明和异常 `obj`/`axiom` 都可以加载。`:inspect` 的标记范围是：
 正常的 `obj`（类型是包内 sort）和正常事实（类型是命题、且不引用任何案件扩展）不标；类型不是
 包内 sort 的 `obj`、只声明常量的 `axiom`（类型是 `Prop`/`Type`/函数类型等非命题）、引用了案件
-扩展的命题事实，以及 `sort`/`pred`/`def`/`rule`/`contrary`/`unique` 都标 ` [案件扩展]`。例如：
+扩展的命题事实，以及 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`interpret` 都标 ` [案件扩展]`。例如：
 
 ```text
 obj   甲 : cn.constitution.人
@@ -657,6 +657,7 @@ fact  甲有中国国籍 : cn.constitution.中国国籍 甲  〔用户陈述〕
 axiom 法律命题 : Prop [案件扩展]
 fact  恶意命题 : 恶意 甲  〔用户陈述〕 [案件扩展]
 axiom 函数命题 : cn.constitution.人 → Prop [案件扩展]
+interpret 恶意解释 : 恶意 甲 → 恶意 甲 〔方向 literal〕〔来源 「测试第一条」（1）〕 [案件扩展]
 ```
 
 导出证书时，只有推导实际应用了案件规则，才在 `open_obligations` 追加一条 `local-extension`；
@@ -697,6 +698,35 @@ cargo run -q -p std-deduce-cli -- --closed-env --allow-case-rules examples/宪�
 # 只写事实的案件：封闭环境照常证明
 cargo run -q -p std-deduce-cli -- --closed-env examples/宪法案例-齐玉苓.std ':why cn.constitution.受教育权 齐玉苓'
 ```
+
+### 解释（`interpret`）：可加载，但不启用
+
+解释把一个命题读成另一个命题，并必须由一个**命名的方向**和**可核对的出处**来支撑：
+
+```text
+interpret 住宅解释 : 非法搜查 张三 甲宅 → 侵犯 张三 甲宅
+  direction narrow
+  source text "中华人民共和国宪法" locator "第三十九条" version "2018"
+```
+
+- 头行只写 `interpret <id> : <from> → <to>`。`from`/`to` 都按**应用项**解析：
+  任何一边本身是箭头类型时必须加括号，例如 `interpret i : P → (Q → P)`。
+- `direction` 必须另起一行且必填，没有默认：`literal`（字面）、`expand`（扩展）、
+  `narrow`（限缩）、`analogy`（类推）。本步只记录这个选择，不给它任何推理语义。
+- `source` 至少一条，也必须另起一行；每条来源的 `text`、`locator`、`version` 都必须非空。
+  头行里夹写 `direction` / `source` 会被拒绝并提示“必须另起一行”。
+- 加载期两个命题都必须是命题（`Sort 0`）；概念到概念的解释（`sort` 之间）明确拒绝，留给后续分支。
+  失败信息指出解释 id 与原因。
+- 解释作为**不透明常量**登记进环境，类型是 `from → to`，方向与来源随声明保存；它不产生事实、
+  不产生规则、不改变任何推导或证书。
+- `:inspect` 显示 `interpret <id> : from → to 〔方向 …〕〔来源 locator/version〕`，来源按既有的
+  转义与单行渲染规则输出；包内的解释标 `[name@version]`，封闭环境里案件文件声明的解释标
+  ` [案件扩展]`。
+- 封闭环境：案件文件写解释默认拒绝，`--allow-case-rules` 才允许；带 `namespace` 的包内解释
+  可正常 `import` 并加载。
+
+**当前边界**：`--interpret` 启用、解释在推理中的应用、证书里的解释节点、解释候选与 `open`
+都还没有实现；加载解释不代表系统已经“支持解释”，也不改变任何结论。
 
 ### 跨包冲突与优先级出处
 
@@ -1041,6 +1071,11 @@ rule 住宅不受侵犯 :
          url "https://www.npc.gov.cn/..." retrieved_at "2026-11-21"
          hash "sha256:..." note "..."
 
+interpret 住宅解释 : 非法搜查 张三 甲宅 → 侵犯 张三 甲宅
+  direction narrow                   -- 必填且另起一行：literal / expand / narrow / analogy
+  source text "宪法" locator "第三十九条" version "2018"
+                                     -- 至少一条、另起一行；text/locator/version 都非空
+
 contrary 批准 不批准               -- 声明的互补谓词：同一组参数不能同时成立
 unique 应适用 1                    -- 第 1 个参数单值：同一案件只能适用一条规范
 
@@ -1077,7 +1112,9 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 - 类型是命题的 `axiom` 以事实身份进入账本：显式写 `identity <身份>`，或按文件取默认值（案件文件 `user_asserted`、带 namespace 的模块 `assumed`）；`verified` / `stipulated` 永不默认。类型不是命题的 `axiom` 声明的是常量，不能带身份。五种身份的关键字与中文标签是 `verified` / 法院查明、`user_asserted` / 用户陈述、`assumed` / 分析假设、`disputed` / 对方争议、`stipulated` / 双方无争议；`disputed` 不参与推导，其余身份按严格事实与主张两类参与裁决，详见「事实身份」。
 - `sort` / `pred` / `obj` / `def` 豁免：类型、词汇与定义不是断言，其来源由法律包清单与审计层承担。
 - `contrary` / `unique` 豁免：冲突与唯一性声明不是事实断言，来源核验留给审计层。
-- `interpret` 可以解析，但加载期显式拒绝：解释语义尚未实现（M2-8），推理器不消费解释。
+- `interpret` 必须有另起一行的 `direction`（literal / expand / narrow / analogy，无默认）与至少一条
+  另起一行的 `source`，来源的 `text`、`locator`、`version` 都非空；`from`/`to` 必须是命题（`Sort 0`），
+  概念到概念的解释明确拒绝。加载后它是不透明常量，不进入推理，也不改变证书。
 
 ## 架构与职责边界
 
@@ -1088,6 +1125,7 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
   推导由推理器按自己的语义产生；把证书的单调骨架翻译成证明项、再交给内核检查，
   是 `crates/cert::kernel_proof` 的职责。
 - **`crates/lang`**：词法、语法、精化、理论文件加载。**不可信**——它产出的每个项都会被内核重新检查。
+  `interpret` 精化为不透明常量（类型 `from → to`），方向与出处随声明保存；本步不产生任何推理行为。
 - **`crates/reason`**：可废止前向链、推导树、缺口诊断，以及推导到证书的转换。
   内部校验器 `verify` 从**引用的前提**重建规则实例（前提决定实例，结论必须由它推出），
   并拒绝以下情形：前提数目不符、前提不是本规则该位置的实例、参数未被任何前提约束、
@@ -1280,6 +1318,10 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 - **时间和地域不是一等公民。** `source` 里有 `effective` / `jurisdiction` / `retrieved_at` 字段，
   证书环境身份也能记录 `--as-of` / `--jurisdiction`，但它们都只是记录：查询还没有"在 T 时刻""在 X 地"
   这样的参数，推理器也不按基准日或管辖筛选规则，不检查案件发生地或时间。事实本身没有发生时间、发生地点。
+- **解释只是登记，不是启发。** `interpret` 已能声明、装载并在 `:inspect` 中查看，但方向
+  （literal / expand / narrow / analogy）只是被保存的元数据：解释不会改写前提、不会产生候选、
+  不进入推导树，也不写进证书。`--interpret` 启用、推理应用、解释节点与 `open` 都尚未实现；
+  加载解释本身不改变任何结论。
 
 ### 宇宙：Prop 不可预测，Type 层可预测
 
@@ -1312,9 +1354,9 @@ pred cn.criminal.盗窃 : cn.constitution.人 → Prop
 
 ### 其余已确认缺陷
 
-- **`interpret` 只有语法，没有语义。** 解析器能读 `interpret 名称 : from → to`，但加载期
-  显式拒绝，错误说明“解释语义尚未实现（M2-8），推理器不消费解释”。`Env::interpretations()`
-  没有调用点，M2-8 实现解释语义后再放开加载。
+- **`interpret` 有声明与装载，没有推理语义。** `interpret 名称 : from → to` 必须带 `direction` 与
+  `source`，加载为不透明常量并能在 `:inspect` 中看到；但它不产生事实、规则或推导，也不进入证书。
+  `--interpret` 启用、推理应用、解释节点与解释候选都还没实现；详见「解释（`interpret`）：可加载，但不启用」。
 - **规则参数必须被前提约束。** 出现在结论却没有出现在任何前提里的参数，
   加载时即被拒绝——否则实例化后结论会是 `?x`，那是一个不闭合的洞。
   代价是完全没有前提的规则暂时写不了；「凡公民皆有 X」现在可以写成
@@ -1359,7 +1401,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 879 个：kernel 24、lang 119、reason 65、cert 196、cli 311、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 899 个：kernel 24、lang 133、reason 65、cert 196、cli 317、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（24）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -1395,7 +1437,13 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   模块声明前缀与空段、未限定类型/结论/unless/`defeated_by`/`prefer`/`contrary`/`unique`/解释/`def`
   体/`obj`/`axiom`/`#check`/`#show` 的拒绝、局部 binder 豁免；两模块同名后缀与加载顺序无关；
   案件文件不能声明带点名字但仍可引用限定名；同名 theory 的 namespace 冲突；`defeated_by`/`prefer`
-  目标必须存在且是规则并允许同文件前向引用；`interpret` 可解析但加载期拒绝；`LoadReport` 不含 namespace。
+  目标必须存在且是规则并允许同文件前向引用；解释按同一命名规则装载；`LoadReport` 不含 namespace。
+- `crates/lang/tests/interpretation.rs`（14）：`interpret` 的语法与装载——完整声明解析成
+  `Item::Interpretation`（from/to 都是应用项）、装载为不透明常量和 `from → to` 类型（from/to 顺序与
+  声明级 sources 都逐字段核对），方向与首条来源保存且不产生规则/事实；四个方向关键字逐个保留；
+  缺 direction、缺 source、头行混写 direction/source、未加括号的箭头、概念到概念/非命题一侧、
+  来源 `text`/`locator`/`version` 为空或空白、未知方向、重复 direction、重复 id 都拒绝且错误指出
+  解释 id；缺 from/to 组件的解析错误也带 id 与失败侧；案件文件可声明解释。
 - `crates/lang/tests/priority.rs`（18）：顶层 `priority` 与跨包边界——模块声明加载后记录
   winner/loser/`declared_in` 与全部出处，加载报告写表面声明；解析器接受一条声明带多条出处，
   也接受暂时没有出处的声明（加载期才拒绝），缺 `over` 与未限定名报解析错误；
@@ -1537,6 +1585,11 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 - `crates/cli/tests/namespace.rs`（4）：模块与案件文件的端到端——`:inspect` 只给 namespaced 声明追加
   `[ns]` 后缀；限定名 `:why` 通过证书复核；`a` 的事实不满足 `b` 的目标；交换两个模块的加载顺序后
   `:why` / `:cert` 结果一致；模块内未限定引用加载失败。
+- `crates/cli/tests/interpretation.rs`（6）：`:inspect` 显示 `interpret` 的方向与来源摘要并保留全部
+  来源字段、来源里的换行/双向覆盖字符被转义、模块解释标 `[ns]`；封闭环境默认拒绝案件解释并提示
+  `--allow-case-rules`，允许后标 `[案件扩展]`；临时包里的解释经 `import` 加载并标
+  `[pkg@版本]`；惰性用例不含任何规则：`:why` / `:gap` 都以缺口退出 `1`，`:cert` 的 JSON 根是缺口
+  节点、没有解释名，解释不进推导树也不作为缺口候选。
 - `crates/cli/tests/imports.rs`（31）：注册表导入端到端——临时 `lawpacks` + `std.lock` 后案件
   `import` 一个包并 `:why`；无 import 时没有注册表也能加载；缺锁、哈希不符（两个包的错误都列出）、
   锁缺包/多包、版本不符；坏清单、重复包名、重复 namespace、缺包；两个包同名后缀的限定名各自解析；

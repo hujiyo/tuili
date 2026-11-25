@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use std_deduce_kernel::FactIdentity;
+use std_deduce_kernel::{FactIdentity, InterpretationDirection};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
@@ -91,11 +91,14 @@ pub enum Item {
         defeaters: Vec<Defeater>,
         sources: Vec<SourceSpec>,
     },
-    /// `interpret 解释A : 概念 -> 概念`
+    /// `interpret 解释A : P → Q` followed by a required `direction` line and
+    /// at least one `source` line. Both sides must be propositions; the
+    /// declaration is recorded as an opaque, inert constant.
     Interpretation {
         name: String,
         from: Term,
         to: Term,
+        direction: InterpretationDirection,
         sources: Vec<SourceSpec>,
     },
     /// `contrary 该批准 不该批准` — a declared incompatibility between two

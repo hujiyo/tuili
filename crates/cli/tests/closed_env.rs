@@ -202,6 +202,11 @@ fn closed_env_rejects_every_case_declaration_kind() {
     contrary.push_str("pred 恶意右 : cn.constitution.人 → Prop\ncontrary 恶意左 恶意右\n");
     let mut unique = String::from("pred 恶意应适用 : cn.constitution.人 → Prop\n");
     unique.push_str("unique 恶意应适用 1\n");
+    let mut interpretation = String::from("obj 张三 : cn.constitution.人\n");
+    interpretation.push_str(
+        "interpret 恶意解释 : cn.constitution.中国国籍 张三 → cn.constitution.公民 张三\n\
+         \x20 direction literal\n  source text \"测试\" locator \"一\" version \"2020\"\n",
+    );
 
     let cases = [
         ("sort", "sort 恶意类型\n".to_owned()),
@@ -213,6 +218,7 @@ fn closed_env_rejects_every_case_declaration_kind() {
         ("rule", rule),
         ("contrary", contrary),
         ("unique", unique),
+        ("interpret", interpretation),
     ];
     for (kind, declarations) in cases {
         let temp = TempDir::new(&format!("reject-{kind}"));
