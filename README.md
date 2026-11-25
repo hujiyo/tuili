@@ -1337,7 +1337,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 848 个：kernel 24、lang 119、reason 65、cert 174、cli 302、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 849 个：kernel 24、lang 119、reason 65、cert 175、cli 302、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（24）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -1642,10 +1642,10 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   超长标识符报长度上限（含边界）；未闭合字符串与尾随反斜杠报在开引号位置；裸控制字符在源码里
   和字符串里分别被拒并转义；无换行的行注释是完整注释；规则参数与前提合计超限报错（含混合边界）；
   普通嵌套、应用与规则仍解析。
-- `crates/cert/tests/limits.rs`（13）：证书 JSON 边界——v5 夹具仍能解析；缺字段/错类型报错并指出字段；
+- `crates/cert/tests/limits.rs`（14）：证书 JSON 边界——v5 夹具仍能解析；缺字段/错类型报错并指出字段；
   `NaN` 与 5000 层嵌套表达式在反序列化阶段被拒（不栈溢出）；超过 8 MiB 的文档在解析前被拒；
-  节点/假设数量与单表达式节点数在恰好上限时接受、超一个即拒绝并报上限；超限证书不能序列化；
-  根索引越界由检查器报错。
+  节点/假设数量在恰好上限时接受、超一个即拒绝；表达式是二叉树、节点数总是奇数，最大可接受 9999 个
+  节点，10001 个即拒绝并报上限；超限证书不能序列化；根索引越界由检查器报错。
 - `crates/reason/tests/matching.rs`（2）：规则匹配的有界对抗形状——32 个变量、每个前提只命中一条
   事实的规则能推导并通过独立校验；40 层嵌套的 ground 项整体绑定到变量、结论保留完整结构并通过
   独立校验。

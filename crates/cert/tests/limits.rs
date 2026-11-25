@@ -186,6 +186,15 @@ fn a_certificate_over_the_node_limit_is_rejected() {
 }
 
 #[test]
+fn a_certificate_at_the_assumption_limit_is_accepted() {
+    let assumptions: Vec<Value> = (0..MAX_CERT_ASSUMPTIONS)
+        .map(|_| self_asserted_assumption())
+        .collect();
+    let text = certificate_json(json!(assumptions), json!([]), Value::Null);
+    Certificate::from_json(&text).expect("exactly the assumption limit must still parse");
+}
+
+#[test]
 fn a_certificate_over_the_assumption_limit_is_rejected() {
     let assumptions: Vec<Value> = (0..MAX_CERT_ASSUMPTIONS + 1)
         .map(|_| self_asserted_assumption())
@@ -199,15 +208,18 @@ fn a_certificate_over_the_assumption_limit_is_rejected() {
 }
 
 #[test]
-fn an_expression_at_the_node_limit_is_accepted() {
-    // `2 * leaves - 1` nodes, kept just under the bound.
+fn the_largest_expression_within_the_node_limit_is_accepted() {
+    // A certificate expression is a binary tree, so its node count is always
+    // odd: the largest count that fits under the bound is `2 * leaves - 1`
+    // with `leaves = MAX / 2` leaves, i.e. one node below the bound.
     let expression = application_tree(MAX_CERT_EXPR_NODES / 2);
     let nodes = json!([{
         "kind": "gap",
         "proposition": expression
     }]);
     let text = certificate_json(json!([]), nodes, Value::Null);
-    Certificate::from_json(&text).expect("exactly the expression limit must still parse");
+    Certificate::from_json(&text)
+        .expect("the largest odd expression under the limit must still parse");
 }
 
 #[test]

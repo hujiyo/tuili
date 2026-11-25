@@ -8,6 +8,8 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
+use std_deduce_kernel::env::escape_control;
+
 use crate::environment::EnvironmentIdentity;
 use crate::expr::CertExpr;
 use crate::source::Source;
@@ -78,9 +80,11 @@ pub struct Certificate {
 impl Certificate {
     /// Serialize as compact JSON.
     ///
-    /// The certificate's own resource bounds are checked first, so this
-    /// function never produces JSON that [`Certificate::from_json`] would
-    /// refuse.
+    /// The certificate's own structural bounds are checked first, so the JSON
+    /// it produces stays within the node, assumption and expression limits that
+    /// [`Certificate::from_json`] enforces. Environment identity checks are not
+    /// repeated here: they run on the way in, and an in-memory environment
+    /// record can be built by hand through the public fields.
     pub fn to_json(&self) -> serde_json::Result<String> {
         self.check_limits().map_err(serde_json::Error::custom)?;
         let json = serde_json::to_string(self)?;
@@ -175,7 +179,10 @@ impl Certificate {
                     for binding in bindings {
                         check_expression(
                             &binding.value,
-                            &format!("{place}的参数 `{}` 绑定", binding.parameter),
+                            &format!(
+                                "{place}的参数 `{}` 绑定",
+                                escape_control(&binding.parameter)
+                            ),
                         )?;
                     }
                 }
@@ -189,13 +196,19 @@ impl Certificate {
                         for expression in &candidate.missing {
                             check_expression(
                                 expression,
-                                &format!("{place}的缺口候选 `{}` 缺失前提", candidate.rule),
+                                &format!(
+                                    "{place}的缺口候选 `{}` 缺失前提",
+                                    escape_control(&candidate.rule)
+                                ),
                             )?;
                         }
                         for expression in &candidate.blocked_by {
                             check_expression(
                                 expression,
-                                &format!("{place}的缺口候选 `{}` 阻断条件", candidate.rule),
+                                &format!(
+                                    "{place}的缺口候选 `{}` 阻断条件",
+                                    escape_control(&candidate.rule)
+                                ),
                             )?;
                         }
                     }
