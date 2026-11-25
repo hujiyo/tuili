@@ -1,15 +1,22 @@
-//! The declaration layer for burden of proof and standards of proof, end to
-//! end: `:inspect` shows what was declared (and only what was declared), and
-//! declaring anything changes neither the derivation nor the certificate.
+//! The declaration layer and the report layer for burden of proof and
+//! standards of proof, end to end.
+//!
+//! `:inspect` shows what was declared (and only what was declared). Declaring
+//! anything changes neither the derivation nor the certificate. The report
+//! layer annotates `:gap`, `:issues` and `:explain` with the rule's declared
+//! burden/standard, writes an undeclared value out as `未声明举证责任` /
+//! `未声明证明标准`, and never defaults a value or attaches a number to the
+//! standard. `:why` stays byte-identical.
 //!
 //! The reasoning/certificate comparison is byte for byte on purpose: these
-//! fields are declarations for a later report, not premises of the calculus.
+//! fields are declarations for the report, not premises of the calculus.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const GAP: i32 = 1;
 const PROVED: i32 = 0;
 const COMMAND_ERROR: i32 = 2;
 
@@ -340,6 +347,288 @@ fn an_illegal_value_fails_the_load_with_rule_field_and_allowed_values() {
         assert!(
             err.contains(needle),
             "the diagnostic must contain {needle:?}:\n{err}"
+        );
+    }
+}
+
+/// The line that starts with `prefix` after trimming its indentation.
+fn line_starting_with(out: &str, prefix: &str) -> String {
+    out.lines()
+        .find(|line| line.trim_start().starts_with(prefix))
+        .unwrap_or_else(|| panic!("no line starts with {prefix:?}:\n{out}"))
+        .to_owned()
+}
+
+/// `:why` output starting at the formal tree's root line. A gap root is
+/// printed as `? <proposition>  【未闭合】`; a proved root starts with `▸`.
+fn why_body(output: &Output) -> String {
+    let out = stdout(output);
+    let start = out
+        .find("? ")
+        .or_else(|| out.find('▸'))
+        .unwrap_or_else(|| panic!("no derivation in the output:\n{out}"));
+    out[start..].to_owned()
+}
+
+/// Two rules concluding the same proposition: one declares a burden and
+/// standard, the other declares nothing. Their missing premises differ, so the
+/// report has to attribute each annotation to the rule that needs it.
+const REPORT_THEORY: &str = r#"
+sort 人
+pred 侵占 : 人 → Prop
+pred 占有 : 人 → Prop
+pred 违法 : 人 → Prop
+obj 张三 : 人
+
+rule 声明规则 :
+  params p : 人
+  premise 侵占 p
+  conclude 违法 p
+  burden claimant
+  standard preponderance
+  source text "测试" locator "声明规则"
+
+rule 未声明规则 :
+  params p : 人
+  premise 占有 p
+  conclude 违法 p
+  source text "测试" locator "未声明规则"
+"#;
+
+/// The same rules without any burden/standard clause: `:why` must not change.
+const REPORT_THEORY_UNDECLARED: &str = r#"
+sort 人
+pred 侵占 : 人 → Prop
+pred 占有 : 人 → Prop
+pred 违法 : 人 → Prop
+obj 张三 : 人
+
+rule 声明规则 :
+  params p : 人
+  premise 侵占 p
+  conclude 违法 p
+  source text "测试" locator "声明规则"
+
+rule 未声明规则 :
+  params p : 人
+  premise 占有 p
+  conclude 违法 p
+  source text "测试" locator "未声明规则"
+"#;
+
+#[test]
+fn gap_and_issues_annotate_each_missing_premise_with_its_rule() {
+    let theory = TempTheory::new("report-values", REPORT_THEORY);
+    let gap = check(
+        load_and(&theory, ":gap 违法 张三"),
+        GAP,
+        &[
+            "缺 ⟨侵占 张三⟩〔举证：主张方 / 优势证据〕",
+            "缺 ⟨占有 张三⟩〔举证：未声明举证责任 / 未声明证明标准〕",
+        ],
+    );
+    // `:issues` renders the same gap tree, so it must carry the exact same
+    // annotated lines, not a second wording.
+    let issues = check(
+        load_and(&theory, ":issues"),
+        GAP,
+        &[
+            "争点 ⟨违法 张三⟩",
+            "缺 ⟨侵占 张三⟩〔举证：主张方 / 优势证据〕",
+            "缺 ⟨占有 张三⟩〔举证：未声明举证责任 / 未声明证明标准〕",
+        ],
+    );
+    let gap_out = stdout(&gap);
+    let issues_out = stdout(&issues);
+    for (premise, needle) in [
+        ("缺 ⟨侵占 张三⟩", "〔举证：主张方 / 优势证据〕"),
+        (
+            "缺 ⟨占有 张三⟩",
+            "〔举证：未声明举证责任 / 未声明证明标准〕",
+        ),
+    ] {
+        assert_eq!(
+            line_starting_with(&gap_out, premise),
+            line_starting_with(&issues_out, premise),
+            ":gap and :issues must render the same line for {needle}"
+        );
+    }
+    // An undeclared rule is not replaced by the claimant or by any standard.
+    for line in gap_out
+        .lines()
+        .chain(issues_out.lines())
+        .filter(|line| line.contains("占有 张三"))
+    {
+        assert!(
+            !line.contains("主张方") && !line.contains("优势证据"),
+            "an undeclared burden must not be defaulted: {line}"
+        );
+    }
+
+    let explain = check(
+        load_and(&theory, ":explain 违法 张三"),
+        GAP,
+        &[
+            "缺少前提「侵占 张三」（这条证据由主张方提出，标准是优势证据）",
+            "缺少前提「占有 张三」（这条证据未声明举证责任，未声明证明标准）",
+            "举证责任：规则「声明规则」缺少前提「侵占 张三」：这条证据由主张方提出，标准是优势证据",
+            "规则「未声明规则」缺少前提「占有 张三」：这条证据未声明举证责任，未声明证明标准",
+        ],
+    );
+    let explain_out = stdout(&explain);
+    assert!(
+        !explain_out.contains("标准是未声明证明标准"),
+        "the narrative must spell out an undeclared standard instead of hedging: {explain_out}"
+    );
+}
+
+/// A rule whose `unless` is triggered is blocked; the report names who must
+/// prove the exception, and an undeclared exception stays undeclared.
+const EXCEPTION_THEORY: &str = r#"
+sort 人
+pred 侵占 : 人 → Prop
+pred 违法 : 人 → Prop
+pred 免责 : 人 → Prop
+obj 张三 : 人
+axiom 免责事实 : 免责 张三
+  source text "测试" locator "免责事实"
+
+rule 例外已声明 :
+  params p : 人
+  premise 侵占 p
+  conclude 违法 p
+  unless 免责 p
+  exception_burden respondent
+  exception_standard clear_and_convincing
+  source text "测试" locator "例外已声明"
+
+rule 例外未声明 :
+  params p : 人
+  premise 侵占 p
+  conclude 违法 p
+  unless 免责 p
+  source text "测试" locator "例外未声明"
+"#;
+
+#[test]
+fn a_triggered_unless_reports_the_exception_burden_or_says_it_is_undeclared() {
+    let theory = TempTheory::new("exception-report", EXCEPTION_THEORY);
+    for (command, needles) in [
+        (
+            ":gap 违法 张三",
+            vec![
+                "〔例外举证：相对方 / 清楚可信〕",
+                "〔例外举证：未声明举证责任 / 未声明证明标准〕",
+            ],
+        ),
+        (
+            ":issues",
+            vec![
+                "〔例外举证：相对方 / 清楚可信〕",
+                "〔例外举证：未声明举证责任 / 未声明证明标准〕",
+            ],
+        ),
+        (
+            ":explain 违法 张三",
+            vec![
+                "例外由相对方提出，标准是清楚可信",
+                "例外未声明举证责任，未声明证明标准",
+            ],
+        ),
+    ] {
+        check(load_and(&theory, command), GAP, &needles);
+    }
+}
+
+/// A two-step gap: the outer rule declares one burden, the inner rule another.
+/// Each missing premise carries the burden of the rule that needs it, so the
+/// two groups never bleed into one another.
+const NESTED_THEORY: &str = r#"
+sort 人
+pred 基础 : 人 → Prop
+pred 中间 : 人 → Prop
+pred 另一 : 人 → Prop
+pred 目标 : 人 → Prop
+obj 张三 : 人
+
+rule 目标规则 :
+  params p : 人
+  premise 中间 p
+  premise 另一 p
+  conclude 目标 p
+  burden claimant
+  standard preponderance
+  source text "测试" locator "目标规则"
+
+rule 中间规则 :
+  params p : 人
+  premise 基础 p
+  conclude 中间 p
+  burden respondent
+  standard beyond_reasonable_doubt
+  source text "测试" locator "中间规则"
+"#;
+
+#[test]
+fn each_missing_premise_carries_only_its_own_rules_burden() {
+    let theory = TempTheory::new("nested-report", NESTED_THEORY);
+    let gap = check(
+        load_and(&theory, ":gap 目标 张三"),
+        GAP,
+        &[
+            "缺 ⟨中间 张三⟩〔举证：主张方 / 优势证据〕",
+            "缺 ⟨另一 张三⟩〔举证：主张方 / 优势证据〕",
+            "缺 ⟨基础 张三⟩〔举证：相对方 / 排除合理怀疑〕",
+        ],
+    );
+    let out = stdout(&gap);
+    for (premise, expected, other) in [
+        ("缺 ⟨中间 张三⟩", "主张方 / 优势证据", "相对方"),
+        ("缺 ⟨另一 张三⟩", "主张方 / 优势证据", "相对方"),
+        ("缺 ⟨基础 张三⟩", "相对方 / 排除合理怀疑", "主张方"),
+    ] {
+        let line = line_starting_with(&out, premise);
+        assert!(
+            line.contains(expected),
+            "the premise must carry its own rule's burden: {line}"
+        );
+        assert!(
+            !line.contains(other),
+            "another rule's burden must not bleed into this premise: {line}"
+        );
+    }
+    // `:issues` lists the same nested tree and the same per-premise values.
+    let issues = check(
+        load_and(&theory, ":issues"),
+        GAP,
+        &[
+            "缺 ⟨中间 张三⟩〔举证：主张方 / 优势证据〕",
+            "缺 ⟨基础 张三⟩〔举证：相对方 / 排除合理怀疑〕",
+        ],
+    );
+    let issues_out = stdout(&issues);
+    assert!(
+        line_starting_with(&issues_out, "缺 ⟨基础 张三⟩").contains("相对方 / 排除合理怀疑"),
+        "an issue's nested premise keeps its own rule's burden:\n{issues_out}"
+    );
+}
+
+#[test]
+fn declaring_burden_and_standard_does_not_change_why_on_a_gap() {
+    let base = TempTheory::new("why-gap-base", REPORT_THEORY_UNDECLARED);
+    let declared = TempTheory::new("why-gap-declared", REPORT_THEORY);
+    let base_out = check(load_and(&base, ":why 违法 张三"), GAP, &["【未闭合】"]);
+    let declared_out = check(load_and(&declared, ":why 违法 张三"), GAP, &["【未闭合】"]);
+    assert_eq!(
+        why_body(&base_out),
+        why_body(&declared_out),
+        ":why must not gain the burden report"
+    );
+    let body = why_body(&declared_out);
+    for marker in ["举证", "主张方", "优势证据", "未声明举证责任"] {
+        assert!(
+            !body.contains(marker),
+            ":why must not print {marker:?}:\n{body}"
         );
     }
 }

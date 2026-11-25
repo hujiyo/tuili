@@ -142,7 +142,9 @@ use std::rc::Rc;
 
 use std_deduce_cert::CertExpr;
 use std_deduce_kernel::conv::convertible;
-use std_deduce_kernel::env::{Decl, DeclKind, Env, FactIdentity, RuleDecl, SourceRef};
+use std_deduce_kernel::env::{
+    Decl, DeclKind, Env, FactIdentity, RuleDecl, RulePleading, SourceRef,
+};
 use std_deduce_kernel::norm::{normalize, spine};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Ctx, Expr, Name};
@@ -1716,6 +1718,37 @@ impl<'a> Reasoner<'a> {
     /// certificate against the same declarations the derivation used.
     pub fn env(&self) -> &Env {
         self.env
+    }
+
+    /// The burden/standard declarations of one rule, for the gap report.
+    ///
+    /// The gap candidate records only the rule name, so the report looks the
+    /// declaration up by that name. `None` means no rule of that name is
+    /// declared here; the renderer says so rather than inventing a burden.
+    pub fn pleading(&self, rule: &str) -> Option<RulePleading> {
+        match &self.env.get(rule)?.kind {
+            DeclKind::Rule(decl) => Some(RulePleading::of_rule(decl)),
+            _ => None,
+        }
+    }
+
+    /// Every declared rule's burden/standard, keyed by rule name.
+    ///
+    /// Certificate v7 does not record these declarations (adding them would
+    /// change the format), so `:explain` supplies this map when it narrates a
+    /// certificate gap. The values come from the environment declaration, the
+    /// same one the derivation used.
+    pub fn pleadings(&self) -> BTreeMap<String, RulePleading> {
+        self.env
+            .rules()
+            .into_iter()
+            .filter_map(|decl| {
+                let DeclKind::Rule(rule) = &decl.kind else {
+                    return None;
+                };
+                Some((decl.name.to_string(), RulePleading::of_rule(rule)))
+            })
+            .collect()
     }
 
     pub fn knows(&self, prop: &Expr) -> bool {

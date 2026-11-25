@@ -890,3 +890,92 @@ fn burden_and_standard_round_trip_their_labels() {
     assert_eq!(Standard::parse("probable"), None);
     assert_eq!(Standard::parse(""), None);
 }
+
+/// The burden report text comes straight from the declaration. Chinese role
+/// and standard labels are fixed here; a missing value is written out as
+/// `未声明举证责任` / `未声明证明标准` rather than defaulted, and the standard
+/// never becomes a number.
+#[test]
+fn burden_report_spells_out_declared_and_undeclared_values() {
+    for (burden, keyword, label) in [
+        (Burden::Claimant, "claimant", "主张方"),
+        (Burden::Respondent, "respondent", "相对方"),
+        (Burden::Court, "court", "法院职权"),
+    ] {
+        assert_eq!(burden.label(), keyword);
+        assert_eq!(burden.label_zh(), label);
+    }
+    for (standard, keyword, label) in [
+        (Standard::Preponderance, "preponderance", "优势证据"),
+        (
+            Standard::ClearAndConvincing,
+            "clear_and_convincing",
+            "清楚可信",
+        ),
+        (
+            Standard::BeyondReasonableDoubt,
+            "beyond_reasonable_doubt",
+            "排除合理怀疑",
+        ),
+    ] {
+        assert_eq!(standard.label(), keyword);
+        assert_eq!(standard.label_zh(), label);
+    }
+
+    let both = ProofBurden {
+        burden: Some(Burden::Claimant),
+        standard: Some(Standard::Preponderance),
+    };
+    assert_eq!(both.labels_zh(), ("主张方", "优势证据"));
+    assert_eq!(both.pair_zh(), "主张方 / 优势证据");
+    assert_eq!(
+        both.sentence_zh(false),
+        "这条证据由主张方提出，标准是优势证据"
+    );
+    assert_eq!(both.sentence_zh(true), "例外由主张方提出，标准是优势证据");
+
+    let burden_only = ProofBurden {
+        burden: Some(Burden::Respondent),
+        standard: None,
+    };
+    assert_eq!(
+        burden_only.pair_zh(),
+        "相对方 / 未声明证明标准",
+        "an undeclared standard is not defaulted"
+    );
+    assert_eq!(
+        burden_only.sentence_zh(false),
+        "这条证据由相对方提出，但未声明证明标准"
+    );
+
+    let standard_only = ProofBurden {
+        burden: None,
+        standard: Some(Standard::BeyondReasonableDoubt),
+    };
+    assert_eq!(
+        standard_only.pair_zh(),
+        "未声明举证责任 / 排除合理怀疑",
+        "an undeclared burden is not defaulted to the claimant"
+    );
+    assert_eq!(
+        standard_only.sentence_zh(false),
+        "这条证据未声明举证责任，标准是排除合理怀疑"
+    );
+
+    let neither = ProofBurden::default();
+    assert_eq!(neither.pair_zh(), "未声明举证责任 / 未声明证明标准");
+    assert_eq!(
+        neither.sentence_zh(false),
+        "这条证据未声明举证责任，未声明证明标准"
+    );
+    assert_eq!(
+        neither.sentence_zh(true),
+        "例外未声明举证责任，未声明证明标准"
+    );
+    for text in [neither.pair_zh(), neither.sentence_zh(false)] {
+        assert!(
+            !text.chars().any(|ch| ch.is_ascii_digit()),
+            "the standard report must not attach a number: {text}"
+        );
+    }
+}

@@ -17,6 +17,14 @@
 //! identity is taken from the assumption table when the certificate records it,
 //! and otherwise the line says no identity is recorded.
 //!
+//! A gap candidate's rule may declare who must prove the missing premises and
+//! to what standard, plus the same for its `unless` exceptions. The
+//! certificate does not record these declarations, so the caller passes them
+//! ([`render_narrative_with_context`]); every missing-premise sentence then
+//! states the burden in plain words. An undeclared burden or standard is
+//! written as such, never defaulted, and the standard is a label, never a
+//! number.
+//!
 //! External text (rule names, labels, quotations, notes, declaration names and
 //! obligations) is escaped before it is printed, so a newline or a terminal
 //! control sequence in a certificate cannot forge another explanation line.
@@ -25,7 +33,7 @@
 
 use std::collections::BTreeMap;
 
-use std_deduce_kernel::env::escape_control;
+use std_deduce_kernel::env::{escape_control, RulePleading};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::Expr;
 
@@ -56,7 +64,7 @@ const QUOTE_SUMMARY_CHARS: usize = 60;
 /// recomputed the concepts the root derivation depends on, or knows the
 /// derivation's per-node applicability verdicts.
 pub fn render_narrative(certificate: &Certificate) -> Result<String, String> {
-    render_narrative_with_context(certificate, &[], &BTreeMap::new())
+    render_narrative_with_context(certificate, &[], &BTreeMap::new(), &BTreeMap::new())
 }
 
 /// Render as [`render_narrative`], with the parts of the derivation the
@@ -79,10 +87,19 @@ pub fn render_narrative(certificate: &Certificate) -> Result<String, String> {
 /// like every other external value. A node without an annotation, like a
 /// caller with no recomputed open concepts, renders exactly as
 /// [`render_narrative`] does.
+///
+/// `pleadings` is every declared rule's burden/standard, keyed by rule name.
+/// Certificate v7 does not record these declarations, so the caller supplies
+/// them; a missing-premise sentence then says who must present the evidence
+/// and to what standard. An undeclared burden or standard reads `未声明举证责任`
+/// / `未声明证明标准`, never a default; the standard itself is only a label and
+/// is never turned into a number. A rule absent from the map is rendered with
+/// no burden sentence, exactly like a caller without this context.
 pub fn render_narrative_with_context(
     certificate: &Certificate,
     open_concepts: &[String],
     annotations: &BTreeMap<NodeId, String>,
+    pleadings: &BTreeMap<String, RulePleading>,
 ) -> Result<String, String> {
     validate(certificate)?;
 
@@ -94,7 +111,7 @@ pub fn render_narrative_with_context(
             let mut order = Vec::new();
             let mut seen = vec![false; certificate.nodes.len()];
             collect_postorder(certificate, root, &mut seen, &mut order)?;
-            write_proof(certificate, &order, annotations, &mut out)?;
+            write_proof(certificate, &order, annotations, pleadings, &mut out)?;
         }
         None => {
             out.push_str("【结论】证书没有根节点，不能给出单一结论。\n");
@@ -103,12 +120,12 @@ pub fn render_narrative_with_context(
             for root in root_nodes(certificate) {
                 collect_postorder(certificate, root, &mut seen, &mut order)?;
             }
-            write_proof(certificate, &order, annotations, &mut out)?;
+            write_proof(certificate, &order, annotations, pleadings, &mut out)?;
         }
     }
 
     write_conflicts(certificate, &mut out)?;
-    write_obligations(certificate, &mut out);
+    write_obligations(certificate, pleadings, &mut out);
     Ok(out)
 }
 
@@ -202,6 +219,7 @@ fn write_proof(
     certificate: &Certificate,
     order: &[NodeId],
     annotations: &BTreeMap<NodeId, String>,
+    pleadings: &BTreeMap<String, RulePleading>,
     out: &mut String,
 ) -> Result<(), String> {
     let mut steps = Vec::new();
@@ -235,7 +253,7 @@ fn write_proof(
     if !gaps.is_empty() {
         begin_section(out, "【缺口】");
         for id in gaps {
-            write_gap(certificate, id, out)?;
+            write_gap(certificate, id, pleadings, out)?;
         }
     }
     Ok(())
@@ -418,7 +436,12 @@ fn quote_summary(quote: &str) -> String {
 }
 
 /// Write one gap with every candidate the certificate records.
-fn write_gap(certificate: &Certificate, id: NodeId, out: &mut String) -> Result<(), String> {
+fn write_gap(
+    certificate: &Certificate,
+    id: NodeId,
+    pleadings: &BTreeMap<String, RulePleading>,
+    out: &mut String,
+) -> Result<(), String> {
     let Some(Node::Gap {
         proposition,
         candidates,
@@ -439,12 +462,17 @@ fn write_gap(certificate: &Certificate, id: NodeId, out: &mut String) -> Result<
         return Ok(());
     }
     for candidate in candidates {
-        write_gap_candidate(certificate, candidate, out);
+        write_gap_candidate(certificate, candidate, pleadings, out);
     }
     Ok(())
 }
 
-fn write_gap_candidate(certificate: &Certificate, candidate: &GapCandidate, out: &mut String) {
+fn write_gap_candidate(
+    certificate: &Certificate,
+    candidate: &GapCandidate,
+    pleadings: &BTreeMap<String, RulePleading>,
+    out: &mut String,
+) {
     out.push_str(&format!(
         "  · 候选规则「{}」：",
         escape_control(&candidate.rule)
@@ -457,7 +485,11 @@ fn write_gap_candidate(certificate: &Certificate, candidate: &GapCandidate, out:
             .map(|proposition| format!("「{}」", print_expr(&Expr::from(proposition))))
             .collect::<Vec<_>>()
             .join("、");
-        clauses.push(format!("缺少前提{missing}"));
+        let mut clause = format!("缺少前提{missing}");
+        if let Some(pleading) = pleadings.get(&candidate.rule) {
+            clause.push_str(&format!("（{}）", pleading.requirements.sentence_zh(false)));
+        }
+        clauses.push(clause);
     }
     if !candidate.blocked_by.is_empty() {
         let blockers = candidate
@@ -466,7 +498,11 @@ fn write_gap_candidate(certificate: &Certificate, candidate: &GapCandidate, out:
             .map(|proposition| blocked_condition(certificate, proposition))
             .collect::<Vec<_>>()
             .join("、");
-        clauses.push(format!("unless 条件{blockers}已成立，故该规则被阻断"));
+        let mut clause = format!("unless 条件{blockers}已成立，故该规则被阻断");
+        if let Some(pleading) = pleadings.get(&candidate.rule) {
+            clause.push_str(&format!("（{}）", pleading.exceptions.sentence_zh(true)));
+        }
+        clauses.push(clause);
     }
     if clauses.is_empty() {
         out.push_str("证书没有记录它缺少什么。\n");
@@ -793,18 +829,26 @@ fn citations(sources: &[Source]) -> String {
 }
 
 /// Write the open obligations the certificate records.
-fn write_obligations(certificate: &Certificate, out: &mut String) {
+fn write_obligations(
+    certificate: &Certificate,
+    pleadings: &BTreeMap<String, RulePleading>,
+    out: &mut String,
+) {
     if certificate.open_obligations.is_empty() {
         return;
     }
     begin_section(out, "【未决义务】");
     for obligation in &certificate.open_obligations {
-        out.push_str(&obligation_line(obligation));
+        out.push_str(&obligation_line(certificate, pleadings, obligation));
         out.push('\n');
     }
 }
 
-fn obligation_line(obligation: &OpenObligation) -> String {
+fn obligation_line(
+    certificate: &Certificate,
+    pleadings: &BTreeMap<String, RulePleading>,
+    obligation: &OpenObligation,
+) -> String {
     let mut line = format!(
         "  - [{}] {}",
         obligation_kind_label(obligation.kind),
@@ -824,6 +868,40 @@ fn obligation_line(obligation: &OpenObligation) -> String {
                 .collect::<Vec<_>>()
                 .join("、")
         ));
+    }
+    // A missing-premise obligation points at the certificate's gap node. The
+    // declaration itself is not recorded in the certificate, so the caller's
+    // pleadings map supplies the same burden sentence the 【缺口】 section
+    // prints; the obligation line does not infer a default.
+    if obligation.kind == ObligationKind::MissingPremise {
+        let mut missing = Vec::new();
+        for id in &obligation.nodes {
+            let Some(Node::Gap { candidates, .. }) = certificate.nodes.get(*id) else {
+                continue;
+            };
+            for candidate in candidates {
+                if candidate.missing.is_empty() {
+                    continue;
+                }
+                let Some(pleading) = pleadings.get(&candidate.rule) else {
+                    continue;
+                };
+                let premises = candidate
+                    .missing
+                    .iter()
+                    .map(|proposition| format!("「{}」", print_expr(&Expr::from(proposition))))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                missing.push(format!(
+                    "规则「{}」缺少前提{premises}：{}",
+                    escape_control(&candidate.rule),
+                    pleading.requirements.sentence_zh(false)
+                ));
+            }
+        }
+        if !missing.is_empty() {
+            details.push(format!("举证责任：{}", missing.join("；")));
+        }
     }
     if !details.is_empty() {
         line.push_str(&format!("（{}）", details.join("；")));

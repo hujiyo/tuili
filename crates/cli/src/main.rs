@@ -273,8 +273,13 @@
 //! `根据法院查明`, `作为分析假设`, `双方无争议`), a step keeps its source and
 //! parameter bindings, a conflict is reported as decided or as `此处未决` with
 //! its recorded reason, and a gap lists its candidates, missing premises and
-//! `unless` blockers. A source the certificate does not record is printed as
-//! `证书未记录来源`, never omitted or filled in. The narrative owns the whole
+//! `unless` blockers. Each missing-premise and blocked sentence also states the
+//! candidate rule's declared burden/standard in plain words (for example
+//! `这条证据由主张方提出，标准是优势证据`); an undeclared value is written out
+//! as `未声明举证责任` / `未声明证明标准`, never defaulted, and the standard is
+//! only a label. The 【未决义务】 section repeats the same values for a
+//! missing-premise obligation. A source the certificate does not record is
+//! printed as `证书未记录来源`, never omitted or filled in. The narrative owns the whole
 //! conflict report, so `:explain` does not append the terse `:why` conflict
 //! lines, the `注：…` defeat note or its `依据：` lines afterwards. `:why` still
 //! prints the formal tree, so the certificate remains expandable; `:cert` JSON
@@ -309,6 +314,12 @@
 //! an excluded rule fire); an undecidable one also points at the missing
 //! explicit reference time, which this version does not offer yet. Only an
 //! unchecked candidate is expanded further.
+//! Every missing-premise line states the rule's declared burden and standard
+//! (`〔举证：主张方 / 优势证据〕`), and every `unless` blocker line states the
+//! exception group (`〔例外举证：相对方 / 清楚可信〕`). An undeclared value is
+//! printed as `未声明举证责任` / `未声明证明标准`, never replaced by a default;
+//! the standard is a label and is never given a number. `:issues` renders the
+//! same gap tree, so it carries exactly the same annotations.
 //! The recursion is bounded by explicit limits — depth 6, 128 nodes, 8 attempts
 //! per rule — and a limit that stops a branch is printed as `已截断：…` where it
 //! applies. `:issues` requires a loaded theory and runs the same machinery over
@@ -1605,8 +1616,14 @@ impl Session {
         // verdict inline; the certificate stores the same verdict, and this
         // annotation is rendered from the derivation's judgement.
         let annotations = derivation_annotations(&d);
+        // The burden/standard declarations the narrative prints come from the
+        // environment, not from the certificate: certificate v7 does not record
+        // them. The map is built once by the reasoner from the same rule
+        // declarations the gap tree reads, so `:explain` and `:gap` report the
+        // same values.
+        let pleadings = r.pleadings();
         let rendered = if cmd == "explain" {
-            render_narrative_with_context(&certificate, &open_concepts, &annotations)?
+            render_narrative_with_context(&certificate, &open_concepts, &annotations, &pleadings)?
         } else {
             render_with_annotations(&certificate, &annotations)?
         };
@@ -4454,7 +4471,13 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
             writeln!(out, "{pad}  ← {}", source.one_line()).ok();
         }
         for missing in &candidate.missing {
-            writeln!(out, "{pad}  缺 ⟨{}⟩", print_expr(&missing.premise)).ok();
+            writeln!(
+                out,
+                "{pad}  缺 ⟨{}⟩{}",
+                print_expr(&missing.premise),
+                requirement_burden_note(reasoner, candidate.rule.as_ref())
+            )
+            .ok();
             if let Some(child) = &missing.gap {
                 render_gap_body(out, child, reasoner, indent + 4);
             }
@@ -4468,9 +4491,10 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
                 .unwrap_or_default();
             writeln!(
                 out,
-                "{pad}  被阻断：「{}」{}已成立，故本规则不触发",
+                "{pad}  被阻断：「{}」{}已成立，故本规则不触发{}",
                 print_expr(blocker),
-                identity
+                identity,
+                exception_burden_note(reasoner, candidate.rule.as_ref())
             )
             .ok();
         }
@@ -4490,6 +4514,33 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
             gap_limit_text(limit)
         )
         .ok();
+    }
+}
+
+/// The burden/standard annotation of the rule that needs a missing premise.
+///
+/// The gap candidate records only a rule name, so the annotation is read from
+/// the rule's declaration through the reasoner. This is the one lookup `:gap`
+/// and `:issues` use; both render the same gap tree, so their annotations
+/// cannot disagree. An undeclared field reads `未声明举证责任` /
+/// `未声明证明标准`, never a default role or standard. A declaration that
+/// cannot be found is stated as such instead of being replaced by a default.
+fn requirement_burden_note(reasoner: &Reasoner<'_>, rule: &str) -> String {
+    match reasoner.pleading(rule) {
+        Some(pleading) => format!("〔举证：{}〕", pleading.requirements.pair_zh()),
+        None => "〔举证：未找到规则声明，无法报告〕".to_owned(),
+    }
+}
+
+/// The exception burden/standard annotation of a blocked rule.
+///
+/// `exception_burden` / `exception_standard` describe every `unless` of a rule,
+/// so one annotation covers each blocker line. The values come from the same
+/// declaration read as [`requirement_burden_note`], with the exception group.
+fn exception_burden_note(reasoner: &Reasoner<'_>, rule: &str) -> String {
+    match reasoner.pleading(rule) {
+        Some(pleading) => format!(" 〔例外举证：{}〕", pleading.exceptions.pair_zh()),
+        None => " 〔例外举证：未找到规则声明，无法报告〕".to_owned(),
     }
 }
 
