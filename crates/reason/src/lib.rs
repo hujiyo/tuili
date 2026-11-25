@@ -1150,8 +1150,9 @@ impl<'a> Reasoner<'a> {
     /// Each candidate rule names what it is missing, which blocking conditions
     /// already hold and where the rule comes from. Every missing premise
     /// becomes its own gap node, expanded until it reaches a fact leaf (no
-    /// rule concludes it), a proposition in a recorded conflict, or a
-    /// proposition that is already being expanded on this path (a rule cycle).
+    /// rule concludes it), a proposition in an unresolved conflict, a decided
+    /// losing side, an open pattern or a non-proposition, or a proposition
+    /// that is already being expanded on this path (a rule cycle).
     ///
     /// The expansion is bounded by [`GapLimits`]. A limit that stops a branch
     /// is recorded on the node or candidate that stopped it; nothing is
@@ -1162,9 +1163,24 @@ impl<'a> Reasoner<'a> {
     }
 
     /// [`Reasoner::gap_tree`] with explicit limits.
+    ///
+    /// The root counts as a node. When the budget does not even allow the root
+    /// (`max_nodes == 0`), a stub that carries the node limit and lists no
+    /// candidate is returned: a `GapTree` is always a tree, so the limit is
+    /// reported instead of silently expanding a root the budget refuses.
     pub fn gap_tree_with(&self, goal: &Expr, limits: &GapLimits) -> GapTree {
         let mut budget = GapBudget::new(limits);
         let mut path = Vec::new();
+        if budget.nodes >= limits.max_nodes {
+            return GapTree {
+                goal: goal.clone(),
+                status: self.gap_status(goal),
+                candidates: Vec::new(),
+                limit: Some(GapLimit::Nodes {
+                    limit: limits.max_nodes,
+                }),
+            };
+        }
         self.expand_gap(goal, 0, &mut path, &mut budget)
     }
 
@@ -1173,11 +1189,14 @@ impl<'a> Reasoner<'a> {
     ///
     /// A conclusion is contestable when a rule can be instantiated to it for
     /// the declared constants (one object per parameter, in parameter order)
-    /// and it is not already in the fact base, or when it is a side of a
-    /// recorded conflict. The scan reports what it could not enumerate — rules
-    /// whose parameter types have no declared constant — instead of pretending
-    /// the list is complete. The list and every tree are bounded by
-    /// [`GapLimits`].
+    /// and it is not already in the fact base, or when it is a side of an
+    /// *unresolved* conflict. A conflict the theory already decided is not an
+    /// open issue: its winner is in the fact base, and its loser is reported by
+    /// [`Reasoner::gap_tree`] as `Defeated` rather than `Conflicted`.
+    ///
+    /// The scan reports what it could not enumerate — rules whose parameter
+    /// types have no declared constant — instead of pretending the list is
+    /// complete. The list and every tree are bounded by [`GapLimits`].
     pub fn issues(&self) -> IssueScan {
         self.issues_with(&GapLimits::default())
     }
@@ -1238,16 +1257,26 @@ impl<'a> Reasoner<'a> {
             }
         }
 
-        // A conclusion that took part in a conflict is contestable even when
-        // no rule enumerates it (two facts, or a claim against a rule). Sides
-        // already produced by a rule keep their rule as the primary order key.
+        // Only an unresolved conflict is contestable. A decided conflict is
+        // settled by its recorded resolution: the winning side is already in
+        // the fact base, and the losing side must not be reported as something
+        // a human still has to decide.
+        let mut decided: BTreeSet<String> = BTreeSet::new();
         for conflict in self.conflicts() {
-            for side in [&conflict.left, &conflict.right] {
-                if self.knows(side) {
-                    continue;
+            match &conflict.resolution {
+                Resolution::Unresolved { .. } => {
+                    for side in [&conflict.left, &conflict.right] {
+                        if self.knows(side) {
+                            continue;
+                        }
+                        let key = structural_key(self.env, side);
+                        goals.entry(key).or_insert_with(|| (None, side.clone()));
+                    }
                 }
-                let key = structural_key(self.env, side);
-                goals.entry(key).or_insert_with(|| (None, side.clone()));
+                Resolution::Defeated { .. } => {
+                    decided.insert(structural_key(self.env, &conflict.left));
+                    decided.insert(structural_key(self.env, &conflict.right));
+                }
             }
         }
 
@@ -1255,10 +1284,11 @@ impl<'a> Reasoner<'a> {
             .into_iter()
             .map(|(key, (rule, goal))| (rule, key, goal))
             .collect();
-        // A proved conclusion is not contestable. This is the same `knows`
-        // predicate the gap tree reads, so the filter cannot disagree with the
-        // status each tree reports.
-        entries.retain(|(_, _, goal)| !self.knows(goal));
+        // A proved conclusion is not contestable, and neither is a side of a
+        // conflict that was already decided. This removes defeated conclusions
+        // that the rule enumeration produced as ordinary gaps: their status is
+        // `Defeated`, not an open issue.
+        entries.retain(|(_, key, goal)| !self.knows(goal) && !decided.contains(key));
         entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         if entries.len() > limits.max_issues {
             scan.limits.push(GapLimit::Issues {
@@ -1398,10 +1428,15 @@ impl<'a> Reasoner<'a> {
             GapStatus::OpenPattern
         } else if check::check(self.env, &Ctx::new(), goal, &Expr::Sort(0)).is_err() {
             GapStatus::NotAProposition
-        } else if self.conflict_for(goal).is_some() {
-            GapStatus::Conflicted
         } else if self.knows(goal) {
+            // A defeated winner is in the fact base; `Proved` is the honest
+            // status even though the proposition took part in a conflict.
             GapStatus::Proved
+        } else if let Some(conflict) = self.conflict_for(goal) {
+            match &conflict.resolution {
+                Resolution::Unresolved { .. } => GapStatus::Conflicted,
+                Resolution::Defeated { .. } => GapStatus::Defeated,
+            }
         } else {
             GapStatus::Unreachable
         }
@@ -1412,6 +1447,7 @@ impl<'a> Reasoner<'a> {
         match status {
             GapStatus::Proved => Some("目标已可推出"),
             GapStatus::Conflicted => Some("目标处于冲突中：未决的结论不进入事实库，需要人工裁决"),
+            GapStatus::Defeated => Some("目标在已裁决的冲突中败出：按记录的裁决不进入事实库"),
             GapStatus::NotAProposition => Some("目标不是命题"),
             GapStatus::Unreachable | GapStatus::OpenPattern | GapStatus::Cycle => None,
         }
@@ -1422,13 +1458,18 @@ impl<'a> Reasoner<'a> {
     ///
     /// This is the single-level candidate search shared by `explain` and the
     /// recursive gap tree; the tree wraps each entry in a child node instead of
-    /// reimplementing the match.
+    /// reimplementing the match. Both sides of the head match are normalised
+    /// first, so matching uses the same definitional identity as the keys that
+    /// deduplicate the tree: a `def` alias of the goal's head finds the rule
+    /// that concludes the definition, exactly as `convertible` and
+    /// [`structural_key`] would.
     fn gap_candidates(&self, goal: &Expr) -> Vec<GapCandidate> {
         let facts: BTreeMap<String, Expr> = self
             .fixed
             .as_ref()
             .map(|f| f.facts.clone())
             .unwrap_or_default();
+        let goal = normalize(self.env, &Ctx::new(), goal).unwrap_or_else(|_| goal.clone());
         let mut candidates = Vec::new();
         for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
@@ -1437,7 +1478,9 @@ impl<'a> Reasoner<'a> {
             // Match the rule head against the goal to get a candidate
             // instantiation, then instantiate premises and blockers with it.
             let mut binding = Vec::new();
-            if !match_fact(&rule.open_conclusion(), goal, &mut binding) {
+            let conclusion = rule.open_conclusion();
+            let conclusion = normalize(self.env, &Ctx::new(), &conclusion).unwrap_or(conclusion);
+            if !match_fact(&conclusion, &goal, &mut binding) {
                 continue;
             }
             let missing: Vec<Expr> = (0..rule.premises.len())
@@ -1906,8 +1949,13 @@ pub enum GapStatus {
     Unreachable,
     /// It is in the settled fact base.
     Proved,
-    /// It is a side of a recorded conflict, so it is not asserted.
+    /// It is a side of an unresolved conflict, so it is not asserted and a
+    /// human still has to decide between the sides.
     Conflicted,
+    /// It took part in a conflict that was decided against it. The decision is
+    /// recorded, so this is not an open issue: it is reported as decided and
+    /// kept out of the issue scan.
+    Defeated,
     /// The term is not a proposition and cannot be a goal.
     NotAProposition,
     /// The term still contains a rule-telescope binder (`?name`): the goal does
@@ -1946,7 +1994,8 @@ pub enum GapLimit {
 pub struct GapLimits {
     /// Maximum depth of the gap tree (the root is depth 0).
     pub max_depth: usize,
-    /// Maximum number of gap nodes in one tree (the root counts).
+    /// Maximum number of gap nodes in one tree (the root counts; with
+    /// `max_nodes == 0` the tree is a stub that only carries the limit).
     pub max_nodes: usize,
     /// Maximum number of times one rule may be expanded inside one tree, and
     /// the maximum number of parameter tuples the issue scan tries per rule.
@@ -2006,8 +2055,9 @@ pub struct GapPremise {
 /// Every contestable conclusion under the current fact set.
 #[derive(Debug, Clone)]
 pub struct IssueScan {
-    /// One gap tree per contestable conclusion, sorted by the rule that first
-    /// produced it and then by structural goal key.
+    /// One gap tree per contestable conclusion. Trees are sorted by the rule
+    /// that first produced the goal and then by structural goal key; a
+    /// conclusion no rule produces (a conflict side) sorts first.
     pub issues: Vec<GapTree>,
     /// Limits that stopped the scan itself (an issue cap or a per-rule
     /// enumeration cap), sorted and deduplicated.

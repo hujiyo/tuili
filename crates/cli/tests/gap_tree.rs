@@ -269,3 +269,95 @@ fn the_issue_list_is_truncated_at_its_limit_and_says_so() {
         "the cap is exactly the reported number of issues:\n{out}"
     );
 }
+
+/// A conflict the theory already decided is not an open issue: the losing side
+/// stays out of the fact base, but `:issues` must not ask a human to decide it
+/// again.
+#[test]
+fn issues_do_not_report_a_decided_conflict_as_unresolved() {
+    let output = check(
+        run(vec![
+            "--no-default-packs".to_string(),
+            ":load examples/法律位阶-河南种子案-裁决.std".to_string(),
+            ":issues".to_string(),
+        ]),
+        PROVED,
+        &["没有可争的结论。"],
+    );
+    let out = stdout(&output);
+    assert!(
+        !out.contains("争点") && !out.contains("需要人工裁决"),
+        "a decided conflict must not be reported as unresolved:\n{out}"
+    );
+}
+
+#[test]
+fn issues_require_a_loaded_theory() {
+    let output = run(vec![":issues".to_string()]);
+    assert_eq!(
+        output.status.code(),
+        Some(COMMAND_ERROR),
+        "an unloaded session is an error, not an empty scan\nstdout:\n{}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains("尚未加载理论"),
+        "stderr must say a theory has to be loaded:\n{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn issues_report_rules_they_cannot_instantiate() {
+    let theory = TempTheory::new(
+        "uninstantiable",
+        r#"
+sort 人
+sort 物
+pred 前提 : 人 → Prop
+pred 结论 : 物 → Prop
+obj 甲物 : 物
+
+rule 规则 :
+  params p : 人
+  premise 前提 p
+  conclude 结论 甲物
+  source text "测试" locator "规则"
+"#,
+    );
+    check(
+        theory.session(&[":issues"]),
+        PROVED,
+        &[
+            "没有可争的结论。",
+            "另有 1 条规则无法在当前事实集上实例化",
+            "⟨规则⟩",
+        ],
+    );
+}
+
+#[test]
+fn issues_report_the_per_rule_enumeration_cap() {
+    let mut source = String::from("sort 人\npred 条件 : 人 → Prop\npred 状态 : 人 → Prop\n");
+    for index in 0..10 {
+        source.push_str(&format!("obj 人{index} : 人\n"));
+    }
+    source.push_str(
+        "rule 规则 :\n  params p : 人\n  premise 条件 p\n  conclude 状态 p\n  source text \"测试\" locator \"规则\"\n",
+    );
+    let theory = TempTheory::new("rule-attempt-limit", &source);
+    let output = check(
+        theory.session(&[":issues"]),
+        GAP,
+        &[
+            "当前事实集下可争的结论 8 条",
+            "已截断：规则 ⟨规则⟩ 的尝试次数已达上限（8 次）；其余实例未枚举。",
+        ],
+    );
+    let out = stdout(&output);
+    assert_eq!(
+        out.matches("争点 ⟨").count(),
+        8,
+        "the per-rule cap limits both enumeration and the report:\n{out}"
+    );
+}

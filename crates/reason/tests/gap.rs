@@ -8,7 +8,7 @@
 //! of one goal.
 
 use std_deduce_kernel::pretty::print_expr;
-use std_deduce_kernel::Expr;
+use std_deduce_kernel::{name, Expr};
 use std_deduce_lang::Library;
 use std_deduce_reason::{GapLimit, GapLimits, GapStatus, Reasoner};
 
@@ -410,4 +410,168 @@ rule 不准 :
             "a contested conclusion says why it is not asserted"
         );
     }
+}
+
+#[test]
+fn a_decided_conflict_is_not_an_open_issue() {
+    let src = r#"
+sort 人
+pred 申请 : 人 → Prop
+pred 批准 : 人 → Prop
+pred 不批准 : 人 → Prop
+obj 张三 : 人
+contrary 批准 不批准
+
+axiom 张三申请 : 申请 张三
+  source text "测试" locator "申请"
+
+rule 准 :
+  params p : 人
+  premise 申请 p
+  conclude 批准 p
+  defeated_by 不准
+  source text "测试" locator "准"
+
+rule 不准 :
+  params p : 人
+  premise 申请 p
+  conclude 不批准 p
+  source text "测试" locator "不准"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let rejected = goal("批准", "张三");
+    let upheld = goal("不批准", "张三");
+    assert!(r.knows(&upheld), "the declared priority makes 不批准 win");
+    assert!(
+        !r.knows(&rejected),
+        "the losing side stays out of the fact base"
+    );
+    assert_eq!(
+        r.gap_tree(&rejected).status,
+        GapStatus::Defeated,
+        "a decided loser is no longer an unresolved conflict"
+    );
+    assert_eq!(r.gap_tree(&upheld).status, GapStatus::Proved);
+    assert!(
+        r.explain(&rejected)
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("已裁决")),
+        "the one-level note must say the conflict was decided, not left open"
+    );
+
+    let scan = r.issues();
+    assert!(
+        scan.issues.is_empty(),
+        "a decided conflict is not an open issue: {:?}",
+        scan.issues
+    );
+}
+
+#[test]
+fn the_root_respects_the_node_limit() {
+    let lib = load(CHAIN);
+    let r = reasoner(&lib);
+    let limits = GapLimits {
+        max_nodes: 0,
+        ..GapLimits::default()
+    };
+    let tree = r.gap_tree_with(&goal("结论", "张三"), &limits);
+    assert_eq!(
+        tree.limit,
+        Some(GapLimit::Nodes { limit: 0 }),
+        "the root itself counts as a node"
+    );
+    assert!(
+        tree.candidates.is_empty(),
+        "a root the node budget refuses lists no candidate"
+    );
+}
+
+#[test]
+fn a_definition_alias_matches_like_its_definition() {
+    let src = r#"
+sort 人
+pred 原 : 人 → Prop
+pred 结论 : 人 → Prop
+obj 张三 : 人
+def 结论别名 : 人 → Prop := 结论
+
+rule 规则 :
+  params p : 人
+  premise 原 p
+  conclude 结论 p
+  source text "测试" locator "规则"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let aliased = Expr::app(p("结论别名"), p("张三"));
+    assert!(
+        !r.explain(&aliased).candidates.is_empty(),
+        "a def alias of the goal's head must find the rule that concludes its definition"
+    );
+    let tree = r.gap_tree(&aliased);
+    assert_eq!(tree.candidates.len(), 1);
+    assert_eq!(tree.candidates[0].rule.as_ref(), "规则");
+    assert_eq!(
+        print_expr(&tree.candidates[0].missing[0].premise),
+        "原 张三"
+    );
+}
+
+#[test]
+fn issues_report_rules_that_cannot_be_instantiated() {
+    let src = r#"
+sort 人
+sort 物
+pred 前提 : 人 → Prop
+pred 结论 : 物 → Prop
+obj 甲物 : 物
+
+rule 规则 :
+  params p : 人
+  premise 前提 p
+  conclude 结论 甲物
+  source text "测试" locator "规则"
+"#;
+    let lib = load(src);
+    let r = reasoner(&lib);
+    let scan = r.issues();
+    assert!(
+        scan.issues.is_empty(),
+        "no constant inhabits 人, so no conclusion can be instantiated"
+    );
+    assert_eq!(
+        scan.uninstantiable,
+        vec![name("规则")],
+        "the rule is reported instead of being silently dropped"
+    );
+}
+
+#[test]
+fn issues_report_the_per_rule_enumeration_cap() {
+    let mut src = String::from("sort 人\npred 前提 : 人 → Prop\npred 结论 : 人 → Prop\n");
+    for index in 0..10 {
+        src.push_str(&format!("obj 人{index} : 人\n"));
+    }
+    src.push_str(
+        "rule 规则 :\n  params p : 人\n  premise 前提 p\n  conclude 结论 p\n  source text \"测试\" locator \"规则\"\n",
+    );
+    let lib = load(&src);
+    let r = reasoner(&lib);
+    let limits = GapLimits {
+        max_rule_attempts: 3,
+        ..GapLimits::default()
+    };
+    let scan = r.issues_with(&limits);
+    assert_eq!(scan.issues.len(), 3, "only three instances are enumerated");
+    assert!(
+        scan.limits.contains(&GapLimit::RuleAttempts {
+            rule: name("规则"),
+            limit: 3,
+        }),
+        "the per-rule enumeration cap is reported: {:?}",
+        scan.limits
+    );
 }

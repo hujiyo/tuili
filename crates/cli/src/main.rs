@@ -214,17 +214,22 @@
 //! it is missing and the blocking conditions that already hold, and every
 //! missing premise is expanded into its own gap — the rules that could conclude
 //! it, in turn — until the branch reaches a proposition no rule concludes, a
-//! proposition in a recorded conflict, or a proposition already being expanded
-//! on the same path (a rule cycle). Repeated expansions are recognised by a
-//! structural key of the normalised proposition, never by printed text, so an
-//! alpha variant cannot start a second, endless branch. The recursion is
-//! bounded by explicit limits — depth 6, 128 nodes, 8 attempts per rule — and a
-//! limit that stops a branch is printed as `已截断：…` where it applies. `:issues`
-//! runs the same machinery over the whole fact set instead of one goal: it
-//! instantiates every rule over the declared constants, lists each conclusion
-//! that is not already proved (or is a side of a recorded conflict) with its
-//! own gap tree, reports rules it could not instantiate, and caps the list at
-//! 32 conclusions. Neither command touches the certificate format.
+//! proposition in an unresolved conflict or a decided loser, an open rule
+//! pattern, a non-proposition, or a proposition already being expanded on the
+//! same path (a rule cycle). Repeated expansions are recognised by a structural
+//! key of the normalised proposition, never by printed text, so an alpha
+//! variant cannot start a second, endless branch; the head match is normalised
+//! too, so a `def` alias finds the rule that concludes its definition. The
+//! recursion is bounded by explicit limits — depth 6, 128 nodes, 8 attempts per
+//! rule — and a limit that stops a branch is printed as `已截断：…` where it
+//! applies. `:issues` requires a loaded theory and runs the same machinery over
+//! the whole fact set instead of one goal: it instantiates every rule over the
+//! declared constants, lists each conclusion that is not already proved (and
+//! each side of an unresolved conflict) with its own gap tree, reports rules it
+//! could not instantiate, and caps the list at 32 conclusions. A conflict the
+//! theory already decided is not an open issue: its winner is in the fact base
+//! and its loser is reported by `:gap`/`:why` as decided, never as unresolved.
+//! Neither command touches the certificate format.
 //!
 //! `:cert` requires a loaded theory and writes only the certificate JSON to
 //! stdout; a gap becomes a `MissingPremise` obligation and an unresolved
@@ -1218,6 +1223,14 @@ impl Session {
     fn issues_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !arg.is_empty() {
             return Err("用法：:issues（不接受参数；它列出当前事实集下所有可争的结论）".into());
+        }
+        if !self.loaded {
+            // Same rule as `:cert`: the scan describes the current fact set,
+            // and an unloaded session has no environment to describe.
+            return Err(
+                "尚未加载理论：:issues 需要已加载的环境才能扫描当前事实集，请先 :load <文件>"
+                    .into(),
+            );
         }
         let mut r = Reasoner::new(&self.lib.env);
         r.assume_ledger_axioms()?;
@@ -3376,6 +3389,10 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
                 "{pad}目标处于冲突中：未决的结论不进入事实库，需要人工裁决。"
             )
             .ok();
+            return;
+        }
+        GapStatus::Defeated => {
+            writeln!(out, "{pad}目标在已裁决的冲突中败出，按记录不进入事实库。").ok();
             return;
         }
         GapStatus::NotAProposition => {
