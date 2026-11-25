@@ -323,6 +323,43 @@
 //! `:cert` JSON is unchanged: the labels are not a certificate field and the
 //! format stays v8.
 //!
+//! `:why`, `:explain` and `:labels` also report the **risk themes** of the
+//! case. A theory marks a predicate with `risk <类别> <谓词>` (刑事, 人身安全,
+//! 重大财产, 临近期限, 涉外或移民); a proposition on the root's proof graph
+//! whose kernel predicate head carries such a marker makes the derivation
+//! high-risk. `:why` and `:explain` then print exactly one
+//! `高风险题材：涉及…；建议尽快咨询执业律师。` line followed by one
+//! `  依据：…` line per proving node (the proposition, the theme, the declaring
+//! `risk` line, and the rule/axiom/interpretation with its recorded sources);
+//! `:labels` prints the same themes as a separate `题材风险（次标签…）` section.
+//! A low-risk derivation prints nothing, so a clean case gets no noise. The
+//! theme is a second label and is never merged into `需律师判断`: that trust
+//! label says why the model may not decide, the theme says what the case is
+//! about. The grading is structural, never a keyword match on printed
+//! propositions, and `:inspect` shows `〔风险 <类别>〕` next to the marked
+//! predicate and the `risk` marker's own ledger entry. The report is derived
+//! from the certificate, is never written into it, and does not change any
+//! exit code: `:cert` JSON, certificate v8 and `:verify-cert` are unchanged.
+//!
+//! Every result output of `:why`, `:explain`, `:labels` and `:cert` carries the
+//! one-line disclaimer `声明：这是模型内推导，不是法律意见。` as its own line.
+//! It is never placed inside the derivation tree and never inside the
+//! certificate JSON; `:cert` prints it, plus the privacy notice
+//! `证书包含案件原文，可能含个人信息，分享前请自行处理`, before the JSON, so the
+//! certificate bytes from the first `{` on are unchanged.
+//!
+//! `--redact` (or the session command `:redact on|off`) is display-layer
+//! redaction: every printed line except `:cert`'s certificate JSON replaces the
+//! declared individual names (`obj`, or an `axiom` constant of a sort) with the
+//! stable placeholders `甲1`, `甲2`, … assigned in declared-name order. Source
+//! text, labels and notes are rewritten too, so a name cannot leak through a
+//! citation, and every redacted command output ends with
+//! `输出已脱敏；证书未脱敏。…`. Redaction changes display only: a verdict, an
+//! exit code, the derivation and the certificate content are identical with it
+//! on or off. Silently redacting the certificate is not offered: `:verify-cert`
+//! re-checks the recorded words, so a redacted certificate could no longer be
+//! verified.
+//!
 //! `:why` and `:explain` also report the `open` concept marker. A rule step
 //! whose conclusion head is an open predicate, or a root that is one, makes the
 //! derivation depend on a human judgement: the certificate records one
@@ -465,10 +502,11 @@ use std::path::{Path, PathBuf};
 use std_deduce_lang::ast::Item;
 
 use std_deduce_cert::{
-    derive_trust, render_narrative_with_context, render_with_annotations, Certificate, CheckReport,
-    EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, KernelProofReport,
+    derive_risk, derive_trust, render_narrative_with_context, render_with_annotations, Certificate,
+    CheckReport, EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, KernelProofReport,
     Node as CertNode, ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin,
-    ResolutionBasis, Source, TrustLabel, TrustLevel, TrustReport, LOCAL_EXTENSION_OBLIGATION_ID,
+    ResolutionBasis, RiskReport, Source, TrustLabel, TrustLevel, TrustReport,
+    LOCAL_EXTENSION_OBLIGATION_ID,
 };
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
@@ -506,6 +544,62 @@ impl Outcome {
         }
     }
 }
+
+/// A buffer for one command's printed output, so display redaction can rewrite
+/// the whole text in one pass instead of a chunk at a time.
+///
+/// `String` is not an [`std::io::Write`], so the buffer collects bytes and
+/// converts once at the end. Every write goes through `writeln!` with UTF-8
+/// strings, so the conversion cannot fail; if it ever did, that is an internal
+/// error rather than silently lossy output.
+#[derive(Default)]
+struct OutputBuffer {
+    bytes: Vec<u8>,
+}
+
+impl OutputBuffer {
+    fn into_text(self, command: &str) -> Result<String, String> {
+        String::from_utf8(self.bytes)
+            .map_err(|error| format!("命令 `:{command}` 的输出不是有效 UTF-8（内部错误）：{error}"))
+    }
+}
+
+impl Write for OutputBuffer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The short statement every user-facing result output carries once.
+///
+/// It is printed as its own line after the derivation tree, the trust line and
+/// any warning, never inside the tree and never inside the certificate JSON:
+/// the certificate is a proof artifact whose bytes must stay reproducible.
+const DISCLAIMER_LINE: &str = "声明：这是模型内推导，不是法律意见。";
+
+/// The notice appended to every redacted command output.
+///
+/// It states both halves of the boundary: the display was redacted, the
+/// certificate was not. The individual names are replaced everywhere the text
+/// mentions them, including source text, labels and notes.
+const REDACT_NOTICE: &str =
+    "输出已脱敏；证书未脱敏。个体名已替换为占位符（甲1、甲2…），来源与标签文本同样替换。";
+
+/// The `:cert` explanation lines printed before the JSON.
+///
+/// The certificate keeps the original text (its propositions, sources and
+/// assumption labels) because `:verify-cert` re-checks the words the derivation
+/// used: a redacted certificate could no longer be verified. The reader is told
+/// so before the JSON, and the JSON itself gains no field (certificate v8).
+const CERT_NOTICE: [&str; 2] = [
+    "说明：这是模型内推导，不是法律意见。",
+    "说明：证书包含案件原文，可能含个人信息，分享前请自行处理；证书不脱敏（:verify-cert 需要原文复核）。",
+];
 
 /// What the command line asked for after the leading environment options.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,6 +691,10 @@ fn parse_invocation(args: &[String]) -> Result<(environment::Options, Invocation
             }
             "--allow-case-rules" => {
                 options.allow_case_rules = true;
+                index += 1;
+            }
+            "--redact" => {
+                options.redact = true;
                 index += 1;
             }
             _ => break,
@@ -749,6 +847,11 @@ struct Session {
     /// The interpretations the session enabled, by declaration id. Empty is
     /// the default: every interpretation stays inert and output is unchanged.
     enabled_interpretations: BTreeSet<String>,
+    /// Display-layer redaction: when set, every printed line except the
+    /// certificate JSON of `:cert` replaces declared individual names with
+    /// stable placeholders. It changes display only: no verdict, exit code,
+    /// certificate field or redacted-off output depends on it.
+    redact: bool,
 }
 
 impl Session {
@@ -762,6 +865,7 @@ impl Session {
             .as_ref()
             .map(|_| SessionValueSource::CommandLine);
         let enabled_interpretations = options.interpretations.iter().cloned().collect();
+        let redact = options.redact;
         Session {
             lib: Library::new(),
             loaded: false,
@@ -771,6 +875,7 @@ impl Session {
             as_of_source,
             jurisdiction_source,
             enabled_interpretations,
+            redact,
         }
     }
 
@@ -974,6 +1079,16 @@ impl Session {
         }
     }
 
+    /// Run one command line and return its outcome.
+    ///
+    /// A bare line is treated as a colon command. With display redaction on,
+    /// every line the command prints is buffered and rewritten once with the
+    /// session's placeholder mapping, and a one-line notice is appended; the
+    /// `:cert` command is exempt because its JSON *is* the certificate and must
+    /// stay reproducible. An error message is redacted the same way, so no path
+    /// can leak a name the user asked to hide. The decision is made once, when
+    /// the command starts: `:redact off` therefore also finishes its own output
+    /// under the old state.
     fn handle(&mut self, line: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let line = line.trim();
         if line.is_empty() {
@@ -988,214 +1103,337 @@ impl Session {
                 "它不是命令；查询请用 :why / :gap / :issues",
             ));
         }
-        if let Some(rest) = line.strip_prefix(':') {
-            let (cmd, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-            let arg = arg.trim();
-            match cmd {
-                "load" => self.load_theory(arg, out),
-                "inspect" => {
-                    // The ledger is flat, so recover each declaration's source
-                    // namespace from the theory that recorded it. Case files
-                    // have no namespace and therefore print exactly as before.
-                    let namespaces: std::collections::HashMap<String, String> = self
-                        .lib
-                        .theories
-                        .iter()
-                        .filter_map(|theory| {
-                            theory.namespace.as_ref().map(|ns| (theory, ns.clone()))
-                        })
-                        .flat_map(|(theory, ns)| {
-                            theory
-                                .decls
-                                .iter()
-                                .map(move |decl| (decl.clone(), ns.clone()))
-                        })
-                        .collect();
-                    // A package supplies the richer `[name@version]` suffix,
-                    // but only for a name it really declared; a namespace
-                    // loaded directly from a file keeps `[ns]`.
-                    let pack_by_decl: std::collections::HashMap<&str, &packs::LoadedPackInfo> =
-                        self.packs
+        let command = if line.starts_with(':') {
+            line.to_owned()
+        } else {
+            format!(":{line}")
+        };
+        let rest = command.strip_prefix(':').unwrap_or(&command);
+        let (cmd, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let arg = arg.trim();
+        if self.redact && cmd != "cert" {
+            let mut buffer = OutputBuffer::default();
+            let result = self.dispatch(cmd, arg, &mut buffer);
+            let text = buffer.into_text(cmd)?;
+            let mut text = self.redact_text(&text);
+            if !text.is_empty() {
+                text.push_str(REDACT_NOTICE);
+                text.push('\n');
+            }
+            write!(out, "{text}").ok();
+            return result.map_err(|error| self.redact_text(&error));
+        }
+        self.dispatch(cmd, arg, out)
+    }
+
+    /// Dispatch an already split colon command.
+    fn dispatch(&mut self, cmd: &str, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        match cmd {
+            "load" => self.load_theory(arg, out),
+            "inspect" => {
+                // The ledger is flat, so recover each declaration's source
+                // namespace from the theory that recorded it. Case files
+                // have no namespace and therefore print exactly as before.
+                let namespaces: std::collections::HashMap<String, String> = self
+                    .lib
+                    .theories
+                    .iter()
+                    .filter_map(|theory| theory.namespace.as_ref().map(|ns| (theory, ns.clone())))
+                    .flat_map(|(theory, ns)| {
+                        theory
+                            .decls
                             .iter()
-                            .flat_map(|pack| {
-                                pack.decls.iter().map(move |decl| (decl.as_str(), pack))
-                            })
-                            .collect();
-                    // `open` markers are metadata on predicates: the predicate
-                    // line shows the marker, and the marker's own ledger entry
-                    // remains visible as `open:<predicate>`.
-                    let open_predicates = self.lib.env.open_predicates();
-                    for decl in self.lib.env.iter() {
-                        let kind = match &decl.kind {
-                            DeclKind::Sort => "sort ",
-                            DeclKind::Obj => "obj  ",
-                            DeclKind::Pred => "pred ",
-                            DeclKind::Axiom => "axiom",
-                            DeclKind::Fact { .. } => "fact ",
-                            DeclKind::Def { .. } => "def  ",
-                            DeclKind::Rule(_) => "rule ",
-                            DeclKind::Interpretation(_) => "interpret",
-                            DeclKind::Contrary { .. } => "contr ",
-                            DeclKind::Unique { .. } => "uniq  ",
-                            DeclKind::Priority { .. } => "prior ",
-                            DeclKind::OpenConcept { .. } => "open ",
-                        };
-                        // A fact shows who asserts it, so the ledger line
-                        // carries the Chinese identity label. An `Axiom`
-                        // asserts nothing and has no identity to show.
-                        let identity = match &decl.kind {
-                            DeclKind::Fact { identity } => {
-                                format!("  〔{}〕", identity.label_zh())
+                            .map(move |decl| (decl.clone(), ns.clone()))
+                    })
+                    .collect();
+                // A package supplies the richer `[name@version]` suffix,
+                // but only for a name it really declared; a namespace
+                // loaded directly from a file keeps `[ns]`.
+                let pack_by_decl: std::collections::HashMap<&str, &packs::LoadedPackInfo> = self
+                    .packs
+                    .iter()
+                    .flat_map(|pack| pack.decls.iter().map(move |decl| (decl.as_str(), pack)))
+                    .collect();
+                // `open` and `risk` markers are metadata on predicates: the
+                // predicate line shows the marker, and the marker's own
+                // ledger entry remains visible as `open:<predicate>` /
+                // `risk:<predicate>`. This is where a reader can see *which*
+                // declaration made a predicate open or risky; neither marker
+                // is ever inferred from the predicate's spelling.
+                let open_predicates = self.lib.env.open_predicates();
+                let risk_markers = self.lib.env.risk_markers();
+                for decl in self.lib.env.iter() {
+                    let kind = match &decl.kind {
+                        DeclKind::Sort => "sort ",
+                        DeclKind::Obj => "obj  ",
+                        DeclKind::Pred => "pred ",
+                        DeclKind::Axiom => "axiom",
+                        DeclKind::Fact { .. } => "fact ",
+                        DeclKind::Def { .. } => "def  ",
+                        DeclKind::Rule(_) => "rule ",
+                        DeclKind::Interpretation(_) => "interpret",
+                        DeclKind::Contrary { .. } => "contr ",
+                        DeclKind::Unique { .. } => "uniq  ",
+                        DeclKind::Priority { .. } => "prior ",
+                        DeclKind::OpenConcept { .. } => "open ",
+                        DeclKind::Risk { .. } => "risk ",
+                    };
+                    // A fact shows who asserts it, so the ledger line
+                    // carries the Chinese identity label. An `Axiom`
+                    // asserts nothing and has no identity to show.
+                    let identity = match &decl.kind {
+                        DeclKind::Fact { identity } => {
+                            format!("  〔{}〕", identity.label_zh())
+                        }
+                        _ => String::new(),
+                    };
+                    // An interpretation's declaration data is what the
+                    // ledger can show; whether it is enabled is a session
+                    // setting, printed by `:interpret list`, not a
+                    // property of the loaded declaration.
+                    let extra = match &decl.kind {
+                        DeclKind::Interpretation(interpretation) => {
+                            let sources = interpretation
+                                .sources
+                                .iter()
+                                .map(|source| source.one_line())
+                                .collect::<Vec<_>>()
+                                .join("；");
+                            format!(
+                                " 〔方向 {}〕〔来源 {sources}〕",
+                                interpretation.direction.keyword()
+                            )
+                        }
+                        _ => String::new(),
+                    };
+                    // An `open` marker belongs on the predicate it marks,
+                    // next to the type. The marker's own ledger entry below
+                    // still shows the synthetic `open:<predicate>` name.
+                    let open = match &decl.kind {
+                        DeclKind::Pred
+                            if open_predicates
+                                .iter()
+                                .any(|pred| pred.as_ref() == decl.name.as_ref()) =>
+                        {
+                            " 〔开放概念〕"
+                        }
+                        _ => "",
+                    };
+                    // A `risk` marker likewise belongs on the predicate it
+                    // marks: the theme it declares is the reason the case
+                    // gets a warning, and `:inspect` must show it.
+                    let risk = match &decl.kind {
+                        DeclKind::Pred => match risk_markers
+                            .iter()
+                            .find(|(pred, _)| pred.as_ref() == decl.name.as_ref())
+                        {
+                            Some((_, theme)) => {
+                                format!(" 〔风险 {}〕", theme.label_zh())
                             }
-                            _ => String::new(),
-                        };
-                        // An interpretation's declaration data is what the
-                        // ledger can show; whether it is enabled is a session
-                        // setting, printed by `:interpret list`, not a
-                        // property of the loaded declaration.
-                        let extra = match &decl.kind {
-                            DeclKind::Interpretation(interpretation) => {
-                                let sources = interpretation
-                                    .sources
-                                    .iter()
-                                    .map(|source| source.one_line())
-                                    .collect::<Vec<_>>()
-                                    .join("；");
-                                format!(
-                                    " 〔方向 {}〕〔来源 {sources}〕",
-                                    interpretation.direction.keyword()
-                                )
-                            }
-                            _ => String::new(),
-                        };
-                        // An `open` marker belongs on the predicate it marks,
-                        // next to the type. The marker's own ledger entry below
-                        // still shows the synthetic `open:<predicate>` name.
-                        let open = match &decl.kind {
-                            DeclKind::Pred
-                                if open_predicates
-                                    .iter()
-                                    .any(|pred| pred.as_ref() == decl.name.as_ref()) =>
-                            {
-                                " 〔开放概念〕"
-                            }
-                            _ => "",
-                        };
-                        // Recorded scope and occurrence are shown next to the
-                        // identity; an undeclared field prints nothing, never a
-                        // "default" placeholder.
-                        let scope = declared_scope_text(&decl.scope);
-                        let occurrence = declared_occurrence_text(decl);
-                        // A rule shows the burden/standard clauses it declared;
-                        // undeclared fields print nothing at all.
-                        let pleading = match &decl.kind {
-                            DeclKind::Rule(rule) => rule_pleading_suffix(rule),
-                            _ => String::new(),
-                        };
-                        // A priority has no user-written name: its ledger name
-                        // is a synthetic key. Print the surface declaration the
-                        // module wrote, the same way the load report does.
-                        let name = match &decl.kind {
-                            DeclKind::Priority { winner, loser, .. } => {
-                                format!("priority {winner} over {loser}")
-                            }
-                            // The marker is metadata about a predicate, so its
-                            // line names the target instead of the synthetic
-                            // ledger key (`open:<predicate>`).
-                            DeclKind::OpenConcept { pred } => pred.to_string(),
-                            _ => decl.name.to_string(),
-                        };
-                        let namespace = match pack_by_decl.get(decl.name.as_ref()) {
-                            Some(pack) => format!(" [{}@{}]", pack.name, pack.version),
-                            // A closed-environment case may declare its own
-                            // legal concepts; they are marked as case
-                            // extensions instead of a namespace, which a case
-                            // file never has.
-                            None if self.case_extensions.contains_key(decl.name.as_ref()) => {
-                                " [案件扩展]".to_owned()
-                            }
-                            None => namespaces
-                                .get(decl.name.as_ref())
-                                .map(|ns| format!(" [{ns}]"))
-                                .unwrap_or_default(),
-                        };
-                        writeln!(
+                            None => String::new(),
+                        },
+                        _ => String::new(),
+                    };
+                    // Recorded scope and occurrence are shown next to the
+                    // identity; an undeclared field prints nothing, never a
+                    // "default" placeholder.
+                    let scope = declared_scope_text(&decl.scope);
+                    let occurrence = declared_occurrence_text(decl);
+                    // A rule shows the burden/standard clauses it declared;
+                    // undeclared fields print nothing at all.
+                    let pleading = match &decl.kind {
+                        DeclKind::Rule(rule) => rule_pleading_suffix(rule),
+                        _ => String::new(),
+                    };
+                    // A priority has no user-written name: its ledger name
+                    // is a synthetic key. Print the surface declaration the
+                    // module wrote, the same way the load report does.
+                    let name = match &decl.kind {
+                        DeclKind::Priority { winner, loser, .. } => {
+                            format!("priority {winner} over {loser}")
+                        }
+                        // The marker is metadata about a predicate, so its
+                        // line names the target instead of the synthetic
+                        // ledger key (`open:<predicate>` / `risk:<predicate>`).
+                        DeclKind::OpenConcept { pred } => pred.to_string(),
+                        DeclKind::Risk { theme, pred } => {
+                            format!("{} {pred}", theme.label_zh())
+                        }
+                        _ => decl.name.to_string(),
+                    };
+                    let namespace = match pack_by_decl.get(decl.name.as_ref()) {
+                        Some(pack) => format!(" [{}@{}]", pack.name, pack.version),
+                        // A closed-environment case may declare its own
+                        // legal concepts; they are marked as case
+                        // extensions instead of a namespace, which a case
+                        // file never has.
+                        None if self.case_extensions.contains_key(decl.name.as_ref()) => {
+                            " [案件扩展]".to_owned()
+                        }
+                        None => namespaces
+                            .get(decl.name.as_ref())
+                            .map(|ns| format!(" [{ns}]"))
+                            .unwrap_or_default(),
+                    };
+                    writeln!(
                             out,
-                            "  {kind} {name} : {}{identity}{extra}{open}{scope}{occurrence}{pleading}{namespace}",
+                            "  {kind} {name} : {}{identity}{extra}{open}{risk}{scope}{occurrence}{pleading}{namespace}",
                             print_expr(&decl.ty)
                         )
                         .ok();
-                        // A definition is a named macro: `:inspect` must let a
-                        // reader see what the name expands to (the body and its
-                        // binder order), because the kernel unfolds it by delta
-                        // during conversion and that expansion is otherwise
-                        // invisible.
-                        if let DeclKind::Def { body } = &decl.kind {
-                            writeln!(out, "       := {}", print_expr(body)).ok();
-                        }
-                        for s in &decl.sources {
-                            writeln!(out, "       ← {}", s.one_line()).ok();
-                            for line in s.full().lines() {
-                                writeln!(out, "         {line}").ok();
-                            }
+                    // A definition is a named macro: `:inspect` must let a
+                    // reader see what the name expands to (the body and its
+                    // binder order), because the kernel unfolds it by delta
+                    // during conversion and that expansion is otherwise
+                    // invisible.
+                    if let DeclKind::Def { body } = &decl.kind {
+                        writeln!(out, "       := {}", print_expr(body)).ok();
+                    }
+                    for s in &decl.sources {
+                        writeln!(out, "       ← {}", s.one_line()).ok();
+                        for line in s.full().lines() {
+                            writeln!(out, "         {line}").ok();
                         }
                     }
-                    Ok(Outcome::Proved)
                 }
-                "given" => {
-                    let e = self.proposition(arg)?;
-                    let line = format!("已登记用户陈述：{}", print_expr(&e));
-                    // Name the fact after the first free slot, not after the
-                    // ledger length: adding metadata declarations (such as an
-                    // `open` marker) must not renumber session facts, because
-                    // that would change `:why`/`:cert` output for the same
-                    // theory and make the marker look non-inert.
-                    let name = (1..)
-                        .map(|n| format!("已知{n}"))
-                        .find(|name| self.lib.env.get(name).is_none())
-                        .expect("the natural numbers are unbounded");
-                    self.insert_fact(e, FactIdentity::UserAsserted, name)?;
-                    writeln!(out, "{line}").ok();
-                    Ok(Outcome::Proved)
-                }
-                "fact" => self.fact_command(arg, out),
-                "interpret" => self.interpret_command(arg, out),
-                "asof" => self.as_of_command(arg, out),
-                "jurisdiction" => self.jurisdiction_command(arg, out),
-                "why" => {
-                    // A multi-jurisdiction environment without a chosen
-                    // jurisdiction is ambiguous: refusing here is the gate,
-                    // not an applicability judgement.
-                    self.require_jurisdiction()?;
-                    self.query(cmd, arg, out)
-                }
-                "gap" => self.query(cmd, arg, out),
-                "explain" => {
-                    // The narrative uses the same certificate and the same
-                    // two proof layers as `:why`, so the multi-jurisdiction
-                    // ambiguity gate applies to it as well.
-                    self.require_jurisdiction()?;
-                    self.query(cmd, arg, out)
-                }
-                "applicability" => self.applicability_command(arg, out),
-                "issues" => self.issues_command(arg, out),
-                "labels" => self.labels_command(arg, out),
-                "cert" => self.export_certificate(arg, out),
-                "verify-cert" => self.verify_certificate(arg, out),
-                "check" => Err(
-                    ":check 已改名为 :verify-cert；检查源文件请直接运行 std-deduce <文件>"
-                        .to_owned(),
-                ),
-                "packs" => self.list_packs(arg, out),
-                "lock" => self.lock_packs(arg, out),
-                "audit" => self.audit_sources(arg, out),
-                "quit" | "exit" => Ok(Outcome::Proved),
-                other => Err(format!("未知命令 `:{other}`")),
+                Ok(Outcome::Proved)
             }
-        } else {
-            // Bare line: treated as a command.
-            self.handle(&format!(":{line}"), out)
+            "given" => {
+                let e = self.proposition(arg)?;
+                let line = format!("已登记用户陈述：{}", print_expr(&e));
+                // Name the fact after the first free slot, not after the
+                // ledger length: adding metadata declarations (such as an
+                // `open` marker) must not renumber session facts, because
+                // that would change `:why`/`:cert` output for the same
+                // theory and make the marker look non-inert.
+                let name = (1..)
+                    .map(|n| format!("已知{n}"))
+                    .find(|name| self.lib.env.get(name).is_none())
+                    .expect("the natural numbers are unbounded");
+                self.insert_fact(e, FactIdentity::UserAsserted, name)?;
+                writeln!(out, "{line}").ok();
+                Ok(Outcome::Proved)
+            }
+            "fact" => self.fact_command(arg, out),
+            "interpret" => self.interpret_command(arg, out),
+            "asof" => self.as_of_command(arg, out),
+            "jurisdiction" => self.jurisdiction_command(arg, out),
+            "why" => {
+                // A multi-jurisdiction environment without a chosen
+                // jurisdiction is ambiguous: refusing here is the gate,
+                // not an applicability judgement.
+                self.require_jurisdiction()?;
+                self.query(cmd, arg, out)
+            }
+            "gap" => self.query(cmd, arg, out),
+            "explain" => {
+                // The narrative uses the same certificate and the same
+                // two proof layers as `:why`, so the multi-jurisdiction
+                // ambiguity gate applies to it as well.
+                self.require_jurisdiction()?;
+                self.query(cmd, arg, out)
+            }
+            "applicability" => self.applicability_command(arg, out),
+            "issues" => self.issues_command(arg, out),
+            "labels" => self.labels_command(arg, out),
+            "cert" => self.export_certificate(arg, out),
+            "verify-cert" => self.verify_certificate(arg, out),
+            "check" => Err(
+                ":check 已改名为 :verify-cert；检查源文件请直接运行 std-deduce <文件>".to_owned(),
+            ),
+            "packs" => self.list_packs(arg, out),
+            "lock" => self.lock_packs(arg, out),
+            "audit" => self.audit_sources(arg, out),
+            "quit" | "exit" => Ok(Outcome::Proved),
+            "redact" => self.redact_command(arg, out),
+            other => Err(format!("未知命令 `:{other}`")),
         }
+    }
+
+    /// `:redact [on|off]` — show or set display-layer redaction.
+    ///
+    /// Redaction is a display filter: it replaces the case's declared individual
+    /// names with stable placeholders in printed output. It never changes a
+    /// derivation, a verdict, an exit code or a certificate field, and `:cert`
+    /// keeps exporting the original certificate.
+    fn redact_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        match arg {
+            "" => {
+                let state = if self.redact {
+                    "已开启"
+                } else {
+                    "已关闭"
+                };
+                writeln!(out, "显示层脱敏：{state}。").ok();
+                Ok(Outcome::Proved)
+            }
+            "on" => {
+                self.redact = true;
+                writeln!(
+                    out,
+                    "显示层脱敏：已开启（个体名会被替换为占位符；证书不脱敏）。"
+                )
+                .ok();
+                Ok(Outcome::Proved)
+            }
+            "off" => {
+                self.redact = false;
+                writeln!(out, "显示层脱敏：已关闭。").ok();
+                Ok(Outcome::Proved)
+            }
+            other => Err(format!(
+                "用法：:redact [on|off]（不接受 `{}`）",
+                escape_control(other)
+            )),
+        }
+    }
+
+    /// The individual-name mapping display redaction uses, sorted by name.
+    ///
+    /// An individual is a constant whose declared type is a sort: an `obj`
+    /// declaration, or an `axiom` that only names a constant of a sort.
+    /// Predicates, sorts, definitions and propositions are not redacted, so the
+    /// output stays readable and a proposition still names its predicate. The
+    /// mapping is sorted by the declared name, so the same theory always yields
+    /// the same placeholder for the same individual, in the same order.
+    fn redaction_map(&self) -> Vec<(String, String)> {
+        let mut names: Vec<String> = self
+            .lib
+            .env
+            .iter()
+            .filter(|decl| is_individual(&self.lib.env, decl))
+            .map(|decl| decl.name.to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| (name, format!("甲{}", index + 1)))
+            .collect()
+    }
+
+    /// Replace every declared individual name in `text` with its placeholder.
+    ///
+    /// Longest name first, so one individual's name is not redacted inside
+    /// another's; ties break by name, so the result does not depend on map
+    /// iteration order. This rewrites the whole printed text, including source
+    /// text, labels and notes: a notice that said the sources were not redacted
+    /// would be a way to leak the names back.
+    fn redact_text(&self, text: &str) -> String {
+        let mut map = self.redaction_map();
+        map.sort_by(|left, right| {
+            right
+                .0
+                .len()
+                .cmp(&left.0.len())
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let mut redacted = text.to_owned();
+        for (name, placeholder) in map {
+            redacted = redacted.replace(&name, &placeholder);
+        }
+        redacted
     }
 
     /// Elaborate `arg` as a proposition in the current environment.
@@ -1624,6 +1862,14 @@ impl Session {
             Some(certificate) => Some(derive_trust(certificate)?),
             None => None,
         };
+        // The risk themes the root derivation is about. Like the trust labels
+        // this is a derived view of the certificate plus the environment's
+        // declared `risk` markers; it is printed as its own line and never
+        // merged into a trust label.
+        let risk = match &certificate {
+            Some(certificate) => Some(derive_risk(&self.lib.env, certificate)?),
+            None => None,
+        };
 
         if cmd != "explain" {
             if let Some(c) = r.conflict_for(&goal) {
@@ -1641,7 +1887,14 @@ impl Session {
                             let Some(trust) = &trust else {
                                 return Err("内部状态错误：冲突分支应当已经派生信任标签".to_owned());
                             };
+                            let Some(risk) = &risk else {
+                                return Err("内部状态错误：冲突分支应当已经派生题材风险".to_owned());
+                            };
                             write_trust_line(out, trust);
+                            report_unresolved(out, &r, &goal, &c, reason);
+                            write_risk_warning(out, risk);
+                            write_disclaimer(out);
+                            return Ok(Outcome::Unresolved);
                         }
                         report_unresolved(out, &r, &goal, &c, reason);
                         return Ok(Outcome::Unresolved);
@@ -1663,6 +1916,15 @@ impl Session {
                                 write_trust_line(out, trust);
                             }
                             report_defeated(out, &r, &goal, &c, *winner, basis);
+                            if cmd == "why" {
+                                let Some(risk) = &risk else {
+                                    return Err(
+                                        "内部状态错误：冲突分支应当已经派生题材风险".to_owned()
+                                    );
+                                };
+                                write_risk_warning(out, risk);
+                                write_disclaimer(out);
+                            }
                             return Ok(Outcome::Gap);
                         }
                         // The winner is asserted; fall through and show it as
@@ -1714,6 +1976,9 @@ impl Session {
         };
         let Some(trust) = trust else {
             return Err("内部状态错误：:why / :explain 应当已经派生信任标签".to_owned());
+        };
+        let Some(risk) = risk else {
+            return Err("内部状态错误：:why / :explain 应当已经派生题材风险".to_owned());
         };
         // The tree or the narrative is printed from the certificate, then that
         // same certificate is checked by both layers: what the user sees and
@@ -1788,6 +2053,8 @@ impl Session {
             if cmd != "explain" {
                 report_conflicts(out, &certificate);
             }
+            write_risk_warning(out, &risk);
+            write_disclaimer(out);
             return Ok(Outcome::Gap);
         }
         if !report.root_proved || !kernel_report.root_proved {
@@ -1796,6 +2063,8 @@ impl Session {
             if cmd != "explain" {
                 report_conflicts(out, &certificate);
             }
+            write_risk_warning(out, &risk);
+            write_disclaimer(out);
             return Ok(Outcome::Gap);
         }
 
@@ -1824,6 +2093,8 @@ impl Session {
             if cmd != "explain" {
                 report_conflicts(out, &certificate);
             }
+            write_risk_warning(out, &risk);
+            write_disclaimer(out);
             return Ok(Outcome::Gap);
         }
 
@@ -1851,6 +2122,8 @@ impl Session {
                 write_certificate_basis(out, &basis, &other_by);
             }
         }
+        write_risk_warning(out, &risk);
+        write_disclaimer(out);
         Ok(Outcome::Proved)
     }
 
@@ -2075,6 +2348,14 @@ impl Session {
     /// environment the proof was derived in, and an unrecorded certificate can
     /// never be exported. Every failure happens before anything is written, so
     /// stdout never carries half a JSON document.
+    ///
+    /// Two explanation lines precede the JSON: the model-only disclaimer and the
+    /// privacy notice that the certificate contains the case text and may
+    /// contain personal information. They stay outside the JSON on purpose (the
+    /// certificate is not a place for display text and gains no field), and
+    /// display redaction never touches this command: the certificate words are
+    /// what `:verify-cert` re-checks, so a redacted certificate could no longer
+    /// be verified.
     fn export_certificate(&self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !self.loaded {
             return Err(
@@ -2114,6 +2395,11 @@ impl Session {
         let json = certificate
             .to_json_pretty()
             .map_err(|e| format!("证书序列化失败：{e}"))?;
+        // The explanation lines stay before the JSON: from the first `{` on the
+        // bytes are the certificate, so existing consumers are unaffected and
+        // the certificate gains no field. Display redaction never applies here:
+        // a redacted certificate could not be re-checked by `:verify-cert`.
+        write_cert_notice(out);
         writeln!(out, "{json}").ok();
         Ok(if reachable {
             Outcome::Proved
@@ -2131,7 +2417,9 @@ impl Session {
     /// target cannot receive different labels in different commands. The
     /// certificate is checked by both layers before any label is printed; a
     /// certificate that fails either layer is an error, never a labelled
-    /// conclusion.
+    /// conclusion. After the five trust labels, the risk themes of the same
+    /// certificate are printed as a separate section: they are a second label,
+    /// not one of the five, and they do not change the label-based exit code.
     fn labels_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         if !self.loaded {
             return Err(
@@ -2169,6 +2457,7 @@ impl Session {
         self.certificate_layers(&certificate, out)?;
 
         let trust = derive_trust(&certificate)?;
+        let risk = derive_risk(&self.lib.env, &certificate)?;
         writeln!(out, "{}", trust.summary()).ok();
         writeln!(out, "标签与依据（目标：{}）：", print_expr(&goal)).ok();
         for label in trust.labels() {
@@ -2177,6 +2466,10 @@ impl Session {
                 writeln!(out, "    - {evidence}").ok();
             }
         }
+        // The risk themes are a second label, reported next to the five trust
+        // labels and never inside them: a themed case keeps its trust label.
+        write_risk_section(out, &risk);
+        write_disclaimer(out);
         let proved_without_open = !trust.contains(TrustLabel::FactNeedsEvidence)
             && !trust.contains(TrustLabel::DisputeUnresolved)
             && !trust.contains(TrustLabel::NeedsLawyerJudgment);
@@ -2999,9 +3292,9 @@ const LOCAL_EXTENSION_ID: &str = LOCAL_EXTENSION_OBLIGATION_ID;
 /// `namespace`) is refused: modules are legal packs and enter through `import`.
 /// The case may state facts (`obj`, `axiom`) and query, but its legal concepts
 /// must come from the loaded packs. A case that declares sorts, predicates,
-/// definitions, rules, contraries, uniques or open-concept markers is refused
-/// unless `--allow-case-rules` is given; the error names what was declared so
-/// the author can move it into a pack or opt in explicitly.
+/// definitions, rules, contraries, uniques or open-concept / risk-theme markers
+/// is refused unless `--allow-case-rules` is given; the error names what was
+/// declared so the author can move it into a pack or opt in explicitly.
 ///
 /// Facts are checked too, because their *type* can carry a new legal concept:
 /// an object must be declared at a sort from a loaded pack (not `Prop`, `Type`
@@ -3092,6 +3385,7 @@ fn case_declaration(item: &Item) -> Option<String> {
         Item::Contrary { left, right, .. } => Some(format!("contrary {left} {right}")),
         Item::Unique { pred, index, .. } => Some(format!("unique {pred} {index}")),
         Item::Open { pred, .. } => Some(format!("open {pred}")),
+        Item::Risk { theme, pred, .. } => Some(format!("risk {theme} {pred}")),
         _ => None,
     }
 }
@@ -3112,6 +3406,28 @@ fn is_pack_sort(env: &Env, ty: &Expr) -> bool {
         env.get(name.as_ref()).map(|decl| &decl.kind),
         Some(DeclKind::Sort)
     )
+}
+
+/// Whether a declaration is an individual, for display redaction.
+///
+/// An individual is a constant whose declared type is a sort: an `obj`
+/// declaration (`obj 张三 : 公民`), or an `axiom` that only names a constant of
+/// a sort (`axiom 张三 : 公民`). Predicates (their type ends in `Prop`),
+/// definitions, sorts and asserted propositions are not individuals: redacting
+/// them would erase the legal vocabulary the output is explaining. The check is
+/// structural (the declared type's head is a declared sort), never a name list.
+fn is_individual(env: &Env, decl: &Decl) -> bool {
+    match &decl.kind {
+        DeclKind::Obj => true,
+        DeclKind::Axiom => match &decl.ty {
+            Expr::Const(sort) => matches!(
+                env.get(sort.as_ref()).map(|decl| &decl.kind),
+                Some(DeclKind::Sort)
+            ),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Collect every constant name an expression mentions.
@@ -3170,6 +3486,7 @@ fn record_case_extensions(
             DeclKind::Contrary { .. } => "contrary",
             DeclKind::Unique { .. } => "unique",
             DeclKind::OpenConcept { .. } => "open",
+            DeclKind::Risk { .. } => "risk",
             DeclKind::Obj | DeclKind::Axiom | DeclKind::Fact { .. } | DeclKind::Priority { .. } => {
                 continue
             }
@@ -3970,6 +4287,65 @@ fn root_summary(certificate: &Certificate, report: &CheckReport) -> String {
 /// `:explain` and `:labels` all print this same string for the same target.
 fn write_trust_line(out: &mut impl Write, trust: &TrustReport) {
     writeln!(out, "{}", trust.summary()).ok();
+}
+
+/// Print the one explicit high-risk line and its evidence.
+///
+/// A high-risk derivation prints exactly one warning line, followed by one
+/// `  依据：…` line per proving node, so the reader can see which proposition,
+/// rule and source produced the grading. A low-risk derivation prints nothing:
+/// a clean case must not be buried under a line that says "no risk".
+fn write_risk_warning(out: &mut impl Write, risk: &RiskReport) {
+    let Some(warning) = risk.warning_line() else {
+        return;
+    };
+    writeln!(out, "{warning}").ok();
+    for theme in risk.themes() {
+        for evidence in risk.evidence(*theme) {
+            writeln!(out, "  依据：{evidence}").ok();
+        }
+    }
+}
+
+/// Print the risk themes as the second-label section of `:labels`.
+///
+/// The section is separate from the five trust labels on purpose: the trust
+/// labels say why the model may not decide (an open concept, a claim, a gap),
+/// the risk themes say what the case is about. Both can hold at once, so a
+/// theme is never folded into `需律师判断`.
+fn write_risk_section(out: &mut impl Write, risk: &RiskReport) {
+    if !risk.is_high_risk() {
+        return;
+    }
+    writeln!(
+        out,
+        "题材风险（次标签，与上面的五种信任标签相互独立，不并入「需律师判断」）："
+    )
+    .ok();
+    if let Some(warning) = risk.warning_line() {
+        writeln!(out, "  {warning}").ok();
+    }
+    for theme in risk.themes() {
+        writeln!(out, "  {}", theme.label_zh()).ok();
+        for evidence in risk.evidence(*theme) {
+            writeln!(out, "    - {evidence}").ok();
+        }
+    }
+}
+
+/// Print the short statement every result output carries once.
+fn write_disclaimer(out: &mut impl Write) {
+    writeln!(out, "{DISCLAIMER_LINE}").ok();
+}
+
+/// Print the `:cert` explanation lines before the certificate JSON.
+///
+/// The lines stay outside the JSON on purpose: certificate v8 gains no field,
+/// and everything from the first `{` on is still the certificate itself.
+fn write_cert_notice(out: &mut impl Write) {
+    for line in CERT_NOTICE {
+        writeln!(out, "{line}").ok();
+    }
 }
 
 /// Explain why a human is or is not needed, using the recorded obligations.
@@ -5098,6 +5474,27 @@ fn print_help(out: &mut impl Write) {
          :interpret list 查看状态，:gap / :why 的缺口会提示未启用的解释。"
     )
     .ok();
+    writeln!(out).ok();
+    writeln!(out, "声明：这是模型内推导，不是法律意见。").ok();
+    writeln!(
+        out,
+        "证书包含案件原文，可能含个人信息，分享前请自行处理；:cert 导出的证书是原样文本，不脱敏\
+         （脱敏后的证书无法再被 :verify-cert 复核）。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "--redact 开启显示层脱敏（:redact on|off 可在会话里切换）：:why / :explain / :labels 等输出把\
+         个体名换成甲1、甲2…（来源与标签文本同样替换），证书 JSON 仍是原文；关闭时输出不变。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "风险题材：理论里 `risk <类别> <谓词>` 声明谓词属于刑事 / 人身安全 / 重大财产 / 临近期限 / \
+         涉外或移民之一；根推导涉及这些命题时 :why / :explain 打印一行高风险警示与依据，\
+         :labels 把它作为次标签列出。"
+    )
+    .ok();
 }
 
 fn print_version(out: &mut impl Write) {
@@ -5131,7 +5528,34 @@ fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write
 /// names the file, so the batch entry adds no path prefix of its own. Remaining
 /// commands are not run.
 fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut impl Write) -> i32 {
-    if let Err(error) = session.load_theory(file, out) {
+    // The load report names the declarations the file contributed, including
+    // the case's individuals, so display redaction must cover it too. Buffering
+    // it keeps the report and its notice in one filtered write.
+    let mut buffer = OutputBuffer::default();
+    let load_result = session.load_theory(file, &mut buffer);
+    let text = match buffer.into_text("load") {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
+    if session.redact {
+        let mut text = session.redact_text(&text);
+        if !text.is_empty() {
+            text.push_str(REDACT_NOTICE);
+            text.push('\n');
+        }
+        write!(out, "{text}").ok();
+    } else {
+        write!(out, "{text}").ok();
+    }
+    if let Err(error) = load_result {
+        let error = if session.redact {
+            session.redact_text(&error)
+        } else {
+            error
+        };
         eprintln!("{error}");
         return 1;
     }
@@ -5160,6 +5584,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
                  :asof [YYYY-MM-DD]  :jurisdiction [代码]  \
                  :interpret [list|enable|disable <解释名>]  \
                  :why <命题>  :explain <命题>  :labels <命题>  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
+                 :redact [on|off]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )
             .ok();

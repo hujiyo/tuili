@@ -72,6 +72,11 @@ pub(crate) struct Options {
     /// line order. They are resolved against the loaded environment; a
     /// default (empty) session keeps every interpretation inert.
     pub(crate) interpretations: Vec<String>,
+    /// Display-layer redaction: replace individual names in printed output with
+    /// stable placeholders. It is a session flag carried on the same struct
+    /// because the option is parsed in the same prefix; it never affects which
+    /// packs load, the environment identity or a certificate's content.
+    pub(crate) redact: bool,
 }
 
 /// An enabled environment: the profile that selected it, where the registry

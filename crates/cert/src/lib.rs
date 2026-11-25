@@ -168,6 +168,19 @@
 //! same evidence, so a conclusion cannot be labelled differently by different
 //! renderers. A label never asserts legal correctness: `已验证` means the
 //! certificate proves the root under strict facts only and leaves nothing open.
+//!
+//! ## Risk themes
+//!
+//! [`derive_risk`] computes a [`RiskReport`] from the environment's declared
+//! `risk` markers and the propositions on the certificate's root proof graph.
+//! It is a second, separate derived view: a themed predicate (criminal law,
+//! personal safety, major property, an approaching deadline, foreign or
+//! immigration matters) makes the conclusion high-risk, so the CLI prints one
+//! explicit warning and `:labels` names the theme as a second label. A theme is
+//! never merged into `需律师判断`: the trust label says why the model cannot
+//! decide, the risk theme says what the case is about, and both can hold at
+//! once. The report is never written into the certificate either, so `:cert`
+//! JSON, certificate v8 and `:verify-cert` are unchanged.
 
 mod closure;
 mod key;
@@ -181,6 +194,7 @@ pub mod narrative;
 pub mod open;
 pub mod proof;
 pub mod render;
+pub mod risk;
 pub mod source;
 pub mod trust;
 pub mod version;
@@ -210,6 +224,7 @@ pub use open::{
 };
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
 pub use render::{render, render_with_annotations};
+pub use risk::{derive_risk, RiskReport};
 pub use source::Source;
 pub use trust::{derive_trust, TrustLabel, TrustReport, LOCAL_EXTENSION_OBLIGATION_ID};
 pub use version::{FormatVersion, FORMAT_VERSION};

@@ -218,6 +218,66 @@ impl FactIdentity {
     }
 }
 
+/// The theme risk categories a predicate can be declared under.
+///
+/// A `risk <类别> <谓词>` declaration records that reasoning about this
+/// predicate's propositions belongs to one of these themes. It is a declared
+/// property of the theory, not a word list the system matches against printed
+/// text: the surface declaration names the category, `:inspect` shows it and the
+/// certificate layer compares predicate heads with it. The kernel only stores
+/// the marker; it never seeds a derivation, blocks a rule or changes a verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RiskTheme {
+    /// `刑事` — criminal liability and criminal procedure.
+    Criminal,
+    /// `人身安全` — personal safety, bodily integrity and personal liberty.
+    PersonalSafety,
+    /// `重大财产` — major property interests and large-value assets.
+    MajorProperty,
+    /// `临近期限` — a deadline or limitation period that is about to run out.
+    ApproachingDeadline,
+    /// `涉外或移民` — foreign elements, immigration and cross-border matters.
+    ForeignOrImmigration,
+}
+
+impl RiskTheme {
+    /// The keywords a `risk` declaration accepts, in a stable order. Error
+    /// messages list the same set so a near miss can be corrected.
+    pub fn keywords() -> &'static [&'static str] {
+        &["刑事", "人身安全", "重大财产", "临近期限", "涉外或移民"]
+    }
+
+    /// The theme named by its keyword, or `None` when the keyword is unknown.
+    /// There is no default: an unknown theme is a load error.
+    pub fn parse(keyword: &str) -> Option<Self> {
+        match keyword {
+            "刑事" => Some(RiskTheme::Criminal),
+            "人身安全" => Some(RiskTheme::PersonalSafety),
+            "重大财产" => Some(RiskTheme::MajorProperty),
+            "临近期限" => Some(RiskTheme::ApproachingDeadline),
+            "涉外或移民" => Some(RiskTheme::ForeignOrImmigration),
+            _ => None,
+        }
+    }
+
+    /// The surface keyword, which is also what `:inspect` prints next to the
+    /// predicate and what the risk report names.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            RiskTheme::Criminal => "刑事",
+            RiskTheme::PersonalSafety => "人身安全",
+            RiskTheme::MajorProperty => "重大财产",
+            RiskTheme::ApproachingDeadline => "临近期限",
+            RiskTheme::ForeignOrImmigration => "涉外或移民",
+        }
+    }
+
+    /// The theme's own name, as the risk report prints it.
+    pub fn label_zh(self) -> &'static str {
+        self.keyword()
+    }
+}
+
 /// Who must prove a rule's positive requirements, or its exceptions.
 ///
 /// The three values are relative roles, not party names: a file never invents
@@ -484,6 +544,14 @@ pub enum DeclKind {
     /// marker, and a certificate records an `open_concept` obligation when a
     /// derivation depends on it.
     OpenConcept { pred: Name },
+    /// A predicate marked as belonging to a risk theme:
+    /// `risk 刑事 故意伤害`. The marker records that reasoning about this
+    /// predicate's propositions is about that theme, so the CLI can warn about
+    /// the case and `:labels` can name it as a second label. It is metadata:
+    /// it asserts nothing, seeds no derivation and blocks no `unless`. The
+    /// risk is never guessed from printed text: a predicate is only risky
+    /// because a declaration says so, and `:inspect` shows the marker.
+    Risk { theme: RiskTheme, pred: Name },
 }
 
 /// A defeasible rule.
@@ -821,6 +889,25 @@ impl Env {
         self.iter()
             .filter_map(|d| match &d.kind {
                 DeclKind::OpenConcept { pred } => Some(pred.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Predicates marked with a risk theme, in declaration order, together
+    /// with the theme they were declared under.
+    ///
+    /// A marker is metadata about what a predicate is about. The kernel stores
+    /// it and never lets it seed a derivation or block a rule. Readers use this
+    /// list: `:inspect` shows the marker next to the predicate, and the
+    /// certificate layer compares predicate heads against it so a derivation
+    /// about a risk theme is reported with an explicit warning instead of
+    /// being presented as an ordinary conclusion. The mapping is a declared
+    /// decision: a predicate is risky only when a `risk` declaration says so.
+    pub fn risk_markers(&self) -> Vec<(Name, RiskTheme)> {
+        self.iter()
+            .filter_map(|d| match &d.kind {
+                DeclKind::Risk { theme, pred } => Some((pred.clone(), *theme)),
                 _ => None,
             })
             .collect()
