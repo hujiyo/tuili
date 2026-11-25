@@ -2163,8 +2163,8 @@ fn has_open_pattern(expression: &Expr) -> bool {
 ///
 /// Rules are constants too (their type is the rule telescope), so a
 /// higher-order parameter can be instantiated with one. Meta declarations
-/// (`contrary`, `unique`, `priority`, `interpret`) name no term and are
-/// skipped.
+/// (`contrary`, `unique`, `priority`, `open`, `interpret`) name no term and
+/// are skipped.
 fn constant_values(env: &Env) -> BTreeMap<String, Vec<Expr>> {
     let mut by_type: BTreeMap<String, Vec<Expr>> = BTreeMap::new();
     for decl in env.iter() {
@@ -2173,6 +2173,7 @@ fn constant_values(env: &Env) -> BTreeMap<String, Vec<Expr>> {
             DeclKind::Contrary { .. }
                 | DeclKind::Unique { .. }
                 | DeclKind::Priority { .. }
+                | DeclKind::OpenConcept { .. }
                 | DeclKind::Interpretation(_)
         ) {
             continue;

@@ -145,6 +145,11 @@ impl Library {
         // validated against the completed environment after the loop so a
         // priority may name a rule declared later in the same file.
         let mut priorities: Vec<(String, String)> = Vec::new();
+        // Every `open` target with the position it was written at. The marker
+        // itself enters the ledger immediately, but its target is validated
+        // against the completed environment so a predicate may be declared
+        // later in the same file.
+        let mut open_concepts: Vec<(String, usize, usize)> = Vec::new();
 
         for item in items {
             match item {
@@ -439,6 +444,43 @@ impl Library {
                         .map_err(|e| LoadError::new(format!("`unique {pred} {index}`：{e}")))?;
                     theory.decls.push(format!("unique:{pred}:{index}"));
                     report.declared.push(format!("unique {pred} {index}"));
+                }
+                Item::Open { pred, line, col } => {
+                    let p = std_deduce_kernel::name(&pred);
+                    // The marker is its own ledger declaration, named after the
+                    // predicate it marks. A second marker for the same target
+                    // is a duplicate, not a harmless repeat: an open concept
+                    // must be one declaration a reader can point at.
+                    if next.env.open_predicates().iter().any(|open| open == &p) {
+                        return Err(LoadError::at(
+                            format!(
+                                "`open {pred}`：谓词 `{p}` 已经标记为开放概念（重复）；\
+                                 一个谓词只能声明一次 open"
+                            ),
+                            line,
+                            col,
+                        ));
+                    }
+                    let decl = Decl {
+                        name: std_deduce_kernel::name(format!("open:{pred}")),
+                        kind: std_deduce_kernel::DeclKind::OpenConcept { pred: p },
+                        // The marker is metadata, not a claim: its constant has
+                        // type `Type`, so the kernel never treats it as a
+                        // proposition. The target check below is what decides
+                        // whether the declaration is meaningful.
+                        ty: Expr::Sort(1),
+                        sources: Vec::new(),
+                        scope: Scope::default(),
+                        occurred_at: None,
+                        occurred_in: None,
+                        index: 0,
+                    };
+                    next.env
+                        .insert(decl, &std_deduce_kernel::Ctx::new())
+                        .map_err(|e| LoadError::at(format!("`open {pred}`：{e}"), line, col))?;
+                    theory.decls.push(format!("open:{pred}"));
+                    report.declared.push(format!("open {pred}"));
+                    open_concepts.push((pred, line, col));
                 }
                 Item::Priority {
                     winner,
@@ -780,6 +822,30 @@ impl Library {
             }
         }
 
+        // An `open` marker may name a predicate declared later in the same
+        // file, so its target is checked against the completed environment.
+        // The marker itself was inserted immediately (it has no term to
+        // elaborate), which keeps `:inspect` in source order.
+        for (pred, line, col) in &open_concepts {
+            let p = std_deduce_kernel::name(pred);
+            match next.env.get(&p) {
+                Some(d) if matches!(d.kind, std_deduce_kernel::DeclKind::Pred) => {}
+                Some(_) => {
+                    return Err(LoadError::at(
+                        format!("`open {pred}`：`{p}` 不是谓词（pred）"),
+                        *line,
+                        *col,
+                    ))
+                }
+                None => {
+                    return Err(LoadError::at(
+                        format!("`open {pred}`：未知谓词 `{p}`"),
+                        *line,
+                        *col,
+                    ))
+                }
+            }
+        }
         // A `defeated_by` / `prefer` name is stored as an opaque string, so a
         // typo would silently disable the intended priority. Validate the
         // targets after the whole file is in the environment, which allows a
@@ -992,6 +1058,7 @@ fn check_case_decl_names(items: &[Item]) -> Result<(), String> {
             | Item::Import(_)
             | Item::Contrary { .. }
             | Item::Unique { .. }
+            | Item::Open { .. }
             | Item::Check(_)
             | Item::Why(_)
             | Item::Gap(_)
@@ -1268,6 +1335,10 @@ fn check_module_names(ns: &str, items: &[Item]) -> Result<(), String> {
             }
             Item::Unique { pred, index, .. } => {
                 let what = format!("`unique {pred} {index}`");
+                require_qualified_ref(ns, &what, pred)?;
+            }
+            Item::Open { pred, .. } => {
+                let what = format!("`open {pred}`");
                 require_qualified_ref(ns, &what, pred)?;
             }
             Item::Priority { winner, loser, .. } => {

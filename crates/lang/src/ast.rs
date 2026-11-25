@@ -124,6 +124,17 @@ pub enum Item {
         index: usize,
         source: Option<SourceSpec>,
     },
+    /// `open 重大` — marks a declared predicate as an open concept.
+    ///
+    /// The target is resolved by the loader against the completed environment,
+    /// so it may be declared later in the same file. The source position is
+    /// recorded here because that check happens after the whole file is read
+    /// and its errors still have to point at this declaration.
+    Open {
+        pred: String,
+        line: usize,
+        col: usize,
+    },
     /// `priority a.r over b.r source …` — a provenance-carrying priority: the
     /// winner outranks the loser. A module (a file with a namespace) is the
     /// only place that may assert one; the declaring namespace is part of the
