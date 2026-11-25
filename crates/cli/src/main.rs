@@ -926,6 +926,10 @@ impl Session {
                             DeclKind::Priority { winner, loser, .. } => {
                                 format!("priority {winner} over {loser}")
                             }
+                            // The marker is metadata about a predicate, so its
+                            // line names the target instead of the synthetic
+                            // ledger key (`open:<predicate>`).
+                            DeclKind::OpenConcept { pred } => pred.to_string(),
                             _ => decl.name.to_string(),
                         };
                         let namespace = match pack_by_decl.get(decl.name.as_ref()) {
@@ -960,7 +964,15 @@ impl Session {
                 "given" => {
                     let e = self.proposition(arg)?;
                     let line = format!("已登记用户陈述：{}", print_expr(&e));
-                    let name = format!("已知{}", self.lib.env.len());
+                    // Name the fact after the first free slot, not after the
+                    // ledger length: adding metadata declarations (such as an
+                    // `open` marker) must not renumber session facts, because
+                    // that would change `:why`/`:cert` output for the same
+                    // theory and make the marker look non-inert.
+                    let name = (1..)
+                        .map(|n| format!("已知{n}"))
+                        .find(|name| self.lib.env.get(name).is_none())
+                        .expect("the natural numbers are unbounded");
                     self.insert_fact(e, FactIdentity::UserAsserted, name)?;
                     writeln!(out, "{line}").ok();
                     Ok(Outcome::Proved)

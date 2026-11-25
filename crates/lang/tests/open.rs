@@ -201,3 +201,13 @@ fn an_open_declaration_is_metadata_not_a_proposition() {
     assert!(marker.sources.is_empty());
     assert!(matches!(marker.kind, DeclKind::OpenConcept { .. }));
 }
+
+#[test]
+fn a_repeated_unknown_target_reports_the_unknown_predicate_not_a_duplicate() {
+    // Target validation runs before duplicate detection, so the first fix a
+    // reader must make is the one that actually explains the failure.
+    let error = load_err("pred 已知 : Prop\nopen 不存在\nopen 不存在\n");
+    let message = error.to_string();
+    assert!(message.contains("未知谓词"), "{message}");
+    assert!(!message.contains("重复"), "{message}");
+}

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std_deduce_lawpack::{build_lock, LOCK_FILE};
 
 const PROVED: i32 = 0;
+const GAP: i32 = 1;
 const LOAD_FAILED: i32 = 1;
 
 fn repo_root() -> PathBuf {
@@ -199,8 +200,11 @@ fn inspect_marks_only_the_opened_predicate() {
         pred("损害")
     );
     assert!(
-        out.lines().any(|line| line.contains("open:重大")),
-        "the marker declaration must stay visible in the ledger:\n{out}"
+        out.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("open") && line.contains("重大 :")
+        }),
+        "the marker declaration must stay visible in the ledger, named after its target:\n{out}"
     );
     assert!(
         !out.contains("[案件扩展]"),
@@ -273,7 +277,10 @@ fn closed_env_rejects_a_case_open_unless_case_rules_are_allowed() {
     );
     let marker_line = out
         .lines()
-        .find(|line| line.contains("open:cn.constitution.非法搜查"))
+        .find(|line| {
+            let line = line.trim_start();
+            line.starts_with("open") && line.contains("非法搜查")
+        })
         .unwrap_or_else(|| panic!("no marker declaration line:\n{out}"));
     assert!(
         marker_line.contains("[案件扩展]"),
@@ -392,4 +399,72 @@ fn opening_a_predicate_changes_neither_why_nor_cert() {
             "`{query}` must be identical with and without the marker\nplain:\n{plain_text}\nopened:\n{opened_text}"
         );
     }
+}
+
+/// A marker occupies a ledger slot, so a session fact must not be numbered by
+/// the ledger length: otherwise adding `open` would rename `:given` facts and
+/// change `:why` output for reasons that have nothing to do with the marker.
+#[test]
+fn a_given_fact_name_does_not_shift_when_a_marker_is_added() {
+    let temp = TempDir::new("given-name");
+    let base = "sort 人\n\
+                pred 损害 : 人 → Prop\n\
+                obj 甲 : 人\n";
+    let marked = format!("{base}open 损害\n");
+    let _plain = temp.write("plain-given.std", base);
+    let opened = temp.write("opened-given.std", &marked);
+
+    let opened_out = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            opened.display().to_string(),
+            ":given 损害 甲".to_owned(),
+            ":why 损害 甲".to_owned(),
+        ]),
+        PROVED,
+        &["已加载", "+ open 损害"],
+    );
+    let text = stdout(&opened_out);
+    assert!(
+        text.contains("[已知1]"),
+        "the first session fact must stay `已知1` with the marker present:\n{text}"
+    );
+    assert!(
+        !text.contains("[已知2]"),
+        "the marker must not consume a session-fact name:\n{text}"
+    );
+}
+
+/// `:issues` instantiates rules over declared constants. An `open` marker is a
+/// metadata declaration of type `Type`, not a term a parameter can take:
+/// without the skip in the constant enumeration it would surface as
+/// `概念 open:<predicate>` inside a `Type`-parameter rule.
+#[test]
+fn issues_does_not_enumerate_open_markers_as_constants() {
+    let temp = TempDir::new("issues-open");
+    let source = "sort 人\n\
+                  pred 重大 : 人 → Prop\n\
+                  open 重大\n\
+                  pred 集合 : Type → Prop\n\
+                  obj 甲 : 人\n\
+                  rule 全体 :\n\
+                    params T : Type\n\
+                    premise 集合 T\n\
+                    conclude 集合 T\n\
+                    source text \"测试\" locator \"一\"\n";
+    let theory = temp.write("issues-open.std", source);
+    let output = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            theory.display().to_string(),
+            ":issues".to_owned(),
+        ]),
+        GAP,
+        &["已加载"],
+    );
+    let text = stdout(&output);
+    assert!(
+        !text.contains("open:"),
+        "the marker must not be enumerated as a constant:\n{text}"
+    );
 }
