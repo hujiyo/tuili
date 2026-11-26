@@ -1,0 +1,38 @@
+-- 金额算错：规则算出的合计与已查明的合计不一致。
+-- 医疗费 3000 分 + 误工费 2000 分，规则算出 5000 分；但卷宗查明的合计是 9000 分。
+-- `unique 合计 1` 声明同一个人的合计金额只有一个值：两边算冲突。
+-- 查明事实是严格事实，胜过规则结论，因此规则算出的 5000 被否决并记录在证书里；
+-- `:why 合计 甲 5000` 按败方退出，`:why 合计 甲 9000` 正常成功并打印裁决依据。
+
+sort 人
+def 金额 : Type := Int
+
+pred 医疗费 : 人 → 金额 → Prop
+pred 误工费 : 人 → 金额 → Prop
+pred 合计 : 人 → 金额 → Prop
+
+-- `unique` 的参数位置从 1 开始写：第 1 个参数是「人」，第 2 个是「金额」，金额单值。
+-- 内核把它记成零基下标 1；`unique 合计 1` 会错把「人」当成单值参数。
+unique 合计 2
+
+obj 甲 : 人
+
+axiom 医疗费事实 : 医疗费 甲 3000
+  identity verified
+  source text "示例卷宗" locator "医疗费票据" version "2024" quote "医疗费 3000 分"
+
+axiom 误工费事实 : 误工费 甲 2000
+  identity verified
+  source text "示例卷宗" locator "误工证明" version "2024" quote "误工费 2000 分"
+
+-- 卷宗查明的合计金额是 9000 分，与规则算出的 5000 分不一致。
+axiom 查明合计 : 合计 甲 9000
+  identity verified
+  source text "示例卷宗" locator "赔偿清单" version "2024" quote "赔偿合计 9000 分"
+
+rule 赔偿合计 :
+  params p : 人, a : 金额, b : 金额
+  premise 医疗费 p a
+  premise 误工费 p b
+  conclude 合计 p (a + b)
+  source text "示例法" locator "赔偿范围" version "2024" quote "医疗费与误工费应当计入赔偿合计"
