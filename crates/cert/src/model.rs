@@ -904,6 +904,16 @@ pub struct GapCandidate {
     /// Premises that are not known.
     #[serde(default)]
     pub missing: Vec<CertExpr>,
+    /// Optional branch labels parallel to `missing`: `Some(k)` marks the
+    /// entry as the k-th written branch of one failing disjunctive premise;
+    /// `null` marks a plain or existential missing proposition. The reasoner
+    /// fills this for disjunctive gaps so `:why` can label each branch instead
+    /// of presenting them as unrelated missing premises. The field is omitted
+    /// when no entry is a branch, so existing gap certificates keep their JSON.
+    /// Hand-written certificates may omit it; the checker validates it when
+    /// present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_branches: Vec<Option<usize>>,
     /// `unless` conditions that already hold, blocking this rule.
     #[serde(default)]
     pub blocked_by: Vec<CertExpr>,

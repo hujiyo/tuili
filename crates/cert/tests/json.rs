@@ -161,6 +161,7 @@ fn sample_certificate() -> Certificate {
                 proposition: app(constant("赔偿"), constant("张三")),
                 axiom_candidates: Vec::new(),
                 candidates: vec![GapCandidate {
+                    missing_branches: Vec::new(),
                     guards: Vec::new(),
                     choices: Vec::new(),
                     rule: "侵权赔偿".to_owned(),

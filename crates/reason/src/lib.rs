@@ -374,6 +374,9 @@ pub struct GapCandidate {
     pub held: Vec<Expr>,
     /// Premises that are not known.
     pub missing: Vec<Expr>,
+    /// Branch labels parallel to `missing`: `Some(k)` for the k-th written
+    /// branch of a failing disjunction, `None` for a plain/existential gap.
+    pub missing_branches: Vec<Option<usize>>,
     /// Branch/witness selections of the compound premises that already hold.
     pub choices: Vec<PremiseSelection>,
     /// `unless` conditions that *are* known, i.e. why this rule is blocked.
@@ -4323,6 +4326,20 @@ impl<'a> Reasoner<'a> {
                 .collect();
             let held: Vec<Expr> = premises.iter().filter_map(|s| s.held.clone()).collect();
             let missing: Vec<Expr> = premises.iter().flat_map(|s| s.missing.clone()).collect();
+            let missing_branches: Vec<Option<usize>> = premises
+                .iter()
+                .flat_map(|status| {
+                    if status.branches.is_empty() {
+                        status.missing.iter().map(|_| None).collect::<Vec<_>>()
+                    } else {
+                        status
+                            .branches
+                            .iter()
+                            .map(|(branch, _)| Some(*branch))
+                            .collect::<Vec<_>>()
+                    }
+                })
+                .collect();
             let choices: Vec<PremiseSelection> =
                 premises.iter().map(|s| s.selection.clone()).collect();
             let blocked_by: Vec<Expr> = {
@@ -4344,6 +4361,7 @@ impl<'a> Reasoner<'a> {
                 bindings: binding,
                 held,
                 missing,
+                missing_branches,
                 choices,
                 premises,
                 blocked_by,
@@ -6503,6 +6521,7 @@ pub fn certificate(
                         bindings,
                         held,
                         missing,
+                        missing_branches: candidate.missing_branches.clone(),
                         choices,
                         blocked_by,
                         guards,

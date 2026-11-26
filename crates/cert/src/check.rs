@@ -2504,6 +2504,10 @@ fn validate_candidate_applicability(
     // missing" is not compressed into a lump-sum proposition.
     let mut held_index = 0usize;
     let mut missing_index = 0usize;
+    // The branch labels the reasoner would have written for this candidate:
+    // every failing disjunction contributes one label per written branch in
+    // order; plain and existential missing propositions contribute `None`.
+    let mut expected_labels: Vec<Option<usize>> = Vec::new();
     for (index, premise) in declared.premises.iter().enumerate() {
         match (&premise.kind, &selected[index]) {
             (PremiseKind::Plain(_), SelectedChoice::Plain) => {
@@ -2513,6 +2517,7 @@ fn validate_candidate_applicability(
                 } else if candidate_item_matches(env, &candidate.missing, missing_index, &expected)?
                 {
                     missing_index += 1;
+                    expected_labels.push(None);
                 } else {
                     return Err(format!(
                         "{place}：规则的第 {} 个前提实例是 `{}`，但候选既未把它列为已持有，\
@@ -2548,6 +2553,7 @@ fn validate_candidate_applicability(
                         ));
                     }
                     missing_index += 1;
+                    expected_labels.push(Some(branch));
                 }
             }
             (PremiseKind::Exists { binder, .. }, SelectedChoice::Witness(witness)) => {
@@ -2576,6 +2582,7 @@ fn validate_candidate_applicability(
                     ));
                 }
                 missing_index += 1;
+                expected_labels.push(None);
             }
             (PremiseKind::Plain(_), _) => {
                 return Err(format!(
@@ -2607,6 +2614,16 @@ fn validate_candidate_applicability(
         return Err(format!(
             "{place}：缺失前提列表与规则前提不匹配（多出 {} 条）",
             candidate.missing.len() - missing_index
+        ));
+    }
+    // The optional branch labels must be exactly the ones the merge above
+    // implies. A present label array is validated in full; an omitted one
+    // (hand-written certificate) is allowed, and the renderer then falls back
+    // to the flat missing list.
+    if !candidate.missing_branches.is_empty() && candidate.missing_branches != expected_labels {
+        return Err(format!(
+            "{place}：缺失前提的分支标注与规则声明不一致（应为 {:?}，记录为 {:?}）",
+            expected_labels, candidate.missing_branches
         ));
     }
 

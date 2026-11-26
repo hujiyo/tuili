@@ -455,6 +455,65 @@ fn too_many_witness_candidates_fail_explicitly() {
     );
 }
 
+#[test]
+fn verify_cert_discloses_that_branch_choices_are_logical_side_conditions() {
+    let theory = TempFile::new("disclosure", "std", THEORY);
+    let output = session(&theory, &[":cert 有情 甲 乙".to_owned()]);
+    assert_exit(&output, PROVED);
+    let certificate_file = write_certificate("disclosure", &certificate_text(&output));
+    let verified = verify(&theory, &certificate_file, "有情 甲 乙");
+    assert_exit(&verified, PROVED);
+    let text = stdout(&verified);
+    assert!(
+        text.contains("其中") && text.contains("步含析取/存在前提，分支选择由逻辑层复核"),
+        "verify-cert must disclose the kernel coverage boundary:\n{text}"
+    );
+}
+
+const PLAIN_THEORY: &str = r#"
+sort 人
+obj 甲 : 人
+pred 安静 : 人 → Prop
+pred 良好 : 人 → Prop
+axiom 事实 : 安静 甲
+source text "测试" locator "一"
+rule 安静规则 :
+  params p : 人
+  premise 安静 p
+  conclude 良好 p
+  source text "测试" locator "二"
+"#;
+
+#[test]
+fn verify_cert_without_compound_premises_keeps_the_kernel_line_byte_identical() {
+    let theory = TempFile::new("plain", "std", PLAIN_THEORY);
+    let output = session(&theory, &[":cert 良好 甲".to_owned()]);
+    assert_exit(&output, PROVED);
+    let certificate_file = write_certificate("plain", &certificate_text(&output));
+    let verified = verify(&theory, &certificate_file, "良好 甲");
+    assert_exit(&verified, PROVED);
+    let text = stdout(&verified);
+    assert!(
+        text.contains("内核证明：通过（1 个规则步骤；根证明项通过内核）"),
+        "the plain kernel line must be unchanged:\n{text}"
+    );
+    assert!(
+        !text.contains("析取/存在前提"),
+        "a plain certificate must not gain the disclosure:\n{text}"
+    );
+}
+
+#[test]
+fn why_labels_each_branch_of_a_failing_disjunction() {
+    let theory = TempFile::new("or-why", "std", NO_BRANCH_THEORY);
+    let output = session(&theory, &[":why 有情 乙 丙".to_owned()]);
+    assert_exit(&output, GAP);
+    let text = stdout(&output);
+    assert!(text.contains("缺："), "{text}");
+    assert!(text.contains("第 1 个分支"), "{text}");
+    assert!(text.contains("第 2 个分支"), "{text}");
+}
+
 /// The v10 and v11 fixtures are kept as rejected samples: a version probe must
 /// refuse them before reading any field.
 #[test]

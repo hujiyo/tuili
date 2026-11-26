@@ -3726,17 +3726,36 @@ impl Session {
                 return Err(format!("证书校验失败（内核层）：{error}"));
             }
         };
-        writeln!(
-            out,
-            "内核证明：通过（{} 个规则步骤；{}）",
-            kernel.steps.len(),
-            if kernel.root_proved {
-                "根证明项通过内核"
-            } else {
-                "根为缺口，无证明项"
-            }
-        )
-        .ok();
+        // A compound premise's branch/witness choice is a logical side condition,
+        // not part of the kernel telescope: the kernel checks parameters and
+        // plain premises only. Say so explicitly when such steps exist, so
+        // "the kernel checked the monotone skeleton" is not overstated.
+        let compound_steps = certificate
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, CertNode::RuleApplication { choices, .. } if !choices.is_empty()))
+            .count();
+        let root_text = if kernel.root_proved {
+            "根证明项通过内核"
+        } else {
+            "根为缺口，无证明项"
+        };
+        if compound_steps > 0 {
+            writeln!(
+                out,
+                "内核证明：通过（{} 个规则步骤；其中 {} 步含析取/存在前提，分支选择由逻辑层复核；{root_text}）",
+                kernel.steps.len(),
+                compound_steps
+            )
+            .ok();
+        } else {
+            writeln!(
+                out,
+                "内核证明：通过（{} 个规则步骤；{root_text}）",
+                kernel.steps.len()
+            )
+            .ok();
+        }
 
         let unresolved = certificate
             .conflicts

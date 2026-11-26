@@ -520,6 +520,7 @@ fn gap_candidate_certificate(held: Vec<CertExpr>, applicability: RuleApplicabili
             proposition: atom("结论", "甲"),
             axiom_candidates: Vec::new(),
             candidates: vec![GapCandidate {
+                missing_branches: Vec::new(),
                 choices: Vec::new(),
                 guards: Vec::new(),
                 rule: "后规".to_owned(),

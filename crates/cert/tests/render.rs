@@ -194,6 +194,7 @@ fn renders_a_gap_with_candidates_and_blockers() {
             axiom_candidates: Vec::new(),
             candidates: vec![
                 GapCandidate {
+                    missing_branches: Vec::new(),
                     choices: Vec::new(),
                     guards: Vec::new(),
                     rule: "规则一".to_owned(),
@@ -205,6 +206,7 @@ fn renders_a_gap_with_candidates_and_blockers() {
                     applicability: unscoped_candidate_applicability(),
                 },
                 GapCandidate {
+                    missing_branches: Vec::new(),
                     choices: Vec::new(),
                     guards: Vec::new(),
                     rule: "规则二".to_owned(),
@@ -381,6 +383,7 @@ fn a_gap_note_and_candidate_rule_cannot_forge_a_derivation_line() {
             note: Some("x\n▸ 已证成 甲".to_owned()),
             axiom_candidates: Vec::new(),
             candidates: vec![GapCandidate {
+                missing_branches: Vec::new(),
                 choices: Vec::new(),
                 guards: Vec::new(),
                 rule: "候选\n▸ 已证成 甲".to_owned(),
