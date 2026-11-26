@@ -6,6 +6,9 @@
 //! std-deduce                       start the REPL
 //! std-deduce [options] <file> [commands...]
 //!                                  load a theory file, then run the commands
+//! std-deduce [options] <case.json> [commands...]
+//!                                  load a strict JSON case description
+//!                                  (the same path as `:load-case`)
 //! std-deduce [options] check <file> [...]
 //!                                  the same batch entry as a plain file
 //! std-deduce [options] env         report and load the default environment
@@ -71,6 +74,21 @@
 //! closed-environment hint instead of being invented for the case. Without
 //! `--closed-env` a case file behaves exactly as before and no extension is
 //! recorded.
+//!
+//! A JSON case description (`:load-case`, or the batch entry when the file ends
+//! in `.json`) is a strict, versioned document (`schema_version = 1`). It is
+//! untrusted input: it may only bring facts, identities, sources, occurrence
+//! records, individual constants and goals, and a rule/predicate/interpretation/
+//! risk/priority field is refused outright. All fields are checked before the
+//! session is touched; proposition text goes through the existing parser and
+//! elaborator. Diagnostics name the JSON path (`facts[2].identity`), one bad
+//! entry rejects the whole file, and a `reference` value that disagrees with an
+//! explicitly set session date or jurisdiction is an error rather than an
+//! overwrite. Imports, the default environment and the closed environment use
+//! the same path as `:load`. A batch JSON load exits `1` on any read, syntax or
+//! validation failure, exactly like a `.std` batch load (usage errors stay `2`);
+//! a successful load exits `0`. Goals are only checked and listed, so an
+//! unproved goal never makes the load exit `1`.
 //!
 //! When the current directory contains `lawpacks/profiles` with a
 //! `default = true` profile, the first theory load prepares that environment
@@ -509,6 +527,7 @@
 //! `:check` is not an alias: it reports that it was renamed to `:verify-cert`
 //! and exits `2`.
 
+mod case;
 mod environment;
 mod identity;
 mod packs;
@@ -637,7 +656,9 @@ enum Invocation {
 /// Options are only recognised in one contiguous prefix. After a file,
 /// `check`, `repl`, `env` or a colon command has started, an argument that
 /// looks like an option is a usage error and is never silently ignored.
-/// `--help` and `--version` only work as the sole argument.
+/// `--help` and `--version` only work as the sole argument. A batch file whose
+/// extension is `.json` is a case description; the load stage chooses the
+/// parser by that extension, not here.
 fn parse_invocation(args: &[String]) -> Result<(environment::Options, Invocation), String> {
     if args.len() == 1 {
         match args[0].as_str() {
@@ -734,7 +755,7 @@ fn parse_invocation(args: &[String]) -> Result<(environment::Options, Invocation
     match first.as_str() {
         "check" => {
             let Some(file) = rest.get(1) else {
-                return Err("用法：std-deduce check <文件.std> [命令...]".to_owned());
+                return Err("用法：std-deduce check <文件.std|文件.json> [命令...]".to_owned());
             };
             if file.starts_with('-') {
                 return Err(unknown_option_message(
@@ -834,6 +855,9 @@ fn extra_argument_error(argument: &str, usage: &str) -> String {
 enum SessionValueSource {
     CommandLine,
     SessionCommand,
+    /// The value came from a loaded JSON case description's `reference`
+    /// object. It is an explicit case value, not a default.
+    CaseFile,
 }
 
 impl SessionValueSource {
@@ -841,6 +865,7 @@ impl SessionValueSource {
         match self {
             SessionValueSource::CommandLine => "命令行",
             SessionValueSource::SessionCommand => "会话命令",
+            SessionValueSource::CaseFile => "案件",
         }
     }
 }
@@ -1074,6 +1099,351 @@ impl Session {
         Ok(Outcome::Proved)
     }
 
+    /// Load a strict JSON case description into the session.
+    ///
+    /// The document is parsed and field-checked before the session is touched,
+    /// so a malformed file cannot prepare the default environment or record
+    /// anything. Imports, the default environment and the closed environment
+    /// follow the same path as `:load`. The description may only add
+    /// individuals, facts, identities, sources, occurrence records and goals;
+    /// proposition text is elaborated and type-checked with the existing
+    /// parser/elaborator, and one bad entry rejects the whole file.
+    ///
+    /// Everything runs on cloned session state: a failure anywhere leaves the
+    /// session exactly as it was, exactly like a failed `:load`.
+    fn load_case(&mut self, path: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if path.trim().is_empty() {
+            return Err("用法：:load-case <文件.json>".to_owned());
+        }
+        let case = case::read(path)?;
+        // A case's reference values are session values. An explicit session
+        // value is never overwritten by a disagreement: that is an error, not a
+        // preference. An equal value is accepted unchanged.
+        if let Some(value) = &case.as_of {
+            if let Some(current) = self.environment.as_of() {
+                if current != value {
+                    return Err(case::render(
+                        path,
+                        "reference.as_of",
+                        format!(
+                            "案件 JSON 的 as_of `{}` 与当前会话值 `{}` 冲突；不覆盖已显式设置的会话值",
+                            escape_control(value),
+                            escape_control(current)
+                        ),
+                    ));
+                }
+            }
+        }
+        if let Some(value) = &case.jurisdiction {
+            if let Some(current) = self.environment.jurisdiction() {
+                if current != value {
+                    return Err(case::render(
+                        path,
+                        "reference.jurisdiction",
+                        format!(
+                            "案件 JSON 的 jurisdiction `{}` 与当前会话值 `{}` 冲突；不覆盖已显式设置的会话值",
+                            escape_control(value),
+                            escape_control(current)
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let mut lib = self.lib.clone();
+        let mut loaded_packs = self.packs.clone();
+        let mut environment = self.environment.clone();
+        let preload = environment.ensure_loaded(&mut lib, &mut loaded_packs)?;
+
+        // Imports resolve exactly like `:load`'s: a namespace this session
+        // already loaded from a file is reused, a package is re-checked through
+        // the registry, and only the remaining names scan the registry once.
+        let pack_names: BTreeSet<&str> =
+            loaded_packs.iter().map(|pack| pack.name.as_str()).collect();
+        let loaded_namespaces: BTreeSet<&str> = lib
+            .theories
+            .iter()
+            .filter_map(|theory| theory.namespace.as_deref())
+            .collect();
+        let registry_imports: Vec<String> = case
+            .imports
+            .iter()
+            .filter(|name| {
+                !loaded_namespaces.contains(name.as_str()) || pack_names.contains(name.as_str())
+            })
+            .cloned()
+            .collect();
+        if !registry_imports.is_empty() {
+            let registry = packs::Registry::open().map_err(|errors| errors.join("\n"))?;
+            let mut loader = packs::PackageLoader::new(&registry, &mut lib, &mut loaded_packs);
+            loader.load_imports(&registry_imports, Path::new(path))?;
+        }
+
+        // Ledger names a loaded legal pack declared. In the closed environment
+        // a JSON object must be an individual of one of these sorts: a sort the
+        // case itself declared with `--allow-case-rules` is a legal concept of
+        // the case, and the JSON format never lets a case description introduce
+        // a legal concept.
+        let pack_decls: BTreeSet<String> = loaded_packs
+            .iter()
+            .flat_map(|pack| pack.decls.iter().cloned())
+            .collect();
+
+        // Every fact already in the environment, so a JSON fact cannot relabel
+        // a proposition registered under another identity (the same rule
+        // `:given` and `:fact add` enforce).
+        let existing_facts: Vec<(Name, Expr, FactIdentity)> = lib
+            .env
+            .iter()
+            .filter_map(|decl| match &decl.kind {
+                DeclKind::Fact { identity } => {
+                    Some((decl.name.clone(), decl.ty.clone(), *identity))
+                }
+                _ => None,
+            })
+            .collect();
+
+        // One diagnostic context for the rest of the load: every case error
+        // names the file and the JSON path, then receives the same environment
+        // hints a failed `:load` would add.
+        let diagnostics = CaseDiagnostics {
+            environment: &environment,
+            imports: &case.imports,
+            file: path,
+        };
+
+        let mut declared: Vec<String> = Vec::new();
+        for object in &case.objects {
+            let type_path = format!("{}.type", object.path);
+            let ty = self.case_type(&object.ty, &type_path, &lib.env, &diagnostics)?;
+            if !is_pack_sort(&lib.env, &ty) {
+                return Err(diagnostics.error(
+                    &type_path,
+                    format!(
+                        "案件对象 `{}` 的类型必须是已加载环境里的一个 sort（例如 `cn.constitution.人`）；\
+                         不能是 Prop、Type、函数类型或定义。JSON 不能借对象引入法律概念",
+                        escape_control(&object.name)
+                    ),
+                ));
+            }
+            if environment.closed_env() {
+                let Expr::Const(sort) = &ty else {
+                    // `is_pack_sort` already refused every non-sort head; this
+                    // arm is unreachable but keeps the closed check total.
+                    return Err(diagnostics.error(
+                        &type_path,
+                        "封闭环境中的案件对象必须使用已加载法律包里的 sort",
+                    ));
+                };
+                if !pack_decls.contains(sort.as_ref()) {
+                    return Err(diagnostics.error(
+                        &type_path,
+                        format!(
+                            "封闭环境中的案件对象必须使用已加载法律包里的 sort；`{}` 不是任何已加载包声明的 sort；\
+                             即使 --allow-case-rules 也不放行 JSON 对象引入案件本地 sort",
+                            escape_control(sort)
+                        ),
+                    ));
+                }
+            }
+            let decl = Decl {
+                name: std_deduce_kernel::name(&object.name),
+                kind: DeclKind::Obj,
+                ty,
+                sources: object.source.clone().into_iter().collect(),
+                scope: Scope::default(),
+                occurred_at: None,
+                occurred_in: None,
+                index: 0,
+            };
+            lib.env.insert(decl, &Ctx::new()).map_err(|error| {
+                diagnostics.error(
+                    &format!("{}.name", object.path),
+                    format!("对象 `{}` 无法登记：{error}", escape_control(&object.name)),
+                )
+            })?;
+            declared.push(object.name.clone());
+        }
+
+        let mut next_fact = 1usize;
+        let mut written: Vec<(String, Expr, FactIdentity)> = Vec::new();
+        for fact in case.facts.iter().chain(case.assumptions.iter()) {
+            let proposition_path = format!("{}.proposition", fact.path);
+            let prop = self.case_proposition(
+                &fact.proposition,
+                &proposition_path,
+                &lib.env,
+                &diagnostics,
+            )?;
+            if let Some(conflict) = diagnostics.identity_conflict(
+                &lib.env,
+                &existing_facts,
+                &written,
+                &prop,
+                fact.identity,
+                &fact.path,
+            )? {
+                return Err(conflict);
+            }
+            let name = next_case_fact_name(&lib.env, &mut next_fact);
+            let decl = Decl {
+                name: std_deduce_kernel::name(&name),
+                kind: DeclKind::Fact {
+                    identity: fact.identity,
+                },
+                ty: prop.clone(),
+                sources: vec![fact.source.clone()],
+                // A JSON fact records exactly the occurrence it declares. An
+                // absent field stays `None`; the session's as-of date is never
+                // copied into a fact's event time.
+                scope: Scope::default(),
+                occurred_at: fact.occurred_at.clone(),
+                occurred_in: fact.occurred_in.clone(),
+                index: 0,
+            };
+            lib.env.insert(decl, &Ctx::new()).map_err(|error| {
+                diagnostics.error(&fact.path, format!("事实 `{name}` 无法登记：{error}"))
+            })?;
+            written.push((fact.path.clone(), prop, fact.identity));
+            declared.push(name);
+        }
+
+        // Goals are checked for syntax and type here, but loading does not
+        // prove them: a query does. They are kept in the load report so the
+        // producer can see the exact propositions the case named.
+        let mut goals: Vec<String> = Vec::new();
+        for goal in &case.goals {
+            let proposition_path = format!("{}.proposition", goal.path);
+            let prop = self.case_proposition(
+                &goal.proposition,
+                &proposition_path,
+                &lib.env,
+                &diagnostics,
+            )?;
+            goals.push(print_expr(&prop));
+        }
+
+        // Interpretations enabled by the command line or an earlier session
+        // command must still resolve in the environment that was just loaded.
+        if !self.enabled_interpretations.is_empty() {
+            configured_reasoner(&lib.env, &self.enabled_interpretations).map_err(|error| {
+                format!("已启用的解释无法在当前环境解析：{error}（--interpret / :interpret enable 设置）")
+            })?;
+        }
+
+        let mut as_of_source = self.as_of_source;
+        let mut jurisdiction_source = self.jurisdiction_source;
+        if let Some(value) = &case.as_of {
+            if environment.as_of().is_none() {
+                environment.set_as_of(value.clone());
+                as_of_source = Some(SessionValueSource::CaseFile);
+            }
+        }
+        if let Some(value) = &case.jurisdiction {
+            if environment.jurisdiction().is_none() {
+                environment.set_jurisdiction(value.clone());
+                jurisdiction_source = Some(SessionValueSource::CaseFile);
+            }
+        }
+
+        self.lib = lib;
+        self.packs = loaded_packs;
+        self.environment = environment;
+        self.as_of_source = as_of_source;
+        self.jurisdiction_source = jurisdiction_source;
+        self.loaded = true;
+        if let Some(report) = preload {
+            write!(out, "{report}").ok();
+        }
+        self.print_case_load_report(path, &case, &declared, &goals, out);
+        Ok(Outcome::Proved)
+    }
+
+    /// Elaborate a type expression from a case description.
+    fn case_type(
+        &self,
+        text: &str,
+        json_path: &str,
+        env: &Env,
+        diagnostics: &CaseDiagnostics<'_>,
+    ) -> Result<Expr, String> {
+        let term = parse_term(text).map_err(|error| {
+            diagnostics.error(json_path, format!("类型无法按现有语法解析：{error}"))
+        })?;
+        let ty =
+            elab::elab_top(env, &term).map_err(|error| diagnostics.error(json_path, error.msg))?;
+        check::check_is_type(env, &Ctx::new(), &ty)
+            .map_err(|error| diagnostics.error(json_path, format!("类型检查失败：{error}")))?;
+        Ok(ty)
+    }
+
+    /// Elaborate and type-check one proposition from a case description.
+    ///
+    /// The existing parser and elaborator do the work, so a case and a `.std`
+    /// file accept exactly the same proposition syntax. Every failure names the
+    /// JSON path of the proposition that failed.
+    fn case_proposition(
+        &self,
+        text: &str,
+        json_path: &str,
+        env: &Env,
+        diagnostics: &CaseDiagnostics<'_>,
+    ) -> Result<Expr, String> {
+        let term = parse_term(text).map_err(|error| {
+            diagnostics.error(json_path, format!("命题无法按现有语法解析：{error}"))
+        })?;
+        let expr =
+            elab::elab_top(env, &term).map_err(|error| diagnostics.error(json_path, error.msg))?;
+        check::check(env, &Ctx::new(), &expr, &Expr::Sort(0))
+            .map_err(|error| diagnostics.error(json_path, format!("命题类型检查失败：{error}")))?;
+        Ok(expr)
+    }
+
+    /// Print the declaration ledger of a successful case load.
+    ///
+    /// The shape follows `:load`: `已加载 …`, one `导入` line per import and
+    /// one `+` line per declaration. Facts are listed by their generated ledger
+    /// names (`事实N`); `:inspect` shows their propositions, identities,
+    /// sources and occurrence records. Goals print after the declarations with
+    /// the same `·` marker `:load` uses for shown items.
+    fn print_case_load_report(
+        &self,
+        path: &str,
+        case: &case::CaseFile,
+        declared: &[String],
+        goals: &[String],
+        out: &mut impl Write,
+    ) {
+        let label = case
+            .case
+            .as_ref()
+            .map(|name| format!("（{}）", escape_control(name)))
+            .unwrap_or_default();
+        writeln!(out, "已加载案件 `{}`{}。", escape_path(path), label).ok();
+        for name in &case.imports {
+            let marker = self
+                .environment
+                .import_marker(name, &self.packs)
+                .unwrap_or_default();
+            writeln!(out, "  导入 {name}{marker}").ok();
+        }
+        for name in declared {
+            writeln!(out, "  + {name}").ok();
+        }
+        let counts = case.identity_counts();
+        if !counts.is_empty() {
+            let summary = counts
+                .iter()
+                .map(|(identity, count)| format!("{} {count}", identity.label_zh()))
+                .collect::<Vec<_>>()
+                .join("、");
+            writeln!(out, "  事实身份：{summary}").ok();
+        }
+        for goal in goals {
+            writeln!(out, "  · 目标 {goal}").ok();
+        }
+    }
+
     /// Print the declarations a successful load reported, in ledger order.
     ///
     /// `report.imported` belongs to the top-level file only; the package
@@ -1150,6 +1520,7 @@ impl Session {
     fn dispatch(&mut self, cmd: &str, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
         match cmd {
             "load" => self.load_theory(arg, out),
+            "load-case" => self.load_case(arg, out),
             "inspect" => {
                 // The ledger is flat, so recover each declaration's source
                 // namespace from the theory that recorded it. Case files
@@ -1541,7 +1912,6 @@ impl Session {
             n += 1;
         }
     }
-
     /// `:fact` — inspect and register the facts in the ledger.
     ///
     /// `verified` and `stipulated` need the case file's source, so the session
@@ -5664,6 +6034,112 @@ fn registered_fact_line(identity: FactIdentity, prop: &Expr) -> String {
     line
 }
 
+/// Whether a batch path names a JSON case description by its extension.
+///
+/// Both `std-deduce <文件.json> [命令...]` and `std-deduce check <文件.json>`
+/// load it through `:load-case`, so the two entries behave identically. The
+/// extension is matched case-insensitively.
+fn is_case_json(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+}
+
+/// Diagnostics for one JSON case load.
+///
+/// Bundles the file, the document's imports and the environment state the
+/// closed-environment hint needs, so every case error is rendered and annotated
+/// in one place.
+struct CaseDiagnostics<'a> {
+    environment: &'a environment::Environment,
+    imports: &'a [String],
+    file: &'a str,
+}
+
+impl CaseDiagnostics<'_> {
+    /// Render `file:JSON 路径: error: message`, then add the environment hints
+    /// a failed `:load` would add.
+    fn error(&self, json_path: &str, message: impl std::fmt::Display) -> String {
+        let rendered = case::render(self.file, json_path, message);
+        let rendered = self.environment.annotate_error(rendered, self.imports);
+        self.environment.annotate_closed_error(rendered)
+    }
+
+    /// Reject a JSON fact that relabels a proposition already registered under
+    /// a different identity.
+    ///
+    /// The comparison is kernel conversion, so an alpha variant or a `def`
+    /// alias cannot dodge it. `written` reports the JSON path of a fact the
+    /// same load already inserted; `existing` reports a fact that was in the
+    /// environment before the load. The identity is evidence, so two identities
+    /// for one proposition are refused instead of silently keeping both.
+    fn identity_conflict(
+        &self,
+        env: &Env,
+        existing: &[(Name, Expr, FactIdentity)],
+        written: &[(String, Expr, FactIdentity)],
+        prop: &Expr,
+        identity: FactIdentity,
+        json_path: &str,
+    ) -> Result<Option<String>, String> {
+        for (other_path, other_type, other_identity) in written {
+            if *other_identity == identity {
+                continue;
+            }
+            let same = convertible(env, &Ctx::new(), other_type, prop).map_err(|error| {
+                self.error(json_path, format!("无法比较命题与已登记事实：{error}"))
+            })?;
+            if same {
+                return Ok(Some(self.error(
+                    &format!("{json_path}.identity"),
+                    format!(
+                        "同一命题只能有一种事实身份：已由 {other_path} 登记为{}，不能再登记为{}",
+                        other_identity.label_zh(),
+                        identity.label_zh()
+                    ),
+                )));
+            }
+        }
+        for (name, other_type, other_identity) in existing {
+            if *other_identity == identity {
+                continue;
+            }
+            let same = convertible(env, &Ctx::new(), other_type, prop).map_err(|error| {
+                self.error(json_path, format!("无法比较命题与已登记事实：{error}"))
+            })?;
+            if same {
+                return Ok(Some(self.error(
+                    &format!("{json_path}.identity"),
+                    format!(
+                        "同一命题只能有一种事实身份：`{}` 已登记为{}，不能再登记为{}",
+                        name,
+                        other_identity.label_zh(),
+                        identity.label_zh()
+                    ),
+                )));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// The next free `事实N` ledger name for a case load.
+///
+/// The name is derived from the first free slot, not from the declaration
+/// count, so metadata declarations cannot renumber facts. The ledger is a flat
+/// map: a collision with a name from a loaded pack is skipped, never
+/// overwritten.
+fn next_case_fact_name(env: &Env, next: &mut usize) -> String {
+    loop {
+        let candidate = format!("事实{next}");
+        *next += 1;
+        if !env.contains(&candidate) {
+            return candidate;
+        }
+    }
+}
+
 fn parse_term(s: &str) -> Result<std_deduce_lang::ast::Term, String> {
     // Wrap a bare term as `#check <term>`, which is the one place the
     // grammar admits a bare expression at the top level.
@@ -5696,7 +6172,12 @@ fn print_help(out: &mut impl Write) {
     .ok();
     writeln!(
         out,
-        "  std-deduce check <文件.std> [...]  等价于直接给文件（check 是批处理入口）"
+        "  std-deduce check <文件.std> [...]  等价于直接给文件（check 是批处理入口；.json 同样接受）"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  std-deduce <文件.json> [命令...]   加载严格 JSON 案件描述（等价于 :load-case）"
     )
     .ok();
     writeln!(
@@ -5810,6 +6291,12 @@ fn print_help(out: &mut impl Write) {
          退出码与 :why 一致：根已证明且无未决义务为 0，其余为 1。"
     )
     .ok();
+    writeln!(
+        out,
+        "案件描述 JSON：:load-case <文件.json> 加载严格版本化的案件描述（只允许事实、身份、来源、\
+         时间地点与目标，不能声明规则/谓词/解释/风险/优先级）；批处理入口 std-deduce <文件.json>。"
+    )
+    .ok();
     writeln!(out).ok();
     writeln!(out, "声明：这是模型内推导，不是法律意见。").ok();
     writeln!(
@@ -5856,20 +6343,29 @@ fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write
     worst
 }
 
-/// Load one theory file and then run the remaining commands.
+/// Load one theory file or JSON case description and then run the remaining
+/// commands.
 ///
-/// A failed load prints the already-rendered `path:line:col: error: ...` (or
-/// `path: error: ...`) on stderr and exits `1`: the file did not pass its
-/// checks, while the invocation itself was well-formed. The load error already
-/// names the file, so the batch entry adds no path prefix of its own. Remaining
-/// commands are not run.
+/// A `.json` path goes through `load_case`; every other path through
+/// `load_theory`. A failed load prints the already-rendered
+/// `path:line:col: error: ...`, `path:<JSON 路径>: error: ...` (or
+/// `path: error: ...`) on stderr and exits `1` for either format: the file was
+/// not accepted, which is a load failure, not a usage error. The load error
+/// already names the file, so the batch entry adds no path prefix of its own.
+/// Remaining commands are not run.
 fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut impl Write) -> i32 {
     // The load report names the declarations the file contributed, including
-    // the case's individuals, so display redaction must cover it too. Buffering
-    // it keeps the report and its notice in one filtered write.
+    // the case's individuals and facts, so display redaction must cover it too.
+    // Buffering it keeps the report and its notice in one filtered write.
     let mut buffer = OutputBuffer::default();
-    let load_result = session.load_theory(file, &mut buffer);
-    let text = match buffer.into_text("load") {
+    let is_case = is_case_json(file);
+    let load_name = if is_case { "load-case" } else { "load" };
+    let load_result = if is_case {
+        session.load_case(file, &mut buffer)
+    } else {
+        session.load_theory(file, &mut buffer)
+    };
+    let text = match buffer.into_text(load_name) {
         Ok(text) => text,
         Err(error) => {
             eprintln!("{error}");
@@ -5893,6 +6389,9 @@ fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut i
             error
         };
         eprintln!("{error}");
+        // A batch file that is not accepted is a failed load, not a malformed
+        // command line: `.std` and JSON case descriptions both exit `1`, so the
+        // extension cannot change the failure code. Usage errors stay `2`.
         return 1;
     }
     run_commands(session, commands, out)
@@ -5916,7 +6415,7 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
         if line.trim() == ":help" {
             writeln!(
                 out,
-                ":load <文件>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
+                ":load <文件>  :load-case <文件.json>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
                  :asof [YYYY-MM-DD]  :jurisdiction [代码]  \
                  :interpret [list|enable|disable <解释名>]  \
                  :why <命题>  :explain <命题>  :labels <命题>  :review <命题> [--out <文件>]  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \

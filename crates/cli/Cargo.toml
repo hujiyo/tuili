@@ -10,6 +10,7 @@ name = "std-deduce"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = "1"
 std-deduce-kernel = { path = "../kernel" }
 std-deduce-lang = { path = "../lang" }
 std-deduce-reason = { path = "../reason" }
