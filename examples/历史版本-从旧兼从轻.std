@@ -1,0 +1,70 @@
+-- 同一法条的两个历史版本 + 显式优先边：从旧兼从轻由法律包用 `priority … over …` 声明。
+--
+-- 运行（本文件是带 namespace 的模块，所以名字都要写全限定名）：
+--   :load examples/历史版本-从旧兼从轻.std
+--   :why example.revision.应适用 example.revision.旧版 example.revision.乙
+--   :cert example.revision.应适用 example.revision.旧版 example.revision.乙
+--
+-- 行为乙发生在 2021-06-01：新旧两版都覆盖这个时间点，两条规则都会触发。
+-- 与 examples/历史版本-新旧法.std 不同的是，本文件用带出处的优先边声明了旧版优先：
+--   priority example.revision.旧版规则 over example.revision.新版规则 source …
+-- 于是冲突被裁决：旧版结论进入事实库，新版结论被否决但不悄悄丢掉。
+--
+-- 为什么优先边必须由人写明：「哪一版更轻」是法律判断，不是系统能算的。
+-- 系统不内建「从旧兼从轻」，也不会自动取新法或旧法；规则内的 `defeated_by` / `prefer`
+-- 只用于同一包内，跨包或想记录声明者与出处时用顶层 `priority`。这条边属于法律包
+-- （带 namespace 的模块），案件文件不能声明顶层优先级。
+
+namespace example.revision
+
+sort example.revision.人
+sort example.revision.法条
+
+pred example.revision.行为 : example.revision.人 → Prop
+pred example.revision.应适用 : example.revision.法条 → example.revision.人 → Prop
+
+-- 同一案件只能适用一版法条：法条参数（第 1 个参数）单值。
+unique example.revision.应适用 1
+
+obj example.revision.甲 : example.revision.人
+obj example.revision.乙 : example.revision.人
+obj example.revision.丙 : example.revision.人
+obj example.revision.旧版 : example.revision.法条
+obj example.revision.新版 : example.revision.法条
+
+axiom example.revision.行为甲 : example.revision.行为 example.revision.甲
+  occurred_at 2019-05-01
+  source text "示例卷宗" locator "行为（甲）" version "2024"
+
+axiom example.revision.行为乙 : example.revision.行为 example.revision.乙
+  occurred_at 2021-06-01
+  source text "示例卷宗" locator "行为（乙）" version "2024"
+
+axiom example.revision.行为丙 : example.revision.行为 example.revision.丙
+  occurred_at 2023-02-01
+  source text "示例卷宗" locator "行为（丙）" version "2024"
+
+rule example.revision.旧版规则 :
+  params p : example.revision.人
+  premise example.revision.行为 p
+  conclude example.revision.应适用 example.revision.旧版 p
+  effective 1999-01-01
+  repealed 2022-01-01
+  revision 第二十条
+  source text "示例刑法" locator "第二十条（1997 年文本）" version "1997"
+
+rule example.revision.新版规则 :
+  params p : example.revision.人
+  premise example.revision.行为 p
+  conclude example.revision.应适用 example.revision.新版 p
+  effective 2021-01-01
+  revision 第二十条
+  source text "示例刑法" locator "第二十条（2021 年修正文本）" version "2021"
+
+-- 显式优先边：旧版规则胜过新版规则。声明者（本模块）与出处一起进入证书，
+-- `:why` 在被裁决的冲突里打印「依据」行，`:verify-cert` 按记录逐项复核这条边。
+-- 「从旧兼从轻」在这里落成一条可审计的声明：哪一版轻、为什么让旧版优先，
+-- 全部由这条边的出处（法名 + 条号 + 版本 + 引文）承担，系统不替任何人做这个判断。
+priority example.revision.旧版规则 over example.revision.新版规则
+  source text "示例刑法" locator "第二十条第三项（从旧兼从轻）" version "2021"
+         quote "适用行为时的法律；但新法处刑较轻的，适用新法——本示例由声明者判断旧版较轻"

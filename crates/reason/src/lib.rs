@@ -232,7 +232,7 @@ use std_deduce_kernel::env::{
 use std_deduce_kernel::norm::{evaluate_arithmetic, evaluate_comparison, normalize};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::{instantiate_telescope, is_closed};
-use std_deduce_kernel::{check, Ctx, Expr, Name};
+use std_deduce_kernel::{check, Ctx, Expr, Name, RevisionGroup};
 
 // ---------------------------------------------------------------- nodes
 
@@ -691,6 +691,39 @@ pub struct Conflict {
     pub left_by: Provenance,
     pub right_by: Provenance,
     pub resolution: Resolution,
+}
+
+/// The revision group containing at least one witness rule of each side of a
+/// conflict.
+///
+/// A `revision` group declares that its rules are versions of one provision
+/// (the 1997 and the 2021 version of an article). When two rules of one group
+/// conflict, the conflict is between an old and a new version, and the reason
+/// text must say so: "no priority was declared" alone leaves a reader unable to
+/// tell an ordinary cross-rule conflict from an unresolved choice between two
+/// versions. The groups are read from the declarations only; the function never
+/// picks a version, and it returns the first shared group in
+/// `(namespace, identifier)` order so the text is deterministic.
+///
+/// `None` means the sides share no group, or at least one side is not a rule
+/// side (a fact, a universal instance or an interpretation conclusion).
+pub fn shared_revision_group(
+    env: &Env,
+    left: &Provenance,
+    right: &Provenance,
+) -> Option<RevisionGroup> {
+    let (Provenance::Rules(left), Provenance::Rules(right)) = (left, right) else {
+        return None;
+    };
+    let left_groups: BTreeSet<RevisionGroup> = left
+        .iter()
+        .filter_map(|rule| env.revision_group_of(rule))
+        .collect();
+    let right_groups: BTreeSet<RevisionGroup> = right
+        .iter()
+        .filter_map(|rule| env.revision_group_of(rule))
+        .collect();
+    left_groups.intersection(&right_groups).next().cloned()
 }
 
 /// One unenabled interpretation that would have applied to a queried
@@ -6643,7 +6676,19 @@ pub fn certificate(
             UnresolvedReason::UnknownWitnesses => {
                 "有一方的规则见证已无法重建，无法核对优先关系".to_owned()
             }
-            UnresolvedReason::NoPriority => "没有声明任何优先关系".to_owned(),
+            UnresolvedReason::NoPriority => {
+                // Rules of one `revision` group are versions of the same
+                // provision; saying only "no priority was declared" would hide
+                // that the reader is choosing between an old and a new version.
+                match shared_revision_group(env, &conflict.left_by, &conflict.right_by) {
+                    Some(group) => format!(
+                        "没有声明任何优先关系；两侧是同一法条的两个历史版本（revision 组 `{}`），\
+                         没有声明哪一版优先，系统不自动选新法或旧法",
+                        group.label()
+                    ),
+                    None => "没有声明任何优先关系".to_owned(),
+                }
+            }
             UnresolvedReason::PriorityUnusable { declared } => {
                 let in_cycle = declared
                     .iter()

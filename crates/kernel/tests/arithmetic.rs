@@ -299,6 +299,7 @@ fn a_comparison_cannot_be_a_rule_premise_or_blocker() {
         exception_standard: None,
         exceptions: Vec::new(),
         prefers: Vec::new(),
+        revision: None,
         sources: Vec::new(),
         declared_in: None,
     };

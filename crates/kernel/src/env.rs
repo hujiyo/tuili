@@ -731,6 +731,18 @@ pub struct RuleDecl {
     /// `exceptions`, kept separately so the source of a priority is visible:
     /// `defeated_by` means "I lose to X", `prefer` means "I beat Y".
     pub prefers: Vec<Name>,
+    /// The historical-version group this rule belongs to, written as
+    /// `revision <id>`; `None` when the rule declared none.
+    ///
+    /// Rules that carry the same identifier under the same scope (a module
+    /// namespace or, for a case file, the file's load identity) are versions of
+    /// one provision ([`crate::meta::RevisionGroup`]). The reasoner never picks
+    /// one of them: which version applies to an instance is the applicability
+    /// judgement from the declared effective range, and which version wins a
+    /// conflict is an explicitly declared priority. The field exists so reports
+    /// can say that two rules are old and new versions of the same provision,
+    /// and so the loader can require a group to have at least two versions.
+    pub revision: Option<crate::meta::RevisionGroup>,
     pub sources: Vec<SourceRef>,
     /// Namespace of the module that declared the rule; `None` for a rule in a
     /// case file (a file without a namespace). Rule-internal `defeated_by` /
@@ -1020,6 +1032,43 @@ impl Env {
         self.iter()
             .filter(|d| matches!(d.kind, DeclKind::Rule(_)))
             .collect()
+    }
+
+    /// The revision group one rule declares, or `None` when the declaration is
+    /// not a rule or declared no `revision` clause.
+    ///
+    /// The group carries its own scope (a module namespace, or a case file's
+    /// load identity) and identifier; see [`crate::meta::RevisionGroup`].
+    pub fn revision_group_of(&self, rule: &Name) -> Option<crate::meta::RevisionGroup> {
+        let decl = self.get(rule)?;
+        let DeclKind::Rule(declared) = &decl.kind else {
+            return None;
+        };
+        declared.revision.clone()
+    }
+
+    /// Every declared revision group, each with its member rules in ledger
+    /// order. Groups are returned sorted by their identity.
+    ///
+    /// This is a view of the declarations only: the kernel never chooses a
+    /// version, and a group with fewer than two rules is still reported (the
+    /// loader, not the kernel, refuses a one-rule group).
+    pub fn revision_groups(&self) -> Vec<(crate::meta::RevisionGroup, Vec<Name>)> {
+        let mut groups: std::collections::BTreeMap<crate::meta::RevisionGroup, Vec<Name>> =
+            std::collections::BTreeMap::new();
+        for decl in self.iter() {
+            let DeclKind::Rule(rule) = &decl.kind else {
+                continue;
+            };
+            let Some(revision) = &rule.revision else {
+                continue;
+            };
+            groups
+                .entry(revision.clone())
+                .or_default()
+                .push(decl.name.clone());
+        }
+        groups.into_iter().collect()
     }
     pub fn interpretations(&self) -> Vec<&Decl> {
         self.iter()

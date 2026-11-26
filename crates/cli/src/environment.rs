@@ -400,6 +400,11 @@ pub(crate) fn run_env(options: &Options, out: &mut impl Write) -> Result<(), Str
         &mut lib,
         &mut infos,
     )?;
+    // The profile's packs are the whole load transaction here: check the
+    // `revision` groups once, after all of them are in (a pack may split one
+    // provision's versions across theory files).
+    lib.check_revision_groups()
+        .map_err(|error| error.to_string())?;
     print_env_profile(&registry, &active, &infos[start..], out)
 }
 

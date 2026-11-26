@@ -829,8 +829,9 @@ axiom 陈述事实 : 违规 张三
 /// Every example file that has a regression test in this crate
 /// (`宪法第三十九条-默认环境.std` is exercised by `environment.rs`,
 /// `复核-*.std` by `review.rs`, `赔偿合计.std` and `金额算错-合计冲突.std` by
-/// `arithmetic.rs`, `守卫-*.std` by `guards.rs`). The guard below keeps this table
-/// in step with the contents of `examples/`.
+/// `arithmetic.rs`, `守卫-*.std` by `guards.rs`, `历史版本-*.std` by
+/// `historical_versions.rs`). The guard below keeps this table in step with the
+/// contents of `examples/`.
 const COVERED_EXAMPLES: &[&str] = &[
     "constitution-39.std",
     "宪法第三十九条-导入包.std",
@@ -855,6 +856,10 @@ const COVERED_EXAMPLES: &[&str] = &[
     "金额算错-合计冲突.std",
     "守卫-重大金额.std",
     "守卫-金额不足-缺口.std",
+    "历史版本-旧版适用.std",
+    "历史版本-新版适用.std",
+    "历史版本-重叠未决.std",
+    "历史版本-从旧兼从轻.std",
 ];
 
 #[test]

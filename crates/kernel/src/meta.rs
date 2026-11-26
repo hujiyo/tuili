@@ -14,6 +14,13 @@
 //! depending on the package registry. `lawpack` re-exports them under its
 //! original names, so a manifest, a `--jurisdiction` option and a rule clause
 //! accept exactly the same formats.
+//!
+//! The module also records the group of rules that declare the same
+//! provision's historical versions ([`RevisionGroup`]). Like a scope record it
+//! is stored data: the kernel never chooses a version, and the reasoner never
+//! prefers the newer or the older one because a group says so.
+
+use crate::term::Name;
 
 /// Check that `value` is a real `YYYY-MM-DD` calendar day.
 ///
@@ -174,5 +181,63 @@ impl Scope {
             && self.effective_to.is_none()
             && self.jurisdiction.is_none()
             && self.territory.is_none()
+    }
+}
+
+/// The declaration name space a revision group lives in.
+///
+/// A module declares qualified names, so its versions are grouped by the
+/// namespace. A case/example file has no namespace, so its versions are grouped
+/// by the file it was loaded from: two case files may each declare their own
+/// `revision 第二十条` versions without merging into one group, and neither can
+/// complete the other's group.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RevisionScope {
+    /// A module's namespace.
+    Namespace(Name),
+    /// The load identity of a case/example file: the name it was loaded under.
+    File(Name),
+}
+
+/// The group of rules that declare the same provision's historical versions.
+///
+/// A rule writes `revision <id>` to say that it is one version of a provision;
+/// every rule carrying the same identifier in the same [`RevisionScope`]
+/// belongs to the same group, and the versions are ordered only by the
+/// effective dates each rule declares. The group is identified by the scope
+/// *and* the written identifier, so two packages may each group their own
+/// `第20条` versions without merging, and so may two case files.
+///
+/// The kernel stores the relation and never uses it to choose a version: which
+/// version covers an instance is the applicability judgement (from the
+/// declared `effective` / `repealed` range), and which version wins a conflict
+/// is an explicitly declared priority. Nothing here makes the newer or the
+/// older version win, and nothing here compares two versions' severity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RevisionGroup {
+    /// Where the group's rules are declared: a module namespace or a case
+    /// file's load identity.
+    pub scope: RevisionScope,
+    /// The identifier written in `revision <id>`.
+    pub revision: Name,
+}
+
+impl RevisionGroup {
+    /// The group as a reader prints it: the identifier qualified by the
+    /// declaring namespace for a module rule (`cn.criminal.第20条`), and the
+    /// identifier alone for a case rule (the file is the whole case, so its
+    /// path would only add noise; the group cannot span two case files).
+    pub fn label(&self) -> String {
+        match &self.scope {
+            RevisionScope::Namespace(namespace) => format!("{namespace}.{}", self.revision),
+            RevisionScope::File(_) => self.revision.to_string(),
+        }
+    }
+
+    /// The scope name, as an error or diagnostic names it.
+    pub fn scope_name(&self) -> &Name {
+        match &self.scope {
+            RevisionScope::Namespace(name) | RevisionScope::File(name) => name,
+        }
     }
 }
