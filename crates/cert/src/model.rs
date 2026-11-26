@@ -1236,7 +1236,8 @@ fn check_expression(expression: &CertExpr, place: &str) -> Result<(), String> {
             CertExpr::Sort { .. }
             | CertExpr::Var { .. }
             | CertExpr::Const { .. }
-            | CertExpr::Num { .. } => {}
+            | CertExpr::Num { .. }
+            | CertExpr::Date { .. } => {}
             CertExpr::Pi {
                 domain, codomain, ..
             } => {

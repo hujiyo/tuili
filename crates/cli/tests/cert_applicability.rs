@@ -1,4 +1,4 @@
-//! End-to-end tests for certificate v12 applicability: the generated record,
+//! End-to-end tests for certificate v13 applicability: the generated record,
 //! the independent recomputation of `:verify-cert`, and hand-edited
 //! counterexamples that must be rejected.
 //!

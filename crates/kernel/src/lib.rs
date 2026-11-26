@@ -12,13 +12,16 @@
 //! * The kernel is a checker, not a prover. Given a term and a claimed type
 //!   it accepts or rejects. It has no way to "just trust" a step.
 //! * Integers are exact `i64` values ([`Expr::Num`]) typed by the built-in
-//!   `Int`, and a small set of built-in operations ([`builtin`]) is *evaluated*
-//!   by normalisation. Overflow is an error, never a wraparound, and there is
-//!   no floating point.
+//!   `Int`, dates are calendar days ([`Expr::Date`]) typed by the built-in
+//!   `Date`, and a small set of built-in operations ([`builtin`]) is
+//!   *evaluated* by normalisation. Overflow and a date outside the supported
+//!   range are errors, never wraparounds or clamps, and there is no floating
+//!   point and no reading of the system clock.
 
 pub mod builtin;
 pub mod check;
 pub mod conv;
+pub mod date;
 pub mod env;
 pub mod error;
 pub mod meta;
@@ -26,6 +29,7 @@ pub mod norm;
 pub mod pretty;
 pub mod term;
 
+pub use date::Date;
 pub use env::{
     Burden, Ctx, Decl, DeclKind, Env, FactIdentity, InterpretationDirection, OpenPremise,
     PremiseDecl, PremiseKind, ProofBurden, RiskTheme, RuleDecl, RulePleading, Standard,

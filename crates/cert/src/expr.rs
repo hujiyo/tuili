@@ -8,7 +8,54 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use std_deduce_kernel::Expr;
+use std_deduce_kernel::{Date, Expr};
+
+/// A calendar-day value in a certificate expression.
+///
+/// The wire form is the canonical `YYYY-MM-DD` string, and it is validated on
+/// the way in: a certificate that writes an impossible day (`2020-02-30`), a
+/// loose shape (`2020-5-6`) or a day outside `1900-01-01..=9999-12-31` is
+/// refused at parse time. Reading a certificate can therefore never invent a
+/// date the kernel would have to refuse later, and there is no conversion from
+/// a string or a number into a date anywhere in the format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CertDate(Date);
+
+impl CertDate {
+    /// Wrap a date the kernel already validated.
+    pub fn new(date: Date) -> Self {
+        CertDate(date)
+    }
+
+    /// Parse one `YYYY-MM-DD` day, refusing an invalid or out-of-range value.
+    pub fn parse(value: &str) -> std::result::Result<Self, String> {
+        Date::parse(value).map(CertDate)
+    }
+
+    /// The kernel value.
+    pub fn date(self) -> Date {
+        self.0
+    }
+}
+
+impl fmt::Display for CertDate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.to_iso())
+    }
+}
+
+impl Serialize for CertDate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.to_iso())
+    }
+}
+
+impl<'de> Deserialize<'de> for CertDate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        CertDate::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
 
 /// A certificate expression.
 ///
@@ -29,6 +76,11 @@ pub enum CertExpr {
     /// floating point and no rounding, and a value outside the `i64` range is
     /// refused by the kernel before a certificate can be written.
     Num { value: i64 },
+    /// A calendar-day literal, written as
+    /// `{"kind": "date", "value": "2020-05-06"}`. The value is one canonical
+    /// `YYYY-MM-DD` string inside `1900-01-01..=9999-12-31`; anything else is
+    /// refused when the certificate is parsed (see [`CertDate`]).
+    Date { value: CertDate },
     /// A dependent function space.
     Pi {
         binder: Option<String>,
@@ -87,6 +139,9 @@ impl TryFrom<&Expr> for CertExpr {
                 name: name.to_string(),
             },
             Expr::Num(value) => CertExpr::Num { value: *value },
+            Expr::Date(value) => CertExpr::Date {
+                value: CertDate::new(*value),
+            },
             Expr::Pi {
                 name,
                 domain,
@@ -129,6 +184,7 @@ impl From<&CertExpr> for Expr {
             CertExpr::Var { index } => Expr::Var(*index as usize),
             CertExpr::Const { name } => Expr::constant(name),
             CertExpr::Num { value } => Expr::Num(*value),
+            CertExpr::Date { value } => Expr::Date(value.date()),
             CertExpr::Pi {
                 binder,
                 domain,

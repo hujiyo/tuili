@@ -318,7 +318,7 @@ fn count_nodes(expression: &Expr, nodes: &mut usize) -> bool {
         return false;
     }
     match expression {
-        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => true,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => true,
         Expr::Pi {
             domain, codomain, ..
         } => count_nodes(domain, nodes) && count_nodes(codomain, nodes),
@@ -404,7 +404,9 @@ fn saturate_expression(expression: &Expr, fresh: &mut usize) -> Expr {
             value: Box::new(saturate_expression(value, fresh)),
             body: Box::new(saturate_expression(body, fresh)),
         },
-        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => expression.clone(),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => {
+            expression.clone()
+        }
     }
 }
 
@@ -442,7 +444,7 @@ fn applied_variable_under_binder(expression: &Expr, depth: usize) -> bool {
             applied_variable_under_binder(value, depth)
                 || applied_variable_under_binder(body, depth + 1)
         }
-        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => false,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => false,
     }
 }
 
@@ -453,7 +455,9 @@ fn applied_variable_under_binder(expression: &Expr, depth: usize) -> bool {
 /// so no binder of the schema can capture the removed variable.
 fn eta_reduce(expression: &Expr) -> Expr {
     match expression {
-        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => expression.clone(),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => {
+            expression.clone()
+        }
         Expr::Pi {
             name,
             domain,
@@ -539,7 +543,7 @@ fn canonicalize(expression: &Expr) -> Expr {
 
 fn canonicalize_with(expression: &Expr, variables: &mut BTreeMap<String, String>) -> Expr {
     match expression {
-        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => expression.clone(),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => expression.clone(),
         Expr::Const(constant) => match constant.strip_prefix('?') {
             Some(parameter) => {
                 let next = variables.len();
@@ -716,7 +720,7 @@ fn collect_subterms(expression: &Expr, root: bool, out: &mut Vec<Expr>) {
         out.push(eta_reduce(expression));
     }
     match expression {
-        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => {}
+        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => {}
         Expr::Pi {
             domain, codomain, ..
         } => {
@@ -777,6 +781,7 @@ fn unify(
         (Expr::Const(left), Expr::Const(right)) => Ok(left == right),
         // Two integer literals unify only when they are the same integer.
         (Expr::Num(left), Expr::Num(right)) => Ok(left == right),
+        (Expr::Date(left), Expr::Date(right)) => Ok(left == right),
         (Expr::Sort(left), Expr::Sort(right)) => Ok(left == right),
         (Expr::Var(left), Expr::Var(right)) => Ok(left == right),
         (
@@ -871,7 +876,7 @@ fn bind_variable(
 fn mentions_variable(expression: &Expr, variable: &str) -> bool {
     match expression {
         Expr::Const(constant) => constant.strip_prefix('?') == Some(variable),
-        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => false,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => false,
         Expr::Pi {
             domain, codomain, ..
         } => mentions_variable(domain, variable) || mentions_variable(codomain, variable),
@@ -897,7 +902,7 @@ fn substitute(pattern: &Expr, binding: &BTreeMap<String, Expr>) -> Expr {
                 .unwrap_or_else(|| pattern.clone()),
             None => pattern.clone(),
         },
-        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => pattern.clone(),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => pattern.clone(),
         Expr::Pi {
             name,
             domain,
@@ -932,7 +937,7 @@ fn is_ground(expression: &Expr) -> bool {
 fn mentions_pattern(expression: &Expr) -> bool {
     match expression {
         Expr::Const(name) => name.starts_with('?'),
-        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => false,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => false,
         Expr::Pi {
             domain, codomain, ..
         } => mentions_pattern(domain) || mentions_pattern(codomain),

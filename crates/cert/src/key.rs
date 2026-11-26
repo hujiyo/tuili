@@ -41,6 +41,15 @@ fn write_expression(expression: &Expr, out: &mut String) {
             out.push_str(&value.to_string());
             out.push(';');
         }
+        // A calendar day gets its own tag, spelled in the canonical form. Like
+        // an integer literal it cannot collide with a constant's key: the `d`
+        // tag is not one of `s`/`v`/`c`/`n` or the structural tags, and the
+        // value is fixed-width so no two days share a key.
+        Expr::Date(value) => {
+            out.push('d');
+            out.push_str(&value.to_iso());
+            out.push(';');
+        }
         Expr::Const(name) => {
             out.push('c');
             out.push_str(&name.len().to_string());

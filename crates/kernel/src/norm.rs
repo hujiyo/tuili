@@ -5,18 +5,17 @@
 //! A rule is not an equation, and unfolding it would be precisely the quiet
 //! overreach this kernel refuses to make.
 //!
-//! The built-in integer operations of [`crate::builtin`] are the one exception
-//! on the term side: they are *computations*, not definitions. `add 3000 2000`
-//! reduces to `5000` in [`whnf`], and an `i64` overflow is returned as an error
-//! instead of wrapping around. A partially applied operation (`add 3000`) is
-//! neutral: nothing is guessed about the missing argument.
-//!
-//! A comparison is evaluated by the same rules, and its value is read as one of
-//! the two built-in propositions: [`evaluate_comparison`] is the one function
-//! that says whether a rule `guard` holds, and it reports a neutral or
-//! non-boolean result as an error rather than as `false`.
+//! The built-in operations of [`crate::builtin`] are the one exception on the
+//! term side: they are *computations*, not definitions. `add 3000 2000` reduces
+//! to `5000` and `addYears d"2020-02-29" 1` to `d"2021-02-28"` in [`whnf`]; an
+//! `i64` overflow or a date outside `1900-01-01..=9999-12-31` is returned as an
+//! error instead of wrapping or clamping. A partially applied operation
+//! (`add 3000`) is neutral: nothing is guessed about the missing argument, and
+//! an operand that is not a literal of the expected kind (an integer where a
+//! date operation needs a date) leaves the term neutral too — the kind mismatch
+//! is reported by the type checker, not converted here.
 
-use crate::builtin::Op;
+use crate::builtin::{Op, Operand};
 use crate::env::{Ctx, DeclKind, Env};
 use crate::error::Result;
 use crate::term::{instantiate, Expr};
@@ -112,21 +111,25 @@ pub fn normalize(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
     })
 }
 
-/// Reduce the built-in integer arithmetic inside `e`, and nothing else.
+/// Reduce the built-in computations inside `e`, and nothing else.
 ///
 /// This is the evaluation the reasoner records for a rule instance: a matched
-/// conclusion such as `合计 甲 (add 3000 2000)` becomes `合计 甲 5000`, while a
+/// conclusion such as `合计 甲 (add 3000 2000)` becomes `合计 甲 5000`, and
+/// `截止 甲 (addYears d"2020-05-06" 3)` becomes `截止 甲 d"2023-05-06"`, while a
 /// `def` alias, a predicate, a quantifier and every other opaque term are kept
 /// exactly as written. Beta, zeta and `def` delta are *not* applied here, so
 /// this function cannot be used to rewrite a proposition beyond computing its
-/// numbers.
+/// literals.
 ///
 /// Operands that are themselves reducible to a literal (a `def` alias of a
-/// number, say) are unfolded for the sake of the value; an operand that is not
-/// a literal leaves the operation neutral. An `i64` overflow is an error.
+/// number or a date, say) are unfolded for the sake of the value; an operand
+/// that is not a literal of the expected kind leaves the operation neutral. An
+/// `i64` overflow or a date outside the supported range is an error.
 pub fn evaluate_arithmetic(env: &Env, e: &Expr) -> Result<Expr> {
     match e {
-        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => Ok(e.clone()),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => {
+            Ok(e.clone())
+        }
         Expr::Pi {
             name,
             domain,
@@ -162,9 +165,9 @@ pub fn evaluate_arithmetic(env: &Env, e: &Expr) -> Result<Expr> {
                         let mut values = Vec::with_capacity(evaluated_args.len());
                         let mut all_literals = true;
                         for arg in &evaluated_args {
-                            match whnf(env, arg)? {
-                                Expr::Num(value) => values.push(value),
-                                _ => {
+                            match literal_operand(env, arg)? {
+                                Some(value) => values.push(value),
+                                None => {
                                     all_literals = false;
                                     break;
                                 }
@@ -198,10 +201,25 @@ pub fn evaluate_comparison(env: &Env, e: &Expr) -> Result<bool> {
         return Ok(value);
     }
     Err(crate::Error::other(format!(
-        "比较「{}」未能求值成布尔：求值结果是「{}」，只有整数操作数全部为字面量时比较才能判定",
+        "比较「{}」未能求值成布尔：求值结果是「{}」，只有两个操作数都是同类字面量（Int 或 Date）时比较才能判定",
         crate::pretty::print_expr(e),
         crate::pretty::print_expr(&evaluated)
     )))
+}
+
+/// The literal value an operand reduces to, or `None` when it is not a literal.
+///
+/// An integer and a date are different literal kinds: the operand keeps its
+/// kind, and an operation that receives the wrong kind refuses it (see
+/// [`crate::builtin::Op::apply`]) instead of converting.
+fn literal_operand(env: &Env, e: &Expr) -> Result<Option<Operand>> {
+    // An argument is inspected in weak head normal form: `add (add 1 2) 3`
+    // must see the inner `3` without normalizing the whole term.
+    Ok(match whnf(env, e)? {
+        Expr::Num(value) => Some(Operand::Int(value)),
+        Expr::Date(value) => Some(Operand::Date(value)),
+        _ => None,
+    })
 }
 
 /// Evaluate one application whose head is a built-in operation and whose
@@ -219,11 +237,9 @@ fn evaluate_builtin(env: &Env, e: &Expr) -> Result<Option<Expr>> {
     }
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
-        // An argument is inspected in weak head normal form: `add (add 1 2) 3`
-        // must see the inner `3` without normalizing the whole term.
-        match whnf(env, arg)? {
-            Expr::Num(value) => values.push(value),
-            _ => return Ok(None),
+        match literal_operand(env, arg)? {
+            Some(value) => values.push(value),
+            None => return Ok(None),
         }
     }
     Ok(Some(op.apply(&values)?))

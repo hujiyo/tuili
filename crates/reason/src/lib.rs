@@ -155,7 +155,7 @@
 //! the instance's anchor (the premise facts' occurrence records, inherited
 //! occurrences, the session fallback values and the declared code hierarchy).
 //! The reasoner only supplies those records; the CLI only renders the recorded
-//! verdict. Certificate v12 records the verdict,
+//! verdict. Certificate v13 records the verdict,
 //! basis, declared scope and reason on every rule application and gap
 //! candidate, and `:verify-cert` recomputes them independently.
 //!
@@ -1244,6 +1244,7 @@ fn match_axiom_body(
         (Expr::Sort(left), Expr::Sort(right)) => left == right,
         (Expr::Const(left), Expr::Const(right)) => left == right,
         (Expr::Num(left), Expr::Num(right)) => left == right,
+        (Expr::Date(left), Expr::Date(right)) => left == right,
         (Expr::Var(left), Expr::Var(right)) if left < &depth || right < &depth => *left == *right,
         (Expr::Var(left), other) if *left >= depth => {
             // `position` counts from the outermost binder; `0` is de Bruijn
@@ -1346,7 +1347,7 @@ pub const MAX_AXIOM_MATCH_ASSIGNMENTS: usize = 4096;
 fn contains_builtin_arithmetic(expression: &Expr) -> bool {
     match expression {
         Expr::Const(name) => std_deduce_kernel::builtin::Op::from_name(name).is_some(),
-        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => false,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => false,
         Expr::Pi {
             domain, codomain, ..
         } => contains_builtin_arithmetic(domain) || contains_builtin_arithmetic(codomain),
@@ -1408,7 +1409,7 @@ fn free_binder_positions(
                 .ok_or_else(|| format!("公理 `{axiom}` 的命题体含有超出绑定范围的自由变量"))?;
             out.insert(position);
         }
-        Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) | Expr::Var(_) => {}
+        Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) | Expr::Var(_) => {}
         Expr::Pi {
             domain, codomain, ..
         } => {
@@ -3909,7 +3910,7 @@ impl<'a> Reasoner<'a> {
 
     /// Every declared rule's burden/standard, keyed by rule name.
     ///
-    /// Certificate v12 does not record these declarations (adding them would
+    /// Certificate v13 does not record these declarations (adding them would
     /// change the format), so `:explain` supplies this map when it narrates a
     /// certificate gap. The values come from the environment declaration, the
     /// same one the derivation used.
@@ -5469,6 +5470,7 @@ fn match_fact(p: &Expr, f: &Expr, b: &mut Vec<(Name, Expr)>) -> bool {
         }
         (Expr::Sort(x), Expr::Sort(y)) => x == y,
         (Expr::Num(x), Expr::Num(y)) => x == y,
+        (Expr::Date(x), Expr::Date(y)) => x == y,
         _ => false,
     }
 }
@@ -5563,7 +5565,7 @@ fn open_names(expression: &Expr) -> BTreeSet<Name> {
                     names.insert(std_deduce_kernel::name(stripped));
                 }
             }
-            Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => {}
+            Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => {}
             Expr::Pi {
                 domain, codomain, ..
             } => {
@@ -5604,7 +5606,7 @@ fn close_pattern(p: &Expr, binding: &[(Name, Expr)]) -> Expr {
             }
             None => p.clone(),
         },
-        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => p.clone(),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => p.clone(),
         Expr::Pi {
             name,
             domain,
@@ -6001,7 +6003,7 @@ fn has_open_pattern(expression: &Expr) -> bool {
         } => has_open_pattern(domain) || has_open_pattern(codomain),
         Expr::Lam { domain, body, .. } => has_open_pattern(domain) || has_open_pattern(body),
         Expr::Let { value, body, .. } => has_open_pattern(value) || has_open_pattern(body),
-        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => false,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => false,
     }
 }
 

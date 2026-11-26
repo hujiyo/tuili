@@ -17,6 +17,12 @@ pub enum Tok {
     /// A token that mixes digits with other identifier characters (a date such
     /// as `2020-05-06`, or a name such as `2型糖尿病`) stays an [`Tok::Ident`].
     Num(String),
+    /// `d"YYYY-MM-DD"`. The calendar check runs here, so `d"2020-02-30"` is a
+    /// lexer error at the literal's own position instead of a term the kernel
+    /// would have to refuse later. Only whole calendar days inside
+    /// `1900-01-01..=9999-12-31` are accepted; there is no time of day, no time
+    /// zone and no conversion from a string or an integer.
+    Date(std_deduce_kernel::Date),
     /// A double-quoted string literal. Values in a `source` clause use it;
     /// escapes are limited to `\\`, `\"`, `\n`, `\t` and `\r`.
     Str(String),
@@ -247,82 +253,31 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             '"' => {
                 let start_line = line;
                 let start_col = col;
-                i += 1;
-                col += 1;
-                let mut value = String::new();
-                loop {
-                    if i >= bytes.len() {
-                        return Err(LexError {
-                            msg: "未闭合字符串".into(),
-                            line: start_line,
-                            col: start_col,
-                        });
-                    }
-                    match bytes[i] {
-                        '"' => {
-                            i += 1;
-                            col += 1;
-                            break;
-                        }
-                        '\\' => {
-                            let escape_line = line;
-                            let escape_col = col;
-                            i += 1;
-                            col += 1;
-                            if i >= bytes.len() {
-                                return Err(LexError {
-                                    msg: "未闭合字符串".into(),
-                                    line: start_line,
-                                    col: start_col,
-                                });
-                            }
-                            match bytes[i] {
-                                '\\' => value.push('\\'),
-                                '"' => value.push('"'),
-                                'n' => value.push('\n'),
-                                't' => value.push('\t'),
-                                'r' => value.push('\r'),
-                                '\n' | '\r' => {
-                                    return Err(LexError {
-                                        msg: "字符串字面量内不能出现裸换行；请写 `\\n`".into(),
-                                        line,
-                                        col,
-                                    })
-                                }
-                                other => {
-                                    return Err(LexError {
-                                        msg: format!("未知转义序列 `\\{other}`"),
-                                        line: escape_line,
-                                        col: escape_col,
-                                    })
-                                }
-                            }
-                            i += 1;
-                            col += 1;
-                        }
-                        '\n' | '\r' => {
-                            return Err(LexError {
-                                msg: "字符串字面量内不能出现裸换行；请写 `\\n`".into(),
-                                line,
-                                col,
-                            })
-                        }
-                        c if c.is_control() => {
-                            return Err(LexError {
-                                msg: "字符串字面量内不能出现裸控制字符；请写 `\\t` 等转义".into(),
-                                line,
-                                col,
-                            })
-                        }
-                        c => {
-                            value.push(c);
-                            i += 1;
-                            col += 1;
-                        }
-                    }
-                }
+                let value = scan_string(&bytes, &mut i, &mut col, start_line, start_col)?;
                 out.push(Token {
                     tok: Tok::Str(value),
+                    line: start_line,
+                    col: start_col,
+                });
+            }
+            // `d"YYYY-MM-DD"` is the date literal. The `d` must be directly
+            // followed by the quote: every other word starting with `d` is an
+            // ordinary identifier (`daysBetween`), and a spaced `d "…"` is not a
+            // literal either. The calendar check runs here, so an impossible day
+            // fails at the literal's own position.
+            _ if ch == 'd' && bytes.get(i + 1) == Some(&'"') => {
+                let start_line = line;
+                let start_col = col;
+                i += 1;
+                col += 1;
+                let text = scan_string(&bytes, &mut i, &mut col, start_line, start_col)?;
+                let date = std_deduce_kernel::Date::parse(&text).map_err(|message| LexError {
+                    msg: format!("{message}（日期字面量 d\"{text}\"）"),
+                    line: start_line,
+                    col: start_col,
+                })?;
+                out.push(Token {
+                    tok: Tok::Date(date),
                     line: start_line,
                     col: start_col,
                 });
@@ -441,6 +396,95 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
         col,
     });
     Ok(out)
+}
+
+/// Scan a double-quoted literal, starting at its opening quote and leaving the
+/// cursor after the closing quote.
+///
+/// Escapes are limited to `\\`, `\"`, `\n`, `\t` and `\r`; a raw newline or a raw
+/// control character inside the quotes is an error at its own position. Both a
+/// `source` value and the text of a `d"…"` date literal go through this one
+/// scanner, so they accept exactly the same escapes.
+fn scan_string(
+    bytes: &[char],
+    i: &mut usize,
+    col: &mut usize,
+    line: usize,
+    start_col: usize,
+) -> Result<String, LexError> {
+    *i += 1;
+    *col += 1;
+    let mut value = String::new();
+    loop {
+        if *i >= bytes.len() {
+            return Err(LexError {
+                msg: "未闭合字符串".into(),
+                line,
+                col: start_col,
+            });
+        }
+        match bytes[*i] {
+            '"' => {
+                *i += 1;
+                *col += 1;
+                return Ok(value);
+            }
+            '\\' => {
+                let escape_col = *col;
+                *i += 1;
+                *col += 1;
+                if *i >= bytes.len() {
+                    return Err(LexError {
+                        msg: "未闭合字符串".into(),
+                        line,
+                        col: start_col,
+                    });
+                }
+                match bytes[*i] {
+                    '\\' => value.push('\\'),
+                    '"' => value.push('"'),
+                    'n' => value.push('\n'),
+                    't' => value.push('\t'),
+                    'r' => value.push('\r'),
+                    '\n' | '\r' => {
+                        return Err(LexError {
+                            msg: "字符串字面量内不能出现裸换行；请写 `\\n`".into(),
+                            line,
+                            col: *col,
+                        })
+                    }
+                    other => {
+                        return Err(LexError {
+                            msg: format!("未知转义序列 `\\{other}`"),
+                            line,
+                            col: escape_col,
+                        })
+                    }
+                }
+                *i += 1;
+                *col += 1;
+            }
+            '\n' | '\r' => {
+                return Err(LexError {
+                    msg: "字符串字面量内不能出现裸换行；请写 `\\n`".into(),
+                    line,
+                    col: *col,
+                })
+            }
+            c if c.is_control() => {
+                return Err(LexError {
+                    msg: "字符串字面量内不能出现裸控制字符；请写 `\\t` 等转义".into(),
+                    line,
+                    col: *col,
+                })
+            }
+            c => {
+                value.push(c);
+                *i += 1;
+                *col += 1;
+            }
+        }
+    }
 }
 
 /// CJK ideographs are identifier characters here. This is the one place the

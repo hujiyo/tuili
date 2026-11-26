@@ -17,6 +17,10 @@ pub enum Term {
     /// surface syntax elaborate to the built-in `add` / `sub` / `mul` / `neg`
     /// constants, so the parser needs no operator node.
     Num(i64),
+    /// A calendar-day literal `d"YYYY-MM-DD"`. Its kernel form is
+    /// `Expr::Date`, typed by the built-in sort `Date`. The value is already a
+    /// real day: the lexer refused impossible dates at the literal's position.
+    Date(std_deduce_kernel::Date),
     /// `∀ (x : A), B` or `A → B`
     Pi {
         name: Option<String>,

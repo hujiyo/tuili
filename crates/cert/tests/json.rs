@@ -12,11 +12,14 @@ use std_deduce_cert::{
 use std_deduce_kernel::env::SourceRef;
 use std_deduce_kernel::{name, Expr};
 
-const SNAPSHOT: &str = include_str!("fixtures/certificate_v12.json");
-/// A v12 certificate that records both a guard judgement and the two
+const SNAPSHOT: &str = include_str!("fixtures/certificate_v13.json");
+/// A v13 certificate that records both a guard judgement and the two
 /// compound-premise choices (a disjunction branch and an existential witness).
-const V12_CHOICES: &str = include_str!("fixtures/certificate_v12_guards_choices.json");
+const V13_CHOICES: &str = include_str!("fixtures/certificate_v13_guards_choices.json");
 const V9_SNAPSHOT: &str = include_str!("fixtures/certificate_v9.json");
+const V12_SNAPSHOT: &str = include_str!("fixtures/certificate_v12.json");
+const V11_SNAPSHOT: &str = include_str!("fixtures/certificate_v11.json");
+const V10_SNAPSHOT: &str = include_str!("fixtures/certificate_v10.json");
 const V8_SNAPSHOT: &str = include_str!("fixtures/certificate_v8.json");
 const V6_SNAPSHOT: &str = include_str!("fixtures/certificate_v6.json");
 const V5_SNAPSHOT: &str = include_str!("fixtures/certificate_v5.json");
@@ -239,9 +242,9 @@ fn serialization_round_trips_and_is_stable() {
 }
 
 #[test]
-fn v12_fixture_records_guards_and_premise_choices() {
-    let certificate = Certificate::from_json(V12_CHOICES).expect("the v12 fixture parses");
-    assert_eq!(certificate.format_version.get(), 12);
+fn v13_fixture_records_guards_and_premise_choices() {
+    let certificate = Certificate::from_json(V13_CHOICES).expect("the v13 fixture parses");
+    assert_eq!(certificate.format_version.get(), 13);
     let node = certificate
         .nodes
         .iter()
@@ -302,7 +305,7 @@ fn field_names_are_stable() {
         assert!(object.contains_key(field), "missing field `{field}`");
     }
 
-    assert_eq!(value["format_version"], 12);
+    assert_eq!(value["format_version"], 13);
     let environment = value["environment"]
         .as_object()
         .expect("the environment is an inline object");
@@ -394,7 +397,7 @@ fn a_v3_certificate_is_rejected_before_its_missing_resolution_basis() {
         message.contains("unsupported certificate format version 3"),
         "{message}"
     );
-    assert!(message.contains("this build supports 12"), "{message}");
+    assert!(message.contains("this build supports 13"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -409,7 +412,7 @@ fn a_v4_certificate_is_rejected_before_its_missing_assumption_identity() {
         message.contains("unsupported certificate format version 4"),
         "{message}"
     );
-    assert!(message.contains("this build supports 12"), "{message}");
+    assert!(message.contains("this build supports 13"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -424,7 +427,7 @@ fn a_v6_certificate_is_rejected_before_its_missing_applicability() {
         message.contains("unsupported certificate format version 6"),
         "{message}"
     );
-    assert!(message.contains("this build supports 12"), "{message}");
+    assert!(message.contains("this build supports 13"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
     assert!(!message.contains("applicability"), "{message}");
     assert!(!message.contains("occurred_at"), "{message}");
@@ -444,7 +447,7 @@ fn a_v7_certificate_is_rejected_before_its_missing_axiom_instances() {
         message.contains("unsupported certificate format version 7"),
         "{message}"
     );
-    assert!(message.contains("this build supports 12"), "{message}");
+    assert!(message.contains("this build supports 13"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -459,7 +462,7 @@ fn a_v8_certificate_is_rejected_before_its_missing_witness_table() {
         message.contains("unsupported certificate format version 8"),
         "{message}"
     );
-    assert!(message.contains("this build supports 12"), "{message}");
+    assert!(message.contains("this build supports 13"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -475,8 +478,25 @@ fn a_v9_certificate_is_rejected_before_its_missing_integer_fields() {
         message.contains("unsupported certificate format version 9"),
         "{message}"
     );
-    assert!(message.contains("this build supports 12"), "{message}");
+    assert!(message.contains("this build supports 13"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
+}
+
+#[test]
+fn v10_v11_and_v12_certificates_are_rejected_by_the_version_probe() {
+    // Each old sample predates fields the current format requires (numbers,
+    // guards, premise choices); the probe must reject by version, never read
+    // the old document under the current rules.
+    for (version, text) in [(10, V10_SNAPSHOT), (11, V11_SNAPSHOT), (12, V12_SNAPSHOT)] {
+        let error = Certificate::from_json(text).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("unsupported certificate format version {version}")),
+            "{message}"
+        );
+        assert!(message.contains("this build supports 13"), "{message}");
+        assert!(!message.contains("missing field"), "{message}");
+    }
 }
 
 #[test]
@@ -490,7 +510,7 @@ fn a_v5_certificate_is_rejected_before_its_missing_interpretations() {
         message.contains("unsupported certificate format version 5"),
         "{message}"
     );
-    assert!(message.contains("this build supports 12"), "{message}");
+    assert!(message.contains("this build supports 13"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
     assert!(!message.contains("interpretations"), "{message}");
 }
@@ -506,7 +526,7 @@ fn a_true_v1_certificate_is_rejected_with_a_version_error() {
         message.contains("unsupported certificate format version 1"),
         "{message}"
     );
-    assert!(message.contains("supports 12"), "{message}");
+    assert!(message.contains("supports 13"), "{message}");
 }
 
 #[test]
@@ -520,7 +540,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
         message.contains("unsupported certificate format version 2"),
         "{message}"
     );
-    assert!(message.contains("this build supports 12"), "{message}");
+    assert!(message.contains("this build supports 13"), "{message}");
     assert!(!message.contains("missing field"), "{message}");
 }
 
@@ -528,7 +548,7 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
 fn source_fields_added_in_v2_still_use_defaults() {
     let mut value: Value = serde_json::from_str(SNAPSHOT).unwrap();
     strip_new_source_fields(&mut value);
-    assert_eq!(value["format_version"], 12);
+    assert_eq!(value["format_version"], 13);
     let certificate = Certificate::from_json(&value.to_string())
         .expect("source fields added with #[serde(default)] may be omitted");
     let source = &certificate.assumptions[0].sources[0];
@@ -695,7 +715,7 @@ fn every_source_field_survives_a_json_round_trip() {
 
 #[test]
 fn unknown_format_version_is_rejected() {
-    let text = SNAPSHOT.replace("\"format_version\": 12", "\"format_version\": 999");
+    let text = SNAPSHOT.replace("\"format_version\": 13", "\"format_version\": 999");
     let error = Certificate::from_json(&text).unwrap_err();
     assert!(
         error
