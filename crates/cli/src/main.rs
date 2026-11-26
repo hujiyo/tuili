@@ -115,6 +115,15 @@
 //! unenabled interpretation prints `存在未启用解释 ...` instead of leaving the
 //! declaration invisible.
 //!
+//! An open concept blocks a conclusion without deciding it. `:why` / `:gap` /
+//! `:issues` name the declared interpretations that relate to the blocked
+//! proposition and point at `:branches <goal>`, which runs each candidate alone:
+//! one local reasoner with exactly that interpretation enabled, one derivation,
+//! one certificate, both certificate layers, and a reported category. The
+//! session's enabled set is never changed by the command, and no combination of
+//! interpretations is enumerated. The candidate criterion, the bound and the
+//! report shape live in the reasoner ([`std_deduce_reason::Reasoner::branch_candidates`]).
+//!
 //! Universal elimination is demand-driven. A `Fact` declaration whose type is a
 //! telescope of named `∀` binders ending in a predicate-headed proposition can
 //! be instantiated with closed values: a queried goal that no rule or fact
@@ -155,6 +164,8 @@
 //! :labels <term>          derive and print the certificate's full trust labels
 //!                         with their evidence
 //! :gap <term>             explain what is missing, as a recursive gap tree
+//! :branches <term>        run one derivation per candidate interpretation of
+//!                         an obstructing open concept and check each branch
 //! :issues                 list every conclusion the current facts can contest
 //! :applicability [term]   list temporal/spatial verdicts: every rule, or the
 //!                         rules the goal's derivation or gap tree uses
@@ -590,6 +601,73 @@ impl Outcome {
             Outcome::Proved => 0,
             Outcome::Gap | Outcome::Unresolved => 1,
         }
+    }
+}
+
+/// How one branch of a `:branches` report ended.
+///
+/// This is the same four-way split a single query prints: an unconditional
+/// proof, a gap root, a conflict the goal is on the losing or undecided side
+/// of, and a proved root that still carries an unresolved obligation. The
+/// first is the only success; the other three exit `1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchClass {
+    /// Root proved, no unresolved obligation and no unresolved conflict.
+    Proof,
+    /// The root is a gap, or no proof of the goal exists.
+    Gap,
+    /// The goal takes part in an unresolved conflict (or is its loser).
+    Conflict,
+    /// Root proved but an unresolved obligation remains (an open concept, a
+    /// case extension, or a recorded unresolved conflict on the proof graph).
+    Open,
+}
+
+impl BranchClass {
+    fn label_zh(self) -> &'static str {
+        match self {
+            BranchClass::Proof => "证明",
+            BranchClass::Gap => "缺口",
+            BranchClass::Conflict => "冲突",
+            BranchClass::Open => "未决",
+        }
+    }
+
+    fn exit_code(self) -> i32 {
+        match self {
+            BranchClass::Proof => 0,
+            BranchClass::Gap | BranchClass::Conflict | BranchClass::Open => 1,
+        }
+    }
+}
+
+/// One complete evaluation of a goal under one interpretation set.
+///
+/// `:branches` runs this once for the baseline and once per candidate
+/// interpretation, each with its own reasoner. The certificate this holds is
+/// exactly the certificate the query path would build for that set, so both
+/// proof layers can be run on it and a reader can export the same branch with
+/// `:cert` after enabling that interpretation explicitly.
+struct BranchEvaluation {
+    certificate: Certificate,
+    /// Whether the goal is in the settled fact base (the root may still be a
+    /// gap: an interpretation can be applied without proving the goal).
+    reachable: bool,
+    /// The trust labels derived from this certificate.
+    trust: TrustReport,
+    /// The open concepts this root derivation turned into proved propositions.
+    open_concepts: Vec<String>,
+    /// The branch category, and therefore the exit code a query would end in.
+    class: BranchClass,
+    /// One entry per failed certificate layer; empty means both layers passed.
+    validation: Vec<String>,
+    /// The root gap tree when the goal is a gap; `None` when it is proved.
+    gap_tree: Option<GapTree>,
+}
+
+impl BranchEvaluation {
+    fn is_valid(&self) -> bool {
+        self.validation.is_empty()
     }
 }
 
@@ -1726,6 +1804,7 @@ impl Session {
                 self.query(cmd, arg, out)
             }
             "gap" => self.query(cmd, arg, out),
+            "branches" => self.branches_command(arg, out),
             "explain" => {
                 // The narrative uses the same certificate and the same
                 // two proof layers as `:why`, so the multi-jurisdiction
@@ -2365,6 +2444,17 @@ impl Session {
             .ok();
             render_gap_tree(out, &tree, &r, 2, "缺口");
             write_interpretation_hints(out, &r, &goal)?;
+            // A gap tree blocked on an open concept gets the same candidate
+            // list a proved root gets: which declared interpretations relate
+            // to the blocked concept, and where to inspect their consequences.
+            // Nothing is enabled here.
+            if !self.lib.env.open_predicates().is_empty() {
+                let blocked = r.open_concept_goals(&tree)?;
+                if !blocked.is_empty() {
+                    let scan = r.branch_candidates(&blocked)?;
+                    write_branch_candidate_hints(out, &scan, &goal);
+                }
+            }
             return Ok(Outcome::Gap);
         }
 
@@ -2439,6 +2529,25 @@ impl Session {
         }
         if cmd == "why" {
             write_open_concept_lines(out, &open_concepts);
+        }
+        // An open concept in the way gets the candidate interpretations right
+        // after the `此处需人判断` line. Only `:why` prints this; `:explain`
+        // keeps its narration unchanged. Nothing is enabled: the reader
+        // chooses an interpretation, then runs `:branches` to see each one's
+        // consequence.
+        if cmd == "why" {
+            let blocked = if reachable {
+                self.blocked_propositions_of(&r, &certificate, None)?
+            } else if !self.lib.env.open_predicates().is_empty() {
+                let tree = r.gap_tree_with(&goal, &GapLimits::default())?;
+                self.blocked_propositions_of(&r, &certificate, Some(&tree))?
+            } else {
+                Vec::new()
+            };
+            if !blocked.is_empty() {
+                let scan = r.branch_candidates(&blocked)?;
+                write_branch_candidate_hints(out, &scan, &goal);
+            }
         }
         // An unreachable `:why` reports the same kind of gap as `:gap`, so it
         // offers the same "only an unenabled interpretation is missing" hint.
@@ -2573,6 +2682,17 @@ impl Session {
             .ok();
             for issue in &scan.issues {
                 render_gap_tree(out, issue, &r, 2, "争点");
+                // An issue blocked on an open concept names the declared
+                // interpretations that could license it, without enabling any
+                // of them. The prompt is per issue, so a reader can run
+                // `:branches` on the proposition that is actually blocked.
+                if !self.lib.env.open_predicates().is_empty() {
+                    let blocked = r.open_concept_goals(issue)?;
+                    if !blocked.is_empty() {
+                        let candidate_scan = r.branch_candidates(&blocked)?;
+                        write_branch_candidate_hints(out, &candidate_scan, &issue.goal);
+                    }
+                }
             }
         }
         for limit in &scan.limits {
@@ -2956,6 +3076,15 @@ impl Session {
         } else {
             Some(r.gap_tree_with(&goal, &limits)?)
         };
+        // The declared interpretations that could license the obstructing
+        // open concept. The report lists them by id; it does not run a branch,
+        // so it never invents a consequence.
+        let blocked = self.blocked_propositions_of(&r, &certificate, root_gap.as_ref())?;
+        let branch_scan = r.branch_candidates(&blocked)?;
+        let open = crate::review::OpenConceptInputs {
+            dependency: dependency.as_ref(),
+            branch_scan: &branch_scan,
+        };
         // The report derives the same risk themes `:why` / `:explain` print from
         // the certificate inside the renderer, so risk cannot change the exit
         // code and cannot disagree with the report's own labels.
@@ -2963,7 +3092,7 @@ impl Session {
             &self.lib.env,
             &certificate,
             &trust,
-            dependency.as_ref(),
+            &open,
             &issues,
             root_gap.as_ref(),
             &pleadings,
@@ -3009,6 +3138,241 @@ impl Session {
         } else {
             Outcome::Gap
         })
+    }
+
+    /// `:branches <命题>` — run one derivation per candidate interpretation.
+    ///
+    /// This does not change the certificate format and does not create a
+    /// "possible conclusion": the branch is N independent, re-checkable
+    /// derivations. For each candidate interpretation, enumerated from the
+    /// loaded environment's `interpret` declarations (see
+    /// [`std_deduce_reason::Reasoner::branch_candidates`]), the command builds
+    /// a fresh reasoner, enables **that one** interpretation, saturates, builds
+    /// the same certificate `:why` would build, runs both certificate layers
+    /// and reports the category. The session's enabled set is never touched:
+    /// enabling happens on a local reasoner, so the next command sees exactly
+    /// the state the user left.
+    ///
+    /// The baseline is the session's own enabled set. A branch is one
+    /// interpretation on top of that set, never a combination of candidates.
+    /// Output is derived only from the certificate and the environment, so
+    /// running it twice yields byte-identical text.
+    fn branches_command(&mut self, arg: &str, out: &mut impl Write) -> Result<Outcome, String> {
+        if !self.loaded {
+            return Err(
+                "尚未加载理论：:branches 需要已加载的环境才能枚举解释，请先 :load <文件>".into(),
+            );
+        }
+        if arg.is_empty() {
+            return Err("用法：:branches <目标命题>".into());
+        }
+        // The same ambiguity gate as `:why`: a branch over an environment that
+        // names several jurisdictions must say which one it is speaking about.
+        self.require_jurisdiction()?;
+        let goal = self.goal(arg)?;
+
+        // The baseline is the session's current state, not a state the command
+        // invents: an already enabled interpretation stays part of it.
+        let mut baseline_reasoner = self.reasoner()?;
+        saturate_with_goal(&mut baseline_reasoner, Some(&goal))?;
+        let baseline = self.evaluate_goal(&mut baseline_reasoner, &goal, true)?;
+        let blocked = self.blocked_open_propositions(&baseline_reasoner, &baseline)?;
+        let scan = baseline_reasoner.branch_candidates(&blocked)?;
+
+        write_branch_header(out, &goal, &scan, &self.enabled_interpretations)?;
+        write_branch_evaluation(out, "基线", &baseline, &self.enabled_interpretations)?;
+
+        let mut branches: Vec<(Name, BranchEvaluation)> = Vec::new();
+        let mut failed: Vec<Name> = Vec::new();
+        let total = scan.candidates.len();
+        for (index, candidate) in scan.candidates.iter().enumerate() {
+            writeln!(
+                out,
+                "分支 {}/{}：`{}`（{} → {}；{}）",
+                index + 1,
+                total,
+                escape_control(&candidate.id),
+                print_expr(&candidate.from),
+                print_expr(&candidate.to),
+                candidate.relation.label_zh()
+            )
+            .ok();
+            // A fresh reasoner holds the session's enabled set plus exactly
+            // this interpretation. `enable_interpretation` is called on the
+            // local reasoner only, so nothing leaks into the session.
+            let mut reasoner = self.reasoner()?;
+            reasoner.enable_interpretation(&candidate.id)?;
+            saturate_with_goal(&mut reasoner, Some(&goal))?;
+            let evaluation = self.evaluate_goal(&mut reasoner, &goal, false)?;
+            if !evaluation.is_valid() {
+                failed.push(candidate.id.clone());
+            }
+            write_branch_evaluation(out, "", &evaluation, &self.enabled_interpretations)?;
+            branches.push((candidate.id.clone(), evaluation));
+        }
+
+        // The comparison names the baseline in the same words whether the
+        // session enabled nothing or already enabled interpretations.
+        writeln!(
+            out,
+            "与基线（{}）对比：",
+            enabled_state(&self.enabled_interpretations)
+        )
+        .ok();
+        writeln!(
+            out,
+            "  基线：{}（{}）",
+            baseline.class.label_zh(),
+            baseline.class.exit_code()
+        )
+        .ok();
+        for (id, evaluation) in &branches {
+            writeln!(
+                out,
+                "  启用 `{}` 后：{}（{}）",
+                escape_control(id),
+                evaluation.class.label_zh(),
+                evaluation.class.exit_code()
+            )
+            .ok();
+        }
+
+        let (mut proof, mut gap, mut conflict, mut open) = (0usize, 0usize, 0usize, 0usize);
+        for class in std::iter::once(baseline.class).chain(branches.iter().map(|(_, e)| e.class)) {
+            match class {
+                BranchClass::Proof => proof += 1,
+                BranchClass::Gap => gap += 1,
+                BranchClass::Conflict => conflict += 1,
+                BranchClass::Open => open += 1,
+            }
+        }
+        writeln!(
+            out,
+            "汇总（含基线）：证明 {proof} 个，未决 {open} 个，缺口 {gap} 个，冲突 {conflict} 个。"
+        )
+        .ok();
+        writeln!(
+            out,
+            "说明：每个分支的证书可单独导出与校验——先 `:interpret enable <id>`（会改变会话的启用状态），\
+             再 `:cert <目标>` 导出该分支，最后用 `:verify-cert <证书文件> <目标>` 复核。\
+             本命令不自动启用任何解释，也不建议采用哪一个。"
+        )
+        .ok();
+
+        if !failed.is_empty() {
+            return Err(format!(
+                "有 {} 个分支的证书未通过校验：{}；分支结论不可采信",
+                failed.len(),
+                format_limited_names(&failed)
+            ));
+        }
+        let any_proof = baseline.class == BranchClass::Proof
+            || branches
+                .iter()
+                .any(|(_, evaluation)| evaluation.class == BranchClass::Proof);
+        Ok(if any_proof {
+            Outcome::Proved
+        } else {
+            Outcome::Gap
+        })
+    }
+
+    /// Evaluate one goal against an already saturated reasoner.
+    ///
+    /// The certificate is built exactly as the query path builds it: a proved
+    /// goal's root is the proof node; an unproved goal gets a gap node with the
+    /// same candidates `:gap` would report. Both certificate layers run here
+    /// without printing, so the caller can report each branch's validation.
+    fn evaluate_goal(
+        &self,
+        reasoner: &mut Reasoner<'_>,
+        goal: &Expr,
+        want_gap_tree: bool,
+    ) -> Result<BranchEvaluation, String> {
+        let reachable = reasoner.knows(goal);
+        let mut derivation = reasoner.derivation();
+        if reachable {
+            derivation.root = reasoner.root_for(goal);
+        } else {
+            let explanation = reasoner.explain(goal)?;
+            let id = derivation.nodes.len();
+            derivation.nodes.push(ReasonNode::Gap {
+                prop: goal.clone(),
+                candidates: explanation.candidates,
+                axiom_candidates: explanation.axiom_candidates,
+                note: explanation.note,
+            });
+            derivation.root = Some(id);
+        }
+        let mut certificate =
+            reason_certificate(&self.lib.env, &derivation, &reasoner.priority_order())?;
+        self.mark_case_extensions(&mut certificate);
+        let class = classify_branch(reasoner, goal, &certificate, reachable);
+        let open_concepts = self.open_concepts(&certificate)?;
+        let trust = derive_trust(&certificate)?;
+        // The gap tree is only needed to name the open concepts that block the
+        // baseline; a branch report does not render it, and an environment
+        // without `open` markers has nothing to name, so it is not built there.
+        let gap_tree = if reachable || !want_gap_tree || self.lib.env.open_predicates().is_empty() {
+            None
+        } else {
+            Some(reasoner.gap_tree_with(goal, &GapLimits::default())?)
+        };
+        let validation = self.certificate_failures(&certificate);
+        Ok(BranchEvaluation {
+            certificate,
+            reachable,
+            trust,
+            open_concepts,
+            class,
+            validation,
+            gap_tree,
+        })
+    }
+
+    /// The open-concept propositions that obstruct this evaluation.
+    ///
+    /// A proved root contributes the nodes `open_concept_dependency` names —
+    /// the same recomputation `cert::check` performs. A gap root contributes
+    /// every open-concept goal on its gap tree, which is where the rules-only
+    /// derivation is blocked. A goal with no open concept in the way yields an
+    /// empty list; `:branches` then says no candidate can be derived rather
+    /// than showing an empty table.
+    fn blocked_open_propositions(
+        &self,
+        reasoner: &Reasoner<'_>,
+        evaluation: &BranchEvaluation,
+    ) -> Result<Vec<Expr>, String> {
+        self.blocked_propositions_of(
+            reasoner,
+            &evaluation.certificate,
+            evaluation.gap_tree.as_ref(),
+        )
+    }
+
+    /// The blocked open-concept propositions of one certificate and its root
+    /// gap tree, if it has one.
+    fn blocked_propositions_of(
+        &self,
+        reasoner: &Reasoner<'_>,
+        certificate: &Certificate,
+        gap_tree: Option<&GapTree>,
+    ) -> Result<Vec<Expr>, String> {
+        let dependency = std_deduce_cert::open_concept_dependency(&self.lib.env, certificate)
+            .map_err(|error| format!("无法重算开放概念义务：{error}"))?;
+        let mut blocked = match gap_tree {
+            Some(tree) => reasoner.open_concept_goals(tree)?,
+            None => Vec::new(),
+        };
+        if let Some(dependency) = dependency {
+            for node in &dependency.nodes {
+                let proposition = certificate.node_proposition(*node).map_err(|error| {
+                    format!("无法读取开放概念依赖节点 `{node}` 的命题：{error}")
+                })?;
+                blocked.push(Expr::from(proposition));
+            }
+        }
+        Ok(blocked)
     }
 
     /// Record the case-local rules a certificate applied as one obligation.
@@ -3076,6 +3440,37 @@ impl Session {
             .unwrap_or_default())
     }
 
+    /// Run both certificate layers without printing anything.
+    ///
+    /// `:branches` reports each branch's validation separately, so the two
+    /// layers are run the same way here and the messages are rendered by the
+    /// caller. A logical pass with a kernel failure is still a failure.
+    fn certificate_layers_checked(
+        &self,
+        certificate: &Certificate,
+    ) -> (
+        Result<CheckReport, std_deduce_cert::CheckError>,
+        Result<KernelProofReport, std_deduce_cert::KernelProofError>,
+    ) {
+        (
+            std_deduce_cert::check(&self.lib.env, certificate),
+            std_deduce_cert::kernel_proof(&self.lib.env, certificate),
+        )
+    }
+
+    /// The failure messages of both certificate layers, empty when both pass.
+    fn certificate_failures(&self, certificate: &Certificate) -> Vec<String> {
+        let (checked, kernel) = self.certificate_layers_checked(certificate);
+        let mut failures = Vec::new();
+        if let Err(error) = checked {
+            failures.push(format!("逻辑层：{}", escape_control(&error.to_string())));
+        }
+        if let Err(error) = kernel {
+            failures.push(format!("内核层：{}", escape_control(&error.to_string())));
+        }
+        failures
+    }
+
     /// Run the two certificate layers and report their failures.
     ///
     /// Both layers run and are reported separately: `cert::check` rebuilds
@@ -3089,8 +3484,7 @@ impl Session {
         certificate: &Certificate,
         out: &mut impl Write,
     ) -> Result<(CheckReport, KernelProofReport), String> {
-        let checked = std_deduce_cert::check(&self.lib.env, certificate);
-        let kernel = std_deduce_cert::kernel_proof(&self.lib.env, certificate);
+        let (checked, kernel) = self.certificate_layers_checked(certificate);
         match (checked, kernel) {
             (Ok(report), Ok(kernel)) => Ok((report, kernel)),
             (checked, kernel) => {
@@ -5704,8 +6098,379 @@ fn write_interpretation_hints(
     Ok(())
 }
 
-/// Register the ledger facts, saturate, and — when the goal is still unproved —
-/// demand a universal-elimination instance for it and saturate again.
+/// The candidate-interpretation block printed after a query that is blocked by
+/// an open concept.
+///
+/// It names the blocked propositions, every declared interpretation that could
+/// license them, and how to inspect each consequence with `:branches`. It
+/// never enables an interpretation, never runs a branch and never suggests
+/// which one to adopt: choosing an interpretation is a legal judgement.
+fn write_branch_candidate_hints(
+    out: &mut impl Write,
+    scan: &std_deduce_reason::BranchCandidateScan,
+    goal: &Expr,
+) {
+    if scan.blocked.is_empty() {
+        return;
+    }
+    writeln!(
+        out,
+        "  受阻的开放概念：{}",
+        scan.blocked
+            .iter()
+            .map(|proposition| format!("`{}`", print_expr(proposition)))
+            .collect::<Vec<_>>()
+            .join("、")
+    )
+    .ok();
+    if scan.candidates.is_empty() {
+        writeln!(
+            out,
+            "  没有可用的候选解释：当前环境没有与受阻的开放概念命题相关的 `interpret` 声明，\
+             或相关解释的 from 在当前事实集（已登记事实与规则结论）里不成立。"
+        )
+        .ok();
+        return;
+    }
+    writeln!(
+        out,
+        "  候选解释（不自动启用；一次只启用一个，不枚举组合）：{}",
+        scan.candidates
+            .iter()
+            .map(|candidate| format!(
+                "`{}`（{} → {}；{}）",
+                escape_control(&candidate.id),
+                print_expr(&candidate.from),
+                print_expr(&candidate.to),
+                candidate.relation.label_zh()
+            ))
+            .collect::<Vec<_>>()
+            .join("、")
+    )
+    .ok();
+    if !scan.truncated.is_empty() {
+        writeln!(
+            out,
+            "  候选解释超过上限 {} 个，未列出：{}（{} 个）。",
+            std_deduce_reason::MAX_BRANCH_CANDIDATES,
+            format_limited_names(&scan.truncated),
+            scan.truncated.len()
+        )
+        .ok();
+    }
+    if !scan.unavailable.is_empty() {
+        writeln!(
+            out,
+            "  另有 {} 个相关解释不可用（原因用 :branches 查看）。",
+            scan.unavailable.len()
+        )
+        .ok();
+    }
+    writeln!(
+        out,
+        "  用 :branches {} 查看每个解释单独启用后的后果（不会自动启用）。",
+        print_expr(goal)
+    )
+    .ok();
+}
+
+/// The branch report's opening block: the goal, the blocked propositions,
+/// every candidate, and the bounds that applied.
+fn write_branch_header(
+    out: &mut impl Write,
+    goal: &Expr,
+    scan: &std_deduce_reason::BranchCandidateScan,
+    enabled: &BTreeSet<String>,
+) -> Result<(), String> {
+    writeln!(out, "分支重跑 `{}`", print_expr(goal)).ok();
+    writeln!(
+        out,
+        "  临时启用：每个分支只在本次命令内临时启用一个解释，命令结束后会话保持原来的启用状态（当前：{}）。",
+        enabled_state(enabled)
+    )
+    .ok();
+    writeln!(out, "  一次只启用一个解释，不枚举解释之间的组合。").ok();
+    if scan.blocked.is_empty() {
+        writeln!(
+            out,
+            "  受阻的开放概念命题：没有。基线结果没有开放概念受阻；:branches 只枚举与受阻开放概念相关的解释，因此没有可用的候选解释。"
+        )
+        .ok();
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "  受阻的开放概念命题 {} 个：{}",
+        scan.blocked.len(),
+        scan.blocked
+            .iter()
+            .map(|proposition| format!("`{}`", print_expr(proposition)))
+            .collect::<Vec<_>>()
+            .join("、")
+    )
+    .ok();
+    writeln!(
+        out,
+        "  候选解释 {} 个（上限 {} 个，按 id 排序；一次只启用一个，可单独启用）：",
+        scan.candidates.len(),
+        std_deduce_reason::MAX_BRANCH_CANDIDATES
+    )
+    .ok();
+    if scan.candidates.is_empty() {
+        writeln!(
+            out,
+            "    没有可用的候选解释：当前环境没有与受阻的开放概念命题相关的 `interpret` 声明，\
+             或相关解释的 from 在当前事实集里不成立。"
+        )
+        .ok();
+    }
+    for candidate in &scan.candidates {
+        writeln!(
+            out,
+            "    `{}`：{} → {}〔{}：{}〕",
+            escape_control(&candidate.id),
+            print_expr(&candidate.from),
+            print_expr(&candidate.to),
+            candidate.relation.label_zh(),
+            if candidate.relation == std_deduce_reason::CandidateRelation::Exact {
+                format!(
+                    "与受阻命题「{}」内核等价，启用后许可该命题",
+                    print_expr(&candidate.blocked)
+                )
+            } else {
+                format!(
+                    "与受阻命题「{}」同谓词，但不是同一命题",
+                    print_expr(&candidate.blocked)
+                )
+            }
+        )
+        .ok();
+    }
+    if !scan.truncated.is_empty() {
+        writeln!(
+            out,
+            "  候选解释超过上限 {} 个：已截断，未列出 {}",
+            std_deduce_reason::MAX_BRANCH_CANDIDATES,
+            format_limited_names(&scan.truncated)
+        )
+        .ok();
+    }
+    if !scan.unavailable.is_empty() {
+        writeln!(
+            out,
+            "  相关但不可用 {} 个（上限 {} 个）：",
+            scan.unavailable.len(),
+            std_deduce_reason::MAX_BRANCH_CANDIDATES
+        )
+        .ok();
+        for entry in &scan.unavailable {
+            writeln!(
+                out,
+                "    `{}`：{} → {}（{}）",
+                escape_control(&entry.candidate.id),
+                print_expr(&entry.candidate.from),
+                print_expr(&entry.candidate.to),
+                entry.reason
+            )
+            .ok();
+        }
+        if !scan.unavailable_truncated.is_empty() {
+            writeln!(
+                out,
+                "  不可用解释超过上限 {} 个：已截断，未列出 {}",
+                std_deduce_reason::MAX_BRANCH_CANDIDATES,
+                format_limited_names(&scan.unavailable_truncated)
+            )
+            .ok();
+        }
+    }
+    Ok(())
+}
+
+/// One branch's result: conclusion, root status, obligations, trust label,
+/// certificate validation and the exit-code category.
+fn write_branch_evaluation(
+    out: &mut impl Write,
+    label: &str,
+    evaluation: &BranchEvaluation,
+    enabled: &BTreeSet<String>,
+) -> Result<(), String> {
+    let root = evaluation
+        .certificate
+        .root
+        .ok_or_else(|| "分支证书没有根节点：无法报告结论".to_owned())?;
+    let conclusion = evaluation
+        .certificate
+        .node_proposition(root)
+        .map_err(|error| format!("无法读取分支证书根节点的命题：{error}"))?;
+    let root_text = print_expr(&Expr::from(conclusion));
+    if !label.is_empty() {
+        writeln!(out, "{label}（{}）：", enabled_state(enabled)).ok();
+    }
+    writeln!(out, "  结论：{root_text}").ok();
+    let root_is_gap = matches!(
+        evaluation.certificate.nodes.get(root),
+        Some(CertNode::Gap { .. })
+    );
+    if root_is_gap || !evaluation.reachable {
+        writeln!(out, "  根：缺口（目标未被证明）").ok();
+    } else {
+        writeln!(out, "  根：已证明（{root_text}）").ok();
+    }
+    if !evaluation.open_concepts.is_empty() {
+        writeln!(
+            out,
+            "  开放概念：{}",
+            evaluation
+                .open_concepts
+                .iter()
+                .map(|concept| format!("`{concept}`"))
+                .collect::<Vec<_>>()
+                .join("、")
+        )
+        .ok();
+    }
+    let unresolved_conflicts = evaluation
+        .certificate
+        .conflicts
+        .iter()
+        .filter(|conflict| {
+            matches!(
+                conflict.resolution,
+                std_deduce_cert::Resolution::Unresolved { .. }
+            )
+        })
+        .count();
+    // Obligations are reported by kind, not only counted: a reader can see
+    // whether the branch is open because an open concept was licensed or
+    // because a premise is still missing.
+    let mut obligation_kinds: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for obligation in &evaluation.certificate.open_obligations {
+        *obligation_kinds
+            .entry(obligation_kind_label(obligation.kind))
+            .or_default() += 1;
+    }
+    if obligation_kinds.is_empty() {
+        writeln!(out, "  未决义务：0 项；未决冲突：{unresolved_conflicts} 项").ok();
+    } else {
+        writeln!(
+            out,
+            "  未决义务：{} 项（{}）；未决冲突：{} 项",
+            evaluation.certificate.open_obligations.len(),
+            obligation_kinds
+                .iter()
+                .map(|(label, count)| format!("{label} {count} 项"))
+                .collect::<Vec<_>>()
+                .join("；"),
+            unresolved_conflicts
+        )
+        .ok();
+    }
+    for conflict in &evaluation.certificate.conflicts {
+        let how = match conflict.resolution {
+            std_deduce_cert::Resolution::Unresolved { .. } => "未决",
+            std_deduce_cert::Resolution::Defeated { .. } => "已裁决",
+        };
+        writeln!(
+            out,
+            "  冲突（{how}）：{} 与 {}",
+            print_expr(&Expr::from(&conflict.left)),
+            print_expr(&Expr::from(&conflict.right))
+        )
+        .ok();
+    }
+    writeln!(out, "  {}", evaluation.trust.summary()).ok();
+    if evaluation.validation.is_empty() {
+        writeln!(
+            out,
+            "  证书校验：通过（逻辑层 cert::check + 内核层 kernel_proof）"
+        )
+        .ok();
+    } else {
+        writeln!(
+            out,
+            "  证书校验：失败（{}）",
+            evaluation.validation.join("；")
+        )
+        .ok();
+    }
+    writeln!(
+        out,
+        "  归类：{}（退出码 {}）",
+        evaluation.class.label_zh(),
+        evaluation.class.exit_code()
+    )
+    .ok();
+    Ok(())
+}
+
+/// The session's interpretation state, spelled out.
+///
+/// The baseline is the session's own enabled set, not a state the branch
+/// command invents, so every report line names it the same way.
+fn enabled_state(enabled: &BTreeSet<String>) -> String {
+    if enabled.is_empty() {
+        "不启用任何解释".to_owned()
+    } else {
+        format!(
+            "会话已启用的解释：{}",
+            enabled
+                .iter()
+                .map(|id| format!("`{}`", escape_control(id)))
+                .collect::<Vec<_>>()
+                .join("、")
+        )
+    }
+}
+
+/// Classify one evaluation exactly the way a single query would end.
+///
+/// The order matters: a conflict the goal takes part in is reported before the
+/// certificate's success path, a gap root is a gap even when an interpretation
+/// was applied elsewhere, and a proved root with an unresolved obligation is
+/// `Open` — it is not a clean proof. The category and its exit code are read
+/// from the same fields `:why` uses, so a branch cannot be labelled more
+/// optimistically than the query it stands for.
+fn classify_branch(
+    reasoner: &Reasoner<'_>,
+    goal: &Expr,
+    certificate: &Certificate,
+    reachable: bool,
+) -> BranchClass {
+    if let Some(conflict) = reasoner.conflict_for(goal) {
+        match &conflict.resolution {
+            Resolution::Unresolved { .. } => return BranchClass::Conflict,
+            Resolution::Defeated { winner, .. } => {
+                if reasoner.conflict_side(&conflict, goal) != Some(*winner) {
+                    return BranchClass::Conflict;
+                }
+            }
+        }
+    }
+    let root_is_gap = match certificate.root {
+        Some(root) => matches!(certificate.nodes.get(root), Some(CertNode::Gap { .. })),
+        None => true,
+    };
+    if !reachable || root_is_gap {
+        return BranchClass::Gap;
+    }
+    let unresolved = certificate
+        .conflicts
+        .iter()
+        .filter(|conflict| {
+            matches!(
+                conflict.resolution,
+                std_deduce_cert::Resolution::Unresolved { .. }
+            )
+        })
+        .count();
+    if certificate.open_obligations.is_empty() && unresolved == 0 {
+        BranchClass::Proof
+    } else {
+        BranchClass::Open
+    }
+}
+
 ///
 /// The second pass runs only when the first one did not prove the goal, so an
 /// existing rule derivation is never displaced by an axiom instance. Demanding
@@ -6360,7 +7125,9 @@ fn print_help(out: &mut impl Write) {
     writeln!(
         out,
         "解释默认不启用：--interpret <解释名> 或 :interpret enable <解释名> 显式启用；\
-         :interpret list 查看状态，:gap / :why 的缺口会提示未启用的解释。"
+         :interpret list 查看状态，:gap / :why 的缺口会提示未启用的解释。\
+         开放概念受阻时 :why / :gap / :issues 另列候选解释；:branches <命题> 逐条临时启用一个候选并重跑推导、导出并校验该分支的证书，\
+         不枚举组合，也不自动启用任何解释。"
     )
     .ok();
     writeln!(
@@ -6498,8 +7265,8 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
                 ":load <文件>  :load-case <文件.json>  :inspect  :given <命题>  :fact [list|show|add|assumed|disputed <命题>]  \
                  :asof [YYYY-MM-DD]  :jurisdiction [代码]  \
                  :interpret [list|enable|disable <解释名>]  \
-                 :why <命题>  :explain <命题>  :labels <命题>  :review <命题> [--out <文件>]  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
-                 :why <命题>  :explain <命题>  :labels <命题>  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
+                 :why <命题>  :explain <命题>  :labels <命题>  :review <命题> [--out <文件>]  :gap <命题>  :branches <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
+                 :why <命题>  :explain <命题>  :labels <命题>  :gap <命题>  :branches <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :redact [on|off]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
             )
