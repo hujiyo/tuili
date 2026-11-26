@@ -636,8 +636,9 @@ use std_deduce_lawpack::{
     OFFICIAL_FILE,
 };
 use std_deduce_reason::{
-    certificate as reason_certificate, Applicability, Conflict, Derivation, GapLimit, GapLimits,
-    GapStatus, GapTree, Node as ReasonNode, Provenance, Reasoner, Resolution, Side,
+    certificate as reason_certificate, shared_revision_group, Applicability, Conflict, Derivation,
+    GapLimit, GapLimits, GapStatus, GapTree, Node as ReasonNode, Provenance, Reasoner, Resolution,
+    Side,
 };
 
 /// How a query ended. Only `Proved` is a success; the other two make the
@@ -1216,6 +1217,16 @@ impl Session {
                 return Err(environment.annotate_closed_error(error));
             }
         };
+        // The whole load transaction is now in the environment: the default
+        // environment, imported packs and the file itself. The `revision` group
+        // completeness is checked once here, never per file, because a law pack
+        // may split one provision's versions across theory files. A failed check
+        // drops the cloned library, so the session keeps its previous state.
+        if let Err(error) = lib.check_revision_groups() {
+            let error = error.render(path);
+            let error = environment.annotate_error(error, &imports);
+            return Err(environment.annotate_closed_error(error));
+        }
         // Interpretations named by `--interpret` or an earlier `:interpret
         // enable` must still exist in the environment that was just loaded.
         // Validating before the commit means a rejected setting leaves the
@@ -1473,6 +1484,11 @@ impl Session {
                 format!("已启用的解释无法在当前环境解析：{error}（--interpret / :interpret enable 设置）")
             })?;
         }
+        // The `revision` groups of the completed transaction: the default
+        // environment, the JSON case's imports and anything already loaded.
+        // The check runs once here, not per file.
+        lib.check_revision_groups()
+            .map_err(|error| error.render(path))?;
 
         let mut as_of_source = self.as_of_source;
         let mut jurisdiction_source = self.jurisdiction_source;
@@ -1771,6 +1787,12 @@ impl Session {
                     // "default" placeholder.
                     let scope = declared_scope_text(&decl.scope);
                     let occurrence = declared_occurrence_text(decl);
+                    // A rule shows the historical-version group it declared;
+                    // a rule without `revision` prints nothing at all.
+                    let revision = match &decl.kind {
+                        DeclKind::Rule(rule) => rule_revision_suffix(rule),
+                        _ => String::new(),
+                    };
                     // A rule shows the burden/standard clauses it declared;
                     // undeclared fields print nothing at all.
                     let pleading = match &decl.kind {
@@ -1809,7 +1831,7 @@ impl Session {
                     };
                     writeln!(
                             out,
-                            "  {kind} {name} : {}{identity}{extra}{open}{risk}{scope}{occurrence}{pleading}{namespace}",
+                            "  {kind} {name} : {}{identity}{extra}{open}{risk}{scope}{revision}{occurrence}{pleading}{namespace}",
                             print_expr(&decl.ty)
                         )
                         .ok();
@@ -5649,6 +5671,7 @@ fn write_unresolved_reason(
                 .ok();
             } else {
                 writeln!(out, "  原因：两侧规则之间没有声明任何优先关系").ok();
+                write_revision_version_note(out, "  ", r.env(), c);
             }
         }
         UnresolvedReason::PriorityUnusable { declared } => {
@@ -5729,6 +5752,34 @@ fn write_unresolved_reason(
             };
         }
     }
+}
+
+/// Name the historical versions when an unresolved conflict is between two
+/// rules of one `revision` group.
+///
+/// The group is a declared relation (the two rules are versions of one
+/// provision), so a reader must be told that the missing decision is "which
+/// version applies", not an ordinary cross-rule conflict. The note never
+/// chooses a version: it says that none was chosen and that the choice has to
+/// be a declared priority edge with a source. It is printed by `:why` and, for
+/// a conflicted gap target, by `:gap`; both read the same declarations.
+fn write_revision_version_note(out: &mut impl Write, pad: &str, env: &Env, c: &Conflict) {
+    let Some(group) = shared_revision_group(env, &c.left_by, &c.right_by) else {
+        return;
+    };
+    writeln!(
+        out,
+        "{pad}历史版本：两侧是同一法条的两个历史版本（revision 组 `{}`），没有声明哪一版优先；\
+         系统不自动选新法或旧法，也不自动判断哪一版更轻",
+        escape_control(&group.label())
+    )
+    .ok();
+    writeln!(
+        out,
+        "{pad}  用带出处（source）的 `priority <胜者> over <败者>` 在法律包里声明哪一版优先\
+         （「从旧兼从轻」同样只能这样声明）"
+    )
+    .ok();
 }
 
 /// One declared priority edge as `:why` lists it under `已声明：`.
@@ -6710,6 +6761,20 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
                 "{pad}目标处于冲突中：未决的结论不进入事实库，需要人工裁决。"
             )
             .ok();
+            // A conflict between two historical versions of one provision says
+            // more than "unresolved": the missing decision is which version
+            // applies. Name the revision group here too, so the gap report and
+            // `:why` tell the reader the same thing.
+            if let Some(conflict) = reasoner.conflict_for(&tree.goal) {
+                if matches!(
+                    conflict.resolution,
+                    Resolution::Unresolved {
+                        reason: std_deduce_reason::UnresolvedReason::NoPriority
+                    }
+                ) {
+                    write_revision_version_note(out, &pad, reasoner.env(), &conflict);
+                }
+            }
             return;
         }
         GapStatus::Defeated => {
@@ -6987,6 +7052,18 @@ fn won_conflict_note(
         return Ok(Some((Expr::from(other), other_by.clone(), basis.clone())));
     }
     Ok(None)
+}
+
+/// Render a rule's `revision` group for `:inspect`.
+///
+/// The identifier is the written one; a module's rules already carry their
+/// namespace on the same line, and the group is the pair of both. A rule that
+/// declared no `revision` prints nothing, never a placeholder.
+fn rule_revision_suffix(rule: &RuleDecl) -> String {
+    match &rule.revision {
+        Some(group) => format!("  〔历史版本 {}〕", escape_control(group.revision.as_ref())),
+        None => String::new(),
+    }
 }
 
 /// The burden/standard annotations of a rule, as `:inspect` displays them.

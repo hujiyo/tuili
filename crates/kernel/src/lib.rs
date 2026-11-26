@@ -31,7 +31,7 @@ pub use env::{
     RiskTheme, RuleDecl, RulePleading, Standard,
 };
 pub use error::{Error, Result};
-pub use meta::{Scope, ScopeOrigin};
+pub use meta::{RevisionGroup, RevisionScope, Scope, ScopeOrigin};
 pub use term::{name, Expr, Level, Name};
 
 pub const PROP: u32 = 0;

@@ -118,6 +118,11 @@ pub enum Item {
         /// from the containing pack's manifest by the loader; the parser only
         /// records what was written.
         scope: ScopeSpec,
+        /// `revision <标识>`: the historical-version group this rule belongs
+        /// to. `None` means the rule declared none. The clause's position is
+        /// kept because the group checks run after the whole file is in the
+        /// environment, and their errors must point at the clause to fix.
+        revision: Option<Revision>,
         /// `burden claimant|respondent|court`: who must prove the positive
         /// requirements. `None` means the file declared nothing; the parser
         /// never substitutes a default.
@@ -240,6 +245,24 @@ pub struct ScopeSpec {
     pub effective_to: Option<String>,
     pub jurisdiction: Option<String>,
     pub territory: Option<String>,
+}
+
+/// One `revision <标识>` clause: the historical-version group a rule belongs to.
+///
+/// Rules that write the same identifier under the same namespace are versions
+/// of one provision (for example the 1997 and 2021 versions of an article).
+/// Grouping is a declaration, never an inference: the language layer does not
+/// derive it from rule names, provision numbers or sources. The clause's
+/// position is recorded so the load-time group checks can point at the clause
+/// that has to be fixed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Revision {
+    /// The group identifier, exactly as written.
+    pub id: String,
+    /// 1-based source line of the `revision` keyword.
+    pub line: usize,
+    /// 1-based source column of the `revision` keyword.
+    pub col: usize,
 }
 
 impl ScopeSpec {
