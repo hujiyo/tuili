@@ -18,8 +18,10 @@
 //!
 //! A comparison reduces to one of the two built-in propositions [`TRUE`] or
 //! [`FALSE`]. That makes a comparison decidable by evaluation; it does not
-//! give the reasoner a way to derive a comparison from facts, which stays out
-//! of this step.
+//! give the reasoner a way to derive a comparison from facts. A rule `guard`
+//! is exactly this: an explicit comparison over the instance's parameter
+//! values whose truth value is judged per instance (see
+//! [`crate::norm::evaluate_comparison`]).
 
 use crate::error::{Error, Result};
 use crate::term::Expr;
@@ -61,11 +63,35 @@ pub fn is_reserved(name: &str) -> bool {
 /// a comparison is a computed expression, not a proposition a fact can prove.
 /// Turning "the comparison evaluated to `True`" into "the premise holds" would
 /// be an implicit reduction pretending to be evidence, so it is not wired into
-/// rule triggering.
+/// rule triggering. A `guard` is the one explicit place where a comparison is
+/// judged, and it must be headed by this operation: the loader rejects a guard
+/// that is not written as `less` or `le`.
 pub fn comparison_head(expression: &Expr) -> Option<Op> {
     let name = expression.head_const()?;
     match Op::from_name(&name) {
         Some(op @ (Op::Less | Op::Le)) => Some(op),
+        _ => None,
+    }
+}
+
+/// The truth value a built-in comparison produced: `Some(true)` for [`TRUE`],
+/// `Some(false)` for [`FALSE`], `None` for anything else.
+///
+/// This is a *reading* of the evaluated form, not a guess: a term that is
+/// neither proposition carries no truth value, and the caller reports that
+/// instead of treating it as false.
+pub fn truth_value(expression: &Expr) -> Option<bool> {
+    match expression {
+        Expr::Const(name) => {
+            let name = name.as_ref();
+            if name == TRUE {
+                Some(true)
+            } else if name == FALSE {
+                Some(false)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }

@@ -10,6 +10,15 @@ pub fn print_expr(e: &Expr) -> String {
     out
 }
 
+/// Print one expression in its parenthesized surface form, `(le 5000 3000)`.
+///
+/// Used where the reader must see the whole expression as one unit and not
+/// confuse an application with a list of words — a rule guard's judgement is
+/// such a place.
+pub fn print_parenthesized(e: &Expr) -> String {
+    format!("({})", print_expr(e))
+}
+
 fn go(e: &Expr, prec: u8, out: &mut String, names: &mut Vec<String>) {
     match e {
         Expr::Sort(0) => out.push_str("Prop"),

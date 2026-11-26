@@ -186,6 +186,7 @@ fn rule_node(
     applicability: RuleApplicability,
 ) -> Node {
     Node::RuleApplication {
+        guards: Vec::new(),
         computed: None,
         rule: rule.to_owned(),
         conclusion,
@@ -518,6 +519,7 @@ fn gap_candidate_certificate(held: Vec<CertExpr>, applicability: RuleApplicabili
             proposition: atom("结论", "甲"),
             axiom_candidates: Vec::new(),
             candidates: vec![GapCandidate {
+                guards: Vec::new(),
                 rule: "后规".to_owned(),
                 bindings: vec![binding("x", constant("甲"))],
                 held,

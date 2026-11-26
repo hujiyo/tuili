@@ -299,6 +299,7 @@ fn rule_constant_env() -> Env {
         Expr::app(c("P"), c("甲")),
     );
     let rdecl = RuleDecl {
+        guards: Vec::new(),
         params: vec![(name("x"), c("公民"))],
         premises: vec![(None, Expr::app(c("P"), Expr::Var(0)))],
         // The conclusion lives under the whole telescope: `x` is behind the
@@ -390,6 +391,7 @@ fn a_rule_must_be_well_typed() {
     )
     .unwrap();
     let bad_rule = RuleDecl {
+        guards: Vec::new(),
         params: vec![],
         premises: vec![],
         // `侵犯` alone is a *function*, not a Prop.
@@ -446,6 +448,7 @@ fn a_rule_with_duplicate_binder_names_is_refused() {
         .unwrap();
     }
     let rule = RuleDecl {
+        guards: Vec::new(),
         // p : Prop
         params: vec![(name("p"), Expr::Sort(0))],
         premises: vec![

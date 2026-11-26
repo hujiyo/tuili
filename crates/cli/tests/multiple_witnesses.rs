@@ -1,4 +1,4 @@
-//! End-to-end tests for certificate v10's multiple-witness table.
+//! End-to-end tests for certificate v11's multiple-witness table.
 //!
 //! A conclusion derived by two rules keeps both derivations: `:why` says how
 //! many other independent arguments exist, `:cert` records every witness node,
@@ -88,7 +88,7 @@ rule 规则C :
 "#;
 
 /// A universal fact breaks the rule cycle: v8 proved `Q 甲` through the
-/// universal instance and must keep doing so in v10.
+/// universal instance and must keep doing so in v11.
 const CYCLE: &str = r#"
 sort 人
 pred P : 人 → Prop
@@ -417,7 +417,7 @@ fn cert_records_both_witnesses_and_verify_accepts_it() {
     let dir = TempDir::new("cert-two");
     let theory = dir.write("two.std", TWO_RULES);
     let certificate = generated(&theory, "Q 甲");
-    assert_eq!(certificate.format_version.get(), 10);
+    assert_eq!(certificate.format_version.get(), 11);
     let group = &certificate.alternatives[root_group(&certificate)];
     assert_eq!(group.witnesses.len(), 2);
     assert!(!group.truncated);

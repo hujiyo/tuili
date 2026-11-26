@@ -1,0 +1,31 @@
+-- 金额 ≥ 5000 分 → 重大：结论由「守卫」决定，而不是把一个比较写成前提。
+-- 甲 9000：守卫 `(le 5000 9000)` 成立，规则触发；乙 3000：守卫 `(le 5000 3000)` 不成立，规则不触发。
+-- 守卫是实例条件：推理时按前提绑定出的数字逐实例求值，判定结果与依据写进证书，`:verify-cert` 独立重算。
+-- 它与 `unless` 不同：`unless` 是「阻断条件，成立则规则不触发」，守卫是「实例条件，成立才触发」。
+
+sort 人
+-- 金额是内核整数类型 Int 的别名；一个字面量 `9000` 的类型就是 Int。
+def 金额 : Type := Int
+
+pred 医疗费 : 人 → 金额 → Prop
+pred 重大 : 人 → 金额 → Prop
+
+obj 甲 : 人
+obj 乙 : 人
+
+axiom 甲医疗费 : 医疗费 甲 9000
+  identity verified
+  source text "示例卷宗" locator "医疗费票据（甲）" version "2024" quote "医疗费 9000 分"
+
+axiom 乙医疗费 : 医疗费 乙 3000
+  identity verified
+  source text "示例卷宗" locator "医疗费票据（乙）" version "2024" quote "医疗费 3000 分"
+
+-- `guard (le 5000 a)` 读作「a ≥ 5000」：a 由前提绑定到具体金额。
+-- 守卫只能引用规则参数或闭项；不能引用前提证明，也不能出现未绑定的自由变量（加载期拒绝）。
+rule 重大认定 :
+  params p : 人, a : 金额
+  premise 医疗费 p a
+  guard (le 5000 a)
+  conclude 重大 p a
+  source text "示例法" locator "重大金额标准" version "2024" quote "医疗费达到 5000 分以上的，认定为重大"

@@ -1,4 +1,4 @@
-//! End-to-end tests for universal elimination (certificate v10).
+//! End-to-end tests for universal elimination (certificate v11).
 //!
 //! A `axiom … : ∀ (x : T), P x` declaration is a universal fact. The reasoner
 //! instantiates it on demand: a goal or a rule premise whose predicate matches
@@ -260,7 +260,7 @@ fn a_two_binder_universal_instantiates_both_values_without_leaking_variables() {
     );
 
     let certificate = generated_certificate(&theory.path, "关系 甲 乙");
-    assert_eq!(certificate.format_version.get(), 10);
+    assert_eq!(certificate.format_version.get(), 11);
     let instance = axiom_instance_node(&certificate);
     let Node::AxiomInstance {
         axiom,

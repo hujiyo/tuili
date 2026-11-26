@@ -51,6 +51,25 @@
 //! both this producer and the certificate checker call: the two never read a
 //! conflict under different rules.
 //!
+//! ## Guards are instance conditions, judged by evaluation
+//!
+//! A rule may declare `guard` clauses: comparisons over its parameter values
+//! that must hold for an instance to fire. A guard is neither a premise nor an
+//! `unless`. It is not a proposition a fact could prove, so it is decided by
+//! evaluating the comparison against the values the instance binds
+//! ([`std_deduce_kernel::norm::evaluate_comparison`]); all guards of one rule
+//! are conjunctive, and a `false` guard leaves the instance unfired while the
+//! gap report still names it. The order is: guard (is this binding an instance
+//! of the rule's own condition?), then `unless` (does an exception hold?),
+//! then the temporal/spatial applicability judgement. An overflowing guard, or
+//! one whose operands are not integer literals, aborts the reasoning with an
+//! explicit error naming the rule and the guard; it is never read as `false`.
+//! Each fired instance records the guard judgements it rested on
+//! ([`GuardJudgement`]) and the certificate carries them; the certificate
+//! checker re-evaluates each record from the rule declaration and the recorded
+//! bindings, so a recorded boolean is evidence that can be rechecked, not a
+//! claim to be trusted.
+//!
 //! ## Three commitments
 //!
 //! 1. **No negation as failure.** A rule fires only when every premise has
@@ -130,7 +149,7 @@
 //! function over the rule's [`Scope`](std_deduce_kernel::meta::Scope) and
 //! the instance's anchor (the premise facts' occurrence records plus the
 //! session fallback values). The reasoner only supplies those records; the
-//! CLI only renders the recorded verdict. Certificate v10 records the verdict,
+//! CLI only renders the recorded verdict. Certificate v11 records the verdict,
 //! basis, declared scope and reason on every rule application and gap
 //! candidate, and `:verify-cert` recomputes them independently.
 //!
@@ -209,7 +228,7 @@ use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{
     named_binders, Decl, DeclKind, Env, FactIdentity, RuleDecl, RulePleading, SourceRef,
 };
-use std_deduce_kernel::norm::{evaluate_arithmetic, normalize};
+use std_deduce_kernel::norm::{evaluate_arithmetic, evaluate_comparison, normalize};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::{instantiate_telescope, is_closed};
 use std_deduce_kernel::{check, Ctx, Expr, Name};
@@ -244,13 +263,19 @@ pub enum Node {
         /// much larger than the other node payloads.
         computed: Option<Box<Expr>>,
         premises: Vec<usize>,
+        /// The guard judgements this instance fired under, in the rule's
+        /// declaration order. Every one of them holds; the certificate records
+        /// each guard's expression, substituted form and truth value, and its
+        /// checker re-evaluates them from the declaration and the bindings.
+        guard_judgements: Vec<GuardJudgement>,
         /// The rule's parameters and the values this step bound them to.
         bindings: Vec<(Name, Expr)>,
         sources: Vec<SourceRef>,
         /// The temporal/spatial judgement under which this instance fired,
         /// with the event times/places it relied on. The certificate records it
-        /// together with the rule's declared scope.
-        applicability: Applicability,
+        /// together with the rule's declared scope. Boxed because the node
+        /// enum is dominated by this record; the payload is unchanged.
+        applicability: Box<Applicability>,
     },
     /// One application of an enabled interpretation. It is a separate step,
     /// never a rule: the declaration licenses the move from `from` to `to`,
@@ -347,6 +372,11 @@ pub struct GapCandidate {
     pub missing: Vec<Expr>,
     /// `unless` conditions that *are* known, i.e. why this rule is blocked.
     pub blocked_by: Vec<Expr>,
+    /// The guard judgements of this candidate instance, in declaration order.
+    /// A guard that does not hold (or cannot be decided) is recorded here
+    /// instead of letting the candidate disappear: `:gap` / `:issues` print the
+    /// substituted guard and why it did not let the rule fire.
+    pub guards: Vec<GuardJudgement>,
     pub sources: Vec<SourceRef>,
     /// The rule's temporal/spatial judgement for this case. An excluded
     /// candidate is still listed: `:gap` says why it cannot be used instead of
@@ -630,6 +660,41 @@ struct Assumption {
     occurred_in: Option<String>,
 }
 
+/// One guard of a rule instance, as the reasoner judged it.
+///
+/// A guard is an *instance condition*: a comparison over the values the
+/// instance binds. It is not a premise — nothing proves it — and it is not an
+/// `unless`: a guard that holds lets the rule fire, while an `unless` that
+/// holds blocks it. All guards of one rule are conjunctive.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuardJudgement {
+    /// Zero-based index in the rule's `guard` clauses, in declaration order.
+    pub index: usize,
+    /// The guard closed by the instance's bindings, before evaluation, e.g.
+    /// `(le 5000 3000)`. A parameter the bindings leave open stays `?name`.
+    pub instance: Expr,
+    /// The evaluated truth value. `Some` for every fired instance; `None` only
+    /// for a gap candidate whose guard could not be decided (an open parameter
+    /// or a non-literal operand). `None` is never read as `false`.
+    pub holds: Option<bool>,
+}
+
+impl GuardJudgement {
+    /// Whether this guard is recorded as holding.
+    fn is_true(&self) -> bool {
+        self.holds == Some(true)
+    }
+}
+
+/// Whether every guard of one instance holds.
+///
+/// An undecided guard is not `true`, so the instance does not fire: the
+/// reasoner reports the undecided state where it can (gap candidates) and
+/// errors where it cannot (a fired step must decide every guard).
+fn guards_hold(guards: &[GuardJudgement]) -> bool {
+    guards.iter().all(GuardJudgement::is_true)
+}
+
 /// One instantiation of a rule against a set of known facts.
 struct Instance {
     /// The proposition this instance derives: the rule's conclusion with the
@@ -643,6 +708,8 @@ struct Instance {
     premise_keys: Vec<String>,
     /// Open `unless` expressions, already closed by this instantiation.
     unlesses: Vec<Expr>,
+    /// The guard judgements of this instantiation, in declaration order.
+    guard_judgements: Vec<GuardJudgement>,
     /// The rule's parameters and the values this instantiation bound them to.
     bindings: Vec<(Name, Expr)>,
 }
@@ -2222,7 +2289,16 @@ impl<'a> Reasoner<'a> {
                 // at all. It is not merely hidden later: it must never seed a
                 // premise, an `unless` blocker or a conflict side. The verdict
                 // is per instance because it depends on the facts it consumes.
-                for inst in self.enumerate_demanding(rule, &k, removed)? {
+                for inst in self.enumerate_demanding(&decl.name, rule, &k, removed)? {
+                    // Guards are instance conditions: a false one keeps the
+                    // rule from firing exactly as an unmet premise would, but
+                    // the instance is still reported by the gap scan. The
+                    // order is: guard first (does this binding meet the rule's
+                    // own condition?), then `unless` (is there an exception?),
+                    // then the applicability judgement.
+                    if !guards_hold(&inst.guard_judgements) {
+                        continue;
+                    }
                     if blocked(&inst.unlesses, &k, self.env)? {
                         continue;
                     }
@@ -2292,6 +2368,7 @@ impl<'a> Reasoner<'a> {
     /// parameter is reported as a gap instead of guessed.
     fn enumerate_demanding(
         &self,
+        rule_name: &str,
         rule: &RuleDecl,
         facts: &BTreeMap<String, Expr>,
         removed: &BTreeSet<String>,
@@ -2301,6 +2378,7 @@ impl<'a> Reasoner<'a> {
         let mut keys: Vec<String> = Vec::new();
         let matching = Matching {
             env: self.env,
+            rule_name,
             rule,
             facts,
         };
@@ -2404,8 +2482,15 @@ impl<'a> Reasoner<'a> {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
-            for inst in self.enumerate(rule, facts)? {
+            for inst in self.enumerate(&decl.name, rule, facts)? {
                 if self.key_of(&inst.conclusion) != target {
+                    continue;
+                }
+                // A guard that does not hold is an instance condition that is
+                // false, so this instance is not a witness: `enumerate` keeps
+                // the instance (gap reports need it) and the firing rules are
+                // checked here.
+                if !guards_hold(&inst.guard_judgements) {
                     continue;
                 }
                 if blocked(&inst.unlesses, facts, self.env)? {
@@ -2735,9 +2820,10 @@ impl<'a> Reasoner<'a> {
                     conclusion: conclusion.clone(),
                     computed: instance.computed.clone(),
                     premises,
+                    guard_judgements: instance.guard_judgements.clone(),
                     bindings: instance.bindings.clone(),
                     sources: sources.clone(),
-                    applicability: (**applicability).clone(),
+                    applicability: Box::new((**applicability).clone()),
                 });
                 conclusion
             }
@@ -3038,8 +3124,13 @@ impl<'a> Reasoner<'a> {
             // The witness is an argument the reader may be shown, so it must
             // be an instance that could actually fire under the case
             // judgement.
-            for inst in self.enumerate(rule, rule_facts)? {
+            for inst in self.enumerate(&decl.name, rule, rule_facts)? {
                 if blocked(&inst.unlesses, rule_facts, self.env)? {
+                    continue;
+                }
+                // An instance whose guard did not hold never fired, so it is
+                // not a witness the certificate could cite.
+                if !guards_hold(&inst.guard_judgements) {
                     continue;
                 }
                 if !inst
@@ -3104,6 +3195,7 @@ impl<'a> Reasoner<'a> {
     /// skipped instance.
     fn enumerate(
         &self,
+        rule_name: &str,
         rule: &RuleDecl,
         facts: &BTreeMap<String, Expr>,
     ) -> Result<Vec<Instance>, String> {
@@ -3112,6 +3204,7 @@ impl<'a> Reasoner<'a> {
         let mut keys: Vec<String> = Vec::new();
         let matching = Matching {
             env: self.env,
+            rule_name,
             rule,
             facts,
         };
@@ -3141,7 +3234,7 @@ impl<'a> Reasoner<'a> {
 
     /// Every declared rule's burden/standard, keyed by rule name.
     ///
-    /// Certificate v10 does not record these declarations (adding them would
+    /// Certificate v11 does not record these declarations (adding them would
     /// change the format), so `:explain` supplies this map when it narrates a
     /// certificate gap. The values come from the environment declaration, the
     /// same one the derivation used.
@@ -3607,11 +3700,13 @@ impl<'a> Reasoner<'a> {
                 continue;
             }
             let attempts = budget.attempts.entry(candidate.rule.clone()).or_default();
-            if !candidate.applicability.allows_firing() {
-                // The rule cannot fire in this case, so its missing premises
-                // are not a place to dig deeper: the candidate, what it lacks
-                // and the reason it does not apply are listed together. It
-                // consumes no attempt and sets no limit — nothing was cut off.
+            if !candidate.applicability.allows_firing() || !guards_hold(&candidate.guards) {
+                // The rule cannot fire in this case — either the case does not
+                // apply to this instance or one of its guards does not hold —
+                // so its missing premises are not a place to dig deeper: the
+                // candidate, what it lacks and the recorded reason are listed
+                // together. It consumes no attempt and sets no limit, because
+                // nothing was cut off.
                 tree.candidates.push(GapRule::unexpanded(candidate, None));
                 continue;
             }
@@ -3633,6 +3728,7 @@ impl<'a> Reasoner<'a> {
                 held: candidate.held,
                 missing: Vec::new(),
                 blocked_by: candidate.blocked_by,
+                guards: candidate.guards,
                 sources: candidate.sources,
                 limit: None,
             };
@@ -3764,12 +3860,17 @@ impl<'a> Reasoner<'a> {
                     blocked_by.push(closed);
                 }
             }
+            // Guards are judged from the candidate's own bindings. A guard
+            // whose parameter the conclusion match left open stays undecided
+            // (`None`), which is reported as such — never silently `false`.
+            let guards = judge_candidate_guards(self.env, &decl.name, rule, &binding)?;
             candidates.push(GapCandidate {
                 rule: decl.name.clone(),
                 bindings: binding,
                 held,
                 missing,
                 blocked_by,
+                guards,
                 sources: decl.sources.clone(),
                 applicability: self.judge_instance(&decl.scope, &held_keys),
             });
@@ -4043,6 +4144,9 @@ fn kosaraju(adjacency: &BTreeMap<Name, Vec<Name>>) -> BTreeMap<Name, u32> {
 /// one enumeration belongs to.
 struct Matching<'a> {
     env: &'a Env,
+    /// The declaration's name, used only to name the rule in an error raised
+    /// while judging an instance's guards.
+    rule_name: &'a str,
     rule: &'a RuleDecl,
     facts: &'a BTreeMap<String, Expr>,
 }
@@ -4056,7 +4160,13 @@ fn backtrack(
 ) -> Result<(), String> {
     let rule = matching.rule;
     if idx == rule.premises.len() {
-        out.push(finish_instance(matching.env, rule, binding, keys.clone())?);
+        out.push(finish_instance(
+            matching.env,
+            matching.rule_name,
+            rule,
+            binding,
+            keys.clone(),
+        )?);
         return Ok(());
     }
 
@@ -4082,15 +4192,24 @@ fn backtrack(
 }
 
 /// The instance a complete binding produces: the rule's conclusion closed by
-/// the binding, then the built-in arithmetic in it evaluated by the kernel.
+/// the binding, then the built-in arithmetic in it evaluated by the kernel, and
+/// every guard judged against the same binding.
 ///
-/// The two forms are kept apart on purpose. `computed` is what the rule wrote
-/// (a record of the computation), `conclusion` is its value; a certificate
-/// records both, and the checker re-derives the first from the rule and the
-/// bindings and the second from the first. An overflow aborts the reasoning
-/// with an error; it never becomes a wraparound or an unrecorded number.
+/// The two conclusion forms are kept apart on purpose. `computed` is what the
+/// rule wrote (a record of the computation), `conclusion` is its value; a
+/// certificate records both, and the checker re-derives the first from the rule
+/// and the bindings and the second from the first. An overflow aborts the
+/// reasoning with an error; it never becomes a wraparound or an unrecorded
+/// number.
+///
+/// A guard is an instance condition, not a premise: it is *evaluated*, never
+/// proved. Every guard must decide to `true` or `false`; an overflowing or
+/// non-literal guard is an explicit error (naming the rule and the guard)
+/// rather than a silent "does not fire", and an instance whose guard is `false`
+/// is produced but does not fire, so gap reports can say why.
 fn finish_instance(
     env: &Env,
+    rule_name: &str,
     rule: &RuleDecl,
     binding: &[(Name, Expr)],
     premise_keys: Vec<String>,
@@ -4098,7 +4217,7 @@ fn finish_instance(
     let raw = close_pattern(&rule.open_conclusion(), binding);
     let conclusion = evaluate_arithmetic(env, &raw).map_err(|error| {
         format!(
-            "规则实例的结论无法计算：{error}（结论写的是「{}」）",
+            "规则 `{rule_name}` 实例的结论无法计算：{error}（结论写的是「{}」）",
             print_expr(&raw)
         )
     })?;
@@ -4110,13 +4229,65 @@ fn finish_instance(
     let unlesses = (0..rule.unlesses.len())
         .map(|i| close_pattern(&rule.open_unless_text(&rule.unlesses[i]), binding))
         .collect();
+    let guard_judgements = (0..rule.guards.len())
+        .map(|i| {
+            let instance = close_pattern(&rule.open_guard(i), binding);
+            let holds = evaluate_comparison(env, &instance).map_err(|error| {
+                format!(
+                    "规则 `{rule_name}` 的第 {} 条守卫无法判定：{error}；\
+                     守卫求值失败不当作 false",
+                    i + 1
+                )
+            })?;
+            Ok(GuardJudgement {
+                index: i,
+                instance,
+                holds: Some(holds),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(Instance {
         conclusion,
         computed,
         premise_keys,
         unlesses,
+        guard_judgements,
         bindings: binding.to_vec(),
     })
+}
+
+/// Judge a gap candidate's guards from its own bindings.
+///
+/// A candidate's bindings come from matching the rule's head against the goal,
+/// so a parameter that only appears in premises may be left open. A guard that
+/// still mentions such a parameter (or whose operands are not integer
+/// literals) cannot be decided; that is recorded as `holds: None` and shown as
+/// "无法判定", never as `false`. An arithmetic overflow is an error even here:
+/// a guard whose result does not fit in `i64` is not evidence about the case.
+fn judge_candidate_guards(
+    env: &Env,
+    rule_name: &str,
+    rule: &RuleDecl,
+    binding: &[(Name, Expr)],
+) -> Result<Vec<GuardJudgement>, String> {
+    let mut out = Vec::with_capacity(rule.guards.len());
+    for i in 0..rule.guards.len() {
+        let instance = close_pattern(&rule.open_guard(i), binding);
+        let evaluated = evaluate_arithmetic(env, &instance).map_err(|error| {
+            format!(
+                "规则 `{rule_name}` 的第 {} 条守卫无法计算：{error}（守卫形态「{}」）",
+                i + 1,
+                print_expr(&instance)
+            )
+        })?;
+        let holds = std_deduce_kernel::builtin::truth_value(&evaluated);
+        out.push(GuardJudgement {
+            index: i,
+            instance,
+            holds,
+        });
+    }
+    Ok(out)
 }
 
 /// [`backtrack`] with universal elimination: a premise no fact satisfies but
@@ -4138,7 +4309,13 @@ fn backtrack_demanding(
 ) -> Result<(), String> {
     let rule = matching.rule;
     if idx == rule.premises.len() {
-        out.push(finish_instance(reasoner.env, rule, binding, keys.clone())?);
+        out.push(finish_instance(
+            reasoner.env,
+            matching.rule_name,
+            rule,
+            binding,
+            keys.clone(),
+        )?);
         return Ok(());
     }
 
@@ -4573,6 +4750,10 @@ pub struct GapRule {
     pub missing: Vec<GapPremise>,
     /// `unless` conditions that already hold; each one stops this rule.
     pub blocked_by: Vec<Expr>,
+    /// Guard judgements for this candidate instance. A false or undecided
+    /// guard is the reason the candidate cannot fire even with every premise,
+    /// and it is printed rather than silently omitted.
+    pub guards: Vec<GuardJudgement>,
     pub sources: Vec<SourceRef>,
     /// Set when this rule was not expanded because it already used up its
     /// attempts.
@@ -4637,6 +4818,7 @@ impl GapRule {
                 .map(|premise| GapPremise { premise, gap: None })
                 .collect(),
             blocked_by: candidate.blocked_by,
+            guards: candidate.guards,
             sources: candidate.sources,
             limit,
         }
@@ -5069,6 +5251,28 @@ pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
             ));
         }
 
+        // Guards are instance conditions, so this step only exists if every one
+        // of them holds. They are re-evaluated from the declaration and the
+        // binding the premises produced, not from any recorded form; a guard
+        // that was not judged is an error, never a pass.
+        for i in 0..r.guards.len() {
+            let closed = close_pattern(&r.open_guard(i), &binding);
+            let holds = evaluate_comparison(env, &closed).map_err(|error| {
+                format!(
+                    "节点 {id}：规则 `{rule}` 的第 {} 条守卫无法判定：{error}；\
+                     守卫求值失败不当作 false",
+                    i + 1
+                )
+            })?;
+            if !holds {
+                return Err(format!(
+                    "节点 {id}：规则 `{rule}` 的第 {} 条守卫「{}」不成立，本步不该成立",
+                    i + 1,
+                    print_expr(&closed)
+                ));
+            }
+        }
+
         // A blocker that holds anywhere in the derivation invalidates the
         // step: under the fixed-point semantics the conclusion would have
         // been retracted. A comparison that fails is an error, never a pass.
@@ -5220,6 +5424,7 @@ pub fn certificate(
                 conclusion,
                 computed,
                 premises,
+                guard_judgements,
                 bindings,
                 sources,
                 applicability,
@@ -5236,12 +5441,14 @@ pub fn certificate(
                     Some(expression) => Some(cert_expr(expression, Some(id), "计算前的结论")?),
                     None => None,
                 };
+                let guards = cert_guards(env, rule, guard_judgements, Some(id))?;
                 nodes.push(std_deduce_cert::Node::RuleApplication {
                     rule: rule.to_string(),
                     conclusion: cert_expr(conclusion, Some(id), "结论")?,
                     computed,
                     premises: premises.clone(),
                     bindings: converted,
+                    guards,
                     sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
                     applicability: Box::new(applicability::certificate_applicability(
                         &scope,
@@ -5359,12 +5566,14 @@ pub fn certificate(
                         })
                         .collect::<Result<Vec<_>, String>>()?;
                     let scope = rule_scope(env, &candidate.rule, id)?;
+                    let guards = cert_guards(env, &candidate.rule, &candidate.guards, Some(id))?;
                     converted.push(std_deduce_cert::GapCandidate {
                         rule: candidate.rule.to_string(),
                         bindings,
                         held,
                         missing,
                         blocked_by,
+                        guards,
                         sources: candidate
                             .sources
                             .iter()
@@ -5627,6 +5836,67 @@ fn cert_expr(expr: &Expr, node: Option<usize>, role: &str) -> Result<CertExpr, S
         Some(id) => format!("节点 {id} 的{role}无法转换为证书表达式：{error}"),
         None => format!("{role}无法转换为证书表达式：{error}"),
     })
+}
+
+/// Encode one instance's guard judgements for the certificate.
+///
+/// The record carries the *declared* guard (rebuilt from the environment rule
+/// as `open_guard`, parameters as `?<name>`), the guard closed by the recorded
+/// bindings, and the evaluated truth value. The certificate checker recomputes
+/// all three from the rule declaration and the bindings, so this function only
+/// encodes what the reasoner already judged; it never decides a guard itself.
+fn cert_guards(
+    env: &Env,
+    rule: &Name,
+    judgements: &[GuardJudgement],
+    node: Option<usize>,
+) -> Result<Vec<std_deduce_cert::GuardRecord>, String> {
+    if judgements.is_empty() {
+        return Ok(Vec::new());
+    }
+    let decl = env
+        .get(rule)
+        .ok_or_else(|| format!("规则 `{rule}` 不在环境中，无法记录守卫判定"))?;
+    let DeclKind::Rule(declared) = &decl.kind else {
+        return Err(format!("`{rule}` 不是规则，无法记录守卫判定"));
+    };
+    if judgements.len() != declared.guards.len() {
+        return Err(format!(
+            "规则 `{rule}` 声明了 {} 条守卫，但推导只记录了 {} 条",
+            declared.guards.len(),
+            judgements.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(judgements.len());
+    for judgement in judgements {
+        let i = judgement.index;
+        if i >= declared.guards.len() {
+            return Err(format!(
+                "规则 `{rule}` 的守卫序号 {i} 超出声明范围（共 {} 条）",
+                declared.guards.len()
+            ));
+        }
+        let expression = cert_expr(
+            &declared.open_guard(i),
+            node,
+            &format!("规则 `{rule}` 第 {} 条守卫的声明形式", i + 1),
+        )?;
+        let instance = cert_expr(
+            &judgement.instance,
+            node,
+            &format!("规则 `{rule}` 第 {} 条守卫的求值形态", i + 1),
+        )?;
+        out.push(std_deduce_cert::GuardRecord {
+            index: i,
+            expression,
+            instance,
+            holds: match judgement.holds {
+                Some(value) => std_deduce_cert::Explicit::some(value),
+                None => std_deduce_cert::Explicit::none(),
+            },
+        });
+    }
+    Ok(out)
 }
 
 /// The identity the derivation recorded for an assumption of `expr`.

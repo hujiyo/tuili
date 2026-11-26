@@ -89,6 +89,7 @@ fn rule(
     sources: Vec<Source>,
 ) -> Node {
     Node::RuleApplication {
+        guards: Vec::new(),
         computed: None,
         rule: rule.to_owned(),
         conclusion,
@@ -278,6 +279,7 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
             axiom_candidates: Vec::new(),
             candidates: vec![
                 GapCandidate {
+                    guards: Vec::new(),
                     rule: "规则一".to_owned(),
                     bindings: Vec::new(),
                     held: Vec::new(),
@@ -287,6 +289,7 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
                     applicability: unscoped_candidate_applicability(),
                 },
                 GapCandidate {
+                    guards: Vec::new(),
                     rule: "规则二".to_owned(),
                     bindings: Vec::new(),
                     held: Vec::new(),
@@ -296,6 +299,7 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
                     applicability: unscoped_candidate_applicability(),
                 },
                 GapCandidate {
+                    guards: Vec::new(),
                     rule: "规则三".to_owned(),
                     bindings: Vec::new(),
                     held: Vec::new(),
@@ -305,6 +309,7 @@ fn renders_a_gap_with_missing_premises_and_an_unless_blocker() {
                     applicability: unscoped_candidate_applicability(),
                 },
                 GapCandidate {
+                    guards: Vec::new(),
                     rule: "规则四".to_owned(),
                     bindings: Vec::new(),
                     held: Vec::new(),
@@ -352,6 +357,7 @@ fn a_gap_without_declaration_context_says_the_declaration_was_not_found() {
             axiom_candidates: Vec::new(),
             candidates: vec![
                 GapCandidate {
+                    guards: Vec::new(),
                     rule: "规则一".to_owned(),
                     bindings: Vec::new(),
                     held: Vec::new(),
@@ -361,6 +367,7 @@ fn a_gap_without_declaration_context_says_the_declaration_was_not_found() {
                     applicability: unscoped_candidate_applicability(),
                 },
                 GapCandidate {
+                    guards: Vec::new(),
                     rule: "规则二".to_owned(),
                     bindings: Vec::new(),
                     held: Vec::new(),
@@ -411,6 +418,7 @@ fn an_ambiguous_blocker_is_not_attributed_to_a_fact() {
                 note: None,
                 axiom_candidates: Vec::new(),
                 candidates: vec![GapCandidate {
+                    guards: Vec::new(),
                     rule: "规则一".to_owned(),
                     bindings: Vec::new(),
                     held: Vec::new(),
@@ -443,6 +451,7 @@ fn a_duplicate_blocker_fact_is_not_attributed() {
             note: None,
             axiom_candidates: Vec::new(),
             candidates: vec![GapCandidate {
+                guards: Vec::new(),
                 rule: "规则一".to_owned(),
                 bindings: Vec::new(),
                 held: Vec::new(),

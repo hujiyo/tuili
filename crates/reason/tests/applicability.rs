@@ -34,7 +34,7 @@ fn root_verdict(r: &Reasoner<'_>, goal: &Expr) -> Applicability {
     d.root = r.root_for(goal);
     let root = d.root.expect("the goal has a root");
     match &d.nodes[root] {
-        std_deduce_reason::Node::RuleApplication { applicability, .. } => applicability.clone(),
+        std_deduce_reason::Node::RuleApplication { applicability, .. } => (**applicability).clone(),
         other => panic!("the root is not a rule application: {other:?}"),
     }
 }
@@ -112,7 +112,7 @@ fn an_old_rule_governs_an_old_event_even_at_a_later_asof() {
     let std_deduce_reason::Node::RuleApplication { applicability, .. } = &d.nodes[root] else {
         panic!("the root is a rule application");
     };
-    let Applicability::Applicable { basis } = applicability else {
+    let Applicability::Applicable { basis } = applicability.as_ref() else {
         panic!("expected applicable, got {applicability:?}");
     };
     assert_eq!(basis.dates.len(), 1);

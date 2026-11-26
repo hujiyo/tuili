@@ -12,7 +12,7 @@ use std_deduce_cert::{
 };
 use std_deduce_kernel::env::Env;
 
-const FIXTURE: &str = include_str!("fixtures/certificate_v10.json");
+const FIXTURE: &str = include_str!("fixtures/certificate_v11.json");
 
 /// A recorded environment with no profile, packs, corpora or dates.
 fn empty_environment() -> Value {
@@ -22,7 +22,7 @@ fn empty_environment() -> Value {
 /// A syntactically complete certificate around the given assumptions and nodes.
 fn certificate_json(assumptions: Value, nodes: Value, root: Value) -> String {
     json!({
-        "format_version": 10,
+        "format_version": 11,
         "environment": empty_environment(),
         "assumptions": assumptions,
         "interpretations": [],
@@ -95,7 +95,7 @@ fn application_tree(leaves: usize) -> Value {
 
 #[test]
 fn the_reference_certificate_still_parses() {
-    Certificate::from_json(FIXTURE).expect("the v10 fixture must remain valid");
+    Certificate::from_json(FIXTURE).expect("the v11 fixture must remain valid");
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn a_wrongly_typed_field_is_rejected() {
 /// not be read as a number.
 #[test]
 fn a_nan_number_is_rejected() {
-    let text = FIXTURE.replacen("\"format_version\": 10", "\"format_version\": NaN", 1);
+    let text = FIXTURE.replacen("\"format_version\": 11", "\"format_version\": NaN", 1);
     assert_ne!(text, FIXTURE, "the fixture must contain format_version");
     let error = rejected(&text, "NaN");
     assert!(
@@ -149,7 +149,7 @@ fn a_deeply_nested_expression_is_rejected() {
         ",\"arg\":{\"kind\":\"const\",\"name\":\"x\"}}".repeat(depth)
     );
     let text = format!(
-        "{{\"format_version\":10,\"environment\":{},\"assumptions\":[],\"interpretations\":[],\
+        "{{\"format_version\":11,\"environment\":{},\"assumptions\":[],\"interpretations\":[],\
          \"nodes\":[{{\"kind\":\"gap\",\"proposition\":{expression}}}],\"root\":null,\
          \"alternatives\":[],\"conflicts\":[],\"open_obligations\":[],\"metadata\":{{}}}}",
         empty_environment()

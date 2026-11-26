@@ -1,0 +1,30 @@
+-- 守卫不成立导致的缺口：下游规则要「重大」，而重大认定的守卫不成立。
+-- 医疗费只有 3000 分，守卫 `(le 5000 3000)` 为 false，所以 `重大 甲 3000` 推不出，
+-- 依赖它的 `从重处理 甲 3000` 也就缺这一步；`:gap 从重处理 甲 3000` 的缺口树会打印守卫不成立的原因，
+-- 不用一条「没有推导」把原因掩盖过去。
+
+sort 人
+def 金额 : Type := Int
+
+pred 医疗费 : 人 → 金额 → Prop
+pred 重大 : 人 → 金额 → Prop
+pred 从重处理 : 人 → 金额 → Prop
+
+obj 甲 : 人
+
+axiom 甲医疗费 : 医疗费 甲 3000
+  identity verified
+  source text "示例卷宗" locator "医疗费票据" version "2024" quote "医疗费 3000 分"
+
+rule 重大认定 :
+  params p : 人, a : 金额
+  premise 医疗费 p a
+  guard (le 5000 a)
+  conclude 重大 p a
+  source text "示例法" locator "重大金额标准" version "2024" quote "医疗费达到 5000 分以上的，认定为重大"
+
+rule 从重处理规则 :
+  params p : 人, a : 金额
+  premise 重大 p a
+  conclude 从重处理 p a
+  source text "示例法" locator "从重处理" version "2024" quote "认定为重大的，从重处理"

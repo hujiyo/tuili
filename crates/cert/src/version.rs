@@ -34,12 +34,20 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// is required exactly when that substitution really computes something: a
 /// step whose instance evaluates differently must record the pre-evaluation
 /// form, so a missing arithmetic step cannot hide behind the recorded number.
+/// Version 11 records rule guards: every rule application and every gap
+/// candidate of a guarded rule carries one `guards` record per `guard` clause —
+/// the declared guard with its parameters opened, the guard after substituting
+/// the recorded bindings, and its evaluated truth value. The checker rebuilds
+/// every record from the environment declaration and the recorded bindings and
+/// evaluates the comparison itself, so the recorded boolean is evidence that
+/// can be rechecked, not a claim to be trusted. A gap candidate whose bindings
+/// leave a guard's parameter open records `null`, never `false`.
 /// Older certificates are
 /// refused rather than read with guessed evidence: a proof that silently drops
 /// an applicability judgement, an interpretation step, a universal
-/// elimination step, an independent argument or the arithmetic step cannot be
-/// checked.
-pub const FORMAT_VERSION: u32 = 10;
+/// elimination step, an independent argument, the arithmetic step or a guard
+/// judgement cannot be checked.
+pub const FORMAT_VERSION: u32 = 11;
 
 /// A certificate format version.
 ///

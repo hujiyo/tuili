@@ -563,6 +563,19 @@ pub struct RuleDecl {
     /// Conditions whose truth *blocks* the rule (the `unless` clauses).
     /// These are part of the telescope, so they may mention any parameter.
     pub unlesses: Vec<Expr>,
+    /// Instance conditions that must *hold* for the rule to fire (the `guard`
+    /// clauses), in declaration order.
+    ///
+    /// Each guard is a comparison (`less` or `le`) over the rule's parameters
+    /// and, unlike an `unless`, it is not a proposition a fact could prove: it
+    /// is evaluated arithmetically against the values the instance binds. All
+    /// guards of one instance are conjunctive — every one of them must
+    /// evaluate to `true`, and a `false` guard leaves the instance unfired.
+    /// A guard must not mention a premise binder (those bind proofs, not
+    /// values) and must not contain an unbound name; the loader refuses both.
+    /// Guards are *not* binders, so the telescope and the rule's declared type
+    /// are unchanged.
+    pub guards: Vec<Expr>,
     /// Who must prove the rule's positive requirements (`burden …`), or
     /// `None` when the file declared no burden. An undeclared burden is not
     /// defaulted to the claimant and is not used by reasoning: the gap report
@@ -1116,6 +1129,46 @@ impl RuleDecl {
                 )));
             }
         }
+        // Guards are the explicit place where a comparison decides one instance.
+        // Each one must be a comparison and a proposition, and it may only
+        // judge the rule's parameters: a premise binder is a proof term, not a
+        // value, so a guard that mentioned one could never close by the
+        // instance's bindings.
+        let premise_binders: Vec<Name> = (0..self.premises.len())
+            .map(|i| {
+                self.premises[i]
+                    .0
+                    .clone()
+                    .unwrap_or_else(|| crate::term::name(format!("_p{i}")))
+            })
+            .collect();
+        for (i, g) in self.guards.iter().enumerate() {
+            let opened = self.open_guard(i);
+            let Some(op) = crate::builtin::comparison_head(&opened) else {
+                return Err(Error::other(format!(
+                    "守卫 {number} 不是比较：`guard` 只能判定 `less` / `le` 比较（例如 `(le a 5000)`）；\
+                     其它表达式（如 `guard 3000`）既不产生真值，也不能决定规则是否触发",
+                    number = i + 1
+                )));
+            };
+            check::check(env, &ctx, g, &Expr::Sort(0)).map_err(|e| {
+                Error::other(format!(
+                    "守卫 {number} 不是命题（`{kind}` 比较要写成 `({kind} a b)`）：{e}",
+                    number = i + 1,
+                    kind = op.name()
+                ))
+            })?;
+            if let Some(binder) = premise_binders
+                .iter()
+                .find(|binder| mentions_pattern(&opened, binder))
+            {
+                return Err(Error::other(format!(
+                    "守卫 {number} 引用了前提绑定 `?{binder}`：守卫只能判定规则参数的值，\
+                     不能判定前提的证明",
+                    number = i + 1
+                )));
+            }
+        }
         let t = check::infer(env, &ctx, &self.conclusion)
             .map_err(|e| Error::other(format!("结论不成立：{e}")))?;
         if !crate::conv::convertible(env, &ctx, &t, conclusion_ty)? {
@@ -1144,15 +1197,17 @@ impl RuleDecl {
                 .unlesses
                 .iter()
                 .any(|u| mentions_pattern(&self.open_unless_text(u), binder));
-            if in_conclusion || in_unless {
+            let in_guard =
+                (0..self.guards.len()).any(|i| mentions_pattern(&self.open_guard(i), binder));
+            if in_conclusion || in_unless || in_guard {
                 return Err(Error::other(format!(
-                    "参数 `{binder}` 出现在结论或 unless 阻断条件里，但没有出现在任何前提里：\
-                     实例化时它无法被确定，结论或阻断条件不会闭合。\
-                     请把它纳入某条前提，或把它从结论/unless 里去掉。"
+                    "参数 `{binder}` 出现在结论、unless 阻断条件或 guard 守卫里，但没有出现在任何前提里：\
+                     实例化时它无法被确定，结论、阻断条件或守卫都不会闭合。\
+                     请把它纳入某条前提，或把它从结论/unless/guard 里去掉。"
                 )));
             }
             return Err(Error::other(format!(
-                "参数 `{binder}` 没有出现在任何前提里，也没有出现在结论或 unless 里：\
+                "参数 `{binder}` 没有出现在任何前提里，也没有出现在结论、unless 或 guard 里：\
                  它是一个无法被实例化的空参数。请把它纳入某条前提，或删掉这个参数。"
             )));
         }
@@ -1182,6 +1237,16 @@ impl RuleDecl {
 
     pub fn open_unless(&self, i: usize) -> Expr {
         self.open(&self.unlesses[i], self.params.len() + self.premises.len())
+    }
+
+    /// Open a `guard` into a pattern: its parameters become `?<binder>`.
+    ///
+    /// A guard may only mention the rule's parameters, so opening it at the
+    /// whole-telescope depth is the same as opening it over the parameters
+    /// alone. The reasoner closes this pattern with the instance's bindings and
+    /// evaluates it; the certificate checker rebuilds it the same way.
+    pub fn open_guard(&self, i: usize) -> Expr {
+        self.open(&self.guards[i], self.params.len() + self.premises.len())
     }
 
     /// Open an [`unless`] expression that has already been unpacked.
