@@ -164,6 +164,9 @@
 //! :packs [dir]            list the legal-pack manifests under a directory
 //! :lock [dir]             hash the packs and write the std.lock registry lock
 //! :audit [dir]            check rule-source quotations against article corpora
+//! :search <keywords> [--law <name>] [--version <version>]
+//!         [--article <number>] [--jurisdiction <code>] [--limit <n>]
+//!                         search article texts and report coverage and rules
 //! :given <term>           register a fact asserted by the user
 //! :fact [list]            list the facts in the ledger with their identities
 //! :fact show <term>       show the facts equivalent to a proposition
@@ -263,6 +266,51 @@
 //! numbers, the named ontology gaps with their counts, the open concepts and
 //! the note. The declaration is printed only and is not compared with the
 //! loaded theory's rules.
+//!
+//! `:search <keywords> [--law <name>] [--version <version>] [--article
+//! <number>] [--jurisdiction <code>] [--limit <n>]` searches the `articles`
+//! text of the corpora under `<current directory>/law/corpus` without requiring
+//! `:load`. Both the keyword and each article are whitespace-normalized (trim,
+//! collapse runs to one space); the keyword is split on spaces and every part
+//! must occur as a literal substring, in any order and not necessarily
+//! adjacent. No regular expression is compiled, so punctuation is literal. A
+//! result prints `law@version article`, a context snippet, the article's
+//! declared coverage status (`已形式化` / `部分` / `仅索引` / `待本体`), the
+//! loaded rules whose sources cite the article with their source line, and the
+//! ledger-declared rules that are not loaded. The coverage status is the
+//! ledger's statement, not an environment state. A loaded rule is listed only
+//! when its source also agrees on the quote (when recorded) and jurisdiction,
+//! matching `:audit`; a versionless source whose law has several corpus
+//! versions is not attributed and says so. An unloaded ledger rule reads
+//! `包未加载` with a `:load`/`import` hint only when no loaded pack links the
+//! corpus; otherwise a loaded-but-differently-cited rule prints
+//! `台账与已加载规则不一致` with its actual source, and a rule the environment
+//! does not load prints `当前环境未加载该规则`. `尚未形式化` prints only when
+//! neither the session nor the ledger names a rule. The corpus's `coverage`
+//! ledger is the only source of the status; without one the output says
+//! `覆盖率台账不可用` and never guesses. `--law` matches the corpus law id,
+//! title or alias; `--version` must name a corpus version in scope (a missing
+//! version is an error, never a fallback); `--article` first matches the stored
+//! number literally (so ASCII `39` stays addressable) and only then tries the
+//! Chinese ordinal, and additionally prints the full article text and its
+//! SHA-256 (the same article-text hash `:audit` checks). With `--article`, a
+//! rule source's recorded hash is compared with the locally computed one;
+//! a mismatch prints `⚠ 语料哈希与规则声明不一致…` and exits `1` (results are
+//! still printed), while no rule or no recorded hash says the hash is local
+//! only. `--jurisdiction` compares the corpus's recorded jurisdiction; a
+//! corpus without one is excluded with a `注：…已排除…` warning, not matched
+//! and not turned into a command failure: the exit code follows whether any
+//! result remains (`0` with results, `1` without). Results are stably sorted by
+//! `(law, version, article order)`. At most 20 results print by default;
+//! `--limit` accepts 1–64, and a larger, zero or repeated value is a usage
+//! error instead of a silent truncation. A result set larger than the limit
+//! prints an explicit `已截断` line. A missing or unreadable corpus directory is
+//! an environment error (exit `2`); an existing but empty one prints
+//! `语料目录中没有语料` and exits `1`. Text from the user, a corpus, a rule or a
+//! path is escaped before printing, so a newline or control character cannot
+//! forge a line. When a loaded pack links the corpus, its trust level is
+//! printed; otherwise no trust level is claimed. This is candidate retrieval,
+//! not a legal conclusion, and it does not read or formalise the law.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -541,6 +589,7 @@ mod environment;
 mod identity;
 mod packs;
 mod review;
+mod search;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -1745,6 +1794,7 @@ impl Session {
             "packs" => self.list_packs(arg, out),
             "lock" => self.lock_packs(arg, out),
             "audit" => self.audit_sources(arg, out),
+            "search" => search::search(arg, &self.lib.env, &self.packs, out),
             "quit" | "exit" => Ok(Outcome::Proved),
             "redact" => self.redact_command(arg, out),
             other => Err(format!("未知命令 `:{other}`")),
@@ -6501,7 +6551,8 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
                  :why <命题>  :explain <命题>  :labels <命题>  :review <命题> [--out <文件>]  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :why <命题>  :explain <命题>  :labels <命题>  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :redact [on|off]  \
-                 :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
+                 :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  \
+                 :search <关键词> [--law <法名>] [--version <版本>] [--article <条号>] [--jurisdiction <代码>] [--limit <n>]  :quit"
             )
             .ok();
             continue;
