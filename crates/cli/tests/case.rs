@@ -14,9 +14,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{json, Value};
 
 const PROVED: i32 = 0;
-/// The batch entry reports a rejected JSON case description as a command-style
-/// error, the same code `:load-case` uses.
-const LOAD_ERROR: i32 = 2;
+/// A batch file that is not accepted: `.std` and JSON case descriptions both
+/// exit `1`, so the extension never changes the failure code.
+const LOAD_ERROR: i32 = 1;
+/// An interactive colon-command error (`:load` / `:load-case`): the command
+/// error convention, distinct from a batch load failure.
+const COMMAND_ERROR: i32 = 2;
 /// A query after a successful load can still fail because its target is a gap;
 /// that is a proof outcome, not a JSON load rejection.
 const QUERY_FAILED: i32 = 1;
@@ -297,7 +300,7 @@ fn goals_are_listed_but_not_proved_by_the_load() {
 }
 
 #[test]
-fn batch_json_exit_codes_are_2_for_rejection_and_0_for_success() {
+fn batch_json_exit_codes_are_1_for_rejection_and_0_for_success() {
     let success = run(&[example("案件-住宅搜查.json")]);
     assert_exit(&success, PROVED);
 
@@ -319,6 +322,26 @@ fn batch_json_exit_codes_are_2_for_rejection_and_0_for_success() {
         stderr(&bad_field).contains("schema_version"),
         "{}",
         stderr(&bad_field)
+    );
+}
+
+#[test]
+fn a_bad_json_and_a_bad_std_exit_with_the_same_code() {
+    // The failure code belongs to "the batch file was not accepted", not to the
+    // extension. A future refactor that gives one format a different code would
+    // fail this test.
+    let temp = TempDir::new("same-exit-code");
+    let bad_json = temp.write("bad.json", "{\"schema_version\":1,");
+    let bad_std = temp.write("bad.std", "sort 人\nbogus\n");
+
+    let json_output = run(&[bad_json.to_string_lossy().into_owned()]);
+    let std_output = run(&[bad_std.to_string_lossy().into_owned()]);
+    assert_exit(&json_output, LOAD_ERROR);
+    assert_exit(&std_output, LOAD_ERROR);
+    assert_eq!(
+        json_output.status.code(),
+        std_output.status.code(),
+        "a bad JSON and a bad .std must share the batch failure code"
     );
 }
 
@@ -588,7 +611,7 @@ fn an_object_name_cannot_reuse_any_loaded_declaration() {
         });
         let output =
             run_theory_then_case(DECLARATION_KINDS_THEORY, &value, &["--no-default-packs"]);
-        assert_exit(&output, LOAD_ERROR);
+        assert_exit(&output, COMMAND_ERROR);
         let err = stderr(&output);
         assert!(err.contains("objects[0].name"), "{name}: {err}");
         assert!(err.contains(name), "{name}: {err}");
@@ -622,7 +645,7 @@ fn the_closed_environment_requires_an_object_type_from_a_loaded_pack() {
         &value,
         &["--closed-env", "--allow-case-rules", "--no-default-packs"],
     );
-    assert_exit(&output, LOAD_ERROR);
+    assert_exit(&output, COMMAND_ERROR);
     let err = stderr(&output);
     assert!(err.contains("objects[0].type"), "{err}");
     assert!(err.contains("包"), "{err}");

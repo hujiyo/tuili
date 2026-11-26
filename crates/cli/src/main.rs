@@ -85,10 +85,10 @@
 //! entry rejects the whole file, and a `reference` value that disagrees with an
 //! explicitly set session date or jurisdiction is an error rather than an
 //! overwrite. Imports, the default environment and the closed environment use
-//! the same path as `:load`. A batch JSON load exits `2` on any read, syntax or
-//! validation failure (the same command-error code `:load-case` uses; the
-//! existing `.std` batch load failure stays `1`) and `0` on success; goals are
-//! only checked and listed, so an unproved goal never makes the load exit `1`.
+//! the same path as `:load`. A batch JSON load exits `1` on any read, syntax or
+//! validation failure, exactly like a `.std` batch load (usage errors stay `2`);
+//! a successful load exits `0`. Goals are only checked and listed, so an
+//! unproved goal never makes the load exit `1`.
 //!
 //! When the current directory contains `lawpacks/profiles` with a
 //! `default = true` profile, the first theory load prepares that environment
@@ -6349,10 +6349,10 @@ fn run_commands(session: &mut Session, commands: &[String], out: &mut impl Write
 /// A `.json` path goes through `load_case`; every other path through
 /// `load_theory`. A failed load prints the already-rendered
 /// `path:line:col: error: ...`, `path:<JSON 路径>: error: ...` (or
-/// `path: error: ...`) on stderr and exits `2` for a JSON case description (the
-/// same code `:load-case` uses) or `1` for a `.std` theory (the existing batch
-/// contract). The load error already names the file, so the batch entry adds no
-/// path prefix of its own. Remaining commands are not run.
+/// `path: error: ...`) on stderr and exits `1` for either format: the file was
+/// not accepted, which is a load failure, not a usage error. The load error
+/// already names the file, so the batch entry adds no path prefix of its own.
+/// Remaining commands are not run.
 fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut impl Write) -> i32 {
     // The load report names the declarations the file contributed, including
     // the case's individuals and facts, so display redaction must cover it too.
@@ -6389,11 +6389,10 @@ fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut i
             error
         };
         eprintln!("{error}");
-        // A rejected JSON case description is an untrusted-input rejection: the
-        // batch entry reports it as a command-style error (2), the same code the
-        // `:load-case` command uses. The existing `.std` batch load contract
-        // stays 1 and is not changed here.
-        return if is_case { 2 } else { 1 };
+        // A batch file that is not accepted is a failed load, not a malformed
+        // command line: `.std` and JSON case descriptions both exit `1`, so the
+        // extension cannot change the failure code. Usage errors stay `2`.
+        return 1;
     }
     run_commands(session, commands, out)
 }
