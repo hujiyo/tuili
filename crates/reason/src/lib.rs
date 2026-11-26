@@ -177,10 +177,18 @@
 //! the dependency propagates from the root's proof graph and becomes the
 //! certificate obligation. A fact the user or the court supplied is evidence,
 //! not a decision of the concept, so an open concept that merely appears as an
-//! assumption premise is not counted. The candidate interpretations and the
-//! branch re-run this marker will eventually drive are not implemented yet.
+//! assumption premise is not counted. [`Reasoner::branch_candidates`] names
+//! the declared interpretations that could license the blocked concept and
+//! says which of them can actually run; the command layer runs each one alone
+//! as its own derivation, never as a combination.
 
 mod applicability;
+mod branches;
+
+pub use branches::{
+    BranchCandidate, BranchCandidateScan, CandidateRelation, UnavailableBranch,
+    MAX_BRANCH_CANDIDATES,
+};
 
 pub use applicability::{
     Applicability, Basis, CodeDimension, DateField, DatedEvidence, InapplicableReason,

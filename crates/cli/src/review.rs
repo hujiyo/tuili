@@ -51,7 +51,7 @@ use std_deduce_kernel::env::{escape_control, RulePleading};
 use std_deduce_kernel::norm::normalize;
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{Ctx, Env, Expr, Name};
-use std_deduce_reason::{GapLimit, GapStatus, GapTree, IssueScan};
+use std_deduce_reason::{BranchCandidateScan, GapLimit, GapStatus, GapTree, IssueScan};
 
 /// The label order of the trust table, independent of the report's primary
 /// label. Every report lists all five labels with either their evidence or a
@@ -180,6 +180,17 @@ impl AxiomCandidateRecord {
     }
 }
 
+/// The open-concept inputs of one report.
+///
+/// `dependency` is the certificate's recomputed open-concept obligation;
+/// `branch_scan` is the candidate enumeration over the blocked propositions.
+/// Both are inputs, not results: the report lists candidates and never runs a
+/// branch.
+pub(crate) struct OpenConceptInputs<'a> {
+    pub dependency: Option<&'a OpenConceptDependency>,
+    pub branch_scan: &'a BranchCandidateScan,
+}
+
 /// Render the Markdown review report for one case.
 ///
 /// `certificate` and `trust` are the same objects `:verify-cert` and
@@ -195,7 +206,7 @@ pub(crate) fn render_review(
     env: &Env,
     certificate: &Certificate,
     trust: &TrustReport,
-    dependency: Option<&OpenConceptDependency>,
+    open: &OpenConceptInputs<'_>,
     issues: &IssueScan,
     root_gap: Option<&GapTree>,
     pleadings: &BTreeMap<String, RulePleading>,
@@ -213,7 +224,7 @@ pub(crate) fn render_review(
     };
     let root_expr = certificate
         .root
-        .map(|root| node_proposition(certificate, root).map(Expr::from))
+        .map(|root| certificate.node_proposition(root).map(Expr::from))
         .transpose()?;
 
     // Stable order for everything the certificate may list in reasoner order.
@@ -236,7 +247,7 @@ pub(crate) fn render_review(
         &mut out,
         certificate,
         trust,
-        dependency,
+        open.dependency,
         &risk,
         &root_proposition,
     );
@@ -280,7 +291,15 @@ pub(crate) fn render_review(
     };
     write_gaps_section(&mut out, &gap_inputs, &mut question_groups)?;
     write_conflicts_section(&mut out, certificate, &conflicts, &mut question_groups);
-    write_open_concepts_section(&mut out, env, certificate, dependency, &mut question_groups)?;
+    write_open_concepts_section(
+        &mut out,
+        env,
+        certificate,
+        open.dependency,
+        open.branch_scan,
+        &root_proposition,
+        &mut question_groups,
+    )?;
 
     // Flatten the groups in their fixed order: conflicts, open concepts,
     // human-determination obligations, case extensions, the root gap, issues,
@@ -1594,6 +1613,8 @@ fn write_open_concepts_section(
     env: &Env,
     certificate: &Certificate,
     dependency: Option<&OpenConceptDependency>,
+    branch_scan: &BranchCandidateScan,
+    root_proposition: &str,
     questions: &mut BTreeMap<u8, Vec<Question>>,
 ) -> Result<(), String> {
     begin_section(out, "## 七、需人判断");
@@ -1637,6 +1658,96 @@ fn write_open_concepts_section(
                     anchor: format!("「需人判断」第 {number} 条"),
                 });
         }
+    }
+
+    // The declared interpretations that could license an obstructing open
+    // concept. The report lists them by id and never runs one, so it never
+    // invents a branch consequence or recommends a reading; choosing an
+    // interpretation is a legal judgement.
+    if !branch_scan.blocked.is_empty() {
+        number += 1;
+        wrote_any = true;
+        out.push_str(&format!(
+            "{number}. 开放概念的候选解释（受阻的开放概念命题 {} 个）：\n",
+            branch_scan.blocked.len()
+        ));
+        for proposition in &branch_scan.blocked {
+            out.push_str(&format!("   - 受阻命题「{}」。\n", expr_text(proposition)));
+        }
+        if branch_scan.candidates.is_empty() {
+            out.push_str(
+                "   - 候选解释：没有可用的候选解释（当前环境没有被声明的 `interpret` \
+                 与该开放概念命题相关，或相关解释的 from 在当前事实集里不成立）。\n",
+            );
+        } else {
+            out.push_str("   - 候选解释（不自动启用，一次只启用一个）：\n");
+            for candidate in &branch_scan.candidates {
+                out.push_str(&format!(
+                    "     - `{}`：{} → {}〔{}〕\n",
+                    escape_control(&candidate.id),
+                    expr_text(&candidate.from),
+                    expr_text(&candidate.to),
+                    candidate_relation_text(candidate),
+                ));
+            }
+        }
+        if !branch_scan.truncated.is_empty() {
+            out.push_str(&format!(
+                "   - 候选解释超过上限 {} 个，未列出：{}。\n",
+                std_deduce_reason::MAX_BRANCH_CANDIDATES,
+                branch_scan
+                    .truncated
+                    .iter()
+                    .map(|id| format!("`{}`", escape_control(id)))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+        }
+        if !branch_scan.unavailable.is_empty() {
+            out.push_str(&format!(
+                "   - 相关但不可用的解释 {} 个：\n",
+                branch_scan.unavailable.len()
+            ));
+            for entry in &branch_scan.unavailable {
+                out.push_str(&format!(
+                    "     - `{}`：{} → {}（{}）\n",
+                    escape_control(&entry.candidate.id),
+                    expr_text(&entry.candidate.from),
+                    expr_text(&entry.candidate.to),
+                    entry.reason
+                ));
+            }
+        }
+        out.push_str(
+            "   - 为什么不能自动判定：选哪一条解释是法律判断；本报告只列当前环境声明的候选，\
+             不运行分支，也不建议采用某一条。每个分支单独启用后的后果可用 \
+             `:branches <目标>` 查看。\n",
+        );
+        let ids = branch_scan
+            .candidates
+            .iter()
+            .map(|candidate| format!("`{}`", escape_control(&candidate.id)))
+            .collect::<Vec<_>>();
+        let text = if ids.is_empty() {
+            format!(
+                "开放概念受阻的命题「{}」没有可用的候选解释；请确认应当由哪一份解释材料来理解该概念\
+                 （:branches {} 可复核当前候选范围）。",
+                root_proposition,
+                escape_control(root_proposition),
+            )
+        } else {
+            format!(
+                "候选解释 {} 都可能影响对受阻开放概念命题「{}」的判断；请逐条确认应采用哪一条、\
+                 以及它单独启用后的后果（可用 `:branches {}` 单独查看，不自动启用）。",
+                ids.join("、"),
+                root_proposition,
+                escape_control(root_proposition),
+            )
+        };
+        questions.entry(1).or_default().push(Question {
+            text,
+            anchor: format!("「需人判断」第 {number} 条"),
+        });
     }
 
     // Every open-concept obligation counts even if the dependency is absent:
@@ -1777,7 +1888,7 @@ fn concept_nodes(
 ) -> Result<Vec<NodeId>, String> {
     let mut nodes = Vec::new();
     for node_id in &dependency.nodes {
-        let proposition = node_proposition(certificate, *node_id)?;
+        let proposition = certificate.node_proposition(*node_id)?;
         let normalized = normalize(env, &Ctx::new(), &Expr::from(proposition))
             .map_err(|error| format!("无法规范化节点 {node_id} 的命题以判定开放概念：{error}"))?;
         if normalized
@@ -1799,7 +1910,7 @@ fn node_description(certificate: &Certificate, node_id: NodeId) -> Result<String
     };
     Ok(match entry {
         Node::Assumption { .. } => {
-            let proposition = node_proposition(certificate, node_id)?;
+            let proposition = certificate.node_proposition(node_id)?;
             format!(
                 "推导步骤 {node_id}（结论命题「{}」，作为事实断言）",
                 cert_expr_text(proposition)
@@ -1852,36 +1963,8 @@ fn node_description(certificate: &Certificate, node_id: NodeId) -> Result<String
     })
 }
 
-fn node_proposition(
-    certificate: &Certificate,
-    node: NodeId,
-) -> Result<&std_deduce_cert::CertExpr, String> {
-    let Some(entry) = certificate.nodes.get(node) else {
-        return Err(format!(
-            "节点 {node}：节点索引越界：证书只有 {} 个节点",
-            certificate.nodes.len()
-        ));
-    };
-    match entry {
-        Node::Assumption { assumption } => certificate
-            .assumptions
-            .get(*assumption)
-            .map(|entry| &entry.proposition)
-            .ok_or_else(|| {
-                format!(
-                    "节点 {node}：引用了不存在的假设 {assumption}：证书只有 {} 条假设",
-                    certificate.assumptions.len()
-                )
-            }),
-        Node::RuleApplication { conclusion, .. } => Ok(conclusion),
-        Node::InterpretationApplication { conclusion, .. } => Ok(conclusion),
-        Node::AxiomInstance { conclusion, .. } => Ok(conclusion),
-        Node::Gap { proposition, .. } => Ok(proposition),
-    }
-}
-
 fn node_proposition_text(certificate: &Certificate, node: NodeId) -> Result<String, String> {
-    node_proposition(certificate, node).map(cert_expr_text)
+    certificate.node_proposition(node).map(cert_expr_text)
 }
 
 fn cert_expr_text(expression: &std_deduce_cert::CertExpr) -> String {
@@ -2166,6 +2249,22 @@ fn node_list_text(nodes: &[NodeId]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("、")
+}
+
+/// How a candidate's `to` relates to the blocked open-concept proposition.
+fn candidate_relation_text(candidate: &std_deduce_reason::BranchCandidate) -> String {
+    match candidate.relation {
+        std_deduce_reason::CandidateRelation::Exact => format!(
+            "{}：与受阻命题「{}」内核等价，启用后许可该命题",
+            candidate.relation.label_zh(),
+            expr_text(&candidate.blocked)
+        ),
+        std_deduce_reason::CandidateRelation::SameHead => format!(
+            "{}：与受阻命题「{}」同谓词，但不是同一命题",
+            candidate.relation.label_zh(),
+            expr_text(&candidate.blocked)
+        ),
+    }
 }
 
 fn candidate_names(candidates: &[std_deduce_reason::GapRule]) -> String {
