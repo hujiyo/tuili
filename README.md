@@ -313,7 +313,7 @@ cargo run -q -p std-deduce-cli -- examples/案件-住宅搜查.json ':why cn.con
 | 命令 | 作用 |
 |---|---|
 | `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`open`/`risk`/`interpret`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则。`:load` 始终按 `.std` 语法解析，与文件扩展名无关；JSON 案件描述见 `:load-case` |
-| `:load-case <文件.json>` | 加载一份严格、版本化的 JSON 案件描述（`schema_version = 1`）。只带来事实、身份、来源、发生时间/地点、个体常量与目标，不能声明规则/谓词/解释/风险/优先级；加载后打印与 `:load` 同形的台账（`已加载案件`、`导入`、`+`、`· 目标`），事实按各自身份进入环境，`disputed` 不参与推导。所有字段与命题在接触会话状态之前校验，任一失败整体回滚；错误带 JSON 路径（如 `facts[2].identity`）。批处理入口被拒绝时与 `.std` 一样退 `1`；交互命令错误按命令惯例退 `2`。字段表、拒绝规则、退出码与边界见「案件描述 JSON（`:load-case`）」 |
+| `:load-case <文件.json>` | 加载一份严格、版本化的 JSON 案件描述（`schema_version = 1`）。只带来事实、身份、来源、发生时间/地点、个体常量与目标，不能声明规则/谓词/解释/风险/优先级；加载后打印与 `:load` 同形的台账（`已加载案件`、`导入`、`+`、`· 目标`），事实按各自身份进入环境，`disputed` 不参与推导。所有字段与命题在接触会话状态之前校验，任一失败整体回滚；错误带 JSON 路径（如 `$.facts[2].identity`）。批处理入口被拒绝时与 `.std` 一样退 `1`；交互命令错误按命令惯例退 `2`。字段表、拒绝规则、退出码与边界见「案件描述 JSON（`:load-case`）」 |
 | `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签；解释显示为 `interpret` 并附方向与来源摘要（`〔方向 …〕〔来源 …〕`），被 `open` 标记的谓词追加 `〔开放概念〕`，被 `risk` 标记的谓词追加 `〔风险 刑事〕` 这类题材，标记本身以 `risk:<谓词>` 留在台账（显示为 `risk  刑事 故意伤害`）。规则与事实已记录的生效区间、管辖、地域和发生时间/地点以 `〔生效 from..to〕`、`〔管辖 CN〕`、`〔地域 CN-HN〕`、`〔发生 2020-05-06〕`、`〔发生地 CN-HN〕` 显示，未声明的字段不打印占位符；区间端点继承自包清单时标 `（继承）`，规则自写时标 `（规则）`。规则只显示已声明的举证/证明标准：`〔举证 claimant · 标准 preponderance〕`，有例外声明时再显示 `〔例外举证 … · 例外标准 …〕`，未声明的字段不显示占位。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`open`/`risk`/`interpret`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
 | `:given <命题>` | 以「用户陈述」身份手工登记一条事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示。手工登记的事实不记录发生时间/地点（不会被会话基准日填充） |
 | `:interpret [list]` / `:interpret enable <解释名>` / `:interpret disable <解释名>` | 查看、启用或停用解释声明。`list` 按 id 列出每条解释的状态、方向与 `from → to`；`enable` 立即校验 id 存在、不得重复启用、不得与另一条已启用解释的 `to` 内核等价（后者报错并提示分别查询或先 disable）；`disable` 恢复默认的不启用状态。必须已 `:load`。启用只改变之后的查询，不改变已加载的声明或既有证书。等价于 `--interpret` 的会话内写法 |
@@ -929,9 +929,13 @@ JSON 加载同样生效：加载报告、事实命题与后续查询输出里的
   重复对象名、同一命题的不同身份、数组超过 10000 项、JSON 嵌套超过 128 层、文件超过
   8 MiB——全部拒绝，不跳过任何坏条目，整次加载回滚（会话、默认环境、已启用的解释都不变）。
 - 错误格式是 `文件:JSON 路径: error: ...`，例如
-  `case.json:facts[2].identity: error: ...`；整文件错误（读取/编码/大小/嵌套/JSON 语法）
-  用 `$` 作为根路径并附行列。
-- 命题失败报 `facts[i].proposition` / `goals[i].proposition`，类型与解析错误都复用现有
+  `case.json:$.facts[2].identity: error: ...`；顶层字段是 `$.字段`，数组下标是 `[i]`，
+  整文件错误（读取/编码/大小/嵌套/JSON 语法）用 `$` 作为根路径并附行列。JSON 路径与
+  路径里的未知字段名都会先转义，诊断始终只占一行。
+- 环境、注册表、`std.lock`、profile 与 `import` 错误保留它们自己的诊断（可能逐行列出
+  坏包、坏锁或包文件路径），不带 `$`/JSON 路径；JSON 路径只用于本文件自身的模式、命题、
+  对象与目标校验。
+- 命题失败报 `$.facts[i].proposition` / `$.goals[i].proposition`，类型与解析错误都复用现有
   parser/elaborator 的检查，不会“跳过坏条目继续加载”。
 - 同一命题的不同身份在本文件内部、以及和已加载环境里已登记的事实之间都拒绝；比较用内核
   定义等价（alpha/eta 变体与 `def` 别名不能绕开），不比较打印文本。
@@ -2443,7 +2447,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 1372 个：kernel 26、lang 200、reason 134、cert 290、cli 558、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 1376 个：kernel 26、lang 200、reason 134、cert 290、cli 562、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（26）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -2889,7 +2893,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   失败退出 `2` 并点名节点与字段；P0 的派生前提证书在有环境登记时被拒、无登记时仍按 `unchecked`
   通过（同一份证书），P1 的候选日期伪造与无关已持有命题替换都被拒；只改环境身份的 `as_of` 并
   用同值验证通过。
-- `crates/cli/tests/case.rs`（40）：严格 JSON 案件描述端到端——批处理入口与 `:load-case` 输出一致、
+- `crates/cli/tests/case.rs`（44）：严格 JSON 案件描述端到端——批处理入口与 `:load-case` 输出一致、
   加载报告同形；`schema_version = 1` 与字段表、未知字段（`rule`/`pred`/`interpret`/`risk`/
   `priority`/`sort`/`def` 等“定义法律”字段）拒绝、身份缺失/非法/同命题不同身份、空来源、坏日期/
   管辖、`assumptions` 写 `verified`/`user_asserted`、`objects` 重名/与已加载声明重名/类型非包内
@@ -2897,7 +2901,11 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   `disputed` 不参与、`goals` 只打印不自动证明；批处理加载失败退 `1`（与 `.std` 一致）、交互
   命令错误退 `2`；`reference` 与会话值相等放行、冲突拒绝；`imports` 经默认环境/`--no-default-packs`
   注册表/`--closed-env` 都与既有语义一致；`--redact` 覆盖 JSON 批处理加载报告与 `:load-case`
-  的缓冲输出（个体名替换、附 `输出已脱敏；证书未脱敏。…`、免责声明仍在）。
+  的缓冲输出（个体名替换、附 `输出已脱敏；证书未脱敏。…`、免责声明仍在）；诊断转义一组：未知
+  字段名、`identity` 原文、对象名、import 别名、`schema_version` 原值与案件名里的控制/不可见
+  格式字符都以 `\n`/`\u{XXXX}` 形式出现在一行诊断里，顶层路径是 `$.schema_version`/`$.字段`，
+  日期/管辖错误不重复路径，`schema_version` 按实际 JSON 类型区分文案；批处理仍退 `1`、交互
+  命令退 `2`。
 - `crates/cli/tests/entry.rs`（25）：二进制入口端到端——批处理加载成功退出 `0` 并打印加载报告；
   坏文件退出 `1`，stderr 带路径与错误且不执行后续命令；坏语法批处理输出 `路径:行:列: error:`
   且路径只出现一次、不出现 `错误：` 前缀；`:load` 坏语法保留 `错误：` 前缀并带同样位置；

@@ -8,8 +8,15 @@
 //!
 //! Every field is checked here, before the session environment is touched, and
 //! every rejection names the JSON path that failed (for example
-//! `facts[2].identity`). There are no defaults for required fields, no guessed
+//! `$.facts[2].identity`). There are no defaults for required fields, no guessed
 //! identities and no skipped entries: one bad entry rejects the whole file.
+//!
+//! Diagnostics treat every value quoted from the document as untrusted text:
+//! field names, identity words, object names, type/proposition text, dates,
+//! codes and schema-version values pass through `escape_control` before they
+//! reach a terminal. The JSON path itself is escaped by [`render`], so a value
+//! containing a newline, carriage return, ESC or a bidirectional override
+//! cannot split a diagnostic into a forged second line.
 //!
 //! The identity keywords are the kernel's [`FactIdentity`] keywords, so a JSON
 //! case and a `.std` case spell evidence the same way. `verified` /
@@ -234,8 +241,10 @@ pub(crate) fn read(path: &str) -> Result<CaseFile, String> {
 
 /// Render one case diagnostic: `file:JSON 路径: error: message`.
 ///
-/// The path components include user text (object names, unknown field names),
-/// so both components are escaped before they reach a terminal or a log.
+/// The path components include user text (unknown field names), so the path is
+/// escaped before it reaches a terminal or a log. Every message that quotes a
+/// value from the JSON escapes that value at its interpolation site; the fixed
+/// message text is not re-escaped, so an already-rendered `\n` stays readable.
 pub(crate) fn render(path: &str, json_path: &str, message: impl std::fmt::Display) -> String {
     format!(
         "{}:{}: error: {}",
@@ -246,9 +255,12 @@ pub(crate) fn render(path: &str, json_path: &str, message: impl std::fmt::Displa
 }
 
 /// A path relative to the document root (`$`).
+///
+/// Top-level fields are `$.字段`; nested fields append `.字段`, arrays append
+/// `[i]`. Field names that come from the document are escaped by [`render`].
 fn join(parent: &str, key: &str) -> String {
     if parent == "$" {
-        key.to_owned()
+        format!("$.{key}")
     } else {
         format!("{parent}.{key}")
     }
@@ -353,6 +365,7 @@ fn check_fields(map: &Map<String, Value>, allowed: &[&str], parent: &str) -> Res
             continue;
         }
         let path = join(parent, key);
+        let key = escape_control(key);
         if CONCEPT_FIELDS.contains(&key.as_str()) {
             return problem(
                 path,
@@ -371,6 +384,26 @@ fn check_fields(map: &Map<String, Value>, allowed: &[&str], parent: &str) -> Res
         return problem(path, format!("未知字段 `{key}`；允许的字段是 {allowed}"));
     }
     Ok(())
+}
+
+/// Replace the JSON-supplied value inside a validator message with its escaped
+/// form.
+///
+/// The kernel's date and code validators build their messages with the raw
+/// value. Here the value is untrusted JSON, so every occurrence is escaped
+/// before the message is rendered; the rest of the fixed message is untouched.
+fn escape_occurrences(message: String, value: &str) -> String {
+    message.replace(value, &escape_control(value))
+}
+
+fn validate_json_date(label: &str, path: &str, value: &str) -> Result<(), Problem> {
+    std_deduce_kernel::meta::validate_date(label, value)
+        .map_err(|error| (path.to_owned(), escape_occurrences(error, value)))
+}
+
+fn validate_json_jurisdiction(label: &str, path: &str, value: &str) -> Result<(), Problem> {
+    std_deduce_kernel::meta::validate_jurisdiction_code(label, value)
+        .map_err(|error| (path.to_owned(), escape_occurrences(error, value)))
 }
 
 /// Validate the document-level nesting depth without trusting `serde_json`'s
@@ -421,33 +454,69 @@ fn parse_value(value: &Value) -> Result<CaseFile, Problem> {
     let map = as_object(value, "$")?;
     check_fields(map, TOP_LEVEL_FIELDS, "$")?;
 
-    let version = match map.get("schema_version") {
-        None => {
-            return problem(
-                "schema_version",
-                "缺少必填字段；当前支持的 schema_version 是 1",
-            )
-        }
-        Some(Value::Number(number)) => number.as_u64(),
-        Some(other) => {
-            return problem(
-                "schema_version",
-                format!("schema_version 必须是整数 1，实际是{}", kind(other)),
-            )
-        }
+    let Some(version_value) = map.get("schema_version") else {
+        return problem(
+            "$.schema_version",
+            "缺少必填字段；当前支持的 schema_version 是 1",
+        );
     };
-    match version {
-        Some(SCHEMA_VERSION) => {}
-        Some(other) => {
+    match version_value {
+        Value::Number(number) => {
+            if let Some(version) = number.as_u64() {
+                if version != SCHEMA_VERSION {
+                    return problem(
+                        "$.schema_version",
+                        format!("不支持的 schema_version {version}；当前只支持 1"),
+                    );
+                }
+            } else if let Some(version) = number.as_i64() {
+                return problem(
+                    "$.schema_version",
+                    format!("schema_version 必须是整数 1；不接受负数 {version}"),
+                );
+            } else if number.to_string().contains(['.', 'e', 'E']) {
+                return problem(
+                    "$.schema_version",
+                    format!("schema_version 必须是整数 1；不接受小数（实际是 {number}）"),
+                );
+            } else {
+                return problem(
+                    "$.schema_version",
+                    format!("schema_version 必须是整数 1；数字超出可接受范围（实际是 {number}）"),
+                );
+            }
+        }
+        Value::String(text) => {
             return problem(
-                "schema_version",
-                format!("不支持的 schema_version {other}；当前只支持 1"),
+                "$.schema_version",
+                format!(
+                    "schema_version 必须是整数 1；不接受字符串（实际是 `{}`）",
+                    escape_control(text)
+                ),
             )
         }
-        None => {
+        Value::Null => {
             return problem(
-                "schema_version",
-                "schema_version 必须是整数 1（不接受小数或字符串）",
+                "$.schema_version",
+                "schema_version 必须是整数 1；实际是 null（空值）",
+            )
+        }
+        Value::Bool(flag) => {
+            return problem(
+                "$.schema_version",
+                format!("schema_version 必须是整数 1；实际是布尔 {flag}"),
+            )
+        }
+        Value::Array(_) => {
+            return problem(
+                "$.schema_version",
+                "schema_version 必须是整数 1；实际是数组",
+            )
+        }
+        Value::Object(_) => {
+            return problem(
+                "$.schema_version",
+                "schema_version 必须是整数 1；实际是对象",
             )
         }
     }
@@ -456,7 +525,7 @@ fn parse_value(value: &Value) -> Result<CaseFile, Problem> {
 
     let imports = {
         let value = required_field(map, "imports", "$")?;
-        let mut imports = string_array(value, "imports", validate_package_name)?;
+        let mut imports = string_array(value, "$.imports", validate_package_name)?;
         // A repeated import is harmless, like a repeated `import` line in a
         // `.std` file; the report and the registry pass see it once.
         let mut seen = BTreeSet::new();
@@ -467,44 +536,42 @@ fn parse_value(value: &Value) -> Result<CaseFile, Problem> {
     let mut as_of = None;
     let mut jurisdiction = None;
     if let Some(value) = map.get("reference") {
-        let reference = as_object(value, "reference")?;
-        check_fields(reference, REFERENCE_FIELDS, "reference")?;
+        let reference = as_object(value, "$.reference")?;
+        check_fields(reference, REFERENCE_FIELDS, "$.reference")?;
         if reference.is_empty() {
             return problem(
-                "reference",
+                "$.reference",
                 "reference 至少要写 as_of 或 jurisdiction 之一；空对象不表示任何值",
             );
         }
-        if let Some(date) = optional_string(reference, "as_of", "reference")? {
-            std_deduce_kernel::meta::validate_date("reference.as_of", &date)
-                .map_err(|error| ("reference.as_of".to_owned(), error))?;
+        if let Some(date) = optional_string(reference, "as_of", "$.reference")? {
+            validate_json_date("as_of", "$.reference.as_of", &date)?;
             as_of = Some(date);
         }
-        if let Some(code) = optional_string(reference, "jurisdiction", "reference")? {
-            std_deduce_kernel::meta::validate_jurisdiction_code("reference.jurisdiction", &code)
-                .map_err(|error| ("reference.jurisdiction".to_owned(), error))?;
+        if let Some(code) = optional_string(reference, "jurisdiction", "$.reference")? {
+            validate_json_jurisdiction("jurisdiction", "$.reference.jurisdiction", &code)?;
             jurisdiction = Some(code);
         }
     }
 
     let facts_value = required_field(map, "facts", "$")?;
-    let facts = parse_facts(facts_value, "facts", false)?;
+    let facts = parse_facts(facts_value, "$.facts", false)?;
     let assumptions = match map.get("assumptions") {
-        Some(value) => parse_facts(value, "assumptions", true)?,
+        Some(value) => parse_facts(value, "$.assumptions", true)?,
         None => Vec::new(),
     };
     let objects = match map.get("objects") {
-        Some(value) => parse_objects(value)?,
+        Some(value) => parse_objects(value, "$.objects")?,
         None => Vec::new(),
     };
     let goals = match map.get("goals") {
         Some(value) => {
-            let items = string_array(value, "goals", |_, _| Ok(()))?;
+            let items = string_array(value, "$.goals", |_, _| Ok(()))?;
             items
                 .into_iter()
                 .enumerate()
                 .map(|(index, proposition)| CaseGoal {
-                    path: at_index("goals", index),
+                    path: at_index("$.goals", index),
                     proposition,
                 })
                 .collect()
@@ -563,8 +630,9 @@ fn parse_fact(value: &Value, path: &str, assumption: bool) -> Result<CaseFact, P
         (
             join(path, "identity"),
             format!(
-                "`{identity_text}` 不是合法身份；只能是 verified / user_asserted / \
-                 assumed / disputed / stipulated"
+                "`{}` 不是合法身份；只能是 verified / user_asserted / \
+                 assumed / disputed / stipulated",
+                escape_control(identity_text)
             ),
         )
     })?;
@@ -589,13 +657,11 @@ fn parse_fact(value: &Value, path: &str, assumption: bool) -> Result<CaseFact, P
 
     let occurred_at = optional_string(map, "occurred_at", path)?;
     if let Some(date) = &occurred_at {
-        std_deduce_kernel::meta::validate_date(&join(path, "occurred_at"), date)
-            .map_err(|error| (join(path, "occurred_at"), error))?;
+        validate_json_date("occurred_at", &join(path, "occurred_at"), date)?;
     }
     let occurred_in = optional_string(map, "occurred_in", path)?;
     if let Some(code) = &occurred_in {
-        std_deduce_kernel::meta::validate_jurisdiction_code(&join(path, "occurred_in"), code)
-            .map_err(|error| (join(path, "occurred_in"), error))?;
+        validate_json_jurisdiction("occurred_in", &join(path, "occurred_in"), code)?;
     }
 
     Ok(CaseFact {
@@ -621,31 +687,30 @@ fn parse_source(value: &Value, path: &str) -> Result<SourceRef, Problem> {
     source.version = optional_string(map, "version", path)?.unwrap_or_default();
     source.effective = optional_string(map, "effective", path)?;
     if let Some(date) = &source.effective {
-        std_deduce_kernel::meta::validate_date(&join(path, "effective"), date)
-            .map_err(|error| (join(path, "effective"), error))?;
+        validate_json_date("effective", &join(path, "effective"), date)?;
     }
     source.note = optional_string(map, "note", path)?.unwrap_or_default();
     source.quote = optional_string(map, "quote", path)?.unwrap_or_default();
     source.url = optional_string(map, "url", path)?.unwrap_or_default();
     source.jurisdiction = optional_string(map, "jurisdiction", path)?.unwrap_or_default();
     if !source.jurisdiction.is_empty() {
-        std_deduce_kernel::meta::validate_jurisdiction_code(
+        validate_json_jurisdiction(
+            "jurisdiction",
             &join(path, "jurisdiction"),
             &source.jurisdiction,
-        )
-        .map_err(|error| (join(path, "jurisdiction"), error))?;
+        )?;
     }
     source.retrieved_at = optional_string(map, "retrieved_at", path)?.unwrap_or_default();
     source.hash = optional_string(map, "hash", path)?.unwrap_or_default();
     Ok(source)
 }
 
-fn parse_objects(value: &Value) -> Result<Vec<CaseObject>, Problem> {
-    let items = as_array(value, "objects")?;
+fn parse_objects(value: &Value, section: &str) -> Result<Vec<CaseObject>, Problem> {
+    let items = as_array(value, section)?;
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut objects = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
-        let path = at_index("objects", index);
+        let path = at_index(section, index);
         let map = as_object(item, &path)?;
         check_fields(map, OBJECT_FIELDS, &path)?;
         let name =
@@ -654,7 +719,10 @@ fn parse_objects(value: &Value) -> Result<Vec<CaseObject>, Problem> {
         if !seen.insert(name.clone()) {
             return problem(
                 join(&path, "name"),
-                format!("对象 `{name}` 重复声明；同名对象只能声明一次"),
+                format!(
+                    "对象 `{}` 重复声明；同名对象只能声明一次",
+                    escape_control(&name)
+                ),
             );
         }
         let ty = non_blank(required_string(map, "type", &path)?, &join(&path, "type"))?.to_owned();
@@ -694,7 +762,11 @@ fn validate_identifier(name: &str, path: &str, unqualified: bool) -> Result<(), 
             "案件对象名不能带命名空间前缀；案件 JSON 没有 namespace",
         );
     }
-    let tokens = lex(name).map_err(|error| (path.to_owned(), format!("不是合法名称：{error}")))?;
+    let tokens = lex(name).map_err(|error| {
+        // The lexer's own diagnostic already escapes the offending character;
+        // escaping the whole message again would double its `\u{...}` form.
+        (path.to_owned(), format!("不是合法名称：{error}"))
+    })?;
     let single = matches!(
         tokens.as_slice(),
         [first, last]
@@ -704,7 +776,10 @@ fn validate_identifier(name: &str, path: &str, unqualified: bool) -> Result<(), 
     if !single {
         return problem(
             path,
-            format!("`{name}` 必须是单个标识符（不能含空白、换行、标点或注释）"),
+            format!(
+                "`{}` 必须是单个标识符（不能含空白、换行、标点或注释）",
+                escape_control(name)
+            ),
         );
     }
     Ok(())

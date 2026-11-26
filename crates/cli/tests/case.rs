@@ -153,6 +153,66 @@ fn assert_load_error(output: &Output, json_path: &str, message: &str) {
     );
 }
 
+/// Assert a diagnostic occupies exactly one line and contains no raw control or
+/// bidirectional-format character.
+fn assert_one_line(text: &str) {
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    assert!(
+        !body.contains('\n'),
+        "diagnostic contains a raw newline:\n{text}"
+    );
+    assert!(
+        !body.contains('\r'),
+        "diagnostic contains a raw carriage return:\n{text}"
+    );
+    assert!(
+        !body.contains('\u{001b}'),
+        "diagnostic contains a raw ESC:\n{text}"
+    );
+    assert!(
+        !body.contains('\u{202e}'),
+        "diagnostic contains a raw U+202E:\n{text}"
+    );
+}
+
+/// Assert the JSON-supplied value appears only in its escaped form, and that
+/// the standard escape spellings are present as literal text (`\n`, `\r`,
+/// Assert the JSON-supplied value appears only in its escaped form, and that
+/// the expected escape spellings are present as literal text.
+fn assert_escaped_diagnostic(output: &Output, path: &str, message: &str, escapes: &[&str]) {
+    assert_exit(output, LOAD_ERROR);
+    let err = stderr(output);
+    assert_one_line(&err);
+    for escaped in escapes {
+        assert!(
+            err.contains(escaped),
+            "diagnostic does not contain the literal escape {escaped:?}:\n{err}"
+        );
+    }
+    assert!(
+        err.contains(path),
+        "diagnostic does not name {path:?}:\n{err}"
+    );
+    assert!(
+        err.contains(message),
+        "diagnostic does not contain {message:?}:\n{err}"
+    );
+}
+
+/// Every control/format character class covered by the escaping test, with its
+/// rendered form.
+const ESCAPE_VECTORS: &[(&str, &str)] = &[
+    ("\n", "\\n"),
+    ("\r", "\\r"),
+    ("\u{001b}", "\\u{001B}"),
+    ("\u{202e}", "\\u{202E}"),
+];
+const ALL_ESCAPES: &[&str] = &["\\n", "\\r", "\\u{001B}", "\\u{202E}"];
+
+/// A JSON string carrying every character class an untrusted value could use to
+/// forge a second diagnostic line or a direction override.
+const ADVERSARIAL_TEXT: &str = "a\n\r\u{001b}\u{202e}b";
+
 // -------------------------------------------------------------------------
 // Success paths
 // -------------------------------------------------------------------------
@@ -414,6 +474,165 @@ fn an_unknown_top_level_field_is_rejected() {
 }
 
 #[test]
+fn json_values_in_diagnostics_are_escaped() {
+    // Unknown field name: it is quoted in the message and also part of the
+    // JSON path, so both must be escaped.
+    let mut value = example_case();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert(ADVERSARIAL_TEXT.to_owned(), json!(true));
+    assert_escaped_diagnostic(&run_value(&value), "$.a", "未知字段", ALL_ESCAPES);
+
+    // `identity` original value.
+    let mut value = example_case();
+    value["facts"][0]["identity"] = json!(ADVERSARIAL_TEXT);
+    assert_escaped_diagnostic(
+        &run_value(&value),
+        "$.facts[0].identity",
+        "不是合法身份",
+        ALL_ESCAPES,
+    );
+
+    // Object name and import alias: each control/format class separately, so
+    // both the lexer diagnostic (ESC / U+202E) and the "single identifier"
+    // message (newline / carriage return) are covered.
+    for &(raw, escaped) in ESCAPE_VECTORS {
+        let mut value = example_case();
+        value["objects"][0]["name"] = json!(format!("张三{raw}伪造"));
+        assert_escaped_diagnostic(&run_value(&value), "$.objects[0].name", "", &[escaped]);
+
+        let mut value = example_case();
+        value["imports"][0] = json!(format!("pkg{raw}伪造"));
+        assert_escaped_diagnostic(&run_value(&value), "$.imports[0]", "", &[escaped]);
+    }
+
+    // A JSON date value quoted by the shared validator message.
+    let mut value = example_case();
+    value["facts"][0]["occurred_at"] = json!(ADVERSARIAL_TEXT);
+    assert_escaped_diagnostic(
+        &run_value(&value),
+        "$.facts[0].occurred_at",
+        "不是 YYYY-MM-DD 日期",
+        ALL_ESCAPES,
+    );
+
+    // `source` date/code fields and the reference date/code go through the same
+    // validator and the same escaping.
+    for (label, path) in [
+        ("source.effective", "facts[0].source.effective"),
+        ("source.jurisdiction", "facts[0].source.jurisdiction"),
+    ] {
+        let mut value = example_case();
+        let (source_key, expected) = if label.starts_with("source.effective") {
+            ("effective", "不是 YYYY-MM-DD 日期")
+        } else {
+            ("jurisdiction", "含非法字符")
+        };
+        value["facts"][0]["source"][source_key] = json!(ADVERSARIAL_TEXT);
+        assert_escaped_diagnostic(
+            &run_value(&value),
+            &format!("$.{path}"),
+            expected,
+            ALL_ESCAPES,
+        );
+    }
+    for (path, message) in [
+        ("$.reference.as_of", "不是 YYYY-MM-DD 日期"),
+        ("$.reference.jurisdiction", "含非法字符"),
+    ] {
+        let mut value = example_case();
+        if path.ends_with("as_of") {
+            value["reference"]["as_of"] = json!(ADVERSARIAL_TEXT);
+        } else {
+            value["reference"]["jurisdiction"] = json!(ADVERSARIAL_TEXT);
+        }
+        assert_escaped_diagnostic(&run_value(&value), path, message, ALL_ESCAPES);
+    }
+
+    // A string schema version.
+    let mut value = example_case();
+    value["schema_version"] = json!(ADVERSARIAL_TEXT);
+    assert_escaped_diagnostic(
+        &run_value(&value),
+        "$.schema_version",
+        "不接受字符串",
+        ALL_ESCAPES,
+    );
+}
+
+#[test]
+fn proposition_and_type_text_cannot_forge_a_diagnostic_line() {
+    // The parser/elaborator messages quote tokens, not the whole input, but a
+    // raw control or format character in the input must never split the
+    // rendered diagnostic or reach the terminal raw.
+    for &(raw, _) in ESCAPE_VECTORS {
+        let adversarial = format!("x{raw}伪造行: error: 已加载");
+        for field in ["proposition", "type"] {
+            let mut value = example_case();
+            if field == "proposition" {
+                value["facts"][0]["proposition"] = json!(adversarial);
+            } else {
+                value["objects"][0]["type"] = json!(adversarial);
+            }
+            let output = run_value(&value);
+            assert_exit(&output, LOAD_ERROR);
+            assert_one_line(&stderr(&output));
+        }
+
+        let mut value = example_case();
+        value["goals"][0] = json!(adversarial);
+        let output = run_value(&value);
+        assert_exit(&output, LOAD_ERROR);
+        assert_one_line(&stderr(&output));
+    }
+}
+
+#[test]
+fn a_case_name_with_control_characters_stays_on_one_report_line() {
+    let mut value = example_case();
+    value["case"] = json!(ADVERSARIAL_TEXT);
+    let output = run_value(&value);
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    let loaded = out
+        .lines()
+        .find(|line| line.contains("已加载案件"))
+        .unwrap_or_else(|| panic!("no load line in:\n{out}"));
+    for escaped in ALL_ESCAPES {
+        assert!(loaded.contains(escaped), "{loaded}");
+    }
+    assert!(!out.contains('\u{001b}'), "{out}");
+    assert!(!out.contains('\u{202e}'), "{out}");
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.contains("已加载案件"))
+            .count(),
+        1,
+        "{out}"
+    );
+}
+
+#[test]
+fn schema_version_errors_name_the_actual_value() {
+    for (value, expected) in [
+        (json!(-1), "不接受负数 -1"),
+        (json!(1.0), "不接受小数（实际是 1.0）"),
+        (json!(null), "实际是 null（空值）"),
+        (json!("1"), "不接受字符串"),
+    ] {
+        let mut case = example_case();
+        case["schema_version"] = value;
+        let output = run_value(&case);
+        assert_exit(&output, LOAD_ERROR);
+        let err = stderr(&output);
+        assert!(err.contains("$.schema_version"), "{err}");
+        assert!(err.contains(expected), "{err}");
+        assert!(!err.contains("实际是null"), "{err}");
+    }
+}
+
+#[test]
 fn a_rule_field_is_rejected_as_defining_law() {
     let mut value = example_case();
     value
@@ -461,14 +680,24 @@ fn an_empty_source_text_is_rejected() {
 fn a_bad_occurred_at_is_rejected() {
     let mut value = example_case();
     value["facts"][0]["occurred_at"] = json!("2020-02-30");
-    assert_load_error(&run_value(&value), "facts[0].occurred_at", "超出");
+    let output = run_value(&value);
+    assert_load_error(&output, "$.facts[0].occurred_at", "超出");
+    let err = stderr(&output);
+    // Once in the path, once as the validator's field label. The full JSON
+    // path must not be repeated inside the message.
+    assert_eq!(err.matches("occurred_at").count(), 2, "{err}");
+    assert!(!err.contains("error: facts[0].occurred_at"), "{err}");
 }
 
 #[test]
 fn a_bad_occurred_in_is_rejected() {
     let mut value = example_case();
     value["facts"][0]["occurred_in"] = json!("CN HN");
-    assert_load_error(&run_value(&value), "facts[0].occurred_in", "非法字符");
+    let output = run_value(&value);
+    assert_load_error(&output, "$.facts[0].occurred_in", "非法字符");
+    let err = stderr(&output);
+    assert_eq!(err.matches("occurred_in").count(), 2, "{err}");
+    assert!(!err.contains("error: facts[0].occurred_in"), "{err}");
 }
 
 #[test]

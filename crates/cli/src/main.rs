@@ -81,7 +81,7 @@
 //! records, individual constants and goals, and a rule/predicate/interpretation/
 //! risk/priority field is refused outright. All fields are checked before the
 //! session is touched; proposition text goes through the existing parser and
-//! elaborator. Diagnostics name the JSON path (`facts[2].identity`), one bad
+//! elaborator. Diagnostics name the JSON path (`$.facts[2].identity`), one bad
 //! entry rejects the whole file, and a `reference` value that disagrees with an
 //! explicitly set session date or jurisdiction is an error rather than an
 //! overwrite. Imports, the default environment and the closed environment use
