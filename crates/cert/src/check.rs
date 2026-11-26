@@ -138,9 +138,12 @@
 //! It is recomputed from the environment's `open` markers and the proof graph
 //! reachable from the root ([`crate::open::dependency`]), and a certificate that
 //! records a different one — or none, or several — is rejected. A rule step
-//! concluding an open concept (`重大`, `情节严重`), or a root that is such a
-//! predicate, depends on a human judgement; the certificate must not report it
-//! as unconditional.
+//! concluding an open concept (`重大`, `情节严重`), a universal instance of it or
+//! a root that is such a predicate depends on a human judgement; the certificate
+//! must not report it as unconditional. An `interpretation_application` that
+//! licenses the concept releases the obligation instead, because the sourced
+//! interpretation is itself the explicit human reading; the same recomputation
+//! decides both directions, so the builder and the checker cannot disagree.
 //!
 //! A [`Node::Gap`] proves nothing, so it cannot be a premise. It may be the
 //! root; the report then says `root_proved = false`.
@@ -2820,13 +2823,19 @@ fn effective_text(value: &Option<String>) -> String {
 /// what the certificate records.
 ///
 /// An `open` marker says a predicate such as 「重大」 needs a human judgement.
-/// A rule step that concludes it, or a root that is itself such a predicate,
-/// therefore cannot be certified as an unconditional proof. The obligation is
-/// derived data, not a free-text note: [`crate::open::dependency`] rebuilds it
-/// from the environment's markers and the proof graph reachable from the root,
-/// and this check requires exactly that obligation. Deleting it makes the open
-/// concept look proved; adding one to an unrelated conclusion would be just as
-/// dishonest. Both are rejected.
+/// A rule step that concludes it, a universal instance of it, or a root that is
+/// itself such a predicate therefore cannot be certified as an unconditional
+/// proof. The obligation is derived data, not a free-text note:
+/// [`crate::open::dependency`] rebuilds it from the environment's markers and
+/// the proof graph reachable from the root, and this check requires exactly that
+/// obligation. Deleting it makes the open concept look proved; adding one to an
+/// unrelated conclusion would be just as dishonest. Both are rejected.
+///
+/// An interpretation application that licenses the open concept is exempt in
+/// the same recomputation: the sourced interpretation is the human reading, so
+/// no obligation is expected for that node. Dropping the application node from
+/// a certificate puts the obligation back, because the exemption is keyed on the
+/// evidence on the proof graph, not on a flag.
 fn validate_open_concept_obligations(env: &Env, cert: &Certificate) -> Result<(), CheckError> {
     let expected = crate::open::dependency(env, cert)
         .map_err(|message| CheckError {

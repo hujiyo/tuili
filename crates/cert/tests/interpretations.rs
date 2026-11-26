@@ -10,7 +10,8 @@ use std_deduce_cert::{
     check, kernel_proof, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind,
     ApplicabilityVerdict, Assumption, CertExpr, Certificate, Conflict, EnvironmentIdentity,
     Explicit, FactIdentity, FormatVersion, Interpretation, InterpretationDirection, Metadata, Node,
-    Provenance, Resolution, RuleApplicability, Source, UnresolvedReason,
+    ObligationKind, OpenObligation, Provenance, Resolution, RuleApplicability, Source,
+    UnresolvedReason,
 };
 use std_deduce_kernel::env::DeclKind;
 use std_deduce_kernel::{name, Expr};
@@ -86,6 +87,18 @@ fn fact_assumption(lib: &Library, id: &str) -> Assumption {
         identity: FactIdentity::from(identity),
         sources: decl.sources.iter().map(Source::from).collect(),
         label: Some(id.to_owned()),
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
+    }
+}
+
+/// A listed assumption with no recorded sources.
+fn fact(proposition: CertExpr, identity: FactIdentity) -> Assumption {
+    Assumption {
+        proposition,
+        identity,
+        sources: Vec::new(),
+        label: None,
         occurred_at: Explicit::none(),
         occurred_in: Explicit::none(),
     }
@@ -436,4 +449,149 @@ fn an_interpretation_cannot_consume_another_interpretation() {
     cert.root = Some(2);
     let error = reject(&cert);
     assert!(error.contains("禁止解释链"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// An enabled interpretation releases the open-concept obligation
+// ---------------------------------------------------------------------------
+
+/// An environment whose predicate `重大` is an open concept and whose sourced
+/// interpretation licenses it from a closed premise.
+const OPEN_ENV: &str = r#"
+sort 人
+pred 损害 : 人 → Prop
+pred 重大 : 人 → Prop
+obj 甲 : 人
+open 重大
+axiom 损害事实 : 损害 甲
+  source text "案情" locator "一"
+interpret 重大解释 : 损害 甲 → 重大 甲
+  direction literal
+  source text "解释" locator "二" version "2020"
+"#;
+
+fn load_open() -> Library {
+    let mut lib = Library::new();
+    lib.load("open-interpret.std", OPEN_ENV)
+        .unwrap_or_else(|error| panic!("load: {error}"));
+    lib
+}
+
+fn atom_expr(predicate: &str, object: &str) -> CertExpr {
+    CertExpr::try_from(&Expr::apps(
+        Expr::constant(predicate),
+        [Expr::constant(object)],
+    ))
+    .expect("the expression is encodable")
+}
+
+/// The proof that states `重大 甲` through the interpretation application.
+fn open_interpretation_certificate(lib: &Library) -> Certificate {
+    Certificate {
+        format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::none(),
+        assumptions: vec![fact_assumption(lib, "损害事实")],
+        interpretations: vec![interpretation(lib, "重大解释")],
+        nodes: vec![
+            Node::Assumption { assumption: 0 },
+            Node::InterpretationApplication {
+                interpretation: 0,
+                premise: 0,
+                conclusion: atom_expr("重大", "甲"),
+            },
+        ],
+        root: Some(1),
+        alternatives: Vec::new(),
+        conflicts: Vec::new(),
+        open_obligations: Vec::new(),
+        metadata: Metadata::default(),
+    }
+}
+
+/// Enabling a sourced interpretation and deriving the open concept through its
+/// application is the human reading itself: no `open_concept` obligation is
+/// expected. The statement is still visible to the candidate scan, and adding
+/// an obligation by hand is rejected.
+#[test]
+fn an_interpretation_that_licenses_an_open_concept_releases_the_obligation() {
+    let lib = load_open();
+    let cert = open_interpretation_certificate(&lib);
+
+    let report = check(&lib.env, &cert).expect("the released certificate is legal");
+    assert!(report.root_proved);
+    assert!(
+        !report.requires_human,
+        "a sourced interpretation is the human reading, not a pending one"
+    );
+    let kernel = kernel_proof(&lib.env, &cert).expect("the kernel proof is legal");
+    assert!(kernel.root_proved);
+
+    assert_eq!(
+        std_deduce_cert::open_concept_dependency(&lib.env, &cert).expect("dependency"),
+        None,
+        "the licensed concept is not a dependency"
+    );
+    let statements = std_deduce_cert::open_concept_statements(&lib.env, &cert)
+        .expect("statements")
+        .expect("the proof states the open concept");
+    assert_eq!(statements.len(), 1);
+    assert_eq!(statements[0].node, 1);
+    assert_eq!(statements[0].concept.as_ref(), "重大");
+    assert_eq!(
+        statements[0].proposition,
+        atom_expr("重大", "甲"),
+        "the statement carries the proposition :branches offers alternatives for"
+    );
+
+    // The release is not a licence to add the obligation back by hand.
+    let mut invented = cert.clone();
+    invented.open_obligations.push(OpenObligation {
+        id: "open-concept".to_owned(),
+        kind: ObligationKind::OpenConcept,
+        description: "开放概念 `重大` 需要人判断，不得当作已证明".to_owned(),
+        nodes: vec![1],
+    });
+    let error = check(&lib.env, &invented)
+        .expect_err("an obligation on a licensed concept is fabricated")
+        .to_string();
+    assert!(error.contains("不能手工添加"), "{error}");
+}
+
+/// The release is evidence-bound: replace the interpretation application with
+/// an asserted root fact and the checker requires the obligation again. That is
+/// the "delete the interpretation step and the obligation reappears" case, and
+/// it also proves the checker is not reading a flag.
+#[test]
+fn the_obligation_returns_when_the_interpretation_application_is_gone() {
+    let lib = load_open();
+    let licensed = open_interpretation_certificate(&lib);
+    check(&lib.env, &licensed).expect("the licensed proof is legal");
+
+    let mut asserted = licensed.clone();
+    asserted
+        .assumptions
+        .push(fact(atom_expr("重大", "甲"), FactIdentity::UserAsserted));
+    asserted.interpretations.clear();
+    asserted.nodes = vec![Node::Assumption {
+        assumption: asserted.assumptions.len() - 1,
+    }];
+    asserted.root = Some(0);
+
+    let error = check(&lib.env, &asserted)
+        .expect_err("asserting the concept needs a human judgement")
+        .to_string();
+    assert!(
+        error.contains("没有记录开放概念义务"),
+        "the obligation must reappear for a non-interpretation statement: {error}"
+    );
+
+    // Recording the recomputed obligation is accepted again.
+    asserted.open_obligations.push(OpenObligation {
+        id: "open-concept".to_owned(),
+        kind: ObligationKind::OpenConcept,
+        description: "开放概念 `重大` 需要人判断，不得当作已证明".to_owned(),
+        nodes: vec![0],
+    });
+    let report = check(&lib.env, &asserted).expect("the obligation is the expected one");
+    assert!(report.requires_human);
 }

@@ -144,8 +144,10 @@
 //! encode. One derived fact is added: when the root's proof graph turns an
 //! `open` concept (`重大`, `情节严重`) into a proved proposition, the
 //! certificate records an `open_concept` obligation naming the concepts and
-//! the nodes that state them. An open concept is never exported as an
-//! unconditional conclusion.
+//! the nodes that state them, so an open concept is never exported as an
+//! unconditional conclusion. An `interpretation_application` that licenses the
+//! concept is exempt: enabling a sourced interpretation is the explicit human
+//! reading, so the obligation is released instead.
 //!
 //! Every conclusion derived by rules or universal elimination keeps all of its
 //! independent witnesses. A witness is one rule instance (rule name plus
@@ -4818,12 +4820,15 @@ fn node_prop(n: &Node) -> Option<&Expr> {
 /// `env` is the environment the derivation was produced in. It is read for one
 /// thing only: the `open` markers ([`Env::open_predicates`]). When the root's
 /// proof graph turns such a concept (`重大`, `情节严重`) into a proved
-/// proposition, the certificate gains one `open_concept` obligation naming the
-/// concepts and the nodes that state them, so an open concept is never
-/// exported as an unconditional conclusion. The obligation is computed by
+/// proposition through a rule, a universal instance or the root assumption, the
+/// certificate gains one `open_concept` obligation naming the concepts and the
+/// nodes that state them, so an open concept is never exported as an
+/// unconditional conclusion. An `interpretation_application` that licenses the
+/// concept releases the obligation: the sourced interpretation is the human
+/// reading. The obligation is computed by
 /// [`std_deduce_cert::open_concept_dependency`], the same function the
-/// certificate checker recomputes with; a derivation over no open concept
-/// records none.
+/// certificate checker recomputes with; a derivation over no open concept, or
+/// one that only licensed it through an enabled interpretation, records none.
 ///
 /// `priority_order` is the [`Reasoner::priority_order`] of the reasoner that
 /// produced `d`. It is consulted only to say how many recorded priority edges
