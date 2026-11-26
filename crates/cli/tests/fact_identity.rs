@@ -472,7 +472,8 @@ axiom 已批准 : 批准 张三
 
 /// `:fact add` and `:fact assumed` are two identities for the same
 /// proposition: the second registration is refused before it inserts anything.
-/// Registering the same identity twice is allowed.
+/// The same identity is refused too: the ledger keeps one entry per
+/// proposition, and the existing fact is named in the error.
 #[test]
 fn a_session_fact_cannot_change_its_identity() {
     let theory = TempFile::new(
@@ -501,13 +502,14 @@ obj 李四 : 公民
         "the failed second registration must not print a success line:\n{out}"
     );
 
-    // The same identity is not a conflict, even with two declarations.
+    // The same identity is still one fact: a repeated `:fact add` is refused
+    // and the existing declaration is named.
     let output = session(&theory, &[":fact add 违规 李四", ":fact add 违规 李四"]);
-    let out = check(output, PROVED, &["已登记用户陈述：违规 李四"]);
+    let out = check_stderr(output, ERROR, &["同一命题只能登记为一条事实", "事实1"]);
     assert_eq!(
         stdout(&out).matches("已登记用户陈述：违规 李四").count(),
-        2,
-        "two declarations with one identity are allowed:\n{}",
+        1,
+        "only the first registration may print a success line:\n{}",
         stdout(&out)
     );
 }

@@ -422,3 +422,50 @@ fn an_overflowing_computed_step_is_rejected_instead_of_wrapping() {
     assert_eq!(error.node, Some(2), "{error}");
     assert!(error.message.contains("溢出"), "{}", error.message);
 }
+
+#[test]
+fn a_computed_form_without_arithmetic_is_rejected() {
+    // `账单合计` only passes a value through: evaluating its instance changes
+    // nothing, so a `computed` of the same proposition would print
+    // `计算：X = X` and claim a computation the rule never performed.
+    let node = Node::RuleApplication {
+        rule: "账单合计".to_owned(),
+        conclusion: amount("合计", 5000),
+        computed: Some(amount("合计", 5000)),
+        premises: vec![0],
+        bindings: bindings(vec![("p", constant("甲")), ("x", num(5000))]),
+        sources: Vec::new(),
+        applicability: unscoped_applicability(),
+    };
+    let cert = Certificate {
+        format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::Recorded(EnvironmentRecord::empty()),
+        assumptions: vec![assumption(amount("账单", 5000))],
+        interpretations: Vec::new(),
+        nodes: vec![Node::Assumption { assumption: 0 }, node],
+        root: Some(1),
+        alternatives: Vec::new(),
+        conflicts: Vec::new(),
+        open_obligations: Vec::new(),
+        metadata: Default::default(),
+    };
+    let error = check(&env(), &cert).expect_err("the invented computation must be refused");
+    assert_eq!(error.node, Some(1), "{error}");
+    assert!(
+        error.message.contains("该步没有算术，不应记录计算形式"),
+        "{}",
+        error.message
+    );
+
+    // An arithmetic step is no exception when both forms are the same term:
+    // then the conclusion was recorded un-evaluated, and no computation
+    // separates the two.
+    let cert = certificate(rule_node(raw_total(), Some(raw_total())));
+    let error = check(&env(), &cert).expect_err("the same form on both sides is refused");
+    assert_eq!(error.node, Some(2), "{error}");
+    assert!(
+        error.message.contains("与计算前形式相同"),
+        "{}",
+        error.message
+    );
+}

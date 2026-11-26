@@ -815,11 +815,26 @@ impl Library {
                         &e,
                     )
                     .map_err(|e| LoadError::new(e.to_string()))?;
-                    report.checked.push(format!(
+                    // Arithmetic is a computation, not a label: checking a term
+                    // evaluates the built-in operations in it, so an i64
+                    // overflow is reported here instead of surviving as an
+                    // unevaluated expression that only fails later in a query.
+                    let evaluated = std_deduce_kernel::norm::evaluate_arithmetic(&next.env, &e)
+                        .map_err(|error| {
+                            LoadError::new(format!("`#check` 的项做算术求值时出错：{error}"))
+                        })?;
+                    let mut line = format!(
                         "{} : {}",
                         std_deduce_kernel::pretty::print_expr(&e),
                         std_deduce_kernel::pretty::print_expr(&ty)
-                    ));
+                    );
+                    if evaluated != e {
+                        line.push_str(&format!(
+                            "（求值：{}）",
+                            std_deduce_kernel::pretty::print_expr(&evaluated)
+                        ));
+                    }
+                    report.checked.push(line);
                 }
                 Item::Proposition(t) => {
                     let e = elab::elab_top(&next.env, &t).map_err(|e| LoadError::new(e.msg))?;
@@ -830,10 +845,21 @@ impl Library {
                         &std_deduce_kernel::Expr::Sort(0),
                     )
                     .map_err(|e| LoadError::new(format!("`#proposition` 的项不是命题：{e}")))?;
-                    report.checked.push(format!(
-                        "命题：{}",
-                        std_deduce_kernel::pretty::print_expr(&e)
-                    ));
+                    // A proposition may contain a comparison or an arithmetic
+                    // expression; evaluate it for the same reason as `#check`:
+                    // overflow is a load error, not a neutral term.
+                    let evaluated = std_deduce_kernel::norm::evaluate_arithmetic(&next.env, &e)
+                        .map_err(|error| {
+                            LoadError::new(format!("`#proposition` 的项做算术求值时出错：{error}"))
+                        })?;
+                    let mut line = format!("命题：{}", std_deduce_kernel::pretty::print_expr(&e));
+                    if evaluated != e {
+                        line.push_str(&format!(
+                            "（求值：{}）",
+                            std_deduce_kernel::pretty::print_expr(&evaluated)
+                        ));
+                    }
+                    report.checked.push(line);
                 }
                 Item::Show(n) => {
                     if let Some(d) = next.env.get(&n) {

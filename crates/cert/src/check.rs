@@ -969,6 +969,21 @@ fn check_with(
                 ),
             ));
         }
+        // `computed` records a computation that actually happened. A step with
+        // no arithmetic, or one whose arithmetic leaves the instance unchanged,
+        // has nothing to record: accepting `computed == conclusion` would make
+        // the tree print `计算：X = X`, inventing a computation step that the
+        // rule never performed.
+        if computed.is_some() && !arithmetic_changed {
+            return Err(CheckError::at(
+                id,
+                format!(
+                    "规则 `{rule}` 的实例结论「{}」按绑定替换后求值前后相同：\
+                     该步没有算术，不应记录计算形式（节点的 `computed` 字段）",
+                    print_expr(&expected)
+                ),
+            ));
+        }
         if let Some(computed) = computed {
             let recorded = Expr::from(computed);
             if !is_closed(&recorded) {
@@ -994,6 +1009,19 @@ fn check_with(
                          算术步骤与规则不一致",
                         print_expr(&recorded),
                         print_expr(&expected)
+                    ),
+                ));
+            }
+            // The recorded conclusion must be the value, not the expression
+            // it was computed from. `computed` and `conclusion` saying the
+            // same thing means no evaluation separates them.
+            if expression_key(&recorded) == expression_key(&actual) {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "规则 `{rule}` 的结论「{}」与计算前形式相同：该步没有算术，\
+                         不应记录计算形式（节点的 `computed` 字段）",
+                        print_expr(&actual)
                     ),
                 ));
             }
