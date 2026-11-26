@@ -41,7 +41,22 @@
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
-//! Version 11 records rule guards: every rule application and every gap
+//! Version 13 records calendar dates: a certificate expression may carry a
+//! `date` literal (`{"kind": "date", "value": "2020-05-06"}`), one canonical
+//! `YYYY-MM-DD` day inside `1900-01-01..=9999-12-31`, validated while the
+//! certificate is parsed. Date arithmetic in a rule conclusion uses the same
+//! `computed` field as integer arithmetic, and a date comparison in a guard
+//! uses the same [`GuardRecord`]; the checker re-evaluates `daysBetween` /
+//! `addDays` / `addMonths` / `addYears` from the environment rule and the
+//! recorded bindings. Version 12 records the premise choices of a rule application: a
+//! disjunctive premise records which written branch was proved, and an
+//! existential premise records the concrete declared individual that
+//! witnesses the body. The choice is mandatory exactly for compound premises;
+//! the checker re-projects the cited premise node onto the selected branch or
+//! witness' body instance, so a non-existent branch, an unproved branch or an
+//! invented witness is rejected. Unselected branches need not be proven —
+//! the step establishes that one branch holds. Version 11 records rule guards:
+//! every rule application and every gap
 //! candidate of a guarded rule carries one [`GuardRecord`] per `guard` clause —
 //! the declared guard with its parameters opened as `?<name>`, the guard closed
 //! by the recorded bindings, and the evaluated truth value. The checker
@@ -278,8 +293,8 @@ pub use key::expression_key;
 pub use model::{
     Alternative, Assumption, Binding, Certificate, Conflict, Explicit, FactIdentity,
     GapAxiomCandidate, GapCandidate, GuardRecord, Interpretation, InterpretationDirection,
-    Metadata, Node, NodeId, ObligationKind, OpenObligation, PriorityClause, PriorityEdge,
-    PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
+    Metadata, Node, NodeId, ObligationKind, OpenObligation, PremiseChoice, PriorityClause,
+    PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
     MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES, MAX_CERT_JSON_BYTES, MAX_CERT_NODES,
     MAX_CERT_WITNESSES_PER_CONCLUSION,
 };

@@ -127,6 +127,7 @@ fn date_node(conclusion: CertExpr, computed: Option<CertExpr>) -> Node {
         rule: "截止日".to_owned(),
         conclusion,
         computed,
+        choices: Vec::new(),
         premises: vec![0],
         bindings: bindings(vec![("p", constant("甲")), ("d", day("2020-05-06"))]),
         sources: Vec::new(),
@@ -298,6 +299,7 @@ fn a_date_step_that_leaves_the_range_is_an_error() {
                         apply("addYears", vec![day("9999-12-31"), num(3)]),
                     ],
                 )),
+                choices: Vec::new(),
                 premises: vec![0],
                 bindings: bindings(vec![("p", constant("甲")), ("d", day("9999-12-31"))]),
                 sources: Vec::new(),
@@ -320,6 +322,7 @@ fn a_guard_over_dates_is_recomputed() {
         rule: "逾期认定".to_owned(),
         conclusion: apply("逾期", vec![constant("甲")]),
         computed: None,
+        choices: Vec::new(),
         premises: vec![0, 1],
         bindings: bindings(vec![
             ("p", constant("甲")),

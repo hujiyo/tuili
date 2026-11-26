@@ -31,8 +31,9 @@ pub mod term;
 
 pub use date::Date;
 pub use env::{
-    Burden, Ctx, Decl, DeclKind, Env, FactIdentity, InterpretationDirection, ProofBurden,
-    RiskTheme, RuleDecl, RulePleading, Standard,
+    Burden, Ctx, Decl, DeclKind, Env, FactIdentity, InterpretationDirection, OpenPremise,
+    PremiseDecl, PremiseKind, ProofBurden, RiskTheme, RuleDecl, RulePleading, Standard,
+    MAX_OR_BRANCHES,
 };
 pub use error::{Error, Result};
 pub use meta::{RevisionGroup, RevisionScope, Scope, ScopeOrigin};

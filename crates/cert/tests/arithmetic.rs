@@ -109,6 +109,7 @@ fn bindings(values: Vec<(&str, CertExpr)>) -> Vec<Binding> {
 /// arithmetic step recorded as `合计 甲 (add 3000 2000)`.
 fn rule_node(conclusion: CertExpr, computed: Option<CertExpr>) -> Node {
     Node::RuleApplication {
+        choices: Vec::new(),
         guards: Vec::new(),
         rule: "赔偿合计".to_owned(),
         conclusion,
@@ -236,6 +237,7 @@ fn recorded_bindings_must_match_the_cited_premises() {
     // `a = 4000` is not this instance: the arithmetic step would compute from a
     // value the premises do not give.
     let node = Node::RuleApplication {
+        choices: Vec::new(),
         guards: Vec::new(),
         rule: "赔偿合计".to_owned(),
         conclusion: amount("合计", 6000),
@@ -285,6 +287,7 @@ fn a_step_without_arithmetic_may_omit_the_computed_form() {
     // field stays optional. The checker still rebuilds the instance from the
     // rule and the bindings, so nothing is taken on trust.
     let node = Node::RuleApplication {
+        choices: Vec::new(),
         guards: Vec::new(),
         rule: "账单合计".to_owned(),
         conclusion: amount("合计", 5000),
@@ -377,6 +380,7 @@ fn a_rule_step_without_arithmetic_records_no_computed_field() {
     // is omitted rather than written as `null`, so v13 output stays stable for
     // cases that compute nothing.
     let cert = certificate(Node::RuleApplication {
+        choices: Vec::new(),
         guards: Vec::new(),
         rule: "赔偿合计".to_owned(),
         conclusion: amount("合计", 5000),
@@ -400,6 +404,7 @@ fn an_overflowing_computed_step_is_rejected_instead_of_wrapping() {
     // the kernel may accept it. The premises really do provide the two huge
     // numbers, so the step's arithmetic — not the binding — is what overflows.
     let node = Node::RuleApplication {
+        choices: Vec::new(),
         guards: Vec::new(),
         rule: "赔偿合计".to_owned(),
         conclusion: amount("合计", 0),
@@ -434,14 +439,15 @@ fn a_computed_form_without_arithmetic_is_rejected() {
     // nothing, so a `computed` of the same proposition would print
     // `计算：X = X` and claim a computation the rule never performed.
     let node = Node::RuleApplication {
+        choices: Vec::new(),
         rule: "账单合计".to_owned(),
         conclusion: amount("合计", 5000),
         computed: Some(amount("合计", 5000)),
         premises: vec![0],
         bindings: bindings(vec![("p", constant("甲")), ("x", num(5000))]),
+        guards: Vec::new(),
         sources: Vec::new(),
         applicability: unscoped_applicability(),
-        guards: Vec::new(),
     };
     let cert = Certificate {
         format_version: FormatVersion::CURRENT,

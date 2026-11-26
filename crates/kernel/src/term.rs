@@ -221,6 +221,64 @@ pub fn instantiate_telescope(body: &Expr, values: &[Expr]) -> Expr {
     result
 }
 
+/// Instantiate the telescope prefix around the witness binder of an
+/// existential body.
+///
+/// The body is written in the context `prefix, x` where `x` is the witness
+/// (`Var(0)`). `values` gives the closed values of the first `prefix_len`
+/// prefix binders, outermost first (a value may be missing for a premise
+/// binder, which the caller does not support). Only the prefix variables are
+/// replaced; the witness variable keeps its de Bruijn role, so inner binders in
+/// the body cannot capture it. Values must be closed (the caller checks), which
+/// is why no binder-crossing shift is needed.
+pub fn instantiate_witness_prefix(body: &Expr, values: &[Expr], prefix_len: usize) -> Expr {
+    fn go(e: &Expr, values: &[Expr], prefix_len: usize, depth: usize) -> Expr {
+        match e {
+            Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => e.clone(),
+            Expr::Var(j) => {
+                if *j < depth {
+                    e.clone()
+                } else {
+                    let rel = *j - depth;
+                    if rel == 0 {
+                        // The witness binder itself.
+                        e.clone()
+                    } else if rel <= prefix_len {
+                        let position = prefix_len - rel;
+                        values.get(position).cloned().unwrap_or_else(|| e.clone())
+                    } else {
+                        e.clone()
+                    }
+                }
+            }
+            Expr::Pi {
+                name,
+                domain,
+                codomain,
+            } => Expr::Pi {
+                name: name.clone(),
+                domain: Box::new(go(domain, values, prefix_len, depth)),
+                codomain: Box::new(go(codomain, values, prefix_len, depth + 1)),
+            },
+            Expr::Lam { name, domain, body } => Expr::Lam {
+                name: name.clone(),
+                domain: Box::new(go(domain, values, prefix_len, depth)),
+                body: Box::new(go(body, values, prefix_len, depth + 1)),
+            },
+            Expr::App { func, arg } => Expr::App {
+                func: Box::new(go(func, values, prefix_len, depth)),
+                arg: Box::new(go(arg, values, prefix_len, depth)),
+            },
+            Expr::Let { name, value, body } => Expr::Let {
+                name: name.clone(),
+                value: Box::new(go(value, values, prefix_len, depth)),
+                body: Box::new(go(body, values, prefix_len, depth + 1)),
+            },
+        }
+    }
+    go(body, values, prefix_len, 0)
+}
+
 /// True when no variable is free at the top level.
 pub fn is_closed(e: &Expr) -> bool {
     free_vars(e, 0).is_empty()

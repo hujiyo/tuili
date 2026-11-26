@@ -647,6 +647,7 @@ fn deleting_the_conflict_and_rerooting_at_a_defeated_rule_is_rejected() {
         .expect("the binding value is a certificate expression");
     let root = certificate.nodes.len();
     certificate.nodes.push(Node::RuleApplication {
+        choices: Vec::new(),
         guards: Vec::new(),
         computed: None,
         rule: "拒绝".to_owned(),
@@ -741,6 +742,7 @@ rule 推定有罪 :
         .expect("the binding value is a certificate expression");
     let branch = certificate.nodes.len();
     certificate.nodes.push(Node::RuleApplication {
+        choices: Vec::new(),
         guards: Vec::new(),
         computed: None,
         rule: "推定有罪".to_owned(),

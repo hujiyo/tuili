@@ -419,6 +419,7 @@ fn tampered_conclusion_or_binding_is_rejected() {
         nodes: vec![
             Node::Assumption { assumption: 0 },
             Node::RuleApplication {
+                choices: Vec::new(),
                 guards: Vec::new(),
                 computed: None,
                 rule: "恒真".to_owned(),

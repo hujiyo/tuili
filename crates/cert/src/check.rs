@@ -261,7 +261,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use std_deduce_kernel::conv::convertible;
-use std_deduce_kernel::env::{escape_control, named_binders, DeclKind, RuleDecl};
+use std_deduce_kernel::env::{
+    escape_control, named_binders, substitute_pattern_constants, DeclKind, OpenPremise,
+    PremiseKind, RuleDecl,
+};
 use std_deduce_kernel::norm::{evaluate_arithmetic, normalize};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::{instantiate_telescope, is_closed};
@@ -278,8 +281,8 @@ use crate::expr::CertExpr;
 use crate::key::expression_key;
 use crate::model::{
     Certificate, Conflict, Explicit, FactIdentity, GuardRecord, InterpretationDirection, Node,
-    NodeId, ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin,
-    Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
+    NodeId, ObligationKind, OpenObligation, PremiseChoice, PriorityClause, PriorityEdge,
+    PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
     MAX_CERT_WITNESSES_PER_CONCLUSION,
 };
 use crate::source::Source;
@@ -763,6 +766,7 @@ fn check_with(
             premises,
             bindings,
             guards,
+            choices,
             applicability,
             ..
         } = node
@@ -887,8 +891,18 @@ fn check_with(
         let premise_binders = premise_binder_names(r);
         if !premise_binders.is_empty() {
             for (i, _) in r.premises.iter().enumerate() {
-                if let Some(binder) = mentioned_premise_binder(&r.open_premise(i), &premise_binders)
-                {
+                let mentions = match &r.open_premise(i) {
+                    OpenPremise::Plain(pattern) => {
+                        mentioned_premise_binder(pattern, &premise_binders)
+                    }
+                    OpenPremise::Or(branches) => branches
+                        .iter()
+                        .find_map(|branch| mentioned_premise_binder(branch, &premise_binders)),
+                    OpenPremise::Exists { body, .. } => {
+                        mentioned_premise_binder(body, &premise_binders)
+                    }
+                };
+                if let Some(binder) = mentions {
                     return Err(CheckError::at(
                         id,
                         format!(
@@ -919,20 +933,55 @@ fn check_with(
             }
         }
 
+        // The branch/witness selections are validated before any premise
+        // comparison: the choice must name an existing premise and branch, its
+        // kind must match the declared premise kind, and a witness must be a
+        // concrete declared individual of the premise's domain type. The
+        // selected branch or body instance is then the proposition the cited
+        // node must prove.
+        let selected = validate_premise_choices(env, rule, r, choices, &binding, true)
+            .map_err(|message| CheckError::at(id, message))?;
+
         for (i, premise) in premises.iter().enumerate() {
             let proof = node_prop(cert, &cert.nodes[*premise]).ok_or_else(|| {
                 CheckError::at(id, format!("前提 {premise} 是未闭合的缺口，不能充当前提"))
             })?;
             let actual = Expr::from(proof);
-            let expected = close_pattern(&r.open_premise(i), &binding);
+            let (expected, what) = match (&r.premises[i].kind, &selected[i]) {
+                (PremiseKind::Plain(_), SelectedChoice::Plain) => (
+                    close_pattern(&r.open_premise_plain(i), &binding),
+                    format!("第 {} 个前提实例", i + 1),
+                ),
+                (PremiseKind::Or(_), SelectedChoice::Branch(branch)) => (
+                    close_pattern(&r.open_branch(i, *branch), &binding),
+                    format!("第 {} 个前提的第 {} 个析取分支", i + 1, branch + 1),
+                ),
+                (PremiseKind::Exists { binder, .. }, SelectedChoice::Witness(witness)) => {
+                    let body = close_pattern(&r.open_exists_body(i), &binding);
+                    let expected =
+                        substitute_pattern_constants(&body, &[(binder.clone(), witness.clone())]);
+                    (
+                        expected,
+                        format!("第 {} 个前提在见证 `{}` 下的体", i + 1, print_expr(witness)),
+                    )
+                }
+                _ => {
+                    // `validate_premise_choices` matched every premise kind to
+                    // its choice already; reaching here would be an internal
+                    // inconsistency rather than a clean pass.
+                    return Err(CheckError::at(
+                        id,
+                        format!("规则 `{rule}` 的第 {} 个前提的选择与声明不一致", i + 1),
+                    ));
+                }
+            };
             let expected_key = key(env, &expected).map_err(|m| CheckError::at(id, m))?;
             let actual_key = key(env, &actual).map_err(|m| CheckError::at(id, m))?;
             if expected_key != actual_key {
                 return Err(CheckError::at(
                     id,
                     format!(
-                        "规则 `{rule}` 的第 {} 个前提实例是 `{}`，而引用的节点 {premise} 证明的是 `{}`",
-                        i + 1,
+                        "规则 `{rule}` 的{what}是 `{}`，而引用的节点 {premise} 证明的是 `{}`",
                         print_expr(&expected),
                         print_expr(&actual)
                     ),
@@ -2411,9 +2460,19 @@ fn validate_candidate_applicability(
         }
         binding.insert(entry.parameter.as_str(), value);
     }
-    let expected_premises: Vec<Expr> = (0..declared.premises.len())
-        .map(|i| close_pattern(&declared.open_premise(i), &binding))
-        .collect();
+    // The candidate's branch/witness choices are structural: a choice is
+    // accepted only for a compound premise whose kind matches, and a compound
+    // premise without a choice is a premise the candidate does *not* hold (all
+    // its branches are listed missing). Every choice is still checked against
+    // the rule declaration here; a candidate cannot invent a branch.
+    let selected = validate_premise_choices(
+        env,
+        &candidate.rule,
+        declared,
+        &candidate.choices,
+        &binding,
+        false,
+    )?;
     let conclusion = close_pattern(&declared.open_conclusion(), &binding);
     if key(env, &conclusion)? != key(env, &Expr::from(proposition))? {
         return Err(format!(
@@ -2437,31 +2496,112 @@ fn validate_candidate_applicability(
         GuardMode::Candidate,
     )?;
 
-    // Merge the held and missing lists against the rule's premise order. Both
-    // lists are subsequences of the instantiated premise list; a premise in
-    // neither list, a duplicate, or an unrelated proposition breaks the merge
-    // and is rejected.
+    // Merge the held and missing lists against the rule's premise order. A
+    // plain premise may be in either list; a compound premise with a recorded
+    // choice must be held at that branch/witness, and one without a choice must
+    // list every branch as missing (an existential without a witness lists its
+    // open body pattern). This keeps the two diagnostics honest: "all branches
+    // missing" is not compressed into a lump-sum proposition.
     let mut held_index = 0usize;
     let mut missing_index = 0usize;
-    for (position, expected) in expected_premises.iter().enumerate() {
-        let expected_key = key(env, expected)?;
-        let held_matches = candidate.held.get(held_index).is_some_and(|held| {
-            key(env, &Expr::from(held)).is_ok_and(|held_key| held_key == expected_key)
-        });
-        let missing_matches = candidate.missing.get(missing_index).is_some_and(|missing| {
-            key(env, &Expr::from(missing)).is_ok_and(|missing_key| missing_key == expected_key)
-        });
-        if held_matches {
-            held_index += 1;
-        } else if missing_matches {
-            missing_index += 1;
-        } else {
-            return Err(format!(
-                "{place}：规则的第 {} 个前提实例是 `{}`，但候选既未把它列为已持有，\
-                 也未把它列为缺失",
-                position + 1,
-                print_expr(expected)
-            ));
+    // The branch labels the reasoner would have written for this candidate:
+    // every failing disjunction contributes one label per written branch in
+    // order; plain and existential missing propositions contribute `None`.
+    let mut expected_labels: Vec<Option<usize>> = Vec::new();
+    for (index, premise) in declared.premises.iter().enumerate() {
+        match (&premise.kind, &selected[index]) {
+            (PremiseKind::Plain(_), SelectedChoice::Plain) => {
+                let expected = close_pattern(&declared.open_premise_plain(index), &binding);
+                if candidate_item_matches(env, &candidate.held, held_index, &expected)? {
+                    held_index += 1;
+                } else if candidate_item_matches(env, &candidate.missing, missing_index, &expected)?
+                {
+                    missing_index += 1;
+                    expected_labels.push(None);
+                } else {
+                    return Err(format!(
+                        "{place}：规则的第 {} 个前提实例是 `{}`，但候选既未把它列为已持有，\
+                         也未把它列为缺失",
+                        index + 1,
+                        print_expr(&expected)
+                    ));
+                }
+            }
+            (PremiseKind::Or(_), SelectedChoice::Branch(branch)) => {
+                let expected = close_pattern(&declared.open_branch(index, *branch), &binding);
+                if !candidate_item_matches(env, &candidate.held, held_index, &expected)? {
+                    return Err(format!(
+                        "{place}：规则的第 {} 个前提记录选择了第 {} 个析取分支，\
+                         但已持有前提列表里没有该分支的实例 `{}`",
+                        index + 1,
+                        branch + 1,
+                        print_expr(&expected)
+                    ));
+                }
+                held_index += 1;
+            }
+            (PremiseKind::Or(branches), SelectedChoice::Plain) => {
+                for branch in 0..branches.len() {
+                    let expected = close_pattern(&declared.open_branch(index, branch), &binding);
+                    if !candidate_item_matches(env, &candidate.missing, missing_index, &expected)? {
+                        return Err(format!(
+                            "{place}：规则的第 {} 个前提是析取且没有已选分支，\
+                             缺失前提列表应在该位置列出第 {} 个分支 `{}`",
+                            index + 1,
+                            branch + 1,
+                            print_expr(&expected)
+                        ));
+                    }
+                    missing_index += 1;
+                    expected_labels.push(Some(branch));
+                }
+            }
+            (PremiseKind::Exists { binder, .. }, SelectedChoice::Witness(witness)) => {
+                let body = close_pattern(&declared.open_exists_body(index), &binding);
+                let expected =
+                    substitute_pattern_constants(&body, &[(binder.clone(), witness.clone())]);
+                if !candidate_item_matches(env, &candidate.held, held_index, &expected)? {
+                    return Err(format!(
+                        "{place}：规则的第 {} 个前提记录见证 `{}`，\
+                         但已持有前提列表里没有该见证下的体 `{}`",
+                        index + 1,
+                        print_expr(witness),
+                        print_expr(&expected)
+                    ));
+                }
+                held_index += 1;
+            }
+            (PremiseKind::Exists { .. }, SelectedChoice::Plain) => {
+                let expected = close_pattern(&declared.open_exists_body(index), &binding);
+                if !candidate_item_matches(env, &candidate.missing, missing_index, &expected)? {
+                    return Err(format!(
+                        "{place}：规则的第 {} 个存在前提没有见证，\
+                         缺失前提列表应列出它的体 `{}`",
+                        index + 1,
+                        print_expr(&expected)
+                    ));
+                }
+                missing_index += 1;
+                expected_labels.push(None);
+            }
+            (PremiseKind::Plain(_), _) => {
+                return Err(format!(
+                    "{place}：规则的第 {} 个前提是普通命题，不能记录选择",
+                    index + 1
+                ));
+            }
+            (PremiseKind::Or(_), SelectedChoice::Witness(_)) => {
+                return Err(format!(
+                    "{place}：规则的第 {} 个前提是析取，只能选择分支",
+                    index + 1
+                ));
+            }
+            (PremiseKind::Exists { .. }, SelectedChoice::Branch(_)) => {
+                return Err(format!(
+                    "{place}：规则的第 {} 个前提是存在量词，只能选择见证",
+                    index + 1
+                ));
+            }
         }
     }
     if held_index != candidate.held.len() {
@@ -2474,6 +2614,16 @@ fn validate_candidate_applicability(
         return Err(format!(
             "{place}：缺失前提列表与规则前提不匹配（多出 {} 条）",
             candidate.missing.len() - missing_index
+        ));
+    }
+    // The optional branch labels must be exactly the ones the merge above
+    // implies. A present label array is validated in full; an omitted one
+    // (hand-written certificate) is allowed, and the renderer then falls back
+    // to the flat missing list.
+    if !candidate.missing_branches.is_empty() && candidate.missing_branches != expected_labels {
+        return Err(format!(
+            "{place}：缺失前提的分支标注与规则声明不一致（应为 {:?}，记录为 {:?}）",
+            expected_labels, candidate.missing_branches
         ));
     }
 
@@ -3422,6 +3572,10 @@ struct WitnessIdentity {
     kind: u8,
     name: String,
     bindings: Vec<(String, Expr)>,
+    /// The branch/witness structure of the instance. Two rule instances with
+    /// the same rule and bindings but different premise choices are different
+    /// witnesses, so the choices participate in the identity.
+    choice_key: String,
 }
 
 /// The identity of a derivation step, if it is one.
@@ -3430,11 +3584,21 @@ struct WitnessIdentity {
 /// instance by its axiom name and binding values. The two kinds never coincide,
 /// so a rule and a universal fact named alike remain distinct witnesses.
 fn witness_identity(node: &Node) -> Option<WitnessIdentity> {
-    let (kind, name, bindings) = match node {
-        Node::RuleApplication { rule, bindings, .. } => (0u8, rule.clone(), bindings),
+    let (kind, name, bindings, choices): (
+        u8,
+        String,
+        &Vec<crate::model::Binding>,
+        &[PremiseChoice],
+    ) = match node {
+        Node::RuleApplication {
+            rule,
+            bindings,
+            choices,
+            ..
+        } => (0u8, rule.clone(), bindings, choices),
         Node::AxiomInstance {
             axiom, bindings, ..
-        } => (1u8, axiom.clone(), bindings),
+        } => (1u8, axiom.clone(), bindings, &[]),
         Node::Assumption { .. } | Node::InterpretationApplication { .. } | Node::Gap { .. } => {
             return None
         }
@@ -3444,10 +3608,21 @@ fn witness_identity(node: &Node) -> Option<WitnessIdentity> {
         .map(|binding| (binding.parameter.clone(), Expr::from(&binding.value)))
         .collect();
     values.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut choice_parts: Vec<String> = choices
+        .iter()
+        .map(|choice| match choice {
+            PremiseChoice::Branch { premise, branch } => format!("branch:{premise}:{branch}"),
+            PremiseChoice::Witness { premise, witness } => {
+                format!("witness:{premise}:{}", expression_key(&Expr::from(witness)))
+            }
+        })
+        .collect();
+    choice_parts.sort();
     Some(WitnessIdentity {
         kind,
         name,
         bindings: values,
+        choice_key: choice_parts.join(";"),
     })
 }
 
@@ -3462,6 +3637,7 @@ fn same_witness_identity(
 ) -> Result<bool, String> {
     if left.kind != right.kind
         || left.name != right.name
+        || left.choice_key != right.choice_key
         || left.bindings.len() != right.bindings.len()
     {
         return Ok(false);
@@ -4282,6 +4458,179 @@ fn node_prop<'a>(cert: &'a Certificate, node: &'a Node) -> Option<&'a CertExpr> 
         Node::InterpretationApplication { conclusion, .. } => Some(conclusion),
         Node::AxiomInstance { conclusion, .. } => Some(conclusion),
         Node::Gap { .. } => None,
+    }
+}
+
+/// Which branch or witness one compound premise of a certificate step used.
+enum SelectedChoice {
+    Plain,
+    Branch(usize),
+    Witness(Expr),
+}
+
+/// Validate the `choices` array of one rule application and resolve one entry
+/// per declared premise.
+///
+/// The checks are structural and independent of the premise nodes:
+///
+/// * every entry names a premise that exists, in range, at most once;
+/// * a branch choice is accepted only for a disjunctive premise and names a
+///   written branch;
+/// * a witness choice is accepted only for an existential premise; the witness
+///   must be closed, must typecheck against the premise's (instantiated)
+///   domain type, and must be a concrete declared individual (`obj`) or an
+///   integer literal — never an invented or compound term;
+/// * every compound premise has exactly one entry, and plain premises have
+///   none. A missing choice is a logical failure, never a default: the checker
+///   cannot know which branch the reasoner used.
+fn validate_premise_choices(
+    env: &Env,
+    rule: &str,
+    declared: &RuleDecl,
+    choices: &[PremiseChoice],
+    binding: &BTreeMap<&str, Expr>,
+    require_complete: bool,
+) -> Result<Vec<SelectedChoice>, String> {
+    let mut selected = (0..declared.premises.len())
+        .map(|_| SelectedChoice::Plain)
+        .collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
+    for choice in choices {
+        let index = match choice {
+            PremiseChoice::Branch { premise, .. } => *premise,
+            PremiseChoice::Witness { premise, .. } => *premise,
+        };
+        if index >= declared.premises.len() {
+            return Err(format!(
+                "规则 `{rule}` 只有 {} 个前提，选择记录了不存在的第 {} 个前提",
+                declared.premises.len(),
+                index + 1
+            ));
+        }
+        if !seen.insert(index) {
+            return Err(format!(
+                "规则 `{rule}` 的第 {} 个前提被多次选择：每个前提最多一条选择",
+                index + 1
+            ));
+        }
+        selected[index] = match (&declared.premises[index].kind, choice) {
+            (PremiseKind::Plain(_), _) => {
+                return Err(format!(
+                    "规则 `{rule}` 的第 {} 个前提是普通命题，不能记录 branch/witness 选择",
+                    index + 1
+                ));
+            }
+            (PremiseKind::Or(branches), PremiseChoice::Branch { branch, .. }) => {
+                if *branch >= branches.len() {
+                    return Err(format!(
+                        "规则 `{rule}` 的第 {} 个前提是析取，只有 {} 个分支，\
+                         选择指向了不存在的第 {} 个分支",
+                        index + 1,
+                        branches.len(),
+                        branch + 1
+                    ));
+                }
+                SelectedChoice::Branch(*branch)
+            }
+            (PremiseKind::Or(_), PremiseChoice::Witness { .. }) => {
+                return Err(format!(
+                    "规则 `{rule}` 的第 {} 个前提是析取，只能记录 branch，不能记录 witness",
+                    index + 1
+                ));
+            }
+            (PremiseKind::Exists { .. }, PremiseChoice::Witness { witness, .. }) => {
+                let witness = Expr::from(witness);
+                if !is_closed(&witness) {
+                    return Err(format!(
+                        "规则 `{rule}` 的第 {} 个前提的存在见证不是闭合项",
+                        index + 1
+                    ));
+                }
+                if !is_declared_individual(env, &witness) {
+                    return Err(format!(
+                        "规则 `{rule}` 的第 {} 个前提的见证 `{}` 不是已声明个体：\
+                         存在见证必须是环境中声明的 `obj` 常量，或 `Int` 域上的整数字面量，\
+                         不能是凭空写的项",
+                        index + 1,
+                        print_expr(&witness)
+                    ));
+                }
+                let OpenPremise::Exists { domain, .. } = declared.open_premise(index) else {
+                    return Err(format!(
+                        "规则 `{rule}` 的第 {} 个前提的声明形式不是存在量词",
+                        index + 1
+                    ));
+                };
+                let domain = close_pattern(&domain, binding);
+                kernel_check::check(env, &Ctx::new(), &witness, &domain).map_err(|error| {
+                    format!(
+                        "规则 `{rule}` 的第 {} 个前提的见证 `{}` 不属于存在量词的域 `{}`：{error}",
+                        index + 1,
+                        print_expr(&witness),
+                        print_expr(&domain)
+                    )
+                })?;
+                SelectedChoice::Witness(witness)
+            }
+            (PremiseKind::Exists { .. }, PremiseChoice::Branch { .. }) => {
+                return Err(format!(
+                    "规则 `{rule}` 的第 {} 个前提是存在量词，只能记录 witness，不能记录 branch",
+                    index + 1
+                ));
+            }
+        };
+    }
+    if require_complete {
+        for (index, premise) in declared.premises.iter().enumerate() {
+            if matches!(
+                premise.kind,
+                PremiseKind::Or(_) | PremiseKind::Exists { .. }
+            ) && !seen.contains(&index)
+            {
+                return Err(format!(
+                    "规则 `{rule}` 的第 {} 个前提是{}，本步没有记录选择（branch/witness）：\
+                     复合前提的选取必须显式记录，校验器不替作者猜一个",
+                    index + 1,
+                    match premise.kind {
+                        PremiseKind::Or(_) => "析取",
+                        PremiseKind::Exists { .. } => "存在量词",
+                        PremiseKind::Plain(_) => unreachable!(),
+                    }
+                ));
+            }
+        }
+    }
+    Ok(selected)
+}
+
+/// Whether the entry at `index` of one gap candidate list is
+/// kernel-equivalent to `expected`.
+fn candidate_item_matches(
+    env: &Env,
+    list: &[CertExpr],
+    index: usize,
+    expected: &Expr,
+) -> Result<bool, String> {
+    let Some(item) = list.get(index) else {
+        return Ok(false);
+    };
+    Ok(key(env, &Expr::from(item))? == key(env, expected)?)
+}
+
+/// Whether a witness term names a concrete, declared individual.
+///
+/// A witness is a value the certificate records and another party can audit.
+/// Only an `obj` declaration or an exact integer literal qualifies: a bare
+/// constant that is not an object (a predicate, a rule, an undefined name) or
+/// a compound application would silently invent an individual.
+fn is_declared_individual(env: &Env, witness: &Expr) -> bool {
+    match witness {
+        Expr::Num(_) => true,
+        Expr::Const(name) => matches!(
+            env.get(name).map(|declaration| &declaration.kind),
+            Some(DeclKind::Obj)
+        ),
+        _ => false,
     }
 }
 

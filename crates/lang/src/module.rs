@@ -5,11 +5,13 @@
 //! from which source, and by whom. The kernel sees only the flat ledger,
 //! which is what keeps the trusted core small.
 
-use std_deduce_kernel::env::{Decl, Env, SourceRef};
+use std_deduce_kernel::env::{
+    check_unique_binders, Decl, Env, PremiseDecl, PremiseKind, SourceRef,
+};
 use std_deduce_kernel::meta::{validate_date, validate_jurisdiction_code, Scope, ScopeOrigin};
 use std_deduce_kernel::{Error, Expr, FactIdentity};
 
-use crate::ast::{Defeater, Item, ScopeSpec, Term};
+use crate::ast::{Defeater, Item, PremiseKind as AstPremiseKind, ScopeSpec, Term};
 use crate::elab;
 use crate::parser;
 
@@ -679,11 +681,32 @@ impl Library {
                         .iter()
                         .map(|(pn, _)| std_deduce_kernel::name(pn))
                         .collect();
-                    binder_names.extend(premises.iter().enumerate().map(|(i, p)| match &p.name {
-                        Some(pn) => std_deduce_kernel::name(pn),
-                        None => std_deduce_kernel::name(format!("_p{i}")),
-                    }));
-                    std_deduce_kernel::env::check_unique_binders(&binder_names)
+                    let mut exists_binders: Vec<std_deduce_kernel::Name> = Vec::new();
+                    for (i, p) in premises.iter().enumerate() {
+                        let bind = match &p.name {
+                            Some(pn) => std_deduce_kernel::name(pn),
+                            None => std_deduce_kernel::name(format!("_p{i}")),
+                        };
+                        if let AstPremiseKind::Exists { binder, .. } = &p.kind {
+                            let witness = std_deduce_kernel::name(binder);
+                            if binder_names.contains(&witness) || exists_binders.contains(&witness)
+                            {
+                                return Err(LoadError::new(format!(
+                                    "`rule {n}`：存在前提 {} 的见证变量 `{binder}` 与参数、\
+                                     前提绑定或另一存在见证重名；见证会与规则绑定混成一个常量，必须改名",
+                                    i + 1
+                                )));
+                            }
+                            exists_binders.push(witness);
+                        }
+                        // Only a plain premise proof is a kernel binder. A
+                        // compound premise is a logical side condition, so its
+                        // (optional) name does not enter the telescope.
+                        if matches!(p.kind, AstPremiseKind::Plain(_)) {
+                            binder_names.push(bind);
+                        }
+                    }
+                    check_unique_binders(&binder_names)
                         .map_err(|e| LoadError::new(format!("`rule {n}`：{e}")))?;
 
                     // One telescope elaboration: params and premises are
@@ -709,24 +732,132 @@ impl Library {
                         rule_params.push((std_deduce_kernel::name(pn), ty));
                     }
 
-                    let mut rule_premises: Vec<(Option<std_deduce_kernel::Name>, Expr)> =
-                        Vec::new();
+                    let mut rule_premises: Vec<PremiseDecl> = Vec::new();
                     for (i, p) in premises.iter().enumerate() {
-                        let ty = elab::elab(&next.env, &binds, &p.ty).map_err(|e| {
-                            LoadError::new(format!("`rule {n}` 的前提 {}：{}", i + 1, e.msg))
-                        })?;
-                        std_deduce_kernel::check::check(
-                            &next.env,
-                            &elab::ctx_of(&binds),
-                            &ty,
-                            &Expr::Sort(0),
-                        )
-                        .map_err(|e| {
-                            LoadError::new(format!("`rule {n}` 的前提 {} 不是命题：{e}", i + 1))
-                        })?;
-                        let bind = p.name.clone().unwrap_or_else(|| format!("_p{i}"));
-                        binds.push((bind.clone(), ty.clone()));
-                        rule_premises.push((p.name.as_ref().map(std_deduce_kernel::name), ty));
+                        let kind = match &p.kind {
+                            AstPremiseKind::Plain(term) => {
+                                let ty = elab::elab(&next.env, &binds, term).map_err(|e| {
+                                    LoadError::new(format!(
+                                        "`rule {n}` 的前提 {}：{}",
+                                        i + 1,
+                                        e.msg
+                                    ))
+                                })?;
+                                std_deduce_kernel::check::check(
+                                    &next.env,
+                                    &elab::ctx_of(&binds),
+                                    &ty,
+                                    &Expr::Sort(0),
+                                )
+                                .map_err(|e| {
+                                    LoadError::new(format!(
+                                        "`rule {n}` 的前提 {} 不是命题：{e}",
+                                        i + 1
+                                    ))
+                                })?;
+                                PremiseKind::Plain(ty)
+                            }
+                            AstPremiseKind::Or(branches) => {
+                                if branches.len() > std_deduce_kernel::MAX_OR_BRANCHES {
+                                    return Err(LoadError::new(format!(
+                                        "`rule {n}` 的前提 {} 的析取有 {} 个分支，\
+                                         超过每个析取前提 {} 个分支的上限",
+                                        i + 1,
+                                        branches.len(),
+                                        std_deduce_kernel::MAX_OR_BRANCHES
+                                    )));
+                                }
+                                let mut encoded = Vec::with_capacity(branches.len());
+                                for (j, branch) in branches.iter().enumerate() {
+                                    let proposition = elab::elab(&next.env, &binds, branch)
+                                        .map_err(|e| {
+                                            LoadError::new(format!(
+                                                "`rule {n}` 的前提 {} 的第 {} 个析取分支：{}",
+                                                i + 1,
+                                                j + 1,
+                                                e.msg
+                                            ))
+                                        })?;
+                                    std_deduce_kernel::check::check(
+                                        &next.env,
+                                        &elab::ctx_of(&binds),
+                                        &proposition,
+                                        &Expr::Sort(0),
+                                    )
+                                    .map_err(|e| {
+                                        LoadError::new(format!(
+                                            "`rule {n}` 的前提 {} 的第 {} 个析取分支不是命题：{e}",
+                                            i + 1,
+                                            j + 1
+                                        ))
+                                    })?;
+                                    encoded.push(proposition);
+                                }
+                                PremiseKind::Or(encoded)
+                            }
+                            AstPremiseKind::Exists {
+                                binder,
+                                domain,
+                                body,
+                            } => {
+                                let witness = std_deduce_kernel::name(binder);
+                                let domain =
+                                    elab::elab(&next.env, &binds, domain).map_err(|e| {
+                                        LoadError::new(format!(
+                                            "`rule {n}` 的前提 {} 的存在量词类型：{}",
+                                            i + 1,
+                                            e.msg
+                                        ))
+                                    })?;
+                                std_deduce_kernel::check::check_is_type(
+                                    &next.env,
+                                    &elab::ctx_of(&binds),
+                                    &domain,
+                                )
+                                .map_err(|e| {
+                                    LoadError::new(format!(
+                                        "`rule {n}` 的前提 {} 的存在量词类型不合法：{e}",
+                                        i + 1
+                                    ))
+                                })?;
+                                let mut witness_binds = binds.clone();
+                                witness_binds.push((binder.clone(), domain.clone()));
+                                let body =
+                                    elab::elab(&next.env, &witness_binds, body).map_err(|e| {
+                                        LoadError::new(format!(
+                                            "`rule {n}` 的前提 {} 的存在量词体：{}",
+                                            i + 1,
+                                            e.msg
+                                        ))
+                                    })?;
+                                std_deduce_kernel::check::check(
+                                    &next.env,
+                                    &elab::ctx_of(&witness_binds),
+                                    &body,
+                                    &Expr::Sort(0),
+                                )
+                                .map_err(|e| {
+                                    LoadError::new(format!(
+                                        "`rule {n}` 的前提 {} 的存在量词体不是命题：{e}",
+                                        i + 1
+                                    ))
+                                })?;
+                                PremiseKind::Exists {
+                                    binder: witness,
+                                    domain,
+                                    body,
+                                }
+                            }
+                        };
+                        let premise = PremiseDecl {
+                            name: p.name.as_ref().map(std_deduce_kernel::name),
+                            kind,
+                        };
+                        let bind = premise.binder_or(i);
+                        if matches!(premise.kind, PremiseKind::Plain(_)) {
+                            binds.push((bind.to_string(), premise.kernel_type()));
+                        }
+                        rule_premises.push(premise);
                     }
 
                     let concl = elab::elab(&next.env, &binds, &conclusion)
@@ -800,8 +931,9 @@ impl Library {
                                 // bound by the instance; the premise check in
                                 // the kernel would report it later, without a
                                 // position, so it is caught here with one.
-                                let in_premise =
-                                    premises.iter().any(|p| term_mentions_ident(&p.ty, ident));
+                                let in_premise = premises
+                                    .iter()
+                                    .any(|p| premise_constrains_ident(&p.kind, ident));
                                 if !in_premise {
                                     return Err(at(format!(
                                         "参数 `{ident}` 出现在守卫里，但没有出现在任何前提里：\
@@ -1854,6 +1986,24 @@ fn term_mentions_ident(term: &Term, ident: &str) -> bool {
     free.iter().any(|name| name == ident)
 }
 
+/// Does one premise guarantee a value for `ident` regardless of the branch or
+/// witness chosen?
+///
+/// A plain premise mentions it; a disjunctive premise only guarantees it when
+/// every branch mentions it; an existential premise mentions it through its
+/// body. The witness binder itself is local to the body, so a parameter that
+/// appears only in the domain of an existential premise is not constrained (a
+/// domain is a type, not a proposition matched against facts).
+fn premise_constrains_ident(kind: &AstPremiseKind, ident: &str) -> bool {
+    match kind {
+        AstPremiseKind::Plain(term) => term_mentions_ident(term, ident),
+        AstPremiseKind::Or(branches) => branches
+            .iter()
+            .all(|branch| term_mentions_ident(branch, ident)),
+        AstPremiseKind::Exists { body, .. } => term_mentions_ident(body, ident),
+    }
+}
+
 fn collect_free_names(term: &Term, bound: &mut Vec<String>, out: &mut Vec<String>) {
     match term {
         Term::Prop | Term::Type(_) | Term::Num(_) | Term::Date(_) => {}
@@ -1909,12 +2059,37 @@ fn check_rule(
             Some(binder) => format!("`rule {name}` 的前提 `{binder}`"),
             None => format!("`rule {name}` 的前提 {}", i + 1),
         };
-        check_term(ns, &what, &locals, &premise.ty)?;
-        // A named premise binds its name; an unnamed one is opened by the
-        // elaborator as the generated local `_p{i}`.
-        match &premise.name {
-            Some(binder) => locals.push(binder.clone()),
-            None => locals.push(format!("_p{i}")),
+        match &premise.kind {
+            AstPremiseKind::Plain(term) => check_term(ns, &what, &locals, term)?,
+            AstPremiseKind::Or(branches) => {
+                for (j, branch) in branches.iter().enumerate() {
+                    let what = format!("{what} 的第 {} 个析取分支", j + 1);
+                    check_term(ns, &what, &locals, branch)?;
+                }
+            }
+            AstPremiseKind::Exists {
+                binder,
+                domain,
+                body,
+            } => {
+                let what_domain = format!("{what} 的存在量词类型");
+                check_term(ns, &what_domain, &locals, domain)?;
+                locals.push(binder.clone());
+                let what_body = format!("{what} 的存在量词体");
+                let body_result = check_term(ns, &what_body, &locals, body);
+                locals.pop();
+                body_result?;
+            }
+        }
+        // A named plain premise binds its name; an unnamed one is opened by the
+        // elaborator as the generated local `_p{i}`. Compound premises are
+        // logical side conditions, not telescope binders, and the witness
+        // binder of an existential premise is local to its body.
+        if matches!(premise.kind, AstPremiseKind::Plain(_)) {
+            match &premise.name {
+                Some(binder) => locals.push(binder.clone()),
+                None => locals.push(format!("_p{i}")),
+            }
         }
     }
     let what = format!("`rule {name}` 的结论");

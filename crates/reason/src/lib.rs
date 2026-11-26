@@ -226,7 +226,8 @@ use std_deduce_cert::conflict::{
 use std_deduce_cert::CertExpr;
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{
-    named_binders, Decl, DeclKind, Env, FactIdentity, RuleDecl, RulePleading, SourceRef,
+    named_binders, substitute_pattern_constants, Decl, DeclKind, Env, FactIdentity, OpenPremise,
+    PremiseKind, RuleDecl, RulePleading, SourceRef,
 };
 use std_deduce_kernel::norm::{evaluate_arithmetic, evaluate_comparison, normalize};
 use std_deduce_kernel::pretty::print_expr;
@@ -263,6 +264,9 @@ pub enum Node {
         /// much larger than the other node payloads.
         computed: Option<Box<Expr>>,
         premises: Vec<usize>,
+        /// Which branch or witness each compound premise used, one entry per
+        /// premise (plain premises carry [`PremiseSelection::Plain`]).
+        selections: Vec<PremiseSelection>,
         /// The guard judgements this instance fired under, in the rule's
         /// declaration order. Every one of them holds; the certificate records
         /// each guard's expression, substituted form and truth value, and its
@@ -370,6 +374,11 @@ pub struct GapCandidate {
     pub held: Vec<Expr>,
     /// Premises that are not known.
     pub missing: Vec<Expr>,
+    /// Branch labels parallel to `missing`: `Some(k)` for the k-th written
+    /// branch of a failing disjunction, `None` for a plain/existential gap.
+    pub missing_branches: Vec<Option<usize>>,
+    /// Branch/witness selections of the compound premises that already hold.
+    pub choices: Vec<PremiseSelection>,
     /// `unless` conditions that *are* known, i.e. why this rule is blocked.
     pub blocked_by: Vec<Expr>,
     /// The guard judgements of this candidate instance, in declaration order.
@@ -377,6 +386,10 @@ pub struct GapCandidate {
     /// instead of letting the candidate disappear: `:gap` / `:issues` print the
     /// substituted guard and why it did not let the rule fire.
     pub guards: Vec<GuardJudgement>,
+    /// One entry per rule premise, in premise order, with the branch/witness
+    /// structure the gap tree and the certificate use. `held`, `missing` and
+    /// `choices` are the flattened views of this list.
+    pub premises: Vec<PremiseStatus>,
     pub sources: Vec<SourceRef>,
     /// The rule's temporal/spatial judgement for this case. An excluded
     /// candidate is still listed: `:gap` says why it cannot be used instead of
@@ -384,6 +397,59 @@ pub struct GapCandidate {
     /// expanded; inapplicable/undecidable ones are listed but not expanded,
     /// because adding a premise cannot make an excluded rule fire.
     pub applicability: Applicability,
+}
+
+/// One premise's status for a gap candidate or the issue scan.
+///
+/// A plain premise either holds (its instantiated proposition is in `held`) or
+/// is missing (the same proposition is in `missing`). A disjunction that holds
+/// records the selected branch; a disjunction that fails fills `missing` with
+/// one entry per written branch and `branches` with their indices. An existence
+/// that fails fills `missing` with the open body pattern and `exists_candidates`
+/// with the declared individuals of its domain (bounded, with an explicit
+/// truncation flag); one that holds records the witness.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PremiseStatus {
+    /// The proposition this premise holds, when it holds.
+    pub held: Option<Expr>,
+    /// The propositions this premise still lacks. For a failing disjunction this
+    /// is one entry per branch; for a plain/existential premise it is one entry.
+    pub missing: Vec<Expr>,
+    /// Which branch or witness the premise used, when it holds.
+    pub selection: PremiseSelection,
+    /// The written branches, in order, when a disjunction fails. Each carries
+    /// its own gap subtree in the rendered tree.
+    pub branches: Vec<(usize, Expr)>,
+    /// The declared individuals the witness search tried, when an existence
+    /// premise has no witness.
+    pub exists_candidates: Vec<Expr>,
+    /// Whether more declared individuals exist than the display bound.
+    pub exists_truncated: bool,
+    /// Whether this premise is an existential premise at all (needed even when
+    /// its domain has no declared individual: the gap must still say that some
+    /// individual has to satisfy the body).
+    pub exists: bool,
+}
+
+/// The declared individuals of one existential domain, bounded for display.
+struct WitnessCandidates {
+    items: Vec<Expr>,
+    truncated: bool,
+}
+
+/// The display bound for candidate individuals in a gap tree.
+pub const MAX_GAP_WITNESS_CANDIDATES: usize = 8;
+
+/// Enumerate the declared individuals of a domain for a gap display, keeping at
+/// most [`MAX_GAP_WITNESS_CANDIDATES`] and marking truncation explicitly.
+fn display_witness_candidates(env: &Env, domain: &Expr) -> Result<WitnessCandidates, String> {
+    let mut individuals = declared_individuals(env, domain)?;
+    let truncated = individuals.len() > MAX_GAP_WITNESS_CANDIDATES;
+    individuals.truncate(MAX_GAP_WITNESS_CANDIDATES);
+    Ok(WitnessCandidates {
+        items: individuals,
+        truncated,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -728,6 +794,70 @@ fn guards_hold(guards: &[GuardJudgement]) -> bool {
     guards.iter().all(GuardJudgement::is_true)
 }
 
+/// Which branch or witness one premise of a rule instance used.
+///
+/// The reasoner records one entry per premise. A disjunction records which
+/// written branch's proof was actually found; an existence records the concrete
+/// declared individual whose body was found. The selection is derived from the
+/// found proof, never guessed, and travels into the certificate's `choices`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum PremiseSelection {
+    #[default]
+    Plain,
+    Branch {
+        premise: usize,
+        branch: usize,
+    },
+    Witness {
+        premise: usize,
+        witness: Expr,
+    },
+}
+
+impl PremiseSelection {
+    /// The branch/witness choice this selection records, or `None` for a plain
+    /// premise. A witness that cannot be represented is an error, never a
+    /// silently dropped record.
+    pub(crate) fn certificate_choice(
+        &self,
+    ) -> Result<Option<std_deduce_cert::PremiseChoice>, String> {
+        match self {
+            PremiseSelection::Plain => Ok(None),
+            PremiseSelection::Branch { premise, branch } => {
+                Ok(Some(std_deduce_cert::PremiseChoice::Branch {
+                    premise: *premise,
+                    branch: *branch,
+                }))
+            }
+            PremiseSelection::Witness { premise, witness } => {
+                Ok(Some(std_deduce_cert::PremiseChoice::Witness {
+                    premise: *premise,
+                    witness: cert_expr(witness, None, "存在见证")?,
+                }))
+            }
+        }
+    }
+}
+
+/// The largest number of witness candidates one existential premise may try in
+/// one rule enumeration.
+///
+/// Witnesses are enumerated from the rule-visible facts and from the declared
+/// individuals of the domain type. Exceeding the bound is an explicit error: a
+/// premise that silently stopped at an arbitrary witness would be a hidden
+/// incompleteness.
+pub const MAX_WITNESS_CANDIDATES_PER_PREMISE: usize = 64;
+
+/// The largest number of branch/witness selection attempts one rule may make in
+/// one enumeration (one fixed-point round or one witness index).
+///
+/// Disjunction and existence are alternatives, not a product: the reasoner
+/// tries the branches of one premise in written order and uses the first branch
+/// that yields a complete instance, and enumerates one witness per matching
+/// body. This bound is the explicit ceiling on that search, so a rule set that
+/// would multiply choices cannot silently turn into an explosive search.
+pub const MAX_SELECTION_ATTEMPTS_PER_RULE: usize = 512;
+
 /// One instantiation of a rule against a set of known facts.
 struct Instance {
     /// The proposition this instance derives: the rule's conclusion with the
@@ -739,6 +869,8 @@ struct Instance {
     /// both, and the checker recomputes the second from the first.
     computed: Option<Box<Expr>>,
     premise_keys: Vec<String>,
+    /// One selection per premise: plain, a chosen branch, or a chosen witness.
+    selections: Vec<PremiseSelection>,
     /// Open `unless` expressions, already closed by this instantiation.
     unlesses: Vec<Expr>,
     /// The guard judgements of this instantiation, in declaration order.
@@ -809,18 +941,29 @@ fn node_capacity_error(estimate: usize) -> String {
 /// listed in: a checker accepts any binding order, so the same instance must
 /// not become a second independent witness merely by reordering its bindings.
 /// Kernel conversion also folds η-equivalent function values.
+type WitnessParts<'a> = (
+    u8,
+    &'a Name,
+    &'a Vec<(Name, Expr)>,
+    Option<&'a [PremiseSelection]>,
+);
+
 fn same_witness(
     env: &Env,
     left: &WitnessCandidate,
     right: &WitnessCandidate,
 ) -> Result<bool, String> {
-    let (left_kind, left_name, left_bindings) = match left {
-        WitnessCandidate::Rule { rule, instance, .. } => (0u8, rule, &instance.bindings),
-        WitnessCandidate::Axiom { instance } => (1u8, &instance.axiom, &instance.bindings),
+    let (left_kind, left_name, left_bindings, left_selections): WitnessParts<'_> = match left {
+        WitnessCandidate::Rule { rule, instance, .. } => {
+            (0u8, rule, &instance.bindings, Some(&instance.selections))
+        }
+        WitnessCandidate::Axiom { instance } => (1u8, &instance.axiom, &instance.bindings, None),
     };
-    let (right_kind, right_name, right_bindings) = match right {
-        WitnessCandidate::Rule { rule, instance, .. } => (0u8, rule, &instance.bindings),
-        WitnessCandidate::Axiom { instance } => (1u8, &instance.axiom, &instance.bindings),
+    let (right_kind, right_name, right_bindings, right_selections): WitnessParts<'_> = match right {
+        WitnessCandidate::Rule { rule, instance, .. } => {
+            (0u8, rule, &instance.bindings, Some(&instance.selections))
+        }
+        WitnessCandidate::Axiom { instance } => (1u8, &instance.axiom, &instance.bindings, None),
     };
     if left_kind != right_kind
         || left_name != right_name
@@ -848,6 +991,65 @@ fn same_witness(
             .map_err(|error| format!("无法判定两个见证的绑定值是否等价：{error}"))?;
         if !same {
             return Ok(false);
+        }
+    }
+    match (left_selections, right_selections) {
+        (None, None) => Ok(true),
+        (Some(left), Some(right)) => same_selections(env, left, right),
+        _ => Ok(false),
+    }
+}
+
+/// Whether two instances chose the same branch or witness for every premise.
+///
+/// A different witness is a different argument even when the parameters and the
+/// conclusion are identical: the certificate records the choice, so two
+/// arguments that rest on different witnesses must not be merged into one.
+fn same_selections(
+    env: &Env,
+    left: &[PremiseSelection],
+    right: &[PremiseSelection],
+) -> Result<bool, String> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.iter().zip(right.iter()) {
+        match (left, right) {
+            (PremiseSelection::Plain, PremiseSelection::Plain) => {}
+            (
+                PremiseSelection::Branch {
+                    premise: left_premise,
+                    branch: left_branch,
+                },
+                PremiseSelection::Branch {
+                    premise: right_premise,
+                    branch: right_branch,
+                },
+            ) => {
+                if left_premise != right_premise || left_branch != right_branch {
+                    return Ok(false);
+                }
+            }
+            (
+                PremiseSelection::Witness {
+                    premise: left_premise,
+                    witness: left_witness,
+                },
+                PremiseSelection::Witness {
+                    premise: right_premise,
+                    witness: right_witness,
+                },
+            ) => {
+                if left_premise != right_premise {
+                    return Ok(false);
+                }
+                if !convertible(env, &Ctx::new(), left_witness, right_witness)
+                    .map_err(|error| format!("无法判定两个存在见证是否等价：{error}"))?
+                {
+                    return Ok(false);
+                }
+            }
+            _ => return Ok(false),
         }
     }
     Ok(true)
@@ -884,7 +1086,11 @@ impl WitnessCandidate {
             WitnessCandidate::Rule { rule, instance, .. } => (
                 0,
                 rule.to_string(),
-                instance_binding_key(env, &instance.bindings),
+                format!(
+                    "{}|{}",
+                    instance_binding_key(env, &instance.bindings),
+                    instance_selection_key(env, &instance.selections)
+                ),
             ),
             WitnessCandidate::Axiom { instance } => (
                 1,
@@ -893,6 +1099,27 @@ impl WitnessCandidate {
             ),
         }
     }
+}
+
+/// The branch/witness structure of one rule instance.
+///
+/// A witness choice is part of the instance's identity: two instances of the
+/// same rule with the same parameters but different witnesses are different
+/// arguments and must not be merged into one node.
+fn instance_selection_key(env: &Env, selections: &[PremiseSelection]) -> String {
+    selections
+        .iter()
+        .map(|selection| match selection {
+            PremiseSelection::Plain => "plain".to_string(),
+            PremiseSelection::Branch { premise, branch } => {
+                format!("branch:{premise}:{branch}")
+            }
+            PremiseSelection::Witness { premise, witness } => {
+                format!("witness:{premise}:{}", structural_key(env, witness))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 /// The binding structure of a rule or universal instance.
@@ -1539,23 +1766,157 @@ impl<'a> Reasoner<'a> {
     /// conditions would let a rule be judged inapplicable on the event record
     /// of a fact it never used, or applicable while the gap tree reports the
     /// same premise missing.
-    fn premise_status(
+    /// Classify every premise of one candidate instance against the fact set.
+    ///
+    /// The classification is the single judgment used by the gap tree, the
+    /// issue scan and the certificate's gap record: a plain premise is held or
+    /// missing; a disjunctive premise holds at the first written branch that a
+    /// fact satisfies (otherwise all branches are missing, one entry each); an
+    /// existential premise holds at the first concrete witness whose body a
+    /// fact satisfies, or is missing with the body pattern and the candidate
+    /// individuals the search tried. A disjunction never reports a lump-sum
+    /// "P or Q" gap, and an existence never reports "some individual satisfies
+    /// P" without naming the candidates it could enumerate.
+    fn premise_statuses(
         &self,
-        premises: &[Expr],
+        rule_name: &str,
+        rule: &RuleDecl,
+        binding: &[(Name, Expr)],
         facts: &BTreeMap<String, Expr>,
-    ) -> (Vec<String>, Vec<Expr>, Vec<Expr>) {
-        let mut held_keys = Vec::new();
-        let mut held = Vec::new();
-        let mut missing = Vec::new();
-        for premise in premises {
-            if premise_satisfied(self.env, facts, premise) {
-                held_keys.push(self.key_of(premise));
-                held.push(premise.clone());
-            } else {
-                missing.push(premise.clone());
-            }
+    ) -> Result<Vec<PremiseStatus>, String> {
+        let mut statuses = Vec::with_capacity(rule.premises.len());
+        for index in 0..rule.premises.len() {
+            let status = match rule.open_premise(index) {
+                OpenPremise::Plain(pattern) => {
+                    let proposition = close_pattern(&pattern, binding);
+                    if premise_satisfied(self.env, facts, &proposition) {
+                        PremiseStatus {
+                            held: Some(proposition),
+                            selection: PremiseSelection::Plain,
+                            ..PremiseStatus::default()
+                        }
+                    } else {
+                        PremiseStatus {
+                            missing: vec![proposition],
+                            selection: PremiseSelection::Plain,
+                            ..PremiseStatus::default()
+                        }
+                    }
+                }
+                OpenPremise::Or(branches) => {
+                    let closed: Vec<Expr> = branches
+                        .iter()
+                        .map(|branch| close_pattern(branch, binding))
+                        .collect();
+                    let first = closed
+                        .iter()
+                        .position(|branch| premise_satisfied(self.env, facts, branch));
+                    match first {
+                        Some(branch) => PremiseStatus {
+                            held: Some(closed[branch].clone()),
+                            selection: PremiseSelection::Branch {
+                                premise: index,
+                                branch,
+                            },
+                            ..PremiseStatus::default()
+                        },
+                        None => PremiseStatus {
+                            missing: closed.clone(),
+                            branches: closed.into_iter().enumerate().collect(),
+                            selection: PremiseSelection::Plain,
+                            ..PremiseStatus::default()
+                        },
+                    }
+                }
+                OpenPremise::Exists {
+                    binder,
+                    domain,
+                    body,
+                } => {
+                    let pattern = close_pattern(&body, binding);
+                    let witness_candidates =
+                        display_witness_candidates(self.env, &close_pattern(&domain, binding))?;
+                    let holds = if open_names(&body).contains(&binder) {
+                        // Match the body against facts to find a concrete
+                        // witness; the first declared individual in fact order
+                        // is the deterministic choice.
+                        let mut found = None;
+                        for fact in facts.values() {
+                            let mut trial = binding.to_vec();
+                            if !match_premise(self.env, &pattern, fact, &mut trial) {
+                                continue;
+                            }
+                            let Some(witness) = trial
+                                .iter()
+                                .rev()
+                                .find(|(name, _)| *name == binder)
+                                .map(|(_, value)| value.clone())
+                            else {
+                                continue;
+                            };
+                            if !is_concrete_witness(self.env, &witness) {
+                                return Err(format!(
+                                    "规则 `{}` 的第 {} 个存在前提的见证 `{}` 不是已声明个体：\
+                                     不能用它作为缺口候选的具体见证",
+                                    rule_name,
+                                    index + 1,
+                                    print_expr(&witness)
+                                ));
+                            }
+                            let instance = substitute_pattern_constants(
+                                &pattern,
+                                &[(binder.clone(), witness.clone())],
+                            );
+                            found = Some(PremiseStatus {
+                                held: Some(instance),
+                                selection: PremiseSelection::Witness {
+                                    premise: index,
+                                    witness,
+                                },
+                                exists: true,
+                                ..PremiseStatus::default()
+                            });
+                            break;
+                        }
+                        found
+                    } else {
+                        let mut found = None;
+                        for witness in &witness_candidates.items {
+                            let instance = substitute_pattern_constants(
+                                &pattern,
+                                &[(binder.clone(), witness.clone())],
+                            );
+                            if premise_satisfied(self.env, facts, &instance) {
+                                found = Some(PremiseStatus {
+                                    held: Some(instance),
+                                    selection: PremiseSelection::Witness {
+                                        premise: index,
+                                        witness: witness.clone(),
+                                    },
+                                    exists: true,
+                                    ..PremiseStatus::default()
+                                });
+                                break;
+                            }
+                        }
+                        found
+                    };
+                    match holds {
+                        Some(status) => status,
+                        None => PremiseStatus {
+                            missing: vec![pattern],
+                            selection: PremiseSelection::Plain,
+                            exists_candidates: witness_candidates.items,
+                            exists_truncated: witness_candidates.truncated,
+                            exists: true,
+                            ..PremiseStatus::default()
+                        },
+                    }
+                }
+            };
+            statuses.push(status);
         }
-        (held_keys, held, missing)
+        Ok(statuses)
     }
 
     /// The priority cycles of the environment: every strongly connected
@@ -2410,19 +2771,24 @@ impl<'a> Reasoner<'a> {
         let mut out = Vec::new();
         let mut binding: Vec<(Name, Expr)> = Vec::new();
         let mut keys: Vec<String> = Vec::new();
+        let mut selections: Vec<PremiseSelection> = (0..rule.premises.len())
+            .map(|_| PremiseSelection::Plain)
+            .collect();
+        let mut budget = SelectionBudget::new();
         let matching = Matching {
             env: self.env,
             rule_name,
             rule,
             facts,
         };
-        backtrack_demanding(
-            self,
+        premise_walk(
             &matching,
+            Some((self, removed)),
             0,
             &mut binding,
             &mut keys,
-            removed,
+            &mut selections,
+            &mut budget,
             &mut out,
         )?;
         Ok(out)
@@ -2854,6 +3220,7 @@ impl<'a> Reasoner<'a> {
                     conclusion: conclusion.clone(),
                     computed: instance.computed.clone(),
                     premises,
+                    selections: instance.selections.clone(),
                     guard_judgements: instance.guard_judgements.clone(),
                     bindings: instance.bindings.clone(),
                     sources: sources.clone(),
@@ -3236,13 +3603,26 @@ impl<'a> Reasoner<'a> {
         let mut out = Vec::new();
         let mut binding: Vec<(Name, Expr)> = Vec::new();
         let mut keys: Vec<String> = Vec::new();
+        let mut selections: Vec<PremiseSelection> = (0..rule.premises.len())
+            .map(|_| PremiseSelection::Plain)
+            .collect();
+        let mut budget = SelectionBudget::new();
         let matching = Matching {
             env: self.env,
             rule_name,
             rule,
             facts,
         };
-        backtrack(&matching, 0, &mut binding, &mut keys, &mut out)?;
+        premise_walk(
+            &matching,
+            None,
+            0,
+            &mut binding,
+            &mut keys,
+            &mut selections,
+            &mut budget,
+            &mut out,
+        )?;
         Ok(out)
     }
 
@@ -3589,10 +3969,11 @@ impl<'a> Reasoner<'a> {
                 // judgment, so an instance the fixed point can fire is not
                 // reported as excluded here just because its premise was
                 // written through a `def` alias.
-                let premises: Vec<Expr> = (0..rule.premises.len())
-                    .map(|index| close_pattern(&rule.open_premise(index), &binding))
+                let statuses = self.premise_statuses(&decl.name, rule, &binding, &facts)?;
+                let held_keys: Vec<String> = statuses
+                    .iter()
+                    .filter_map(|status| status.held.as_ref().map(|held| self.key_of(held)))
                     .collect();
-                let (held_keys, _, _) = self.premise_status(&premises, &facts);
                 let verdict = self.judge_instance(&decl.scope, &held_keys);
                 // The conclusion is an issue even when this instance is
                 // excluded: the gap tree must show why the rule did not fire.
@@ -3756,6 +4137,7 @@ impl<'a> Reasoner<'a> {
                 continue;
             }
             *attempts += 1;
+            let fallback = Expr::Sort(0);
             let mut rule = GapRule {
                 rule: candidate.rule,
                 applicability: candidate.applicability,
@@ -3766,17 +4148,72 @@ impl<'a> Reasoner<'a> {
                 sources: candidate.sources,
                 limit: None,
             };
-            for premise in candidate.missing {
+            for status in candidate.premises {
+                if status.held.is_some() {
+                    continue;
+                }
+                if !status.branches.is_empty() {
+                    // A failing disjunction lists every written branch with its
+                    // own gap: "P or Q is missing" is not a lump-sum answer.
+                    let mut group = GapPremise {
+                        premise: status
+                            .missing
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| fallback.clone()),
+                        gap: None,
+                        branches: Vec::new(),
+                        exists: None,
+                    };
+                    for (index, proposition) in status.branches {
+                        let Some(child) = self.expand_premise(&proposition, depth, path, budget)?
+                        else {
+                            tree.limit = Some(GapLimit::Nodes {
+                                limit: budget.limits.max_nodes,
+                            });
+                            group.branches.push(GapBranch {
+                                index,
+                                proposition,
+                                gap: None,
+                            });
+                            continue;
+                        };
+                        group.branches.push(GapBranch {
+                            index,
+                            proposition,
+                            gap: Some(Box::new(child)),
+                        });
+                    }
+                    rule.missing.push(group);
+                    continue;
+                }
+                let premise = status
+                    .missing
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| fallback.clone());
+                let exists = status.exists.then(|| GapExists {
+                    body: premise.clone(),
+                    candidates: status.exists_candidates,
+                    truncated: status.exists_truncated,
+                });
                 let Some(child) = self.expand_premise(&premise, depth, path, budget)? else {
                     tree.limit = Some(GapLimit::Nodes {
                         limit: budget.limits.max_nodes,
                     });
-                    rule.missing.push(GapPremise { premise, gap: None });
+                    rule.missing.push(GapPremise {
+                        premise,
+                        gap: None,
+                        branches: Vec::new(),
+                        exists,
+                    });
                     continue;
                 };
                 rule.missing.push(GapPremise {
                     premise,
                     gap: Some(Box::new(child)),
+                    branches: Vec::new(),
+                    exists,
                 });
             }
             tree.candidates.push(rule);
@@ -3877,23 +4314,45 @@ impl<'a> Reasoner<'a> {
             if !match_premise(self.env, &rule.open_conclusion(), goal, &mut binding) {
                 continue;
             }
-            let premises: Vec<Expr> = (0..rule.premises.len())
-                .map(|i| close_pattern(&rule.open_premise(i), &binding))
-                .collect();
             // One judgment decides both sides of this candidate: a premise the
             // fixed point can consume contributes the fact's occurrence record
             // to the applicability anchor, and everything else is what the tree
             // reports as missing. The candidate's instance references only the
             // premise facts that already hold; a still-missing premise is not
             // a fact yet, so it does not contribute an event record.
-            let (held_keys, held, missing) = self.premise_status(&premises, &facts);
-            let mut blocked_by: Vec<Expr> = Vec::new();
-            for u in &rule.unlesses {
-                let closed = close_pattern(&rule.open_unless_text(u), &binding);
-                if blocked(std::slice::from_ref(&closed), &facts, self.env)? {
-                    blocked_by.push(closed);
+            let premises = self.premise_statuses(&decl.name, rule, &binding, &facts)?;
+            let held_keys: Vec<String> = premises
+                .iter()
+                .filter_map(|status| status.held.as_ref().map(|held| self.key_of(held)))
+                .collect();
+            let held: Vec<Expr> = premises.iter().filter_map(|s| s.held.clone()).collect();
+            let missing: Vec<Expr> = premises.iter().flat_map(|s| s.missing.clone()).collect();
+            let missing_branches: Vec<Option<usize>> = premises
+                .iter()
+                .flat_map(|status| {
+                    if status.branches.is_empty() {
+                        status.missing.iter().map(|_| None).collect::<Vec<_>>()
+                    } else {
+                        status
+                            .branches
+                            .iter()
+                            .map(|(branch, _)| Some(*branch))
+                            .collect::<Vec<_>>()
+                    }
+                })
+                .collect();
+            let choices: Vec<PremiseSelection> =
+                premises.iter().map(|s| s.selection.clone()).collect();
+            let blocked_by: Vec<Expr> = {
+                let mut out = Vec::new();
+                for u in &rule.unlesses {
+                    let closed = close_pattern(&rule.open_unless_text(u), &binding);
+                    if blocked(std::slice::from_ref(&closed), &facts, self.env)? {
+                        out.push(closed);
+                    }
                 }
-            }
+                out
+            };
             // Guards are judged from the candidate's own bindings. A guard
             // whose parameter the conclusion match left open stays undecided
             // (`None`), which is reported as such — never silently `false`.
@@ -3903,6 +4362,9 @@ impl<'a> Reasoner<'a> {
                 bindings: binding,
                 held,
                 missing,
+                missing_branches,
+                choices,
+                premises,
                 blocked_by,
                 guards,
                 sources: decl.sources.clone(),
@@ -4185,11 +4647,120 @@ struct Matching<'a> {
     facts: &'a BTreeMap<String, Expr>,
 }
 
-fn backtrack(
+/// A premise-search budget: how many branch/witness alternatives one rule may
+/// try in one enumeration. The count is reset at each enumeration (one fixed
+/// point round or one witness index), and exceeding it is an explicit error.
+struct SelectionBudget {
+    attempts: usize,
+}
+
+impl SelectionBudget {
+    fn new() -> Self {
+        SelectionBudget { attempts: 0 }
+    }
+
+    fn charge(&mut self, rule_name: &str) -> Result<(), String> {
+        self.attempts += 1;
+        if self.attempts > MAX_SELECTION_ATTEMPTS_PER_RULE {
+            return Err(format!(
+                "规则 `{rule_name}` 的析取分支/存在见证选择尝试超过每轮 {} 次上限：\
+                 析取与存在会按书写顺序尝试分支与见证，超过上限时显式报错，\
+                 不静默截断搜索结果",
+                MAX_SELECTION_ATTEMPTS_PER_RULE
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Is this term a concrete witness the certificate can record?
+///
+/// A witness must be an environment `obj` constant or an exact integer
+/// literal. A compound term or a bare name that is not an individual would
+/// silently invent an individual, so the reasoner refuses it instead of
+/// producing a certificate its own checker would reject.
+fn is_concrete_witness(env: &Env, witness: &Expr) -> bool {
+    match witness {
+        Expr::Num(_) => true,
+        Expr::Const(name) => matches!(env.get(name).map(|decl| &decl.kind), Some(DeclKind::Obj)),
+        _ => false,
+    }
+}
+
+/// Every declared individual whose type is the (closed) domain type, sorted by
+/// name.
+///
+/// Existential witnesses are not guessed: when the body does not mention the
+/// witness, the search enumerates declared `obj` constants of the domain, so the
+/// certificate can record a concrete, auditable individual. A domain with no
+/// declared individual (for example `Int`, which has no finite enumeration)
+/// yields no candidate and therefore no witness.
+fn declared_individuals(env: &Env, domain: &Expr) -> Result<Vec<Expr>, String> {
+    let mut names = Vec::new();
+    for declaration in env.iter() {
+        if !matches!(declaration.kind, DeclKind::Obj) {
+            continue;
+        }
+        let same = convertible(env, &Ctx::new(), &declaration.ty, domain).map_err(|error| {
+            format!(
+                "无法判定个体 `{}` 的类型是否属于存在量词的域：{error}",
+                declaration.name
+            )
+        })?;
+        if same {
+            names.push(declaration.name.clone());
+        }
+    }
+    names.sort();
+    Ok(names.into_iter().map(Expr::constant).collect())
+}
+
+/// The key of a fact that is kernel-equivalent to `proposition`, if one exists.
+fn find_fact_key(
+    env: &Env,
+    facts: &BTreeMap<String, Expr>,
+    proposition: &Expr,
+) -> Result<Option<String>, String> {
+    let key = key(env, proposition);
+    if facts.contains_key(&key) {
+        return Ok(Some(key));
+    }
+    for (fact_key, fact) in facts {
+        if convertible(env, &Ctx::new(), fact, proposition).map_err(|error| {
+            format!(
+                "无法判定事实是否等价于「{}」：{error}",
+                print_expr(proposition)
+            )
+        })? {
+            return Ok(Some(fact_key.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// Expand every match of one premise and recurse into the next premise.
+///
+/// This is the single premise walk both the plain and the demanding enumeration
+/// use. `demand` carries the reasoner and the removed fact keys for
+/// premise-driven universal instantiation; `None` is the plain enumeration.
+/// The disjunctive and existential forms follow the same rule:
+///
+/// * branches are tried in **written order**, and the first branch that yields
+///   at least one complete instance is used (the step proves one branch, not
+///   all of them);
+/// * an existential premise enumerates one witness per matching body. If the
+///   body does not mention the witness, it enumerates declared individuals of
+///   the domain in name order. Every witness is recorded, so two distinct
+///   witnesses are two instances of the same rule.
+#[allow(clippy::too_many_arguments)]
+fn premise_walk(
     matching: &Matching,
+    demand: Option<(&Reasoner<'_>, &BTreeSet<String>)>,
     idx: usize,
     binding: &mut Vec<(Name, Expr)>,
     keys: &mut Vec<String>,
+    selections: &mut Vec<PremiseSelection>,
+    budget: &mut SelectionBudget,
     out: &mut Vec<Instance>,
 ) -> Result<(), String> {
     let rule = matching.rule;
@@ -4200,27 +4771,243 @@ fn backtrack(
             rule,
             binding,
             keys.clone(),
+            selections.clone(),
         )?);
         return Ok(());
     }
 
-    let pattern = close_pattern(&rule.open_premise(idx), binding);
-    // A fact is not a linear resource: one established proposition may satisfy
-    // several premises of the same rule, whether the rule writes the same
-    // premise twice or writes two kernel-equivalent forms of it. Forbidding
-    // reuse was a silent false negative, and it let a gap candidate list no
-    // missing premise while the fixed point still could not fire.
-    for (k, fact) in matching.facts {
-        let before = binding.len();
-        let mut b = binding.clone();
-        if !match_premise(matching.env, &pattern, fact, &mut b) {
-            continue;
+    match rule.open_premise(idx) {
+        OpenPremise::Plain(pattern) => {
+            let pattern = close_pattern(&pattern, binding);
+            // A fact is not a linear resource: one established proposition may
+            // satisfy several premises of the same rule, whether the rule writes
+            // the same premise twice or writes two kernel-equivalent forms of it.
+            let mut matched = false;
+            for (k, fact) in matching.facts {
+                let before = binding.len();
+                let mut b = binding.clone();
+                if !match_premise(matching.env, &pattern, fact, &mut b) {
+                    continue;
+                }
+                matched = true;
+                *binding = b;
+                keys.push(k.clone());
+                selections[idx] = PremiseSelection::Plain;
+                premise_walk(
+                    matching,
+                    demand,
+                    idx + 1,
+                    binding,
+                    keys,
+                    selections,
+                    budget,
+                    out,
+                )?;
+                keys.pop();
+                binding.truncate(before);
+            }
+            if !matched && !has_open_pattern(&pattern) {
+                if let Some((reasoner, removed)) = demand {
+                    if let Some(instance) = reasoner.demand_axiom(&pattern)? {
+                        let key = reasoner.key_of(&instance.conclusion);
+                        if !removed.contains(&key) && !matching.facts.contains_key(&key) {
+                            keys.push(key);
+                            selections[idx] = PremiseSelection::Plain;
+                            premise_walk(
+                                matching,
+                                demand,
+                                idx + 1,
+                                binding,
+                                keys,
+                                selections,
+                                budget,
+                                out,
+                            )?;
+                            keys.pop();
+                        }
+                    }
+                }
+            }
         }
-        *binding = b;
-        keys.push(k.clone());
-        backtrack(matching, idx + 1, binding, keys, out)?;
-        keys.pop();
-        binding.truncate(before);
+        OpenPremise::Or(branches) => {
+            // Every written branch is tried, in order. A branch that yields a
+            // complete instance proves the disjunction; another branch may
+            // yield a different binding or a second independent proof, so a
+            // branch is never dropped merely because an earlier one fired. The
+            // selection budget bounds the total work; the certificate records
+            // exactly which branch each instance used.
+            for (branch, declared) in branches.iter().enumerate() {
+                budget.charge(matching.rule_name)?;
+                let pattern = close_pattern(declared, binding);
+                for (k, fact) in matching.facts {
+                    let before = binding.len();
+                    let mut b = binding.clone();
+                    if !match_premise(matching.env, &pattern, fact, &mut b) {
+                        continue;
+                    }
+                    *binding = b;
+                    keys.push(k.clone());
+                    selections[idx] = PremiseSelection::Branch {
+                        premise: idx,
+                        branch,
+                    };
+                    premise_walk(
+                        matching,
+                        demand,
+                        idx + 1,
+                        binding,
+                        keys,
+                        selections,
+                        budget,
+                        out,
+                    )?;
+                    keys.pop();
+                    binding.truncate(before);
+                }
+            }
+            if let Some((reasoner, removed)) = demand {
+                for (branch, declared) in branches.iter().enumerate() {
+                    let pattern = close_pattern(declared, binding);
+                    if has_open_pattern(&pattern) {
+                        continue;
+                    }
+                    if let Some(instance) = reasoner.demand_axiom(&pattern)? {
+                        let key = reasoner.key_of(&instance.conclusion);
+                        if !removed.contains(&key) && !matching.facts.contains_key(&key) {
+                            budget.charge(matching.rule_name)?;
+                            keys.push(key);
+                            selections[idx] = PremiseSelection::Branch {
+                                premise: idx,
+                                branch,
+                            };
+                            premise_walk(
+                                matching,
+                                demand,
+                                idx + 1,
+                                binding,
+                                keys,
+                                selections,
+                                budget,
+                                out,
+                            )?;
+                            keys.pop();
+                        }
+                    }
+                }
+            }
+        }
+        OpenPremise::Exists {
+            binder,
+            domain,
+            body,
+        } => {
+            let pattern = close_pattern(&body, binding);
+            let body_mentions_witness = open_names(&body).contains(&binder);
+            if body_mentions_witness {
+                let mut candidates = 0usize;
+                for (k, fact) in matching.facts {
+                    let before = binding.len();
+                    let mut b = binding.clone();
+                    if !match_premise(matching.env, &pattern, fact, &mut b) {
+                        continue;
+                    }
+                    candidates += 1;
+                    if candidates > MAX_WITNESS_CANDIDATES_PER_PREMISE {
+                        return Err(format!(
+                            "规则 `{}` 的第 {} 个存在前提的见证候选超过每个前提 {} 个上限：\
+                             见证必须逐个枚举，超限时显式报错而不静默截断",
+                            matching.rule_name,
+                            idx + 1,
+                            MAX_WITNESS_CANDIDATES_PER_PREMISE
+                        ));
+                    }
+                    budget.charge(matching.rule_name)?;
+                    let witness = b
+                        .iter()
+                        .rev()
+                        .find(|(name, _)| *name == binder)
+                        .map(|(_, value)| value.clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "规则 `{}` 的第 {} 个存在前提：匹配到了体，却没有得到见证 `?{}`",
+                                matching.rule_name,
+                                idx + 1,
+                                binder
+                            )
+                        })?;
+                    if !is_concrete_witness(matching.env, &witness) {
+                        return Err(format!(
+                            "规则 `{}` 的第 {} 个存在前提的见证 `{}` 不是已声明个体：\
+                             事实里的这个项无法作为证书中的具体见证",
+                            matching.rule_name,
+                            idx + 1,
+                            print_expr(&witness)
+                        ));
+                    }
+                    *binding = b;
+                    keys.push(k.clone());
+                    selections[idx] = PremiseSelection::Witness {
+                        premise: idx,
+                        witness: witness.clone(),
+                    };
+                    premise_walk(
+                        matching,
+                        demand,
+                        idx + 1,
+                        binding,
+                        keys,
+                        selections,
+                        budget,
+                        out,
+                    )?;
+                    keys.pop();
+                    binding.truncate(before);
+                }
+            } else {
+                // The body does not mention the witness: any declared individual
+                // of the domain satisfies it if the body holds. The witness is
+                // enumerated from declarations, so it is always concrete.
+                let closed_domain = close_pattern(&domain, binding);
+                let closed_body = close_pattern(&body, binding);
+                let individuals = declared_individuals(matching.env, &closed_domain)?;
+                if individuals.len() > MAX_WITNESS_CANDIDATES_PER_PREMISE {
+                    return Err(format!(
+                        "规则 `{}` 的第 {} 个存在前提的候选个体超过每个前提 {} 个上限：\
+                         见证必须逐个枚举，超限时显式报错而不静默截断",
+                        matching.rule_name,
+                        idx + 1,
+                        MAX_WITNESS_CANDIDATES_PER_PREMISE
+                    ));
+                }
+                for witness in individuals {
+                    budget.charge(matching.rule_name)?;
+                    let instance = substitute_pattern_constants(
+                        &closed_body,
+                        &[(binder.clone(), witness.clone())],
+                    );
+                    let Some(fact_key) = find_fact_key(matching.env, matching.facts, &instance)?
+                    else {
+                        continue;
+                    };
+                    keys.push(fact_key);
+                    selections[idx] = PremiseSelection::Witness {
+                        premise: idx,
+                        witness: witness.clone(),
+                    };
+                    premise_walk(
+                        matching,
+                        demand,
+                        idx + 1,
+                        binding,
+                        keys,
+                        selections,
+                        budget,
+                        out,
+                    )?;
+                    keys.pop();
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -4247,6 +5034,7 @@ fn finish_instance(
     rule: &RuleDecl,
     binding: &[(Name, Expr)],
     premise_keys: Vec<String>,
+    selections: Vec<PremiseSelection>,
 ) -> Result<Instance, String> {
     let raw = close_pattern(&rule.open_conclusion(), binding);
     let conclusion = evaluate_arithmetic(env, &raw).map_err(|error| {
@@ -4280,13 +5068,31 @@ fn finish_instance(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // Only parameters are certificate bindings. The witness of an existential
+    // premise is not a telescope binder and is recorded in `selections`; a
+    // premise binder itself is not a value.
+    let bindings = rule
+        .params
+        .iter()
+        .map(|(parameter, _)| {
+            binding
+                .iter()
+                .rev()
+                .find(|(name, _)| name == parameter)
+                .map(|(_, value)| (parameter.clone(), value.clone()))
+                .ok_or_else(|| {
+                    format!("规则 `{rule_name}` 的参数 `{parameter}` 没有被这次实例的匹配确定")
+                })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(Instance {
         conclusion,
         computed,
         premise_keys,
+        selections,
         unlesses,
         guard_judgements,
-        bindings: binding.to_vec(),
+        bindings,
     })
 }
 
@@ -4324,63 +5130,14 @@ fn judge_candidate_guards(
     Ok(out)
 }
 
-/// [`backtrack`] with universal elimination: a premise no fact satisfies but
-/// which is closed asks the reasoner for a universal instance.
-///
-/// The instance is a derived proposition, so it may satisfy this premise even
-/// before the next fixed-point round carries it into the fact set. The
-/// conclusion key is recorded as the premise key so the node graph can cite the
-/// `axiom_instance` node; [`Reasoner::fixed_point`] adds the instance to the
-/// next set in the same round. A removed conclusion never satisfies a premise.
-fn backtrack_demanding(
-    reasoner: &Reasoner<'_>,
-    matching: &Matching,
-    idx: usize,
-    binding: &mut Vec<(Name, Expr)>,
-    keys: &mut Vec<String>,
-    removed: &BTreeSet<String>,
-    out: &mut Vec<Instance>,
-) -> Result<(), String> {
-    let rule = matching.rule;
-    if idx == rule.premises.len() {
-        out.push(finish_instance(
-            reasoner.env,
-            matching.rule_name,
-            rule,
-            binding,
-            keys.clone(),
-        )?);
-        return Ok(());
-    }
-
-    let pattern = close_pattern(&rule.open_premise(idx), binding);
-    let mut matched = false;
-    for (k, fact) in matching.facts {
-        let before = binding.len();
-        let mut b = binding.clone();
-        if !match_premise(matching.env, &pattern, fact, &mut b) {
-            continue;
-        }
-        matched = true;
-        *binding = b;
-        keys.push(k.clone());
-        backtrack_demanding(reasoner, matching, idx + 1, binding, keys, removed, out)?;
-        keys.pop();
-        binding.truncate(before);
-    }
-    if !matched && !has_open_pattern(&pattern) {
-        if let Some(instance) = reasoner.demand_axiom(&pattern)? {
-            let key = reasoner.key_of(&instance.conclusion);
-            if !removed.contains(&key) && !matching.facts.contains_key(&key) {
-                keys.push(key);
-                backtrack_demanding(reasoner, matching, idx + 1, binding, keys, removed, out)?;
-                keys.pop();
-            }
-        }
-    }
-    Ok(())
-}
-
+/// Premise-driven universal elimination is folded into [`premise_walk`]: a
+/// premise no fact satisfies but which is closed asks the reasoner for a
+/// universal instance. The instance is a derived proposition, so it may satisfy
+/// this premise even before the next fixed-point round carries it into the fact
+/// set. The conclusion key is recorded as the premise key so the node graph can
+/// cite the `axiom_instance` node; [`Reasoner::fixed_point`] adds the instance
+/// to the next set in the same round. A removed conclusion never satisfies a
+/// premise.
 fn blocked(unlesses: &[Expr], facts: &BTreeMap<String, Expr>, env: &Env) -> Result<bool, String> {
     for unless in unlesses {
         // A comparison that could not be decided is not evidence that the
@@ -4802,6 +5559,36 @@ pub struct GapPremise {
     /// `None` when a node limit stopped the expansion; the enclosing
     /// `GapTree::limit` or `GapRule::limit` says which.
     pub gap: Option<Box<GapTree>>,
+    /// For a failing disjunction: one entry per written branch, each with its
+    /// own gap. Empty for a plain or existential premise.
+    pub branches: Vec<GapBranch>,
+    /// For a failing existence: the body and the declared individuals that were
+    /// tried, with an explicit truncation flag. `None` otherwise.
+    pub exists: Option<GapExists>,
+}
+
+/// One branch of a failing disjunction, with what that branch itself lacks.
+#[derive(Debug, Clone)]
+pub struct GapBranch {
+    /// Zero-based branch index in the written order.
+    pub index: usize,
+    /// The instantiated branch proposition.
+    pub proposition: Expr,
+    /// `None` when a node limit stopped this branch's expansion.
+    pub gap: Option<Box<GapTree>>,
+}
+
+/// The witnesses a failing existence search could enumerate.
+#[derive(Debug, Clone)]
+pub struct GapExists {
+    /// The open body `P ?w` (or the closed body when it does not mention the
+    /// witness).
+    pub body: Expr,
+    /// Declared individuals of the domain that the search tried, at most
+    /// [`MAX_GAP_WITNESS_CANDIDATES`].
+    pub candidates: Vec<Expr>,
+    /// Whether more declared individuals exist than the display bound.
+    pub truncated: bool,
 }
 
 /// A rule whose every enumerated instance is excluded by the applicability
@@ -4843,21 +5630,61 @@ pub struct IssueScan {
 impl GapRule {
     /// A candidate whose missing premises are listed but not expanded.
     fn unexpanded(candidate: GapCandidate, limit: Option<GapLimit>) -> Self {
+        let missing = unexpanded_gap_premises(candidate.premises);
         GapRule {
             rule: candidate.rule,
             applicability: candidate.applicability,
             held: candidate.held,
-            missing: candidate
-                .missing
-                .into_iter()
-                .map(|premise| GapPremise { premise, gap: None })
-                .collect(),
+            missing,
             blocked_by: candidate.blocked_by,
             guards: candidate.guards,
             sources: candidate.sources,
             limit,
         }
     }
+}
+
+/// Turn a candidate's per-premise statuses into unexpanded gap entries.
+fn unexpanded_gap_premises(premises: Vec<PremiseStatus>) -> Vec<GapPremise> {
+    premises
+        .into_iter()
+        .filter(|status| status.held.is_none())
+        .map(|status| {
+            let fallback = Expr::Sort(0);
+            if !status.branches.is_empty() {
+                return GapPremise {
+                    premise: status
+                        .missing
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| fallback.clone()),
+                    gap: None,
+                    branches: status
+                        .branches
+                        .into_iter()
+                        .map(|(index, proposition)| GapBranch {
+                            index,
+                            proposition,
+                            gap: None,
+                        })
+                        .collect(),
+                    exists: None,
+                };
+            }
+            let body = status.missing.first().cloned().unwrap_or(fallback);
+            let exists = status.exists.then(|| GapExists {
+                body: body.clone(),
+                candidates: status.exists_candidates,
+                truncated: status.exists_truncated,
+            });
+            GapPremise {
+                premise: body,
+                gap: None,
+                branches: Vec::new(),
+                exists,
+            }
+        })
+        .collect()
 }
 
 /// The budget shared by every node of one gap tree.
@@ -5220,6 +6047,7 @@ pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
             rule,
             conclusion,
             premises,
+            selections,
             ..
         } = node
         else {
@@ -5255,13 +6083,87 @@ pub fn verify(env: &Env, d: &Derivation) -> Result<(), String> {
         for (i, p) in premises.iter().enumerate() {
             let actual = node_prop(&d.nodes[*p])
                 .ok_or_else(|| format!("节点 {id}：前提 {p} 是未闭合的缺口，不能充当前提"))?;
-            if !match_premise(env, &r.open_premise(i), actual, &mut binding) {
-                return Err(format!(
-                    "节点 {id}：规则 `{rule}` 的第 {} 个前提是 `{}`，而引用的节点 {p} 证成的是 `{}`",
-                    i + 1,
-                    print_expr(&close_pattern(&r.open_premise(i), &binding)),
-                    print_expr(actual)
-                ));
+            let selection = selections.get(i);
+            match (&r.premises[i].kind, selection) {
+                (PremiseKind::Plain(_), None | Some(PremiseSelection::Plain)) => {
+                    let pattern = close_pattern(&r.open_premise_plain(i), &binding);
+                    if !match_premise(env, &pattern, actual, &mut binding) {
+                        return Err(format!(
+                            "节点 {id}：规则 `{rule}` 的第 {} 个前提是 `{}`，\
+                             而引用的节点 {p} 证成的是 `{}`",
+                            i + 1,
+                            print_expr(&pattern),
+                            print_expr(actual)
+                        ));
+                    }
+                }
+                (PremiseKind::Or(branches), Some(PremiseSelection::Branch { branch, .. })) => {
+                    if *branch >= branches.len() {
+                        return Err(format!(
+                            "节点 {id}：规则 `{rule}` 的第 {} 个前提只有 {} 个分支，\
+                             本步选择的是第 {} 个",
+                            i + 1,
+                            branches.len(),
+                            branch + 1
+                        ));
+                    }
+                    let pattern = close_pattern(&r.open_branch(i, *branch), &binding);
+                    if !match_premise(env, &pattern, actual, &mut binding) {
+                        return Err(format!(
+                            "节点 {id}：规则 `{rule}` 的第 {} 个前提选择了第 {} 个析取分支 `{}`，\
+                             而引用的节点 {p} 证成的是 `{}`",
+                            i + 1,
+                            branch + 1,
+                            print_expr(&pattern),
+                            print_expr(actual)
+                        ));
+                    }
+                }
+                (
+                    PremiseKind::Exists { binder, .. },
+                    Some(PremiseSelection::Witness { witness, .. }),
+                ) => {
+                    if !is_concrete_witness(env, witness) {
+                        return Err(format!(
+                            "节点 {id}：规则 `{rule}` 的第 {} 个前提的见证 `{}` 不是已声明个体",
+                            i + 1,
+                            print_expr(witness)
+                        ));
+                    }
+                    let body = close_pattern(&r.open_exists_body(i), &binding);
+                    let expected =
+                        substitute_pattern_constants(&body, &[(binder.clone(), witness.clone())]);
+                    if !convertible(env, &Ctx::new(), &expected, actual)
+                        .map_err(|error| format!("节点 {id}：无法判定见证体的等价性：{error}"))?
+                    {
+                        return Err(format!(
+                            "节点 {id}：规则 `{rule}` 的第 {} 个存在前提在见证 `{}` 下的体是 `{}`，\
+                             而引用的节点 {p} 证成的是 `{}`",
+                            i + 1,
+                            print_expr(witness),
+                            print_expr(&expected),
+                            print_expr(actual)
+                        ));
+                    }
+                }
+                (PremiseKind::Or(_), _) => {
+                    return Err(format!(
+                        "节点 {id}：规则 `{rule}` 的第 {} 个前提是析取，本步没有记录选择",
+                        i + 1
+                    ));
+                }
+                (PremiseKind::Exists { .. }, _) => {
+                    return Err(format!(
+                        "节点 {id}：规则 `{rule}` 的第 {} 个前提是存在量词，本步没有记录见证",
+                        i + 1
+                    ));
+                }
+                (PremiseKind::Plain(_), Some(_)) => {
+                    return Err(format!(
+                        "节点 {id}：规则 `{rule}` 的第 {} 个前提是普通命题，不能记录选择",
+                        i + 1
+                    ));
+                }
             }
         }
 
@@ -5459,6 +6361,7 @@ pub fn certificate(
                 conclusion,
                 computed,
                 premises,
+                selections,
                 guard_judgements,
                 bindings,
                 sources,
@@ -5477,11 +6380,18 @@ pub fn certificate(
                     None => None,
                 };
                 let guards = cert_guards(env, rule, guard_judgements, Some(id))?;
+                let mut choices = Vec::new();
+                for selection in selections {
+                    if let Some(choice) = selection.certificate_choice()? {
+                        choices.push(choice);
+                    }
+                }
                 nodes.push(std_deduce_cert::Node::RuleApplication {
                     rule: rule.to_string(),
                     conclusion: cert_expr(conclusion, Some(id), "结论")?,
                     computed,
                     premises: premises.clone(),
+                    choices,
                     bindings: converted,
                     guards,
                     sources: sources.iter().map(std_deduce_cert::Source::from).collect(),
@@ -5602,11 +6512,19 @@ pub fn certificate(
                         .collect::<Result<Vec<_>, String>>()?;
                     let scope = rule_scope(env, &candidate.rule, id)?;
                     let guards = cert_guards(env, &candidate.rule, &candidate.guards, Some(id))?;
+                    let mut choices = Vec::new();
+                    for selection in &candidate.choices {
+                        if let Some(choice) = selection.certificate_choice()? {
+                            choices.push(choice);
+                        }
+                    }
                     converted.push(std_deduce_cert::GapCandidate {
                         rule: candidate.rule.to_string(),
                         bindings,
                         held,
                         missing,
+                        missing_branches: candidate.missing_branches.clone(),
+                        choices,
                         blocked_by,
                         guards,
                         sources: candidate

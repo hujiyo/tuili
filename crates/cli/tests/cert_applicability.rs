@@ -778,6 +778,7 @@ rule 后规 :
     };
     let rule_node =
         |rule: &str, conclusion: CertExpr, premises: Vec<usize>| Node::RuleApplication {
+            choices: Vec::new(),
             guards: Vec::new(),
             computed: None,
             rule: rule.to_owned(),

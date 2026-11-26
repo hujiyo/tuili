@@ -345,6 +345,7 @@ impl Certificate {
                     computed,
                     bindings,
                     guards,
+                    choices,
                     ..
                 } => {
                     check_expression(conclusion, &format!("{place}的结论"))?;
@@ -362,6 +363,9 @@ impl Certificate {
                     }
                     for guard in guards {
                         check_guard_expression(guard, &place)?;
+                    }
+                    for choice in choices {
+                        check_choice_expression(choice, &place)?;
                     }
                 }
                 Node::InterpretationApplication { conclusion, .. } => {
@@ -444,6 +448,15 @@ impl Certificate {
                             check_guard_expression(
                                 guard,
                                 &format!("{place}的缺口候选 `{}`", escape_control(&candidate.rule)),
+                            )?;
+                        }
+                        for choice in &candidate.choices {
+                            check_choice_expression(
+                                choice,
+                                &format!(
+                                    "{place}的缺口候选 `{}` 的前提选择",
+                                    escape_control(&candidate.rule)
+                                ),
                             )?;
                         }
                     }
@@ -692,7 +705,25 @@ pub enum Node {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         computed: Option<CertExpr>,
         /// The nodes proving the rule's premises, in the rule's premise order.
+        ///
+        /// One node per premise. For a plain premise the node proves the
+        /// premise itself; for a disjunctive premise it proves the selected
+        /// branch; for an existential premise it proves the selected witness'
+        /// body instance `P w`. The selection itself is recorded in `choices`
+        /// — the premises list alone cannot say which branch or witness was
+        /// used, and the checker refuses to guess.
         premises: Vec<NodeId>,
+        /// The explicit branch/witness selections of this instance.
+        ///
+        /// Exactly one entry is required for every compound premise of the
+        /// rule (disjunction or existence), and no entry is allowed for a
+        /// plain premise. The field is omitted when the rule has only plain
+        /// premises, so an ordinary step's JSON is unchanged apart from the
+        /// version number. Unselected branches are deliberately not recorded
+        /// and not required to be proven: this step establishes that one branch
+        /// holds, not that every branch does.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        choices: Vec<PremiseChoice>,
         /// The parameter bindings that produced this instance, available to a
         /// checker without parsing the rendering of the instance.
         bindings: Vec<Binding>,
@@ -783,6 +814,43 @@ pub struct Binding {
     pub value: CertExpr,
 }
 
+/// Which branch or witness a compound rule premise used.
+///
+/// The certificate records the choice next to the premise it belongs to; the
+/// checker validates three things and refuses the step if any fails:
+///
+/// * the rule declaration really has a premise at `premise`, and that premise
+///   is the kind this choice speaks about (a branch choice only for a
+///   disjunction, a witness only for an existence);
+/// * the cited premise node proves exactly the selected branch (or the body
+///   instance with the selected witness);
+/// * the selection exists: `branch` is a written branch, and `witness` is a
+///   declared individual (or an integer literal) of the premise's domain type.
+///
+/// An unselected branch never has to be proven. The certificate therefore
+/// proves "one branch holds", not "all branches hold", exactly like the
+/// reasoner's semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PremiseChoice {
+    /// Zero-based index of the selected branch of a disjunctive premise.
+    Branch {
+        /// Zero-based index of the premise in the rule's premise order.
+        premise: usize,
+        /// Zero-based index of the selected branch in the written order.
+        branch: usize,
+    },
+    /// The concrete witness of an existential premise.
+    Witness {
+        /// Zero-based index of the premise in the rule's premise order.
+        premise: usize,
+        /// The closed individual that satisfies the body. It must be a
+        /// declared `obj` constant (or an integer literal for an `Int`
+        /// domain), never an invented or open term.
+        witness: CertExpr,
+    },
+}
+
 /// One `guard` judgement of a rule instance.
 ///
 /// A guard is an *instance condition*: a comparison over the rule's parameter
@@ -836,6 +904,16 @@ pub struct GapCandidate {
     /// Premises that are not known.
     #[serde(default)]
     pub missing: Vec<CertExpr>,
+    /// Optional branch labels parallel to `missing`: `Some(k)` marks the
+    /// entry as the k-th written branch of one failing disjunctive premise;
+    /// `null` marks a plain or existential missing proposition. The reasoner
+    /// fills this for disjunctive gaps so `:why` can label each branch instead
+    /// of presenting them as unrelated missing premises. The field is omitted
+    /// when no entry is a branch, so existing gap certificates keep their JSON.
+    /// Hand-written certificates may omit it; the checker validates it when
+    /// present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_branches: Vec<Option<usize>>,
     /// `unless` conditions that already hold, blocking this rule.
     #[serde(default)]
     pub blocked_by: Vec<CertExpr>,
@@ -846,6 +924,15 @@ pub struct GapCandidate {
     /// as `null` (the guard could not be decided), never as `false`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guards: Vec<GuardRecord>,
+    /// The branch/witness selections of the compound premises this candidate
+    /// already holds, in the same form as a rule application. A disjunctive
+    /// premise with a held branch records the selected branch; an existential
+    /// premise with a found witness records that witness. A compound premise
+    /// that holds no branch/witness has no entry here, and its branches appear
+    /// in `missing` (one entry per branch, in written order) instead of a
+    /// single lump-sum proposition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<PremiseChoice>,
     /// Where the candidate rule comes from.
     #[serde(default)]
     pub sources: Vec<Source>,
@@ -1117,6 +1204,18 @@ fn check_guard_expression(guard: &GuardRecord, place: &str) -> Result<(), String
     let at = format!("{place}的第 {} 条守卫", guard.index + 1);
     check_expression(&guard.expression, &format!("{at}的声明形式"))?;
     check_expression(&guard.instance, &format!("{at}的求值形态"))
+}
+
+/// Reject a premise choice whose witness term exceeds the certificate's
+/// expression bound. Branch indices are plain integers and carry no term.
+fn check_choice_expression(choice: &PremiseChoice, place: &str) -> Result<(), String> {
+    if let PremiseChoice::Witness { premise, witness } = choice {
+        check_expression(
+            witness,
+            &format!("{place}的第 {} 个前提的存在见证", premise + 1),
+        )?;
+    }
+    Ok(())
 }
 
 /// Reject an expression with more than [`MAX_CERT_EXPR_NODES`] nodes.

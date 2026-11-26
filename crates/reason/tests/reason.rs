@@ -203,6 +203,7 @@ rule r :
     // the premise is simply absent.
     let mut d = Derivation::default();
     d.nodes.push(Node::RuleApplication {
+        selections: Vec::new(),
         guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
@@ -222,6 +223,7 @@ rule r :
     // A conclusion that is not even an instance of the rule's head must fail.
     let mut d2 = Derivation::default();
     d2.nodes.push(Node::RuleApplication {
+        selections: Vec::new(),
         guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
@@ -266,6 +268,7 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        selections: Vec::new(),
         guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
@@ -312,6 +315,7 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        selections: Vec::new(),
         guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
@@ -367,6 +371,7 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        selections: Vec::new(),
         guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
@@ -425,6 +430,7 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        selections: Vec::new(),
         guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
@@ -613,7 +619,10 @@ fn kernel_rejects_a_malformed_telescope() {
         guards: Vec::new(),
         params: vec![(name("a"), Expr::Sort(0))],
         // `p a : Prop`, so the premise is a proposition.
-        premises: vec![(None, Expr::app(Expr::constant("p"), Expr::Var(0)))],
+        premises: vec![std_deduce_kernel::PremiseDecl::plain(
+            None,
+            Expr::app(Expr::constant("p"), Expr::Var(0)),
+        )],
         conclusion: Expr::constant("p"),
         unlesses: vec![],
         exceptions: vec![],
@@ -632,7 +641,10 @@ fn kernel_rejects_a_malformed_telescope() {
     let bad = std_deduce_kernel::RuleDecl {
         guards: Vec::new(),
         params: vec![(name("a"), Expr::Sort(0))],
-        premises: vec![(None, Expr::app(Expr::constant("p"), Expr::Var(2)))],
+        premises: vec![std_deduce_kernel::PremiseDecl::plain(
+            None,
+            Expr::app(Expr::constant("p"), Expr::Var(2)),
+        )],
         conclusion: Expr::Sort(0),
         unlesses: vec![],
         exceptions: vec![],

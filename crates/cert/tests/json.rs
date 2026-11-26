@@ -13,6 +13,9 @@ use std_deduce_kernel::env::SourceRef;
 use std_deduce_kernel::{name, Expr};
 
 const SNAPSHOT: &str = include_str!("fixtures/certificate_v13.json");
+/// A v13 certificate that records both a guard judgement and the two
+/// compound-premise choices (a disjunction branch and an existential witness).
+const V13_CHOICES: &str = include_str!("fixtures/certificate_v13_guards_choices.json");
 const V9_SNAPSHOT: &str = include_str!("fixtures/certificate_v9.json");
 const V8_SNAPSHOT: &str = include_str!("fixtures/certificate_v8.json");
 const V6_SNAPSHOT: &str = include_str!("fixtures/certificate_v6.json");
@@ -143,6 +146,7 @@ fn sample_certificate() -> Certificate {
                 rule: "正当防卫".to_owned(),
                 conclusion: justified.clone(),
                 premises: vec![0],
+                choices: Vec::new(),
                 bindings: vec![Binding {
                     parameter: "p".to_owned(),
                     value: constant("张三"),
@@ -157,7 +161,9 @@ fn sample_certificate() -> Certificate {
                 proposition: app(constant("赔偿"), constant("张三")),
                 axiom_candidates: Vec::new(),
                 candidates: vec![GapCandidate {
+                    missing_branches: Vec::new(),
                     guards: Vec::new(),
+                    choices: Vec::new(),
                     rule: "侵权赔偿".to_owned(),
                     bindings: Vec::new(),
                     held: Vec::new(),
@@ -230,6 +236,42 @@ fn serialization_round_trips_and_is_stable() {
     let parsed = Certificate::from_json(&compact).unwrap();
     assert_eq!(certificate, parsed);
     assert_eq!(compact, parsed.to_json().unwrap());
+}
+
+#[test]
+fn v13_fixture_records_guards_and_premise_choices() {
+    let certificate = Certificate::from_json(V13_CHOICES).expect("the v13 fixture parses");
+    assert_eq!(certificate.format_version.get(), 13);
+    let node = certificate
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            Node::RuleApplication {
+                rule,
+                guards,
+                choices,
+                ..
+            } if rule == "组合" => Some((guards, choices)),
+            _ => None,
+        })
+        .expect("the fixture records a guarded rule with compound premises");
+    assert!(!node.0.is_empty(), "the guard record is present");
+    assert!(
+        matches!(node.0[0].holds.as_ref(), Some(true)),
+        "the guard held for the recorded instance"
+    );
+    assert!(
+        node.1
+            .iter()
+            .any(|choice| matches!(choice, std_deduce_cert::PremiseChoice::Branch { .. })),
+        "the disjunction branch choice is present"
+    );
+    assert!(
+        node.1
+            .iter()
+            .any(|choice| matches!(choice, std_deduce_cert::PremiseChoice::Witness { .. })),
+        "the existential witness choice is present"
+    );
 }
 
 #[test]

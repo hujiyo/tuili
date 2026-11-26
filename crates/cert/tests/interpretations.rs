@@ -410,6 +410,7 @@ fn a_rule_premise_cannot_be_an_interpretation_application() {
     let mut cert = certificate(&lib);
     let rule = lib.env.get(&name("规则S")).expect("the rule exists");
     cert.nodes.push(Node::RuleApplication {
+        choices: Vec::new(),
         guards: Vec::new(),
         computed: None,
         rule: "规则S".to_owned(),
@@ -637,6 +638,7 @@ fn rule_root_certificate(lib: &Library) -> Certificate {
         nodes: vec![
             Node::Assumption { assumption: 0 },
             Node::RuleApplication {
+                choices: Vec::new(),
                 guards: Vec::new(),
                 rule: "重大推定".to_owned(),
                 conclusion: atom_expr("重大", "甲"),
