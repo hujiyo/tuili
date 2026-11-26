@@ -280,6 +280,41 @@ fn redaction_can_be_switched_off_and_then_the_default_output_returns() {
 }
 
 #[test]
+fn a_state_query_or_switching_off_does_not_claim_redaction() {
+    // Neither command touches an individual name: `:redact` only reports the
+    // state, and `:redact off` switches the flag off. Printing "输出已脱敏"
+    // here would claim a replacement that never happened.
+    for (command, expected) in [
+        (":redact", "显示层脱敏：已开启"),
+        (":redact off", "显示层脱敏：已关闭"),
+    ] {
+        let output = run(&[
+            "--no-default-packs".to_owned(),
+            "--redact".to_owned(),
+            command.to_owned(),
+        ]);
+        assert_exit(&output, PROVED);
+        let out = stdout(&output);
+        assert!(out.contains(expected), "{out}");
+        assert!(
+            !out.contains(REDACT_NOTICE),
+            "`{command}` replaced no name and must not claim redaction:\n{out}"
+        );
+    }
+
+    // A query that does replace names still gets the notice.
+    let dir = TempDir::new("status");
+    let file = case_file(&dir);
+    let output = session(&file, &["--redact"], &[":why 人身受到伤害 李四"]);
+    assert_exit(&output, PROVED);
+    assert!(
+        stdout(&output).contains(REDACT_NOTICE),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
 fn the_redaction_notice_is_printed_with_every_redacted_output() {
     let dir = TempDir::new("notice");
     let file = case_file(&dir);
