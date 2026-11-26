@@ -391,7 +391,7 @@ fn a_nested_gap_names_the_historical_versions() {
 }
 
 /// The unresolved-conflict obligation in the certificate names the group too:
-/// the certificate keeps the v11 shape, only the human-readable description
+/// the certificate keeps the v12 shape, only the human-readable description
 /// gains the relation.
 #[test]
 fn the_certificate_names_the_historical_versions_in_the_obligation() {
@@ -401,11 +401,11 @@ fn the_certificate_names_the_historical_versions_in_the_obligation() {
     let json_start = out.find('{').expect("the certificate JSON starts");
     let certificate: serde_json::Value =
         serde_json::from_str(&out[json_start..]).expect("the certificate is JSON");
-    // No new field: the v11 shape is unchanged and the reason is recorded as
+    // No new field: the v12 shape is unchanged and the reason is recorded as
     // `no_priority`; only its description mentions the versions.
     assert_eq!(
         certificate["format_version"],
-        serde_json::Value::from(11),
+        serde_json::Value::from(12),
         "{certificate}"
     );
     let obligations = certificate["open_obligations"]
@@ -451,7 +451,7 @@ fn a_declared_priority_edge_decides_the_historical_conflict() {
     );
 }
 
-/// The decision is written into the v11 certificate as a defeated conflict with
+/// The decision is written into the v12 certificate as a defeated conflict with
 /// a priority basis, and `:verify-cert` accepts it.
 #[test]
 fn the_priority_certificate_records_and_verifies_the_edge() {

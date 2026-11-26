@@ -62,7 +62,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
-use std_deduce_kernel::env::{DeclKind, Env, RuleDecl};
+use std_deduce_kernel::env::{DeclKind, Env, OpenPremise, PremiseKind, RuleDecl};
 use std_deduce_kernel::norm::normalize;
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::{free_vars, is_closed, shift, Expr};
@@ -590,25 +590,48 @@ struct OpenedRule {
 
 fn open_rule(env: &Env, name: &str, rule: &RuleDecl) -> Result<OpenedRule, String> {
     let mut evaluable = !mentions_premise_binder(rule);
+    // A rule with a disjunctive or existential premise is not evaluated
+    // exactly here: the closure would have to enumerate branches and witnesses,
+    // and an over-approximation is enough for its only consumer (the possible
+    // `unless` blocker). Such a rule contributes its most general conclusion as
+    // a pattern instead, which is conservative: it may report an unconfirmable
+    // blocker, never hide one.
+    if rule.premises.iter().any(|premise| {
+        matches!(
+            premise.kind,
+            PremiseKind::Or(_) | PremiseKind::Exists { .. }
+        )
+    }) {
+        evaluable = false;
+    }
     // A normalization failure is an error even for an opaque rule. Skipping
     // the rule would drop its conclusion and could hide an opaque blocker
     // behind it.
     let mut premises = Vec::with_capacity(rule.premises.len());
-    for i in 0..rule.premises.len() {
-        let opened = rule.open_premise(i);
-        let part = format!("第 {} 个前提", i + 1);
-        let normalized = normalize_rule_part(env, name, &opened, &part)?;
-        let reduced = eta_reduce(&normalized);
-        let saturated = saturate_applied_variables(&reduced);
-        if saturated != reduced {
-            // The reasoner may match an unnormalized application of a lambda
-            // against the raw premise, and the normalized fact can lose that
-            // application structure. A rule whose premise applies a function
-            // parameter therefore cannot be matched against concrete facts
-            // exactly; its conclusion schema is used instead.
-            evaluable = false;
+    if evaluable {
+        for i in 0..rule.premises.len() {
+            let OpenPremise::Plain(opened) = rule.open_premise(i) else {
+                evaluable = false;
+                break;
+            };
+            let part = format!("第 {} 个前提", i + 1);
+            let normalized = normalize_rule_part(env, name, &opened, &part)?;
+            let reduced = eta_reduce(&normalized);
+            let saturated = saturate_applied_variables(&reduced);
+            if saturated != reduced {
+                // The reasoner may match an unnormalized application of a lambda
+                // against the raw premise, and the normalized fact can lose that
+                // application structure. A rule whose premise applies a function
+                // parameter therefore cannot be matched against concrete facts
+                // exactly; its conclusion schema is used instead.
+                evaluable = false;
+                break;
+            }
+            premises.push(saturated);
         }
-        premises.push(saturated);
+    }
+    if !evaluable {
+        premises.clear();
     }
     let opened = rule.open_conclusion();
     let normalized = normalize_rule_part(env, name, &opened, "结论")?;
@@ -625,8 +648,13 @@ fn mentions_premise_binder(rule: &RuleDecl) -> bool {
     if binders.is_empty() {
         return false;
     }
-    let premise_uses = (0..rule.premises.len())
-        .any(|i| mentioned_premise_binder(&rule.open_premise(i), &binders).is_some());
+    let premise_uses = (0..rule.premises.len()).any(|i| match rule.open_premise(i) {
+        OpenPremise::Plain(pattern) => mentioned_premise_binder(&pattern, &binders).is_some(),
+        OpenPremise::Or(branches) => branches
+            .iter()
+            .any(|branch| mentioned_premise_binder(branch, &binders).is_some()),
+        OpenPremise::Exists { body, .. } => mentioned_premise_binder(&body, &binders).is_some(),
+    });
     let unless_uses = rule
         .unlesses
         .iter()

@@ -42,12 +42,19 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// evaluates the comparison itself, so the recorded boolean is evidence that
 /// can be rechecked, not a claim to be trusted. A gap candidate whose bindings
 /// leave a guard's parameter open records `null`, never `false`.
+/// Version 12 records the premise choices of a rule instance: a disjunctive
+/// premise records which branch was proved, and an existential premise records
+/// the concrete declared individual that witnesses the body. The choices are
+/// mandatory for compound premises, and the checker re-projects the cited
+/// premise node onto the selected branch/body, so neither the branch number nor
+/// the witness can be forged. Unselected branches are deliberately not
+/// required: the certificate proves that one branch holds, not that all do.
 /// Older certificates are
 /// refused rather than read with guessed evidence: a proof that silently drops
 /// an applicability judgement, an interpretation step, a universal
-/// elimination step, an independent argument, the arithmetic step or a guard
-/// judgement cannot be checked.
-pub const FORMAT_VERSION: u32 = 11;
+/// elimination step, an independent argument, the arithmetic step, a guard
+/// judgement or the branch/witness choice cannot be checked.
+pub const FORMAT_VERSION: u32 = 12;
 
 /// A certificate format version.
 ///

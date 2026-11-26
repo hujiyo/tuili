@@ -270,6 +270,7 @@ fn rule_node(
     bindings: Vec<(&str, CertExpr)>,
 ) -> Node {
     Node::RuleApplication {
+        choices: Vec::new(),
         guards: Vec::new(),
         computed: None,
         rule: rule.to_owned(),

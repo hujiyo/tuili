@@ -53,7 +53,7 @@
 //! while a rule judged *unchecked* (no evidence at all) keeps firing and every
 //! conclusion line it produces carries `适用性未判定（…）`. The verdict and
 //! the event times/places it relied on are printed on the conclusion line; a
-//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v11
+//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v12
 //! records the verdict, its basis and its reason on every rule application and
 //! gap candidate, and `:verify-cert` recomputes it from the environment
 //! declaration and the certificate's own inputs.
@@ -98,7 +98,7 @@
 //! without affecting explicit imports; `--profile` selects a profile by name or
 //! alias. The preload lines are printed only after the whole load commits, so a
 //! failed file never claims that the environment loaded. The profile and the
-//! packs it loaded are session objects, but a certificate v11 records the
+//! packs it loaded are session objects, but a certificate v12 records the
 //! environment identity it was produced in: the profile, the as-of date, the
 //! jurisdiction code and the loaded packs/corpora. `:cert` stamps it before
 //! writing, and `:verify-cert` compares it with the current environment before
@@ -129,7 +129,7 @@
 //! be instantiated with closed values: a queried goal that no rule or fact
 //! proves demands one instance, and a rule premise that is already closed under
 //! the bindings collected so far demands one during saturation. Every instance
-//! is a derived `axiom_instance` step in certificate v11, never an assumption;
+//! is a derived `axiom_instance` step in certificate v12, never an assumption;
 //! `:why` prints the universal fact, its identity and the binding, and
 //! `:verify-cert` recomputes the conclusion from the declaration. `:gap` lists
 //! the universal facts that unify with a goal, with the values an instance
@@ -398,7 +398,7 @@
 //! certificate proves the root under strict facts and leaves no root-relevant
 //! obligation — it is not a claim that the conclusion is legally correct.
 //! `:cert` JSON has no label field; the five labels are a derived view of the
-//! recorded proof, and the v11 witness table does not change them.
+//! recorded proof, and the v12 witness table does not change them.
 //!
 //! A derived conclusion can have several independent witnesses. `:why` still
 //! expands one main tree, then prints `另有 N 条独立推导。` when the root's
@@ -638,7 +638,7 @@ use std_deduce_lawpack::{
 use std_deduce_reason::{
     certificate as reason_certificate, shared_revision_group, Applicability, Conflict, Derivation,
     GapLimit, GapLimits, GapStatus, GapTree, Node as ReasonNode, Provenance, Reasoner, Resolution,
-    Side,
+    Side, MAX_GAP_WITNESS_CANDIDATES,
 };
 
 /// How a query ended. Only `Proved` is a success; the other two make the
@@ -2584,7 +2584,7 @@ impl Session {
         // annotation is rendered from the derivation's judgement.
         let annotations = derivation_annotations(&d);
         // The burden/standard declarations the narrative prints come from the
-        // environment, not from the certificate: certificate v11 does not record
+        // environment, not from the certificate: certificate v12 does not record
         // them. The map is built once by the reasoner from the same rule
         // declarations the gap tree reads, so `:explain` and `:gap` report the
         // same values.
@@ -3726,17 +3726,36 @@ impl Session {
                 return Err(format!("证书校验失败（内核层）：{error}"));
             }
         };
-        writeln!(
-            out,
-            "内核证明：通过（{} 个规则步骤；{}）",
-            kernel.steps.len(),
-            if kernel.root_proved {
-                "根证明项通过内核"
-            } else {
-                "根为缺口，无证明项"
-            }
-        )
-        .ok();
+        // A compound premise's branch/witness choice is a logical side condition,
+        // not part of the kernel telescope: the kernel checks parameters and
+        // plain premises only. Say so explicitly when such steps exist, so
+        // "the kernel checked the monotone skeleton" is not overstated.
+        let compound_steps = certificate
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, CertNode::RuleApplication { choices, .. } if !choices.is_empty()))
+            .count();
+        let root_text = if kernel.root_proved {
+            "根证明项通过内核"
+        } else {
+            "根为缺口，无证明项"
+        };
+        if compound_steps > 0 {
+            writeln!(
+                out,
+                "内核证明：通过（{} 个规则步骤；其中 {} 步含析取/存在前提，分支选择由逻辑层复核；{root_text}）",
+                kernel.steps.len(),
+                compound_steps
+            )
+            .ok();
+        } else {
+            writeln!(
+                out,
+                "内核证明：通过（{} 个规则步骤；{root_text}）",
+                kernel.steps.len()
+            )
+            .ok();
+        }
 
         let unresolved = certificate
             .conflicts
@@ -6847,6 +6866,33 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
             writeln!(out, "{pad}  ← {}", source.one_line()).ok();
         }
         for missing in &candidate.missing {
+            if !missing.branches.is_empty() {
+                // A disjunction is not reported as one lump-sum proposition:
+                // every written branch is listed with its own gap, so a reader
+                // sees exactly what each alternative would need.
+                writeln!(
+                    out,
+                    "{pad}  缺析取前提（{} 个分支，按书写顺序）{}",
+                    missing.branches.len(),
+                    requirement_burden_note(reasoner, candidate.rule.as_ref())
+                )
+                .ok();
+                for branch in &missing.branches {
+                    writeln!(
+                        out,
+                        "{pad}    分支 {} ⟨{}⟩",
+                        branch.index + 1,
+                        print_expr(&branch.proposition)
+                    )
+                    .ok();
+                    if let Some(child) = &branch.gap {
+                        render_gap_body(out, child, reasoner, indent + 6);
+                    } else {
+                        writeln!(out, "{pad}      该分支未展开（见上方截断说明）。").ok();
+                    }
+                }
+                continue;
+            }
             writeln!(
                 out,
                 "{pad}  缺 ⟨{}⟩{}",
@@ -6854,6 +6900,42 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
                 requirement_burden_note(reasoner, candidate.rule.as_ref())
             )
             .ok();
+            if let Some(exists) = &missing.exists {
+                writeln!(
+                    out,
+                    "{pad}    存在前提：需要某个已声明个体满足 ⟨{}⟩。",
+                    print_expr(&exists.body)
+                )
+                .ok();
+                if exists.candidates.is_empty() {
+                    writeln!(
+                        out,
+                        "{pad}    没有已声明的候选个体（域内没有 `obj`；系统不枚举数字或凭空构造个体）。"
+                    )
+                    .ok();
+                } else {
+                    let names = exists
+                        .candidates
+                        .iter()
+                        .map(print_expr)
+                        .collect::<Vec<_>>()
+                        .join("、");
+                    writeln!(
+                        out,
+                        "{pad}    候选个体（{} 个，按名称排序）：{}",
+                        exists.candidates.len(),
+                        names
+                    )
+                    .ok();
+                }
+                if exists.truncated {
+                    writeln!(
+                        out,
+                        "{pad}    候选个体已截断：最多列出 {MAX_GAP_WITNESS_CANDIDATES} 个。"
+                    )
+                    .ok();
+                }
+            }
             if let Some(child) = &missing.gap {
                 render_gap_body(out, child, reasoner, indent + 4);
             }

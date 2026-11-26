@@ -439,15 +439,38 @@ fn render_node(
                 }
                 out.push('\n');
                 if !candidate.missing.is_empty() {
-                    out.push_str(&format!(
-                        "{pad}    缺：{}\n",
-                        candidate
+                    // Disjunctive gaps carry one label per written branch:
+                    // label each branch so a reader does not mistake the
+                    // branches for independent missing premises. A certificate
+                    // without labels (plain/existential gaps, or a hand-written
+                    // certificate omitting them) keeps the flat wording.
+                    if !candidate.missing_branches.is_empty() {
+                        let missing = candidate
                             .missing
                             .iter()
-                            .map(|proposition| print_expr(&Expr::from(proposition)))
+                            .zip(candidate.missing_branches.iter())
+                            .map(|(proposition, branch)| match branch {
+                                Some(branch) => format!(
+                                    "第 {} 个分支 {}",
+                                    branch + 1,
+                                    print_expr(&Expr::from(proposition))
+                                ),
+                                None => print_expr(&Expr::from(proposition)),
+                            })
                             .collect::<Vec<_>>()
-                            .join("；")
-                    ));
+                            .join("；");
+                        out.push_str(&format!("{pad}    缺：{missing}\n"));
+                    } else {
+                        out.push_str(&format!(
+                            "{pad}    缺：{}\n",
+                            candidate
+                                .missing
+                                .iter()
+                                .map(|proposition| print_expr(&Expr::from(proposition)))
+                                .collect::<Vec<_>>()
+                                .join("；")
+                        ));
+                    }
                 }
                 for blocked in &candidate.blocked_by {
                     // The certificate's assumption table is the only identity

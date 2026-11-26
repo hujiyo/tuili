@@ -138,39 +138,6 @@ pub fn elab_top(env: &Env, t: &Term) -> Result<Expr> {
     elab(env, &[], t)
 }
 
-/// Elaborate a rule's telescope. Returns the parameter types and the kernel
-/// context needed to check the premises and the conclusion.
-pub fn elab_telescope(
-    env: &Env,
-    params: &[(String, Term)],
-    premises: &[crate::ast::Premise],
-) -> Result<(Vec<(String, Expr)>, Ctx)> {
-    let mut locals: Vec<(String, Expr)> = Vec::new();
-    for (n, t) in params {
-        let ty = elab(env, &locals, t)?;
-        // The kernel checks each telescope entry lives in a sort.
-        std_deduce_kernel::check::check_is_type(env, &locals_ctx(&locals), &ty).map_err(|e| {
-            ElabError {
-                msg: format!("参数 `{n}` 的类型不合法：{e}"),
-            }
-        })?;
-        locals.push((n.clone(), ty));
-    }
-    let mut kernel_ctx = locals_ctx(&locals);
-    let mut premise_binders = Vec::new();
-    for (i, p) in premises.iter().enumerate() {
-        let ty = elab(env, &locals, &p.ty)?;
-        std_deduce_kernel::check::check_is_type(env, &kernel_ctx, &ty).map_err(|e| ElabError {
-            msg: format!("前提 {} 不是命题：{e}", i + 1),
-        })?;
-        let bind = p.name.clone().unwrap_or_else(|| format!("_p{}", i));
-        premise_binders.push((bind.clone(), ty.clone()));
-        kernel_ctx.push(Some(name(&bind)), ty.clone());
-        locals.push((bind, ty));
-    }
-    Ok((locals, kernel_ctx))
-}
-
 fn locals_ctx(locals: &[(String, Expr)]) -> Ctx {
     let mut c = Ctx::new();
     for (n, t) in locals {

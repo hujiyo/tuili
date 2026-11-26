@@ -4,7 +4,7 @@
 //! practising lawyer can read. It is a **derived view**, not a new inference
 //! and not legal advice. Every sentence is read from one of four inputs:
 //!
-//! * the certificate v11 the query path produced (`:why` / `:cert` build the
+//! * the certificate v12 the query path produced (`:why` / `:cert` build the
 //!   same certificate),
 //! * the reasoner's gap trees (the root's tree and the `:issues` scan),
 //! * the rules' declared burden of proof (`RulePleading`, the same map

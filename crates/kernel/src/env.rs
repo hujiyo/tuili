@@ -554,11 +554,145 @@ pub enum DeclKind {
     Risk { theme: RiskTheme, pred: Name },
 }
 
+/// The largest number of branches one disjunctive premise may write.
+///
+/// The bound is a declaration-time constant, not a caller option: a 析取前提
+/// with more branches than this is refused when the theory is loaded, so the
+/// reasoner's branch enumeration has a fixed auditable ceiling.
+pub const MAX_OR_BRANCHES: usize = 8;
+
+/// One premise of a rule: a plain proposition, a disjunction of propositions,
+/// or an existential proposition with one explicitly named witness binder.
+///
+/// A rule's premises are still conjoined with one another: multiple `premise`
+/// lines of a rule are all required. Inside one premise, `P or Q` means at
+/// least one of the branches must be proved; `exists x : T, P x` means some
+/// concrete declared individual of type `T` must make `P x` true.
+///
+/// The kernel represents both compound forms by their impredicative encoding
+/// (see [`or_type`] and [`exists_type`]), so a rule's declared type stays a
+/// plain telescope and the kernel can check a step's proof term after the
+/// certificate has recorded which branch / witness was used. The declaration
+/// keeps the surface structure because the reasoner and the certificate checker
+/// must know exactly which branches and which witness binder exist.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PremiseDecl {
+    /// The optional binder name; unnamed premises get `_p{i}`.
+    pub name: Option<Name>,
+    pub kind: PremiseKind,
+}
+
+/// The form of one rule premise.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PremiseKind {
+    /// A single proposition, as before.
+    Plain(Expr),
+    /// `P or Q [or R …]`: at least one branch, tried in written order.
+    Or(Vec<Expr>),
+    /// `exists x : T, P x`: `body` is written in the context of the telescope
+    /// extended by the witness binder `binder`, exactly like a `Pi` codomain.
+    Exists {
+        binder: Name,
+        domain: Expr,
+        body: Expr,
+    },
+}
+
+impl PremiseDecl {
+    /// A plain premise with its optional surface name.
+    pub fn plain(name: Option<Name>, ty: Expr) -> Self {
+        PremiseDecl {
+            name,
+            kind: PremiseKind::Plain(ty),
+        }
+    }
+
+    /// The binder name this premise contributes to the rule telescope.
+    pub fn binder_or(&self, index: usize) -> Name {
+        self.name
+            .clone()
+            .unwrap_or_else(|| crate::term::name(format!("_p{index}")))
+    }
+
+    /// The kernel type of this premise, written in the rule telescope prefix.
+    ///
+    /// Plain premises keep their written type. Compound premises use the
+    /// impredicative encoding so the kernel can check the branch/witness
+    /// introduction term as an ordinary proof.
+    pub fn kernel_type(&self) -> Expr {
+        match &self.kind {
+            PremiseKind::Plain(ty) => ty.clone(),
+            PremiseKind::Or(branches) => or_type(branches),
+            PremiseKind::Exists { domain, body, .. } => exists_type(domain, body),
+        }
+    }
+}
+
+/// The impredicative encoding of `P or Q`: `∀ C : Prop, (P → C) → (Q → C) → C`.
+///
+/// The branches are written in the rule telescope prefix, so they are shifted
+/// under the encoding's own binders exactly as a `Pi` codomain would be.
+pub fn or_type(branches: &[Expr]) -> Expr {
+    Expr::pi(Expr::Sort(0), or_arms(branches, 0))
+}
+
+fn or_arms(branches: &[Expr], index: usize) -> Expr {
+    if index == branches.len() {
+        // `C` is the outermost binder; after `index` arrow binders its de
+        // Bruijn index is `index`.
+        return Expr::var(index);
+    }
+    // `B → C`: the branch is placed under `C` and the earlier arrow binders,
+    // and `C` itself sits outside the arrow binder, so its index inside the
+    // arrow codomain is `index + 1`.
+    let arrow = Expr::pi(
+        crate::term::shift(&branches[index], (index as isize) + 1, 0),
+        Expr::var(index + 1),
+    );
+    Expr::pi(arrow, or_arms(branches, index + 1))
+}
+
+/// The impredicative encoding of `exists x : T, P x`:
+/// `∀ C : Prop, (∀ x : T, P x → C) → C`.
+///
+/// `domain` lives in the telescope prefix; `body` is written in the prefix
+/// extended by the witness binder (so its `Var(0)` is that binder), exactly as
+/// a `Pi` codomain is.
+pub fn exists_type(domain: &Expr, body: &Expr) -> Expr {
+    // Inside `C`: `Prop`. `Pi (x : T) (P x → C)`; the inner arrow introduces a
+    // proof binder, so `C` has index 2 inside it (C, x, proof).
+    let witness = Expr::pi(
+        crate::term::shift(domain, 1, 0),
+        Expr::pi(crate::term::shift(body, 1, 1), Expr::var(2)),
+    );
+    Expr::pi(Expr::Sort(0), Expr::pi(witness, Expr::var(1)))
+}
+
+/// One premise opened into the reasoner's pattern language.
+///
+/// Every rule-telescope binder becomes a `?name` constant. For an existential
+/// premise the witness binder is a *local* `?name` constant: it is not a
+/// telescope binder, so it cannot be used by later premises or the conclusion,
+/// and it is recorded separately in the certificate's witness choice.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OpenPremise {
+    Plain(Expr),
+    Or(Vec<Expr>),
+    Exists {
+        binder: Name,
+        domain: Expr,
+        body: Expr,
+    },
+}
+
 /// A defeasible rule.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleDecl {
     pub params: Vec<(Name, Expr)>,
-    pub premises: Vec<(Option<Name>, Expr)>,
+    /// The rule's premises, conjoined with one another. A plain premise is one
+    /// proposition; a disjunctive or existential premise is one premise with an
+    /// internal choice (see [`PremiseDecl`]).
+    pub premises: Vec<PremiseDecl>,
     pub conclusion: Expr,
     /// Conditions whose truth *blocks* the rule (the `unless` clauses).
     /// These are part of the telescope, so they may mention any parameter.
@@ -1106,17 +1240,41 @@ pub fn check_unique_binders(binders: &[Name]) -> Result<()> {
 }
 
 impl RuleDecl {
-    /// All binders of the rule: params, then premises. `unless` conditions
-    /// are not binders, so they are not listed here.
+    /// The kernel telescope: the parameters followed by the **plain**
+    /// premises.
+    ///
+    /// Disjunctive and existential premises are not kernel arguments: their
+    /// proofs are side conditions of the logical certificate layer, because the
+    /// kernel's context types are prefix-relative and cannot express the
+    /// impredicative encoding those compound proofs would need. Their
+    /// well-formedness is still checked here; only the proof term is not part
+    /// of the rule constant's type. `unless`, guards and applicability are
+    /// outside the kernel for the same reason.
     pub fn telescope(&self) -> Vec<(Name, Expr)> {
         let mut out = self.params.clone();
-        for (i, (n, ty)) in self.premises.iter().enumerate() {
-            let n = n
-                .clone()
-                .unwrap_or_else(|| crate::term::name(format!("_p{i}")));
-            out.push((n, ty.clone()));
+        for (i, premise) in self.premises.iter().enumerate() {
+            if !matches!(premise.kind, PremiseKind::Plain(_)) {
+                continue;
+            }
+            out.push((premise.binder_or(i), premise.kernel_type()));
         }
         out
+    }
+
+    /// How many plain premises precede premise `index`.
+    pub fn plain_premises_before(&self, index: usize) -> usize {
+        self.premises[..index]
+            .iter()
+            .filter(|premise| matches!(premise.kind, PremiseKind::Plain(_)))
+            .count()
+    }
+
+    /// How many plain premises the rule has in total.
+    pub fn plain_premise_count(&self) -> usize {
+        self.premises
+            .iter()
+            .filter(|premise| matches!(premise.kind, PremiseKind::Plain(_)))
+            .count()
     }
 
     /// Names of the telescope binders, outermost first.
@@ -1141,6 +1299,26 @@ impl RuleDecl {
         // way round. Renaming silently would hide which binding the source
         // meant, so it is refused before anything else.
         check_unique_binders(&self.binder_names())?;
+        // The witness binder of an existential premise is opened as a local
+        // `?name` constant while that premise is matched. It is not a telescope
+        // binder, so it must not collide with one (or with another existential
+        // binder): a collision would let a parameter value, a premise proof or
+        // another witness impersonate this witness.
+        let telescope_binders = self.binder_names();
+        let mut exists_binders: Vec<Name> = Vec::new();
+        for (i, premise) in self.premises.iter().enumerate() {
+            let PremiseKind::Exists { binder, .. } = &premise.kind else {
+                continue;
+            };
+            if telescope_binders.contains(binder) || exists_binders.contains(binder) {
+                return Err(Error::other(format!(
+                    "前提 {} 的存在见证变量 `{binder}` 与参数、前提绑定或另一存在见证重名：\
+                     见证变量会与规则绑定混为一个 `?{binder}` 常量，必须改名",
+                    i + 1
+                )));
+            }
+            exists_binders.push(binder.clone());
+        }
         let mut ctx = Ctx::new();
         for (i, (n, ty)) in self.params.iter().enumerate() {
             check::check_is_type(env, &ctx, ty)
@@ -1149,22 +1327,76 @@ impl RuleDecl {
             // `ctx` before the push.
             ctx.push(Some(n.clone()), ty.clone());
         }
-        for (i, (n, p)) in self.premises.iter().enumerate() {
-            check::check_is_type(env, &ctx, p)
-                .map_err(|e| Error::other(format!("前提 {} 不成立：{e}", i + 1)))?;
-            if let Some(op) = crate::builtin::comparison_head(&self.open_premise(i)) {
-                return Err(Error::other(format!(
-                    "前提 {number} 是以 `{name}` 打头的比较（`{name} a b`）：比较目前不参与规则触发，\
-                     不能靠“求值成 True 再当作前提已成立”来让规则开火；\
-                     数字比较请写在结论的计算里，或先作为事实登记",
-                    name = op.name(),
-                    number = i + 1
-                )));
+        for (i, premise) in self.premises.iter().enumerate() {
+            match &premise.kind {
+                PremiseKind::Plain(ty) => {
+                    check::check_is_type(env, &ctx, ty)
+                        .map_err(|e| Error::other(format!("前提 {} 不成立：{e}", i + 1)))?;
+                    if let Some(op) = crate::builtin::comparison_head(&self.open_premise_plain(i)) {
+                        return Err(Error::other(comparison_premise_error(i + 1, op.name())));
+                    }
+                }
+                PremiseKind::Or(branches) => {
+                    if branches.len() < 2 {
+                        return Err(Error::other(format!(
+                            "前提 {} 是析取，但只写了 {} 个分支：`premise P or Q` 至少要有两个分支",
+                            i + 1,
+                            branches.len()
+                        )));
+                    }
+                    if branches.len() > MAX_OR_BRANCHES {
+                        return Err(Error::other(format!(
+                            "前提 {} 的析取有 {} 个分支，超过每个析取前提 {MAX_OR_BRANCHES} 个分支的上限",
+                            i + 1,
+                            branches.len()
+                        )));
+                    }
+                    for (j, branch) in branches.iter().enumerate() {
+                        check::check(env, &ctx, branch, &Expr::Sort(0)).map_err(|e| {
+                            Error::other(format!(
+                                "前提 {} 的第 {} 个析取分支不是命题：{e}",
+                                i + 1,
+                                j + 1
+                            ))
+                        })?;
+                        if let Some(op) = crate::builtin::comparison_head(&self.open_branch(i, j)) {
+                            return Err(Error::other(format!(
+                                "前提 {number} 的第 {branch} 个析取分支是以 `{name}` 打头的比较：\
+                                 比较不参与规则触发，不能作为一个可证明的析取分支",
+                                number = i + 1,
+                                branch = j + 1,
+                                name = op.name()
+                            )));
+                        }
+                    }
+                }
+                PremiseKind::Exists {
+                    binder,
+                    domain,
+                    body,
+                } => {
+                    check::check_is_type(env, &ctx, domain).map_err(|e| {
+                        Error::other(format!("前提 {} 的存在量词类型不成立：{e}", i + 1))
+                    })?;
+                    let mut inner = ctx.clone();
+                    inner.push(Some(binder.clone()), domain.clone());
+                    check::check(env, &inner, body, &Expr::Sort(0)).map_err(|e| {
+                        Error::other(format!("前提 {} 的存在量词体内不是命题：{e}", i + 1))
+                    })?;
+                    if let Some(op) = crate::builtin::comparison_head(&self.open_exists_body(i)) {
+                        return Err(Error::other(format!(
+                            "前提 {number} 的存在量词体是以 `{name}` 打头的比较：\
+                             比较不参与规则触发，不能作为存在见证要满足的命题",
+                            number = i + 1,
+                            name = op.name()
+                        )));
+                    }
+                }
             }
-            let bind = n
-                .clone()
-                .unwrap_or_else(|| crate::term::name(format!("_p{i}")));
-            ctx.push(Some(bind), p.clone());
+            let bind = premise.binder_or(i);
+            if matches!(premise.kind, PremiseKind::Plain(_)) {
+                ctx.push(Some(bind), premise.kernel_type());
+            }
         }
         for (i, u) in self.unlesses.iter().enumerate() {
             check::check(env, &ctx, u, &Expr::Sort(0))
@@ -1184,12 +1416,8 @@ impl RuleDecl {
         // value, so a guard that mentioned one could never close by the
         // instance's bindings.
         let premise_binders: Vec<Name> = (0..self.premises.len())
-            .map(|i| {
-                self.premises[i]
-                    .0
-                    .clone()
-                    .unwrap_or_else(|| crate::term::name(format!("_p{i}")))
-            })
+            .filter(|i| matches!(self.premises[*i].kind, PremiseKind::Plain(_)))
+            .map(|i| self.premises[i].binder_or(i))
             .collect();
         for (i, g) in self.guards.iter().enumerate() {
             let opened = self.open_guard(i);
@@ -1236,8 +1464,16 @@ impl RuleDecl {
         // binding for every parameter: the two disagree about what a complete
         // instance is. Both are silent holes, so they are refused at load time.
         for (binder, _) in &self.params {
+            // A parameter must be *guaranteed* a value by some premise. A
+            // plain premise binds it whatever fact matches; an existential
+            // premise binds it through its body (the witness search matches the
+            // body against facts); a disjunctive premise binds it only when
+            // every branch mentions it, because the branch actually chosen must
+            // bind it. A parameter that appears in only some branches of every
+            // premise mentioning it could stay open, so it is refused rather
+            // than silently producing a non-closed instance for one choice.
             let in_premise =
-                (0..self.premises.len()).any(|i| mentions_pattern(&self.open_premise(i), binder));
+                (0..self.premises.len()).any(|i| self.premise_constrains_param(i, binder));
             if in_premise {
                 continue;
             }
@@ -1250,9 +1486,10 @@ impl RuleDecl {
                 (0..self.guards.len()).any(|i| mentions_pattern(&self.open_guard(i), binder));
             if in_conclusion || in_unless || in_guard {
                 return Err(Error::other(format!(
-                    "参数 `{binder}` 出现在结论、unless 阻断条件或 guard 守卫里，但没有出现在任何前提里：\
-                     实例化时它无法被确定，结论、阻断条件或守卫都不会闭合。\
-                     请把它纳入某条前提，或把它从结论/unless/guard 里去掉。"
+                    "参数 `{binder}` 出现在结论、unless 阻断条件或 guard 守卫里，\
+                     但没有出现在任何前提里（或没有一条前提保证绑定它）：\
+                     它必须出现在普通前提里、出现在某条析取前提的每个分支里，或出现在某条存在前提的体内；\
+                     只出现在部分析取分支里时，选了另一个分支的实例无法给出它的值。"
                 )));
             }
             return Err(Error::other(format!(
@@ -1276,16 +1513,95 @@ impl RuleDecl {
         self.open(&self.params[i].1, i)
     }
 
-    pub fn open_premise(&self, i: usize) -> Expr {
-        self.open(&self.premises[i].1, self.params.len() + i)
+    /// The plain form of premise `i`. Only valid for [`PremiseKind::Plain`];
+    /// compound premises are opened by [`RuleDecl::open_premise`] instead.
+    pub fn open_premise_plain(&self, i: usize) -> Expr {
+        match &self.premises[i].kind {
+            PremiseKind::Plain(ty) => {
+                self.open(ty, self.params.len() + self.plain_premises_before(i))
+            }
+            _ => Expr::Sort(0),
+        }
+    }
+
+    /// Open one premise into the reasoner's pattern language.
+    pub fn open_premise(&self, i: usize) -> OpenPremise {
+        let in_scope = self.params.len() + self.plain_premises_before(i);
+        match &self.premises[i].kind {
+            PremiseKind::Plain(ty) => OpenPremise::Plain(self.open(ty, in_scope)),
+            PremiseKind::Or(branches) => {
+                OpenPremise::Or(branches.iter().map(|b| self.open(b, in_scope)).collect())
+            }
+            PremiseKind::Exists {
+                binder,
+                domain,
+                body,
+            } => {
+                // The witness binder is appended to the *visible* telescope
+                // prefix: `Var(0)` of the body is the witness, `Var(1 + k)` is
+                // the prefix binder `k` away. The prefix contains params and
+                // plain premises before this one; later plain premise binders
+                // are not in scope here.
+                let mut names: Vec<Name> = self.binder_names().into_iter().take(in_scope).collect();
+                names.push(binder.clone());
+                OpenPremise::Exists {
+                    binder: binder.clone(),
+                    domain: self.open(domain, in_scope),
+                    body: open_vars(body, &names, 0, in_scope + 1),
+                }
+            }
+        }
+    }
+
+    /// Open branch `j` of the disjunctive premise `i`.
+    pub fn open_branch(&self, i: usize, j: usize) -> Expr {
+        match &self.premises[i].kind {
+            PremiseKind::Or(branches) => self.open(
+                &branches[j],
+                self.params.len() + self.plain_premises_before(i),
+            ),
+            _ => Expr::Sort(0),
+        }
+    }
+
+    /// Open the body of the existential premise `i`, with the witness binder
+    /// as the `?<binder>` placeholder and the telescope prefix opened too.
+    pub fn open_exists_body(&self, i: usize) -> Expr {
+        match &self.premises[i].kind {
+            PremiseKind::Exists { binder, body, .. } => {
+                let prefix = self.params.len() + self.plain_premises_before(i);
+                let mut names: Vec<Name> = self.binder_names().into_iter().take(prefix).collect();
+                names.push(binder.clone());
+                open_vars(body, &names, 0, prefix + 1)
+            }
+            _ => Expr::Sort(0),
+        }
+    }
+
+    /// Does premise `i` guarantee a value for `binder` regardless of which
+    /// fact matches or which branch is chosen?
+    fn premise_constrains_param(&self, i: usize, binder: &Name) -> bool {
+        match self.open_premise(i) {
+            OpenPremise::Plain(pattern) => mentions_pattern(&pattern, binder),
+            OpenPremise::Or(branches) => branches
+                .iter()
+                .all(|branch| mentions_pattern(branch, binder)),
+            OpenPremise::Exists { body, .. } => mentions_pattern(&body, binder),
+        }
     }
 
     pub fn open_conclusion(&self) -> Expr {
-        self.open(&self.conclusion, self.params.len() + self.premises.len())
+        self.open(
+            &self.conclusion,
+            self.params.len() + self.plain_premise_count(),
+        )
     }
 
     pub fn open_unless(&self, i: usize) -> Expr {
-        self.open(&self.unlesses[i], self.params.len() + self.premises.len())
+        self.open(
+            &self.unlesses[i],
+            self.params.len() + self.plain_premise_count(),
+        )
     }
 
     /// Open a `guard` into a pattern: its parameters become `?<binder>`.
@@ -1295,12 +1611,15 @@ impl RuleDecl {
     /// alone. The reasoner closes this pattern with the instance's bindings and
     /// evaluates it; the certificate checker rebuilds it the same way.
     pub fn open_guard(&self, i: usize) -> Expr {
-        self.open(&self.guards[i], self.params.len() + self.premises.len())
+        self.open(
+            &self.guards[i],
+            self.params.len() + self.plain_premise_count(),
+        )
     }
 
     /// Open an [`unless`] expression that has already been unpacked.
     pub fn open_unless_text(&self, e: &Expr) -> Expr {
-        self.open(e, self.params.len() + self.premises.len())
+        self.open(e, self.params.len() + self.plain_premise_count())
     }
 }
 
@@ -1377,4 +1696,55 @@ fn mentions_pattern(e: &Expr, binder: &Name) -> bool {
             }
         },
     }
+}
+
+/// Replace every `?name` pattern constant in `expression` by the value the
+/// substitution gives for it. A name without a value stays as the constant,
+//      which lets a caller detect an incomplete instantiation instead of
+/// silently turning it into an open term.
+pub fn substitute_pattern_constants(expression: &Expr, values: &[(Name, Expr)]) -> Expr {
+    match expression {
+        Expr::Const(name) => match name.strip_prefix('?') {
+            Some(parameter) => values
+                .iter()
+                .rev()
+                .find(|(key, _)| key.as_ref() == parameter)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| expression.clone()),
+            None => expression.clone(),
+        },
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => expression.clone(),
+        Expr::Pi {
+            name,
+            domain,
+            codomain,
+        } => Expr::Pi {
+            name: name.clone(),
+            domain: Box::new(substitute_pattern_constants(domain, values)),
+            codomain: Box::new(substitute_pattern_constants(codomain, values)),
+        },
+        Expr::Lam { name, domain, body } => Expr::Lam {
+            name: name.clone(),
+            domain: Box::new(substitute_pattern_constants(domain, values)),
+            body: Box::new(substitute_pattern_constants(body, values)),
+        },
+        Expr::App { func, arg } => Expr::App {
+            func: Box::new(substitute_pattern_constants(func, values)),
+            arg: Box::new(substitute_pattern_constants(arg, values)),
+        },
+        Expr::Let { name, value, body } => Expr::Let {
+            name: name.clone(),
+            value: Box::new(substitute_pattern_constants(value, values)),
+            body: Box::new(substitute_pattern_constants(body, values)),
+        },
+    }
+}
+
+/// The message for a premise written as a bare comparison.
+fn comparison_premise_error(number: usize, operation: &str) -> String {
+    format!(
+        "前提 {number} 是以 `{operation}` 打头的比较（`{operation} a b`）：比较目前不参与规则触发，\
+         不能靠“求值成 True 再当作前提已成立”来让规则开火；\
+         数字比较请写在结论的计算里，或先作为事实登记"
+    )
 }

@@ -36,12 +36,20 @@
 //!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 11. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 12. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
-//! Version 11 records rule guards: every rule application and every gap
+//! Version 12 records the premise choices of a rule application: a
+//! disjunctive premise records which written branch was proved, and an
+//! existential premise records the concrete declared individual that
+//! witnesses the body. The choice is mandatory exactly for compound premises;
+//! the checker re-projects the cited premise node onto the selected branch or
+//! witness' body instance, so a non-existent branch, an unproved branch or an
+//! invented witness is rejected. Unselected branches need not be proven —
+//! the step establishes that one branch holds. Version 11 records rule guards:
+//! every rule application and every gap
 //! candidate of a guarded rule carries one [`GuardRecord`] per `guard` clause —
 //! the declared guard with its parameters opened as `?<name>`, the guard closed
 //! by the recorded bindings, and the evaluated truth value. The checker
@@ -218,7 +226,7 @@
 //! five labels are `已验证`, `依赖假设`, `事实待举证`, `争点未决` and
 //! `需律师判断`; [`trust`](mod@trust) documents the exact field-to-label
 //! mapping. The labels are a derived view: they are never serialized into the
-//! certificate, and the v11 witness table does not change them. `:why`,
+//! certificate, and the v12 witness table does not change them. `:why`,
 //! `:explain` and `:labels` all print the same [`TrustReport::summary`] and the
 //! same evidence, so a conclusion cannot be labelled differently by different
 //! renderers. A label never asserts legal correctness: `已验证` means the
@@ -278,8 +286,8 @@ pub use key::expression_key;
 pub use model::{
     Alternative, Assumption, Binding, Certificate, Conflict, Explicit, FactIdentity,
     GapAxiomCandidate, GapCandidate, GuardRecord, Interpretation, InterpretationDirection,
-    Metadata, Node, NodeId, ObligationKind, OpenObligation, PriorityClause, PriorityEdge,
-    PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
+    Metadata, Node, NodeId, ObligationKind, OpenObligation, PremiseChoice, PriorityClause,
+    PriorityEdge, PriorityOrigin, Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
     MAX_CERT_ASSUMPTIONS, MAX_CERT_EXPR_NODES, MAX_CERT_JSON_BYTES, MAX_CERT_NODES,
     MAX_CERT_WITNESSES_PER_CONCLUSION,
 };
