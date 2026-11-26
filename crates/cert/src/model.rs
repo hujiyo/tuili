@@ -344,6 +344,7 @@ impl Certificate {
                     conclusion,
                     computed,
                     bindings,
+                    guards,
                     ..
                 } => {
                     check_expression(conclusion, &format!("{place}的结论"))?;
@@ -358,6 +359,9 @@ impl Certificate {
                                 escape_control(&binding.parameter)
                             ),
                         )?;
+                    }
+                    for guard in guards {
+                        check_guard_expression(guard, &place)?;
                     }
                 }
                 Node::InterpretationApplication { conclusion, .. } => {
@@ -434,6 +438,12 @@ impl Certificate {
                                     "{place}的缺口候选 `{}` 阻断条件",
                                     escape_control(&candidate.rule)
                                 ),
+                            )?;
+                        }
+                        for guard in &candidate.guards {
+                            check_guard_expression(
+                                guard,
+                                &format!("{place}的缺口候选 `{}`", escape_control(&candidate.rule)),
                             )?;
                         }
                     }
@@ -686,6 +696,16 @@ pub enum Node {
         /// The parameter bindings that produced this instance, available to a
         /// checker without parsing the rendering of the instance.
         bindings: Vec<Binding>,
+        /// The guard judgements of this instance: one record per `guard` clause
+        /// of the environment's rule declaration, in declaration order. A rule
+        /// without guards records nothing (the field is omitted, so an
+        /// unguarded step's JSON is unchanged). A guarded step must record every
+        /// one of its guards: the checker recomputes each record from the
+        /// declaration and the recorded bindings, and an omitted, reordered,
+        /// added or edited record is a logical failure, never a default.
+        /// Every record of a step that fired must say `true`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        guards: Vec<GuardRecord>,
         /// Where the applied rule comes from.
         #[serde(default)]
         sources: Vec<Source>,
@@ -763,6 +783,41 @@ pub struct Binding {
     pub value: CertExpr,
 }
 
+/// One `guard` judgement of a rule instance.
+///
+/// A guard is an *instance condition*: a comparison over the rule's parameter
+/// values that must hold for the rule to fire. The record carries the evidence
+/// the verdict was built from, not just the verdict:
+///
+/// * `expression` — the rule's declared guard with its parameters opened as
+///   `?<name>` placeholders, i.e. the template that was judged;
+/// * `instance` — the same guard after substituting the recorded bindings, the
+///   form the kernel evaluated (for example `(le 5000 3000)`);
+/// * `holds` — the evaluated truth value.
+///
+/// The checker rebuilds `expression` from the environment's rule declaration
+/// and `instance` from that declaration plus the recorded `bindings`, then
+/// evaluates the comparison itself and compares the result. A recorded `true`
+/// changed to `false`, an edited expression, a dropped record or an invented
+/// one therefore fails the logical check; the recorded boolean is never
+/// trusted on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardRecord {
+    /// Zero-based index of the guard in the rule's `guard` clauses, in
+    /// declaration order.
+    pub index: usize,
+    /// The declared guard with the rule's parameters opened as `?<name>`.
+    pub expression: CertExpr,
+    /// The guard after substituting the recorded bindings, before evaluation.
+    pub instance: CertExpr,
+    /// The evaluated truth value. `null` only for a gap candidate whose
+    /// bindings leave a parameter of the guard open: that guard was not
+    /// decided, which is not the same as `false`, and the checker requires the
+    /// undecided state to be recorded as such.
+    pub holds: Explicit<bool>,
+}
+
 /// A rule that could have proved a gap, and why it did not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -784,6 +839,13 @@ pub struct GapCandidate {
     /// `unless` conditions that already hold, blocking this rule.
     #[serde(default)]
     pub blocked_by: Vec<CertExpr>,
+    /// The guard judgements of this candidate instance, one per `guard` clause
+    /// of the rule, in declaration order. An excluded candidate is listed with
+    /// the guards that did not hold instead of disappearing silently. A
+    /// candidate whose bindings leave a guard's parameter open records `holds`
+    /// as `null` (the guard could not be decided), never as `false`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guards: Vec<GuardRecord>,
     /// Where the candidate rule comes from.
     #[serde(default)]
     pub sources: Vec<Source>,
@@ -1045,6 +1107,16 @@ fn check_json_size(bytes: usize) -> serde_json::Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Reject a guard record whose expressions exceed the certificate's term bound.
+///
+/// Both recorded forms are checked: the opened declaration pattern and the
+/// substituted instance.
+fn check_guard_expression(guard: &GuardRecord, place: &str) -> Result<(), String> {
+    let at = format!("{place}的第 {} 条守卫", guard.index + 1);
+    check_expression(&guard.expression, &format!("{at}的声明形式"))?;
+    check_expression(&guard.instance, &format!("{at}的求值形态"))
 }
 
 /// Reject an expression with more than [`MAX_CERT_EXPR_NODES`] nodes.

@@ -1694,7 +1694,7 @@ rule 规则 :
     let out = stdout(&output);
     let json = &out[out.find('{').expect("the certificate JSON starts")..];
     let value: serde_json::Value = serde_json::from_str(json).expect("the certificate is JSON");
-    assert_eq!(value["format_version"], 10);
+    assert_eq!(value["format_version"], 11);
     let record = &value["nodes"][1]["applicability"];
     assert_eq!(record["verdict"], "applicable");
     assert_eq!(

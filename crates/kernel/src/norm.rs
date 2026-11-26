@@ -10,6 +10,11 @@
 //! reduces to `5000` in [`whnf`], and an `i64` overflow is returned as an error
 //! instead of wrapping around. A partially applied operation (`add 3000`) is
 //! neutral: nothing is guessed about the missing argument.
+//!
+//! A comparison is evaluated by the same rules, and its value is read as one of
+//! the two built-in propositions: [`evaluate_comparison`] is the one function
+//! that says whether a rule `guard` holds, and it reports a neutral or
+//! non-boolean result as an error rather than as `false`.
 
 use crate::builtin::Op;
 use crate::env::{Ctx, DeclKind, Env};
@@ -174,6 +179,29 @@ pub fn evaluate_arithmetic(env: &Env, e: &Expr) -> Result<Expr> {
             Ok(evaluated_args.into_iter().fold(evaluated_head, Expr::app))
         }
     }
+}
+
+/// Evaluate one comparison to its truth value.
+///
+/// The term is first evaluated with [`evaluate_arithmetic`] (which already
+/// folds the built-in operations), and the result must be the built-in
+/// proposition `True` or `False`. Everything else is an error, never a guess:
+/// an overflow keeps its own diagnostic, and a term whose operands are not
+/// integer literals stays neutral — the guard cannot be decided, so the caller
+/// reports that instead of silently treating it as `false`.
+///
+/// This is the function the reasoner and the certificate checker share to
+/// judge a `guard`; there is no second interpretation of a comparison.
+pub fn evaluate_comparison(env: &Env, e: &Expr) -> Result<bool> {
+    let evaluated = evaluate_arithmetic(env, e)?;
+    if let Some(value) = crate::builtin::truth_value(&evaluated) {
+        return Ok(value);
+    }
+    Err(crate::Error::other(format!(
+        "比较「{}」未能求值成布尔：求值结果是「{}」，只有整数操作数全部为字面量时比较才能判定",
+        crate::pretty::print_expr(e),
+        crate::pretty::print_expr(&evaluated)
+    )))
 }
 
 /// Evaluate one application whose head is a built-in operation and whose
