@@ -102,9 +102,10 @@ fn an_unloaded_search_finds_article_39_and_lists_the_declared_rules() {
             "cn.constitution@2018 第三十九条",
             "片段：中华人民共和国公民的住宅不受侵犯。",
             "覆盖：已形式化（来源：语料 coverage 台账）",
-            "清单声明（未加载，无出处 locator）：",
+            "清单声明（未加载）：",
             "「cn.constitution.非法搜查侵犯住宅」",
             "「cn.constitution.非法侵入侵犯住宅」",
+            "注：包未加载，无法给出条号定位；先 :load 或 import <包名> 再检索。",
         ],
     );
     let out = stdout(&output);
@@ -176,28 +177,107 @@ fn an_unknown_version_is_an_error_and_is_not_replaced() {
     );
 }
 
-#[test]
-fn a_corpus_without_jurisdiction_reads_as_unrecorded() {
-    let temp = TempDir::new("jurisdiction-unrecorded");
-    temp.corpus(
-        "law/corpus/cn.test/2018.json",
-        r#"{
+/// A corpus without a `jurisdiction` field. `:search` tolerates this so the
+/// corpus can be excluded by `--jurisdiction` instead of failing the lookup.
+fn corpus_without_jurisdiction(law: &str, title: &str) -> String {
+    format!(
+        r#"{{
   "format": 2,
-  "law": "cn.test",
-  "title": "测试法",
+  "law": "{law}",
+  "title": "{title}",
   "version": "2018",
-  "articles": [ { "number": "第一条", "text": "住宅不受侵犯" } ]
-}"#,
+  "articles": [ {{ "number": "第一条", "text": "住宅不受侵犯" }} ]
+}}"#
+    )
+}
+
+fn corpus_with_jurisdiction(law: &str, title: &str) -> String {
+    format!(
+        r#"{{
+  "format": 2,
+  "law": "{law}",
+  "title": "{title}",
+  "version": "2018",
+  "jurisdiction": "CN",
+  "articles": [ {{ "number": "第一条", "text": "住宅不受侵犯" }} ]
+}}"#
+    )
+}
+
+#[test]
+fn a_jurisdiction_filter_excludes_an_unrecorded_corpus_with_a_warning() {
+    let temp = TempDir::new("jurisdiction-mixed");
+    temp.corpus(
+        "law/corpus/cn.known/2018.json",
+        &corpus_with_jurisdiction("cn.known", "已知法"),
     );
-    let output = run_in(temp.path(), &[":search 住宅 --jurisdiction CN".to_string()]);
-    assert_exit(&output, ERROR);
+    temp.corpus(
+        "law/corpus/cn.unknown/2018.json",
+        &corpus_without_jurisdiction("cn.unknown", "未记管辖法"),
+    );
+    let output = check(
+        run_in(temp.path(), &[":search 住宅 --jurisdiction CN".to_string()]),
+        PROVED,
+        &[
+            "注：cn.unknown@2018 的语料没有记录管辖，已排除；如需检索该语料请去掉 --jurisdiction",
+            "管辖过滤：`CN` 保留 1 个语料（另有 1 个管辖未记录）",
+            "cn.known@2018 第一条",
+        ],
+    );
     let out = stdout(&output);
     assert!(
-        out.contains("管辖未记录"),
-        "the corpus must be reported as unrecorded:\n{out}\nstderr:\n{}",
-        stderr(&output)
+        !out.contains("cn.unknown@2018 第一条"),
+        "the unrecorded corpus must not be searched under --jurisdiction:\n{out}"
     );
-    assert!(!out.contains("命中"), "{out}");
+}
+
+#[test]
+fn an_all_unrecorded_jurisdiction_search_has_no_results_and_exits_one() {
+    let temp = TempDir::new("jurisdiction-all-unrecorded");
+    temp.corpus(
+        "law/corpus/cn.unknown-a/2018.json",
+        &corpus_without_jurisdiction("cn.unknown-a", "未记管辖法甲"),
+    );
+    temp.corpus(
+        "law/corpus/cn.unknown-b/2018.json",
+        &corpus_without_jurisdiction("cn.unknown-b", "未记管辖法乙"),
+    );
+    let output = run_in(temp.path(), &[":search 住宅 --jurisdiction CN".to_string()]);
+    assert_exit(&output, NO_MATCH);
+    let out = stdout(&output);
+    assert!(
+        out.contains(
+            "注：cn.unknown-a@2018 的语料没有记录管辖，已排除；如需检索该语料请去掉 --jurisdiction"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "注：cn.unknown-b@2018 的语料没有记录管辖，已排除；如需检索该语料请去掉 --jurisdiction"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("没有命中的条文"), "{out}");
+    assert!(!out.contains("cn.unknown-a@2018 第一条"), "{out}");
+    assert!(!out.contains("cn.unknown-b@2018 第一条"), "{out}");
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn an_unrecorded_jurisdiction_does_not_block_an_unfiltered_search() {
+    let temp = TempDir::new("jurisdiction-unfiltered");
+    temp.corpus(
+        "law/corpus/cn.unknown/2018.json",
+        &corpus_without_jurisdiction("cn.unknown", "未记管辖法"),
+    );
+    check(
+        run_in(temp.path(), &[":search 住宅".to_string()]),
+        PROVED,
+        &[
+            "cn.unknown@2018 第一条",
+            "覆盖：覆盖率台账不可用（不猜覆盖状态）",
+        ],
+    );
 }
 
 #[test]

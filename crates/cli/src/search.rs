@@ -47,7 +47,8 @@ pub(crate) fn search(
     let options = Options::parse(arg)?;
     let terms = keyword_terms(&options.keyword);
     let root = crate::corpus_root("")?;
-    let scan = corpus::scan(&root).map_err(|error| escape_control(&error.to_string()))?;
+    let scan =
+        corpus::scan_for_search(&root).map_err(|error| escape_control(&error.to_string()))?;
     let all_ids: Vec<String> = scan
         .corpora
         .iter()
@@ -127,6 +128,22 @@ pub(crate) fn search(
         scoped = candidates;
     }
 
+    // Check the article before the jurisdiction filter: an article that exists
+    // only in a corpus whose jurisdiction is unrecorded is "excluded by the
+    // filter", not "the article does not exist".
+    if let Some(article) = &options.article {
+        let exists = scoped
+            .iter()
+            .any(|corpus| find_article(corpus, article).is_some());
+        if !exists {
+            return Err(format!(
+                "没有该条号的语料：`{}`（在已选语料范围内）",
+                escape_control(article)
+            ));
+        }
+        writeln!(out, "条号过滤：`{}`", escape_control(article)).ok();
+    }
+
     if let Some(code) = &options.jurisdiction {
         let mut retained = Vec::new();
         let mut unrecorded = Vec::new();
@@ -140,21 +157,13 @@ pub(crate) fn search(
         for corpus in &unrecorded {
             writeln!(
                 out,
-                "管辖未记录：{}（不参与 --jurisdiction `{}` 匹配）",
-                escape_control(&format!("{}@{}", corpus.law, corpus.version)),
-                escape_control(code)
+                "注：{} 的语料没有记录管辖，已排除；如需检索该语料请去掉 --jurisdiction",
+                escape_control(&format!("{}@{}", corpus.law, corpus.version))
             )
             .ok();
         }
-        if retained.is_empty() {
-            if unrecorded.is_empty() {
-                return Err(format!("没有管辖为 `{}` 的语料", escape_control(code)));
-            }
-            return Err(format!(
-                "管辖未记录：{}；没有可用于 --jurisdiction `{}` 匹配的语料",
-                available_ids(&corpus_ids(&unrecorded)),
-                escape_control(code)
-            ));
+        if retained.is_empty() && unrecorded.is_empty() {
+            return Err(format!("没有管辖为 `{}` 的语料", escape_control(code)));
         }
         writeln!(
             out,
@@ -165,19 +174,6 @@ pub(crate) fn search(
         )
         .ok();
         scoped = retained;
-    }
-
-    if let Some(article) = &options.article {
-        let exists = scoped
-            .iter()
-            .any(|corpus| find_article(corpus, article).is_some());
-        if !exists {
-            return Err(format!(
-                "没有该条号的语料：`{}`（在已选语料范围内）",
-                escape_control(article)
-            ));
-        }
-        writeln!(out, "条号过滤：`{}`", escape_control(article)).ok();
     }
 
     let mut hits: Vec<Hit<'_>> = Vec::new();
@@ -492,13 +488,6 @@ fn write_header(out: &mut impl Write, options: &Options, terms: &[String], root:
     writeln!(out).ok();
 }
 
-fn corpus_ids(corpora: &[&Corpus]) -> Vec<String> {
-    corpora
-        .iter()
-        .map(|corpus| format!("{}@{}", corpus.law, corpus.version))
-        .collect()
-}
-
 fn available_ids(ids: &[String]) -> String {
     if ids.is_empty() {
         return "（无）".to_owned();
@@ -705,12 +694,17 @@ fn write_rules(out: &mut impl Write, hit: &Hit<'_>, env: &Env) {
     if !unloaded.is_empty() {
         writeln!(
             out,
-            "  清单声明（未加载，无出处 locator）：{}",
+            "  清单声明（未加载）：{}",
             unloaded
                 .iter()
                 .map(|name| format!("「{}」", escape_control(name)))
                 .collect::<Vec<_>>()
                 .join("、")
+        )
+        .ok();
+        writeln!(
+            out,
+            "  注：包未加载，无法给出条号定位；先 :load 或 import <包名> 再检索。"
         )
         .ok();
     }

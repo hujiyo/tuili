@@ -9,7 +9,10 @@
 //! Corpus files are static repository data; this crate never downloads one.
 //! Parsing is strict: `deny_unknown_fields`, a supported format version, real
 //! calendar dates, a well-formed `sha256:` value, a non-empty article list,
-//! unique article numbers and, when present, a coverage ledger. The ledger has
+//! unique article numbers, a recorded jurisdiction and, when present, a
+//! coverage ledger. The search-only [`scan_for_search`] tolerates a missing
+//! jurisdiction so `:search` can exclude that corpus with a warning; every
+//! other reader uses [`scan`], which rejects it. The ledger has
 //! exactly one entry per article in corpus order; each entry is `formalized`,
 //! `partial`, `indexed` or `needs_ontology`, with rules only for the first two,
 //! a note required for `partial` (and allowed on any status) and a named gap
@@ -215,10 +218,17 @@ impl Corpus {
 
     /// Read, parse and validate a corpus file.
     pub fn read(path: &Path) -> Result<Corpus, CorpusError> {
-        let text = fs::read_to_string(path).map_err(|error| {
-            CorpusError::new(path.to_path_buf(), format!("无法读取语料文件：{error}"))
-        })?;
-        parse_at(path, &text)
+        read_at(path, false)
+    }
+
+    /// Read a corpus for `:search`, tolerating a missing jurisdiction code.
+    ///
+    /// Every other rule is still enforced: the layout, JSON shape, dates,
+    /// article numbers, coverage ledger and duplicate `(law, version)` check.
+    /// Only the jurisdiction value may be empty here, and `:search` reports
+    /// that corpus as unrecorded instead of treating it as matching any code.
+    fn read_for_search(path: &Path) -> Result<Corpus, CorpusError> {
+        read_at(path, true)
     }
 
     /// Does a citation's instrument name match this corpus's title or aliases?
@@ -243,7 +253,12 @@ impl Corpus {
             .find(|article| normalize_space(&article.number) == wanted)
     }
 
-    fn validate(&self) -> Result<(), String> {
+    /// Validate the corpus, optionally allowing an unrecorded jurisdiction.
+    ///
+    /// `:audit` and every other strict reader use `validate`; only `:search`
+    /// opts in to the unrecorded jurisdiction so it can exclude that corpus
+    /// with a warning instead of failing the whole lookup.
+    fn validate_with(&self, allow_unrecorded_jurisdiction: bool) -> Result<(), String> {
         if self.format != CORPUS_FORMAT {
             return Err(format!(
                 "不支持的语料格式版本 {}：当前只支持 {CORPUS_FORMAT}",
@@ -264,7 +279,7 @@ impl Corpus {
         }
         require_text("title", &self.title)?;
         require_text("version", &self.version)?;
-        if self.jurisdiction.trim().is_empty() {
+        if self.jurisdiction.trim().is_empty() && !allow_unrecorded_jurisdiction {
             return Err("管辖未记录（jurisdiction）：语料必须记录管辖代码".to_owned());
         }
         if let Some(value) = &self.effective_from {
@@ -472,12 +487,27 @@ fn require_rules(field: &str, rules: &[String]) -> Result<(), String> {
     }
 }
 
+fn read_at(path: &Path, allow_unrecorded_jurisdiction: bool) -> Result<Corpus, CorpusError> {
+    let text = fs::read_to_string(path).map_err(|error| {
+        CorpusError::new(path.to_path_buf(), format!("无法读取语料文件：{error}"))
+    })?;
+    parse_at_with(path, &text, allow_unrecorded_jurisdiction)
+}
+
 fn parse_at(path: &Path, text: &str) -> Result<Corpus, CorpusError> {
+    parse_at_with(path, text, false)
+}
+
+fn parse_at_with(
+    path: &Path,
+    text: &str,
+    allow_unrecorded_jurisdiction: bool,
+) -> Result<Corpus, CorpusError> {
     let corpus: Corpus = serde_json::from_str(text).map_err(|error| {
         CorpusError::new(path.to_path_buf(), format!("语料 JSON 解析失败：{error}"))
     })?;
     corpus
-        .validate()
+        .validate_with(allow_unrecorded_jurisdiction)
         .map_err(|message| CorpusError::new(path.to_path_buf(), message))?;
     Ok(corpus)
 }
@@ -621,6 +651,25 @@ pub fn hash_file(path: &Path) -> Result<String, CorpusError> {
 /// check stays so a future loader cannot silently replace one corpus with
 /// another.
 pub fn scan(root: &Path) -> Result<Scan, CorpusError> {
+    scan_with(root, Corpus::read)
+}
+
+/// Scan `root` for corpora for `:search`.
+///
+/// The layout, duplicate `(law, version)` check and every other corpus rule are
+/// the same as [`scan`]. The only difference is that a corpus whose
+/// `jurisdiction` is missing or blank is loaded with an empty value instead of
+/// being rejected; `:search --jurisdiction` then reports it as
+/// "管辖未记录" and excludes it. `:audit` continues to use [`scan`], which
+/// rejects such a corpus.
+pub fn scan_for_search(root: &Path) -> Result<Scan, CorpusError> {
+    scan_with(root, Corpus::read_for_search)
+}
+
+fn scan_with(
+    root: &Path,
+    read: fn(&Path) -> Result<Corpus, CorpusError>,
+) -> Result<Scan, CorpusError> {
     let entries = fs::read_dir(root).map_err(|error| {
         CorpusError::new(root.to_path_buf(), format!("无法读取语料目录：{error}"))
     })?;
@@ -674,7 +723,7 @@ pub fn scan(root: &Path) -> Result<Scan, CorpusError> {
             continue;
         }
         for path in files {
-            match Corpus::read(&path) {
+            match read(&path) {
                 Ok(corpus) => {
                     if corpus.law != dir_name {
                         errors.push(CorpusError::new(

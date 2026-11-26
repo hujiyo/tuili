@@ -276,17 +276,21 @@
 //! adjacent. No regular expression is compiled, so punctuation is literal. A
 //! result prints `law@version article`, a context snippet, the article's
 //! declared coverage status (`已形式化` / `部分` / `仅索引` / `待本体`), the
-//! loaded rules whose sources cite the article with their source line, or
-//! `尚未形式化` when the ledger and the session have no rule for it. The
-//! coverage status comes from the corpus's `coverage` ledger; without one the
-//! output says `覆盖率台账不可用` and never guesses. `--law` matches the corpus
-//! law id, title or alias; `--version` must name a corpus version in scope (a
-//! missing version is an error, never a fallback); `--article` accepts the
-//! stored number or ASCII digits such as `39`, and additionally prints the full
-//! article text and its SHA-256 (the same article-text hash `:audit` checks).
-//! `--jurisdiction` compares the corpus's recorded jurisdiction; a corpus
-//! without one is reported as `管辖未记录` and is not matched. Results are
-//! stably sorted by `(law, version, article order)`. At most 20 results print
+//! loaded rules whose sources cite the article with their source line, and the
+//! ledger-declared rules that are not loaded (without a locator, followed by a
+//! hint to `:load` or `import <pack>`); `尚未形式化` prints only when neither
+//! the ledger nor the session has a rule. The coverage status comes from the
+//! corpus's `coverage` ledger; without one the output says `覆盖率台账不可用`
+//! and never guesses. `--law` matches the corpus law id, title or alias;
+//! `--version` must name a corpus version in scope (a missing version is an
+//! error, never a fallback); `--article` accepts the stored number or ASCII
+//! digits such as `39`, and additionally prints the full article text and its
+//! SHA-256 (the same article-text hash `:audit` checks). `--jurisdiction`
+//! compares the corpus's recorded jurisdiction; a corpus without one is
+//! excluded with a `注：…已排除…` warning, not matched and not turned into a
+//! command failure: the exit code follows whether any result remains (`0` with
+//! results, `1` without). Results are stably sorted by `(law, version, article
+//! order)`. At most 20 results print
 //! by default; `--limit` accepts 1–64, and a larger value is a usage error
 //! instead of a silent truncation. A result set larger than the limit prints an
 //! explicit `已截断` line. Text from the user, a corpus, a rule or a path is
