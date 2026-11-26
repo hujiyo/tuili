@@ -164,6 +164,9 @@
 //! :packs [dir]            list the legal-pack manifests under a directory
 //! :lock [dir]             hash the packs and write the std.lock registry lock
 //! :audit [dir]            check rule-source quotations against article corpora
+//! :search <keywords> [--law <name>] [--version <version>]
+//!         [--article <number>] [--jurisdiction <code>] [--limit <n>]
+//!                         search article texts and report coverage and rules
 //! :given <term>           register a fact asserted by the user
 //! :fact [list]            list the facts in the ledger with their identities
 //! :fact show <term>       show the facts equivalent to a proposition
@@ -263,6 +266,34 @@
 //! numbers, the named ontology gaps with their counts, the open concepts and
 //! the note. The declaration is printed only and is not compared with the
 //! loaded theory's rules.
+//!
+//! `:search <keywords> [--law <name>] [--version <version>] [--article
+//! <number>] [--jurisdiction <code>] [--limit <n>]` searches the `articles`
+//! text of the corpora under `<current directory>/law/corpus` without requiring
+//! `:load`. Both the keyword and each article are whitespace-normalized (trim,
+//! collapse runs to one space); the keyword is split on spaces and every part
+//! must occur as a literal substring, in any order and not necessarily
+//! adjacent. No regular expression is compiled, so punctuation is literal. A
+//! result prints `law@version article`, a context snippet, the article's
+//! declared coverage status (`已形式化` / `部分` / `仅索引` / `待本体`), the
+//! loaded rules whose sources cite the article with their source line, or
+//! `尚未形式化` when the ledger and the session have no rule for it. The
+//! coverage status comes from the corpus's `coverage` ledger; without one the
+//! output says `覆盖率台账不可用` and never guesses. `--law` matches the corpus
+//! law id, title or alias; `--version` must name a corpus version in scope (a
+//! missing version is an error, never a fallback); `--article` accepts the
+//! stored number or ASCII digits such as `39`, and additionally prints the full
+//! article text and its SHA-256 (the same article-text hash `:audit` checks).
+//! `--jurisdiction` compares the corpus's recorded jurisdiction; a corpus
+//! without one is reported as `管辖未记录` and is not matched. Results are
+//! stably sorted by `(law, version, article order)`. At most 20 results print
+//! by default; `--limit` accepts 1–64, and a larger value is a usage error
+//! instead of a silent truncation. A result set larger than the limit prints an
+//! explicit `已截断` line. Text from the user, a corpus, a rule or a path is
+//! escaped before printing, so a newline or control character cannot forge a
+//! line. When a loaded pack links the corpus, its trust level is printed;
+//! otherwise no trust level is claimed. This is candidate retrieval, not a
+//! legal conclusion, and it does not read or formalise the law.
 //!
 //! `:why` prints the derivation tree rendered from the generated certificate,
 //! then runs [`std_deduce_cert::check`] and [`std_deduce_cert::kernel_proof`]
@@ -541,6 +572,7 @@ mod environment;
 mod identity;
 mod packs;
 mod review;
+mod search;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -1745,6 +1777,7 @@ impl Session {
             "packs" => self.list_packs(arg, out),
             "lock" => self.lock_packs(arg, out),
             "audit" => self.audit_sources(arg, out),
+            "search" => search::search(arg, &self.lib.env, &self.packs, out),
             "quit" | "exit" => Ok(Outcome::Proved),
             "redact" => self.redact_command(arg, out),
             other => Err(format!("未知命令 `:{other}`")),
@@ -6501,7 +6534,8 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
                  :why <命题>  :explain <命题>  :labels <命题>  :review <命题> [--out <文件>]  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :why <命题>  :explain <命题>  :labels <命题>  :gap <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :redact [on|off]  \
-                 :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  :quit"
+                 :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  \
+                 :search <关键词> [--law <法名>] [--version <版本>] [--article <条号>] [--jurisdiction <代码>] [--limit <n>]  :quit"
             )
             .ok();
             continue;

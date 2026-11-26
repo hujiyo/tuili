@@ -52,7 +52,10 @@ pub struct Corpus {
     pub aliases: Vec<String>,
     /// Version matched against a citation's `version`, for example `2018`.
     pub version: String,
-    /// Jurisdiction code, for example `CN`.
+    /// Jurisdiction code, for example `CN`. A corpus must record one; an
+    /// absent or blank value is rejected as "管辖未记录" instead of being
+    /// treated as matching every jurisdiction.
+    #[serde(default)]
     pub jurisdiction: String,
     /// First effective date, `YYYY-MM-DD`.
     #[serde(default)]
@@ -261,7 +264,9 @@ impl Corpus {
         }
         require_text("title", &self.title)?;
         require_text("version", &self.version)?;
-        require_text("jurisdiction", &self.jurisdiction)?;
+        if self.jurisdiction.trim().is_empty() {
+            return Err("管辖未记录（jurisdiction）：语料必须记录管辖代码".to_owned());
+        }
         if let Some(value) = &self.effective_from {
             date::validate("effective_from", value)?;
         }
@@ -555,6 +560,16 @@ fn require_unpadded(field: &str, value: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// Hash one article's text: `sha256:` plus 64 lowercase hex digits.
+///
+/// This is the hash `:audit` compares a citation's `source.hash` with, and the
+/// hash `:search --article` prints for manual checking: the SHA-256 of the
+/// article text exactly as stored in the corpus file (UTF-8, including its
+/// newlines). It is not the hash of the corpus file.
+pub fn article_hash(text: &str) -> String {
+    format!("sha256:{}", hex::encode(&Sha256::digest(text.as_bytes())))
 }
 
 /// Hash one corpus file's content: `sha256:` plus 64 lowercase hex digits.
@@ -903,10 +918,7 @@ pub fn audit(corpora: &[Corpus], citation: &Citation<'_>) -> AuditResult {
                 "条文哈希格式无效：应为 sha256: 加 64 位小写十六进制",
             );
         }
-        let actual = format!(
-            "sha256:{}",
-            hex::encode(&Sha256::digest(article.text.as_bytes()))
-        );
+        let actual = article_hash(&article.text);
         if actual != citation.hash {
             let mut checked = result(Audit::HashMismatch, id, "条文哈希不符");
             checked.hash_checked = true;
