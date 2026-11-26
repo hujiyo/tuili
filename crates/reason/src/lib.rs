@@ -144,8 +144,10 @@
 //! encode. One derived fact is added: when the root's proof graph turns an
 //! `open` concept (`重大`, `情节严重`) into a proved proposition, the
 //! certificate records an `open_concept` obligation naming the concepts and
-//! the nodes that state them. An open concept is never exported as an
-//! unconditional conclusion.
+//! the nodes that state them, so an open concept is never exported as an
+//! unconditional conclusion. An `interpretation_application` that licenses the
+//! concept is exempt: enabling a sourced interpretation is the explicit human
+//! reading, so the obligation is released instead.
 //!
 //! Every conclusion derived by rules or universal elimination keeps all of its
 //! independent witnesses. A witness is one rule instance (rule name plus
@@ -177,10 +179,18 @@
 //! the dependency propagates from the root's proof graph and becomes the
 //! certificate obligation. A fact the user or the court supplied is evidence,
 //! not a decision of the concept, so an open concept that merely appears as an
-//! assumption premise is not counted. The candidate interpretations and the
-//! branch re-run this marker will eventually drive are not implemented yet.
+//! assumption premise is not counted. [`Reasoner::branch_candidates`] names
+//! the declared interpretations that could license the blocked concept and
+//! says which of them can actually run; the command layer runs each one alone
+//! as its own derivation, never as a combination.
 
 mod applicability;
+mod branches;
+
+pub use branches::{
+    BranchCandidate, BranchCandidateScan, CandidateRelation, EnabledLicense, UnavailableBranch,
+    MAX_BRANCH_CANDIDATES,
+};
 
 pub use applicability::{
     Applicability, Basis, CodeDimension, DateField, DatedEvidence, InapplicableReason,
@@ -4810,12 +4820,15 @@ fn node_prop(n: &Node) -> Option<&Expr> {
 /// `env` is the environment the derivation was produced in. It is read for one
 /// thing only: the `open` markers ([`Env::open_predicates`]). When the root's
 /// proof graph turns such a concept (`重大`, `情节严重`) into a proved
-/// proposition, the certificate gains one `open_concept` obligation naming the
-/// concepts and the nodes that state them, so an open concept is never
-/// exported as an unconditional conclusion. The obligation is computed by
+/// proposition through a rule, a universal instance or the root assumption, the
+/// certificate gains one `open_concept` obligation naming the concepts and the
+/// nodes that state them, so an open concept is never exported as an
+/// unconditional conclusion. An `interpretation_application` that licenses the
+/// concept releases the obligation: the sourced interpretation is the human
+/// reading. The obligation is computed by
 /// [`std_deduce_cert::open_concept_dependency`], the same function the
-/// certificate checker recomputes with; a derivation over no open concept
-/// records none.
+/// certificate checker recomputes with; a derivation over no open concept, or
+/// one that only licensed it through an enabled interpretation, records none.
 ///
 /// `priority_order` is the [`Reasoner::priority_order`] of the reasoner that
 /// produced `d`. It is consulted only to say how many recorded priority edges

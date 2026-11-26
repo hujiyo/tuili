@@ -259,6 +259,34 @@ fn help_lists_the_batch_and_certificate_entries() {
     }
 }
 
+/// Every user-facing colon command must appear in both help surfaces: a
+/// command added without a help line was discoverable only from the README.
+#[test]
+fn help_lists_every_colon_command_from_the_recent_entries() {
+    let commands = [
+        ":search",
+        ":branches",
+        ":load-case",
+        ":labels",
+        ":review",
+        ":redact",
+    ];
+    for flag in ["--help", "-h"] {
+        let output = run(&[flag.to_owned()]);
+        assert_exit(&output, PROVED);
+        let out = stdout(&output);
+        for command in commands {
+            assert!(out.contains(command), "{flag} must list {command}:\n{out}");
+        }
+    }
+    let repl = run_with_stdin(&[], ":help\n:quit\n");
+    assert_exit(&repl, PROVED);
+    let out = stdout(&repl);
+    for command in commands {
+        assert!(out.contains(command), ":help must list {command}:\n{out}");
+    }
+}
+
 #[test]
 fn version_prints_the_binary_name_and_version() {
     let expected = format!("std-deduce {}\n", env!("CARGO_PKG_VERSION"));

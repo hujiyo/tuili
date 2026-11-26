@@ -211,6 +211,39 @@ impl Certificate {
         self
     }
 
+    /// The proposition a node states, read through its own variant.
+    ///
+    /// One mapping is shared by every renderer and every derived view: an
+    /// assumption node resolves through the assumption table, a gap node
+    /// through its recorded proposition, and a rule, interpretation or
+    /// universal-elimination step through its conclusion. An out-of-range
+    /// node or a missing table entry is an error naming the reference; a
+    /// renderer never substitutes an empty placeholder.
+    pub fn node_proposition(&self, node: NodeId) -> Result<&CertExpr, String> {
+        let Some(entry) = self.nodes.get(node) else {
+            return Err(format!(
+                "节点 {node}：节点索引越界：证书只有 {} 个节点",
+                self.nodes.len()
+            ));
+        };
+        match entry {
+            Node::Assumption { assumption } => self
+                .assumptions
+                .get(*assumption)
+                .map(|entry| &entry.proposition)
+                .ok_or_else(|| {
+                    format!(
+                        "节点 {node}：引用了不存在的假设 {assumption}：证书只有 {} 条假设",
+                        self.assumptions.len()
+                    )
+                }),
+            Node::RuleApplication { conclusion, .. } => Ok(conclusion),
+            Node::InterpretationApplication { conclusion, .. } => Ok(conclusion),
+            Node::AxiomInstance { conclusion, .. } => Ok(conclusion),
+            Node::Gap { proposition, .. } => Ok(proposition),
+        }
+    }
+
     /// Parse JSON, rejecting an unknown or missing `format_version`.
     ///
     /// The version is probed first, using only the `format_version` field, so a

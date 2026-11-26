@@ -166,8 +166,11 @@
 //! exception: the `open_concept` obligation is recomputed from the environment's
 //! `open` markers and the proof graph, and a certificate that dropped, invented
 //! or edited it is rejected. A root derivation that turns an open concept
-//! (`重大`, `情节严重`) into a proved proposition is never presented as
-//! unconditional. The checker does
+//! (`重大`, `情节严重`) into a proved proposition through a rule, a universal
+//! instance or the root assumption is never presented as unconditional. An
+//! enabled interpretation that licenses the concept releases the obligation —
+//! the sourced interpretation is the explicit human reading — and the proof then
+//! labels as `依赖假设`, not as unconditionally verified. The checker does
 //! not re-derive the rule instances named by `left_by` / `right_by` and does
 //! not judge the legal effect of a citation.
 //!
@@ -258,7 +261,8 @@ pub use model::{
 };
 pub use narrative::{render_narrative, render_narrative_with_context};
 pub use open::{
-    dependency as open_concept_dependency, OpenConceptDependency, OPEN_CONCEPT_OBLIGATION_ID,
+    dependency as open_concept_dependency, statements as open_concept_statements,
+    OpenConceptDependency, OpenStatement, OPEN_CONCEPT_OBLIGATION_ID,
 };
 pub use proof::{kernel_proof, KernelProofError, KernelProofReport, KernelStep};
 pub use render::{render, render_with_annotations};
