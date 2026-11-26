@@ -29,6 +29,9 @@
 //!           | 'source' (source_key STRING)+
 //!           | 'effective' DATE | 'repealed' DATE
 //!           | 'jurisdiction' CODE | 'territory' CODE
+//!           | 'revision' IDENT
+//!           -- `revision` names the historical-version group a rule belongs
+//!           -- to; it must start its own line and is checked on load
 //! interpret := 'interpret' IDENT ':' application '→' application
 //!              'direction' DIRECTION 'source' (source_key STRING)+
 //!           -- `direction` is required and must start its own line, as must
@@ -502,7 +505,7 @@ impl Parser {
                 if let Tok::Ident(keyword) = self.peek().clone() {
                     if matches!(
                         keyword.as_str(),
-                        "effective" | "repealed" | "jurisdiction" | "territory"
+                        "effective" | "repealed" | "jurisdiction" | "territory" | "revision"
                     ) {
                         return self.err(format!(
                             "`axiom {name}`：`{keyword}` 只能写在规则（rule）上；事实只能写 occurred_at / occurred_in"
@@ -746,6 +749,14 @@ impl Parser {
                 self.bump();
                 Ok(Item::Show(self.ident()?))
             }
+            // `revision` is a rule clause, not a declaration. Say so instead
+            // of reporting a generic unknown keyword: the identifier groups
+            // rules and means nothing on its own.
+            "revision" => self.err(
+                "`revision` 只能作为规则的子句：在 `rule` 体内另起一行写 `revision <标识>`，\
+                 同一标识表示同一法条的多个版本"
+                    .to_string(),
+            ),
             _ => self.err(format!("未知声明关键字 `{kw}`")),
         }
     }
@@ -1002,6 +1013,10 @@ impl Parser {
         let mut guards = Vec::new();
         let mut sources = Vec::new();
         let mut scope = ScopeSpec::default();
+        // `revision <标识>` groups rules that are versions of the same
+        // provision. The value is a bare identifier, the clause must start its
+        // own line, and the group checks run after the whole file is loaded.
+        let mut revision: Option<Revision> = None;
         // The pleading clauses are optional and each may appear at most once.
         // `None` here means "not declared": nothing fills in a default.
         let mut burden = None;
@@ -1160,6 +1175,46 @@ impl Parser {
                     self.require_clause_new_line(&name, "territory", on_new_line)?;
                     self.scope_clause(&name, "territory", &mut scope.territory)?;
                 }
+                // `revision <标识>` names the group of rules that are versions
+                // of one provision. The identifier groups rules, so it must not
+                // be mistaken for a term: the value is a bare identifier, the
+                // clause starts its own line, and it may appear once. Which
+                // rules belong together is declared here, never inferred from
+                // their names or provision numbers.
+                "revision" => {
+                    self.require_clause_new_line(&name, "revision", on_new_line)?;
+                    let (line, col) = (self.here().line, self.here().col);
+                    self.bump();
+                    let id = match self.peek().clone() {
+                        Tok::Ident(id) => {
+                            self.bump();
+                            id
+                        }
+                        Tok::Newline | Tok::Eof => {
+                            return Err(ParseError {
+                                msg: format!(
+                                    "`rule {name}` 的 `revision` 缺少组标识（用法：`revision <标识>`，\
+                                     同一标识表示同一法条的多个版本）"
+                                ),
+                                line,
+                                col,
+                            })
+                        }
+                        other => {
+                            return Err(ParseError {
+                                msg: format!(
+                                    "`rule {name}` 的 `revision` 之后必须是裸标识符，实际是 `{other:?}`；\
+                                     不要写成字符串字面量"
+                                ),
+                                line,
+                                col,
+                            })
+                        }
+                    };
+                    if revision.replace(Revision { id, line, col }).is_some() {
+                        return Err(duplicate_clause(&name, "revision", line, col));
+                    }
+                }
                 "occurred_at" | "occurred_in" => {
                     return self.err(format!(
                         "`rule {name}` 的 `{kw}`：它只能写在事实（axiom 命题）上；规则不能声明发生时间或发生地"
@@ -1185,6 +1240,7 @@ impl Parser {
             guards,
             sources,
             scope,
+            revision,
             burden,
             standard,
             exception_burden,

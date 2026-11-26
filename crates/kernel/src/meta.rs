@@ -14,6 +14,13 @@
 //! depending on the package registry. `lawpack` re-exports them under its
 //! original names, so a manifest, a `--jurisdiction` option and a rule clause
 //! accept exactly the same formats.
+//!
+//! The module also records the group of rules that declare the same
+//! provision's historical versions ([`RevisionGroup`]). Like a scope record it
+//! is stored data: the kernel never chooses a version, and the reasoner never
+//! prefers the newer or the older one because a group says so.
+
+use crate::term::Name;
 
 /// Check that `value` is a real `YYYY-MM-DD` calendar day.
 ///
@@ -174,5 +181,41 @@ impl Scope {
             && self.effective_to.is_none()
             && self.jurisdiction.is_none()
             && self.territory.is_none()
+    }
+}
+
+/// The group of rules that declare the same provision's historical versions.
+///
+/// A rule writes `revision <id>` to say that it is one version of a provision;
+/// every rule carrying the same identifier in the same namespace belongs to the
+/// same group, and the versions are ordered only by the effective dates each
+/// rule declares. The group is identified by the declaring namespace *and* the
+/// written identifier, so two packages may each group their own `第20条`
+/// versions without merging into one group.
+///
+/// The kernel stores the relation and never uses it to choose a version: which
+/// version covers an instance is the applicability judgement (from the
+/// declared `effective` / `repealed` range), and which version wins a conflict
+/// is an explicitly declared priority. Nothing here makes the newer or the
+/// older version win, and nothing here compares two versions' severity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RevisionGroup {
+    /// The namespace the grouped rules are declared in; `None` for a rule in a
+    /// case/example file (a file without a `namespace`).
+    pub declared_in: Option<Name>,
+    /// The identifier written in `revision <id>`.
+    pub revision: Name,
+}
+
+impl RevisionGroup {
+    /// The group as a reader prints it: the identifier alone for a case rule,
+    /// qualified by the declaring namespace for a module rule
+    /// (`cn.criminal.第20条`). This is display only; the group's identity is
+    /// the pair of namespace and identifier, not the printed string.
+    pub fn label(&self) -> String {
+        match &self.declared_in {
+            Some(namespace) => format!("{namespace}.{}", self.revision),
+            None => self.revision.to_string(),
+        }
     }
 }

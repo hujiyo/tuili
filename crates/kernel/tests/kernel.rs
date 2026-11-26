@@ -308,6 +308,7 @@ fn rule_constant_env() -> Env {
         unlesses: vec![],
         exceptions: vec![],
         prefers: vec![],
+        revision: None,
         sources: vec![],
         declared_in: None,
         burden: None,
@@ -399,6 +400,7 @@ fn a_rule_must_be_well_typed() {
         unlesses: vec![],
         exceptions: vec![],
         prefers: vec![],
+        revision: None,
         sources: vec![],
         declared_in: None,
         burden: None,
@@ -462,6 +464,7 @@ fn a_rule_with_duplicate_binder_names_is_refused() {
         unlesses: vec![],
         exceptions: vec![],
         prefers: vec![],
+        revision: None,
         sources: vec![],
         declared_in: None,
         burden: None,
@@ -996,4 +999,102 @@ fn burden_report_spells_out_declared_and_undeclared_values() {
             "the standard report must not attach a number: {text}"
         );
     }
+}
+
+/// `revision` groups are keyed by the declaring namespace plus the written
+/// identifier, and only rules that declared one belong to a group.
+///
+/// The kernel stores the relation and never chooses a version: the view is what
+/// reports and the loader read.
+#[test]
+fn revision_groups_are_keyed_by_namespace_and_identifier() {
+    let mut env = Env::new();
+    let ctx = Ctx::new();
+    let add = |env: &mut Env, name: &str, kind: DeclKind, ty: Expr| {
+        env.insert(
+            Decl {
+                name: std_deduce_kernel::name(name),
+                kind,
+                ty,
+                sources: vec![],
+                scope: Default::default(),
+                occurred_at: None,
+                occurred_in: None,
+                index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+    };
+    add(&mut env, "P", DeclKind::Pred, Expr::Sort(0));
+    let rule = |declared_in: Option<&str>, revision: Option<&str>| RuleDecl {
+        guards: Vec::new(),
+        params: vec![],
+        premises: vec![],
+        conclusion: Expr::constant("P"),
+        unlesses: vec![],
+        exceptions: vec![],
+        prefers: vec![],
+        revision: revision.map(std_deduce_kernel::name),
+        sources: vec![],
+        declared_in: declared_in.map(std_deduce_kernel::name),
+        burden: None,
+        standard: None,
+        exception_burden: None,
+        exception_standard: None,
+    };
+    let add_rule =
+        |env: &mut Env, name: &str, declared_in: Option<&str>, revision: Option<&str>| {
+            let decl = rule(declared_in, revision);
+            let ty = std_deduce_kernel::env::rule_type(&decl);
+            env.insert(
+                Decl {
+                    name: std_deduce_kernel::name(name),
+                    kind: DeclKind::Rule(Box::new(decl)),
+                    ty,
+                    sources: vec![],
+                    scope: Default::default(),
+                    occurred_at: None,
+                    occurred_in: None,
+                    index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+        };
+    add_rule(&mut env, "a.旧", Some("a"), Some("第二十条"));
+    add_rule(&mut env, "a.新", Some("a"), Some("第二十条"));
+    add_rule(&mut env, "b.旧", Some("b"), Some("第二十条"));
+    add_rule(&mut env, "b.新", Some("b"), Some("第二十条"));
+    add_rule(&mut env, "无关", Some("b"), None);
+
+    assert_eq!(
+        env.revision_group_of(&std_deduce_kernel::name("a.旧"))
+            .map(|group| group.label()),
+        Some("a.第二十条".to_owned())
+    );
+    assert_eq!(
+        env.revision_group_of(&std_deduce_kernel::name("无关")),
+        None,
+        "a rule without `revision` belongs to no group"
+    );
+    let groups = env.revision_groups();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].0.label(), "a.第二十条");
+    assert_eq!(
+        groups[0].1,
+        vec![
+            std_deduce_kernel::name("a.旧"),
+            std_deduce_kernel::name("a.新"),
+        ]
+    );
+    assert_eq!(groups[1].0.label(), "b.第二十条");
+    assert_eq!(
+        groups[1].1,
+        vec![
+            std_deduce_kernel::name("b.旧"),
+            std_deduce_kernel::name("b.新"),
+        ],
+        "the rule without a revision is not a member"
+    );
 }

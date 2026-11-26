@@ -154,6 +154,11 @@ impl Library {
         // marker is inserted after the whole file is in the environment, so it
         // may mark a predicate declared later in the same file.
         let mut risk_themes: Vec<(String, String, usize, usize)> = Vec::new();
+        // Every rule's `revision <标识>` clause with its position. Grouping is
+        // a declaration; the group checks run against the completed
+        // environment (so a version declared later in the same file counts) and
+        // still point at the clause that must be fixed.
+        let mut revision_claims: Vec<(String, crate::ast::Revision)> = Vec::new();
 
         for item in items {
             match item {
@@ -569,6 +574,7 @@ impl Library {
                     guards,
                     sources,
                     scope: scope_spec,
+                    revision,
                     burden,
                     standard,
                     exception_burden,
@@ -578,6 +584,35 @@ impl Library {
                     // elaboration so a bad date is reported as such and not as
                     // a type error in the rule.
                     let scope = rule_scope(&n, &scope_spec, options).map_err(LoadError::new)?;
+                    // Historical versions of one provision form a group, and a
+                    // group shares the declaration name space with every other
+                    // declaration: two versions cannot reuse a rule name. The
+                    // ledger refuses a duplicate name of any kind; when the
+                    // clash is inside one revision group the error names the
+                    // group and the clause position, because reusing a version's
+                    // name is the mistake the `revision` declaration invited.
+                    if let Some(rev) = &revision {
+                        if let Some(existing) = next.env.get(&std_deduce_kernel::name(&n)) {
+                            if let std_deduce_kernel::DeclKind::Rule(existing_rule) = &existing.kind
+                            {
+                                let group_hit = existing_rule.revision.as_ref()
+                                    == Some(&std_deduce_kernel::name(&rev.id))
+                                    && existing_rule.declared_in
+                                        == namespace.as_ref().map(std_deduce_kernel::name);
+                                if group_hit {
+                                    return Err(LoadError::at(
+                                        format!(
+                                            "`rule {n}` 的 `revision {}`：同一 revision 组内不能有同名规则；\
+                                             `{n}` 已经作为该组的一个历史版本声明过——同一组的每个版本必须是不同的规则",
+                                            rev.id
+                                        ),
+                                        rev.line,
+                                        rev.col,
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     // A rule is the bridge from a legal provision to a
                     // conclusion; without a source the bridge cannot be
                     // audited. A source made only of whitespace names nothing
@@ -780,6 +815,9 @@ impl Library {
                         guards: rule_guards,
                         exceptions,
                         prefers,
+                        revision: revision
+                            .as_ref()
+                            .map(|rev| std_deduce_kernel::name(&rev.id)),
                         sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
                         declared_in: namespace.as_ref().map(std_deduce_kernel::name),
                         // The pleading clauses are declaration metadata: they
@@ -806,6 +844,9 @@ impl Library {
                         .map_err(|e| LoadError::new(format!("`rule {n}`：{e}")))?;
                     theory.decls.push(n.clone());
                     theory.rules.push(n.clone());
+                    if let Some(rev) = revision {
+                        revision_claims.push((n.clone(), rev));
+                    }
                     report.declared.push(n);
                 }
                 Item::Interpretation {
@@ -1134,6 +1175,11 @@ impl Library {
         // targets after the whole file is in the environment, which allows a
         // rule to name a rule declared later in the same file.
         check_rule_targets(&next.env, &theory.rules).map_err(LoadError::new)?;
+        // A `revision` clause groups rules that are versions of one provision.
+        // The group is declared, not inferred, so the loader only checks what
+        // the declaration implies; the targets are read from the completed
+        // environment so a version declared later in the same file counts.
+        check_revision_groups(&next.env, &revision_claims, namespace.as_deref())?;
         // A top-level `priority` may name rules declared later in the same
         // file as well, so its targets are checked against the completed
         // environment too.
@@ -1458,6 +1504,122 @@ fn check_priority_targets(
         }
     }
     Ok(())
+}
+
+/// The loader's checks for `revision <标识>` groups.
+///
+/// A `revision` clause declares that several rules are versions of the same
+/// provision; grouping is never inferred from rule names, provision numbers or
+/// sources. The loader checks what that declaration implies, against the
+/// completed environment (so a version declared later in the same file counts):
+///
+/// * the identifier shares the declaration name space, so it may not be the
+///   name of a declared rule, predicate or any other declaration. A module
+///   declares qualified names, so the qualified form is checked as well as the
+///   bare identifier a case file writes;
+/// * a group has at least two rules: one rule is not a set of versions, so a
+///   lone declaration is refused instead of becoming a group of one;
+/// * every version declares an effective range (a pack rule may inherit it
+///   from the manifest), because the range is what the applicability judgement
+///   uses to tell the versions apart and to compare them.
+///
+/// A group's identity is the declaring namespace plus the identifier, so rules
+/// of two packages never merge. A case file has no namespace, so two case
+/// files that write the same identifier declare the same group.
+///
+/// Errors point at the `revision` clause that must be fixed, and name the rule.
+fn check_revision_groups(
+    env: &Env,
+    claims: &[(String, crate::ast::Revision)],
+    namespace: Option<&str>,
+) -> Result<(), LoadError> {
+    let mut checked: Vec<std_deduce_kernel::RevisionGroup> = Vec::new();
+    for (rule, revision) in claims {
+        // The identifier is a label, not a term: it must not name an existing
+        // declaration. Look at the bare identifier (what a case file writes)
+        // and, for a module, at its qualified form.
+        let clash = revision_name_clash(env, namespace, &revision.id);
+        if let Some(existing) = clash {
+            return Err(LoadError::at(
+                format!(
+                    "`rule {rule}` 的 `revision {}`：组标识不得与已声明规则名/谓词冲突；\
+                     `{}` 已声明为 `{}`。`revision` 标识与其他声明共用一个名字空间",
+                    revision.id,
+                    existing.name,
+                    decl_kind_label(&existing.kind)
+                ),
+                revision.line,
+                revision.col,
+            ));
+        }
+        let rule_name = std_deduce_kernel::name(rule);
+        let Some(group) = env.revision_group_of(&rule_name) else {
+            return Err(LoadError::at(
+                format!(
+                    "`rule {rule}` 的 `revision {}`：内部状态不一致，规则声明里没有记录该组",
+                    revision.id
+                ),
+                revision.line,
+                revision.col,
+            ));
+        };
+        // Every version must carry an effective start. This is checked per
+        // claim rather than per group: each version's own clause is the one
+        // that has to be fixed.
+        if env
+            .get(&rule_name)
+            .is_some_and(|decl| decl.scope.effective_from.is_none())
+        {
+            return Err(LoadError::at(
+                format!(
+                    "`rule {rule}` 的 `revision {}`：历史版本必须声明生效区间；\
+                     请写 `effective <YYYY-MM-DD>`（有失效日再写 `repealed`），\
+                     包内规则也可由清单提供起点——没有生效区间就无法把两个版本放在时间轴上比较",
+                    revision.id
+                ),
+                revision.line,
+                revision.col,
+            ));
+        }
+        if checked.contains(&group) {
+            continue;
+        }
+        let members = env
+            .revision_groups()
+            .into_iter()
+            .find(|(declared, _)| declared == &group)
+            .map(|(_, members)| members)
+            .unwrap_or_default();
+        if members.len() < 2 {
+            return Err(LoadError::at(
+                format!(
+                    "`rule {rule}` 的 `revision {}`：同一 revision 组内必须至少有两条规则；\
+                     组 `{}` 目前只有 {} 条。单条声明不是一组历史版本",
+                    revision.id,
+                    group.label(),
+                    members.len()
+                ),
+                revision.line,
+                revision.col,
+            ));
+        }
+        checked.push(group);
+    }
+    Ok(())
+}
+
+/// An existing declaration whose name equals the revision identifier, in the
+/// bare form or in the module's qualified form.
+fn revision_name_clash<'a>(
+    env: &'a Env,
+    namespace: Option<&str>,
+    revision: &str,
+) -> Option<&'a std_deduce_kernel::Decl> {
+    if let Some(decl) = env.get(revision) {
+        return Some(decl);
+    }
+    let namespace = namespace?;
+    env.get(&format!("{namespace}.{revision}"))
 }
 
 fn namespace_label(namespace: &Option<String>) -> String {
