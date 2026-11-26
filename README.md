@@ -270,7 +270,7 @@ cargo run -q -p std-deduce-cli -- examples/案件-住宅搜查.json ':why cn.con
 | 命令 | 作用 |
 |---|---|
 | `:load <文件>` | 加载一份 `.std` 理论文件（逐条检查，任一失败则整体回滚）。默认环境在第一次 `:load` 时按 profile 预加载（失败则本次加载失败）。`import <包名>` 先看当前会话已加载的 namespace：未加载的才从当前目录的 `lawpacks` 扫描注册表、校验 `std.lock`，按依赖递归加载包内 `kind = "theory"` 的文件；已由包加载的仍复核版本/哈希漂移，已由文件加载的不读注册表。没有 import 且默认环境未启用/已关闭（或 import 全部已由文件加载）时不读取注册表。`--closed-env` 下只接受不带 `namespace` 的案件文件；案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`open`/`risk`/`interpret`、类型不是包内 `sort` 的 `obj`、类型不是命题的 `axiom` 默认拒绝，`--allow-case-rules` 才允许；`:inspect` 会标 ` [案件扩展]`，证书义务只覆盖实际应用的案件规则。`:load` 始终按 `.std` 语法解析，与文件扩展名无关；JSON 案件描述见 `:load-case` |
-| `:load-case <文件.json>` | 加载一份严格、版本化的 JSON 案件描述（`schema_version = 1`）。只带来事实、身份、来源、发生时间/地点、个体常量与目标，不能声明规则/谓词/解释/风险/优先级；加载后打印与 `:load` 同形的台账（`已加载案件`、`导入`、`+`、`· 目标`），事实按各自身份进入环境，`disputed` 不参与推导。所有字段与命题在接触会话状态之前校验，任一失败整体回滚；错误带 JSON 路径（如 `facts[2].identity`）。字段表、拒绝规则与边界见「案件描述 JSON（`:load-case`）」 |
+| `:load-case <文件.json>` | 加载一份严格、版本化的 JSON 案件描述（`schema_version = 1`）。只带来事实、身份、来源、发生时间/地点、个体常量与目标，不能声明规则/谓词/解释/风险/优先级；加载后打印与 `:load` 同形的台账（`已加载案件`、`导入`、`+`、`· 目标`），事实按各自身份进入环境，`disputed` 不参与推导。所有字段与命题在接触会话状态之前校验，任一失败整体回滚；错误带 JSON 路径（如 `facts[2].identity`），失败时命令退出 `2`（批处理入口同样以 `2` 报告拒绝）。字段表、拒绝规则、退出码与边界见「案件描述 JSON（`:load-case`）」 |
 | `:inspect` | 打印声明台账（含出处与全部来源字段）；命题事实显示为 `fact` 并附中文身份标签；解释显示为 `interpret` 并附方向与来源摘要（`〔方向 …〕〔来源 …〕`），被 `open` 标记的谓词追加 `〔开放概念〕`，被 `risk` 标记的谓词追加 `〔风险 刑事〕` 这类题材，标记本身以 `risk:<谓词>` 留在台账（显示为 `risk  刑事 故意伤害`）。规则与事实已记录的生效区间、管辖、地域和发生时间/地点以 `〔生效 from..to〕`、`〔管辖 CN〕`、`〔地域 CN-HN〕`、`〔发生 2020-05-06〕`、`〔发生地 CN-HN〕` 显示，未声明的字段不打印占位符；区间端点继承自包清单时标 `（继承）`，规则自写时标 `（规则）`。规则只显示已声明的举证/证明标准：`〔举证 claimant · 标准 preponderance〕`，有例外声明时再显示 `〔例外举证 … · 例外标准 …〕`，未声明的字段不显示占位。`--closed-env --allow-case-rules` 下，案件本地 `sort`/`pred`/`def`/`rule`/`contrary`/`unique`/`open`/`risk`/`interpret`、类型不是包内 `sort` 的 `obj`、只声明常量的 `axiom`、引用案件扩展的命题事实标 ` [案件扩展]`；正常的 `obj 张三 : 包内 sort` 与正常事实不标 |
 | `:given <命题>` | 以「用户陈述」身份手工登记一条事实；封闭模式下未知名称同样追加“已加载的法律包中没有 `X`”提示。手工登记的事实不记录发生时间/地点（不会被会话基准日填充） |
 | `:interpret [list]` / `:interpret enable <解释名>` / `:interpret disable <解释名>` | 查看、启用或停用解释声明。`list` 按 id 列出每条解释的状态、方向与 `from → to`；`enable` 立即校验 id 存在、不得重复启用、不得与另一条已启用解释的 `to` 内核等价（后者报错并提示分别查询或先 disable）；`disable` 恢复默认的不启用状态。必须已 `:load`。启用只改变之后的查询，不改变已加载的声明或既有证书。等价于 `--interpret` 的会话内写法 |
@@ -856,8 +856,8 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std ':why 不受侵�
 | `reference` | 否 | 对象，只能有 `as_of`（真实 `YYYY-MM-DD`）与 `jurisdiction`（非空 ASCII 字母/数字/短横），至少一个；给出后成为该案件会话的显式值 |
 | `facts` | 是 | 事实数组，可为空；形状见下 |
 | `assumptions` | 否 | 与 `facts` 同形，但 `identity` 必填且只能是 `assumed`；以分析假设进入环境 |
-| `goals` | 否 | 命题文本数组；加载时只做语法/类型检查并在报告列出，**不自动证明** |
-| `objects` | 否 | 个体常量数组；每项 `name`（非空、不带命名空间前缀的标识符）、`type`（必填文本）、可选 `source`。精化后 `type` 必须是已加载环境里的一个 `sort`；`Prop`、`Type`、函数类型、`def` 别名一律拒绝。JSON 没有 `sort`/`pred`/`def`，所以这是唯一能声明案件名词的入口 |
+| `goals` | 否 | 命题文本数组；它是给后续 `:why` / `:cert` / `:review` 用的目标清单。加载只做语法/类型检查并在报告列出，**不自动证明**，也不影响加载退出码 |
+| `objects` | 否 | 个体常量数组；每项 `name`（非空、不带命名空间前缀的标识符）、`type`（必填文本）、可选 `source`。精化后 `type` 必须是已加载环境里的一个 `sort`；`Prop`、`Type`、函数类型、`def` 别名一律拒绝。`name` 不能与已加载环境的任何声明重名，同一文件内也不能重复声明（即使类型不同）。封闭环境下 `type` 还必须是已加载法律包声明的 `sort`，`--allow-case-rules` 也不放行案件本地 `sort`。JSON 没有 `sort`/`pred`/`def`，所以这是唯一能声明案件名词的入口 |
 
 `facts` 每项：
 
@@ -883,7 +883,12 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std ':why 不受侵�
   parser/elaborator 的检查，不会“跳过坏条目继续加载”。
 - 同一命题的不同身份在本文件内部、以及和已加载环境里已登记的事实之间都拒绝；比较用内核
   定义等价（alpha/eta 变体与 `def` 别名不能绕开），不比较打印文本。
-- `objects` 名称与已有声明重名拒绝；同一文件内同名对象拒绝。
+- `objects` 名称与已加载环境里的任何声明（`sort` / `obj` / `pred` / `axiom` / `rule` /
+  `def` / `interpret` 及事实）重名拒绝；同一文件内同名对象拒绝，重复声明不能用不同
+  类型“制造”两个同名的人。错误报 `objects[i].name` 与冲突的名字。
+- `objects.type` 必须是**已声明且已加载**的 `sort`；封闭环境（`--closed-env`）下还必须是
+  **已加载法律包**声明的 `sort`，与 `.std` 的 `obj` 规则一致，`--allow-case-rules` 也不能
+  让 JSON 对象引用案件本地 `sort`。
 - `reference` 与命令行 `--as-of` / `--jurisdiction`（或会话 `:asof` / `:jurisdiction`）
   不同则报错，不覆盖；相同则正常加载，来源仍显示原先的 `命令行` / `会话命令`。
 
@@ -894,7 +899,8 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std ':why 不受侵�
   namespace，再按需扫描注册表并递归加载依赖，失败整体回滚。
 - `--closed-env` 下同样只能使用已加载法律包里的声明与规则；JSON 本来就不能声明规则/谓词，
   `--allow-case-rules` 对它没有额外作用（没有可声明的案件规则）。JSON 的 `objects` 始终
-  只能声明已声明 `sort` 的个体，比非封闭 `.std` 的 `obj` 更严格。
+  只能声明已声明 `sort` 的个体；封闭环境下该 `sort` 还必须来自已加载法律包，比非封闭
+  `.std` 的 `obj` 更严格。
 - `reference` 设置的是会话值：`:asof` / `:jurisdiction` 的来源显示 `案件`；之后 `:cert`
   记录它们、`:verify-cert` 按同一组值比对，与 `--as-of` / `:jurisdiction` 的既有语义一致。
 - 加载后照常使用 `:why` / `:explain` / `:gap` / `:issues` / `:applicability` / `:cert`；
@@ -905,10 +911,25 @@ cargo run -q -p std-deduce-cli -- examples/constitution-39.std ':why 不受侵�
 - 没有 `namespace`，不能写 `#check` / `#show` 或任何声明；唯一能新增的声明是 `objects`
   个体常量（且类型必须是已声明的 `sort`）。
 - `identity` 必填，没有 `.std` 案件文件的 `user_asserted` 默认值；`assumptions` 与 `facts`
-  分开，且身份必填 `assumed`。
+  分开，且身份必填 `assumed`（写 `verified` / `stipulated` / `user_asserted` / `disputed`
+  都拒绝：分析假设不能声称法院查明、双方无争议、用户陈述或对方争议）。
 - `source` 的可选字段一旦出现必须非空；`source.effective` 与 `source.jurisdiction` 在此
   校验格式（`.std` 只存储它们，不做日期/代码校验）。
-- `goals` 只被加载和类型检查，不会被自动查询；证明结果由用户显式调用查询命令得到。
+- `goals` 是后续查询的目标清单：加载只解析、类型检查并列入台账，不自动证明；需要结论时
+  显式调用 `:why` / `:cert` / `:review` 等。
+
+### 批处理退出码
+
+`std-deduce <文件.json>`（以及 `check <文件.json>`）与交互命令 `:load-case` 对
+**拒绝不可信输入**使用同一个退出码：
+
+- 读取、JSON 语法、字段/模式校验、命题解析/类型检查、环境或 import 失败：写诊断到
+  stderr 并以 `2` 退出。这与交互 `:load-case` 的命令错误码一致；现有 `.std` 批处理
+  加载失败仍按既有契约以 `1` 退出，本次不改（用法错误两者都是 `2`）。
+- 加载成功：以 `0` 退出。`goals` 只被列出、不被证明，所以“目标推不出”不会让加载本身
+  退 `1`。
+- 加载成功后同一命令行给出的查询命令按各自结果决定退出码（`:why` 缺口 `1`、
+  多法域未选管辖 `2`、`:verify-cert` 环境或逻辑失败 `2` 等），与 `.std` 入口相同。
 
 ### 输入上限
 

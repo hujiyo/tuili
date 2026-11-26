@@ -14,7 +14,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{json, Value};
 
 const PROVED: i32 = 0;
-const LOAD_ERROR: i32 = 1;
+/// The batch entry reports a rejected JSON case description as a command-style
+/// error, the same code `:load-case` uses.
+const LOAD_ERROR: i32 = 2;
+/// A query after a successful load can still fail because its target is a gap;
+/// that is a proof outcome, not a JSON load rejection.
+const QUERY_FAILED: i32 = 1;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -116,6 +121,22 @@ fn run_value_with(value: &Value, options: &[&str]) -> Output {
     run(&args)
 }
 
+/// Load a `.std` theory from a file, then load the JSON case from a file in the
+/// same session. This exercises the real load path for both files: the theory
+/// supplies the ledger names a JSON object must not reuse, and the JSON case is
+/// rejected by `:load-case`, not by a directly constructed structure.
+fn run_theory_then_case(theory: &str, case: &Value, options: &[&str]) -> Output {
+    let temp = TempDir::new("theory-then-case");
+    let theory_path = temp.write("theory.std", theory);
+    let case_path = temp.write("case.json", &case.to_string());
+    let mut args: Vec<String> = options.iter().map(|option| (*option).to_owned()).collect();
+    args.push(theory_path.to_string_lossy().into_owned());
+    args.push(format!(":load-case {}", case_path.display()));
+    // The temporary directory has no `lawpacks`, so the auto environment stays
+    // disabled and the test exercises only the two files it wrote.
+    run_in(temp.path(), &args)
+}
+
 fn assert_load_error(output: &Output, json_path: &str, message: &str) {
     assert_exit(output, LOAD_ERROR);
     let err = stderr(output);
@@ -201,7 +222,7 @@ fn a_disputed_fact_is_registered_but_never_a_premise() {
     ]);
     // The query is a gap, so the session exits non-zero even though the load
     // succeeded.
-    assert_exit(&output, LOAD_ERROR);
+    assert_exit(&output, QUERY_FAILED);
     let out = stdout(&output);
     assert!(out.contains("对方争议"), "{out}");
     assert!(out.contains("争议事实，不参与推导"), "{out}");
@@ -254,6 +275,51 @@ fn a_case_without_imports_loads_under_no_default_packs() {
     assert_exit(&output, PROVED);
     let out = stdout(&output);
     assert!(out.contains("· 目标 ∀ (p : Prop)"), "{out}");
+}
+
+#[test]
+fn goals_are_listed_but_not_proved_by_the_load() {
+    // The goal is well-typed but has no fact backing it. Loading lists it and
+    // succeeds: `goals` is a target list for later `:why` / `:cert` /
+    // `:review`, not an automatic proof obligation.
+    let mut value = example_case();
+    value["facts"] = json!([]);
+    value["assumptions"] = json!([]);
+    let output = run_value(&value);
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("· 目标 cn.constitution.住宅受侵犯 张三 甲宅"),
+        "{out}"
+    );
+    assert!(!out.contains("推导已通过独立校验。"), "{out}");
+    assert!(!out.contains("根为缺口"), "{out}");
+}
+
+#[test]
+fn batch_json_exit_codes_are_2_for_rejection_and_0_for_success() {
+    let success = run(&[example("案件-住宅搜查.json")]);
+    assert_exit(&success, PROVED);
+
+    let temp = TempDir::new("exit-codes");
+    let malformed = temp.write("bad.json", "{\"schema_version\":1,");
+    let bad_json = run(&[malformed.to_string_lossy().into_owned()]);
+    assert_exit(&bad_json, LOAD_ERROR);
+    assert!(
+        stderr(&bad_json).contains("JSON 解析失败"),
+        "{}",
+        stderr(&bad_json)
+    );
+
+    let mut value = example_case();
+    value["schema_version"] = json!(9);
+    let bad_field = run_value(&value);
+    assert_exit(&bad_field, LOAD_ERROR);
+    assert!(
+        stderr(&bad_field).contains("schema_version"),
+        "{}",
+        stderr(&bad_field)
+    );
 }
 
 #[test]
@@ -394,10 +460,17 @@ fn a_proposition_that_does_not_type_check_is_rejected_with_its_path() {
 }
 
 #[test]
-fn a_goal_that_is_not_a_proposition_is_rejected() {
-    let mut value = example_case();
-    value["goals"][0] = json!("cn.constitution.人");
-    assert_load_error(&run_value(&value), "goals[0].proposition", "类型检查失败");
+fn goals_that_are_not_propositions_are_rejected() {
+    // A sort's type (`Type`) and a function type are not propositions. Both
+    // must fail at the goal's own JSON path.
+    for goal in [
+        "cn.constitution.人",
+        "cn.constitution.人 → cn.constitution.人",
+    ] {
+        let mut value = example_case();
+        value["goals"][0] = json!(goal);
+        assert_load_error(&run_value(&value), "goals[0].proposition", "类型检查失败");
+    }
 }
 
 #[test]
@@ -417,7 +490,28 @@ fn an_assumption_with_a_non_assumed_identity_is_rejected() {
     assert_load_error(
         &run_value(&value),
         "assumptions[0].identity",
-        "只能是 assumed",
+        "用户陈述请写在 facts 里",
+    );
+}
+
+#[test]
+fn an_assumption_cannot_claim_a_court_finding() {
+    let value = json!({
+        "schema_version": 1,
+        "imports": [],
+        "facts": [],
+        "assumptions": [
+            {
+                "proposition": "p",
+                "identity": "verified",
+                "source": {"text": "判决书", "locator": "查明事实"}
+            }
+        ]
+    });
+    assert_load_error(
+        &run_value(&value),
+        "assumptions[0].identity",
+        "分析假设不能声称法院查明",
     );
 }
 
@@ -434,6 +528,104 @@ fn an_object_that_names_a_concept_instead_of_a_sort_is_rejected() {
     let err = stderr(&output);
     assert!(err.contains("objects[0].type"), "{err}");
     assert!(err.contains("sort"), "{err}");
+}
+
+#[test]
+fn an_object_type_that_is_not_declared_is_rejected() {
+    let value = json!({
+        "schema_version": 1,
+        "imports": [],
+        "facts": [],
+        "objects": [{"name": "甲", "type": "未声明类型"}]
+    });
+    let output = run_value_with(&value, &["--no-default-packs"]);
+    assert_exit(&output, LOAD_ERROR);
+    let err = stderr(&output);
+    assert!(err.contains("objects[0].type"), "{err}");
+    assert!(
+        err.contains("未知名称") || err.contains("类型检查失败"),
+        "{err}"
+    );
+}
+
+/// One theory declaring every ledger kind, so the collision test can load it
+/// from a file and then try to reuse each name as a JSON object.
+const DECLARATION_KINDS_THEORY: &str = "\
+sort 类型甲\n\
+obj 个体甲 : 类型甲\n\
+pred 谓词甲 : 类型甲 → Prop\n\
+axiom 常量甲 : 类型甲\n\
+  source text \"测试\" locator \"夹具\"\n\
+axiom 事实甲 : 谓词甲 个体甲\n\
+  source text \"测试\" locator \"夹具\"\n\
+def 定义甲 : 类型甲 := 个体甲\n\
+rule 规则甲 :\n\
+  params x : 类型甲\n\
+  premise 谓词甲 x\n\
+  conclude 谓词甲 x\n\
+  source text \"测试\" locator \"夹具\"\n\
+interpret 解释甲 : 谓词甲 个体甲 → 谓词甲 个体甲\n\
+  direction literal\n\
+  source text \"测试\" locator \"夹具\" version \"1\"\n";
+
+#[test]
+fn an_object_name_cannot_reuse_any_loaded_declaration() {
+    for name in [
+        "类型甲",
+        "个体甲",
+        "谓词甲",
+        "常量甲",
+        "事实甲",
+        "定义甲",
+        "规则甲",
+        "解释甲",
+    ] {
+        let value = json!({
+            "schema_version": 1,
+            "imports": [],
+            "facts": [],
+            "objects": [{"name": name, "type": "类型甲"}]
+        });
+        let output =
+            run_theory_then_case(DECLARATION_KINDS_THEORY, &value, &["--no-default-packs"]);
+        assert_exit(&output, LOAD_ERROR);
+        let err = stderr(&output);
+        assert!(err.contains("objects[0].name"), "{name}: {err}");
+        assert!(err.contains(name), "{name}: {err}");
+        assert!(err.contains("名称已被占用"), "{name}: {err}");
+    }
+}
+
+#[test]
+fn duplicate_object_names_are_rejected_even_with_different_types() {
+    let mut value = example_case();
+    value["objects"] = json!([
+        {"name": "张三", "type": "cn.constitution.人"},
+        {"name": "张三", "type": "cn.constitution.住宅"}
+    ]);
+    assert_load_error(&run_value(&value), "objects[1].name", "重复声明");
+}
+
+#[test]
+fn the_closed_environment_requires_an_object_type_from_a_loaded_pack() {
+    // A case-local sort loaded with `--allow-case-rules` is a legal concept the
+    // case declared. The JSON format must not let an object use it: in the
+    // closed environment the sort has to come from a loaded legal pack.
+    let value = json!({
+        "schema_version": 1,
+        "imports": [],
+        "facts": [],
+        "objects": [{"name": "甲", "type": "类型甲"}]
+    });
+    let output = run_theory_then_case(
+        "sort 类型甲\n",
+        &value,
+        &["--closed-env", "--allow-case-rules", "--no-default-packs"],
+    );
+    assert_exit(&output, LOAD_ERROR);
+    let err = stderr(&output);
+    assert!(err.contains("objects[0].type"), "{err}");
+    assert!(err.contains("包"), "{err}");
 }
 
 #[test]

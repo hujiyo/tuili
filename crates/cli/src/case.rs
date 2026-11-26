@@ -569,12 +569,19 @@ fn parse_fact(value: &Value, path: &str, assumption: bool) -> Result<CaseFact, P
         )
     })?;
     if assumption && identity != FactIdentity::Assumed {
+        // The section and the identity must agree: an analysis assumption is
+        // not a court finding, an agreement between the parties or a party's
+        // claim, and those belong in `facts` where their evidence is stated.
+        let reason = match identity {
+            FactIdentity::Verified => "分析假设不能声称法院查明",
+            FactIdentity::Stipulated => "分析假设不能声称双方无争议",
+            FactIdentity::UserAsserted => "分析假设不能用用户陈述表示；用户陈述请写在 facts 里",
+            FactIdentity::Disputed => "分析假设不能用对方争议表示；争议事实请写在 facts 里",
+            FactIdentity::Assumed => "分析假设的身份必须显式写 assumed",
+        };
         return problem(
             join(path, "identity"),
-            format!(
-                "assumptions 的事实身份只能是 assumed，实际是 `{}`",
-                identity.keyword()
-            ),
+            format!("{reason}（assumptions 的 identity 只能显式写 assumed）"),
         );
     }
     let source_value = required_field(map, "source", path)?;
