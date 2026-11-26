@@ -1,0 +1,74 @@
+-- 辖区/地域代码的层级：`territory <子代码> within <父代码>` 与
+-- `jurisdiction <子代码> within <父代码>`。
+--
+-- 运行：
+--   :load examples/地域层级-省与国.std
+--   :jurisdiction CN
+--   :why 国家规定 甲
+--   :gap 省级规定 乙
+--
+-- 层级是显式声明，不从 `CN-HN` 这种短横写法猜。声明 `territory CN-HN within CN`
+-- 后：规则的地域是 CN、事实发生在 CN-HN 时规则覆盖（适用）；反过来，规则的地域
+-- 是 CN-HN、事实发生在 CN 时规则只覆盖子区域，判“不适用”。没有声明层级时，
+-- 这类上下位关系仍是“无法判定（上下位未声明层级）”，系统不猜。
+--
+-- `territory` 与 `jurisdiction` 是两个独立维度：
+--   * `territory` 与事实的 `occurred_in` 比较；
+--   * `jurisdiction` 与会话的 `:jurisdiction`（案件所属法律体系）比较。
+-- 因此本文件分别声明两条链路。两者都不传递地混用：`territory` 的声明不会让
+-- `jurisdiction` 的上下位也成立。声明本身传递：`A within B`、`B within C`
+-- 时 A 也在 C 内；环、重复声明与 `A within A` 在加载期报错。
+--
+-- 依据文本会写“依据层级 CN-HN ⊂ CN 落入规则范围”，而不是只说“覆盖”。
+
+sort 人
+
+pred 行为 : 人 → Prop
+pred 应适用 : 人 → Prop
+pred 省级规定 : 人 → Prop
+
+obj 甲 : 人
+obj 乙 : 人
+
+-- 甲的行为发生在河南：规则地域是 CN 时可依据层级覆盖。
+axiom 甲的行为 : 行为 甲
+  occurred_at 2019-05-01
+  occurred_in CN-HN
+  source text "示例卷宗" locator "行为（甲）" version "2024"
+
+-- 乙的行为发生在 CN：省级规则只覆盖 CN-HN，因此对乙不适用。
+axiom 乙的行为 : 行为 乙
+  occurred_at 2019-05-01
+  occurred_in CN
+  source text "示例卷宗" locator "行为（乙）" version "2024"
+
+-- 地域维度：河南在国之内。
+territory CN-HN within CN
+-- 法律体系维度：河南的制定机关/法律体系隶属于国家的法律体系。
+jurisdiction CN-HN within CN
+
+-- 国家规则：地域 CN、管辖 CN。对河南事实（CN-HN）按层级覆盖；
+-- 会话管辖为 CN-HN 时，管辖也按层级覆盖。
+rule 国家规则 :
+  params p : 人
+  premise 行为 p
+  conclude 应适用 p
+  effective 2018-01-01
+  repealed 2022-01-01
+  territory CN
+  jurisdiction CN
+  source text "示例法" locator "国家规则" version "2024"
+
+-- 省级规则：地域 CN-HN、管辖 CN-HN。它只覆盖子区域：
+--   * 对发生在 CN 的事实判“不适用”；
+--   * 会话管辖为 CN 时，管辖同样判“不适用”。
+-- 会话未选管辖时，管辖这一维度是“未判定”，规则仍会按原有规则触发并标注。
+rule 省级规则 :
+  params p : 人
+  premise 行为 p
+  conclude 省级规定 p
+  effective 2018-01-01
+  repealed 2022-01-01
+  territory CN-HN
+  jurisdiction CN-HN
+  source text "示例法" locator "省级规则" version "2024"

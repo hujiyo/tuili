@@ -271,8 +271,8 @@ use std_deduce_kernel::term::{instantiate_telescope, is_closed};
 use std_deduce_kernel::{check as kernel_check, Ctx, Env, Expr};
 
 use crate::applicability::{
-    ApplicabilityAnchor, DatedEvidence, PlaceEvidence, RuleApplicability, ScopeEvidence,
-    SessionEvidence,
+    ApplicabilityAnchor, ApplicabilityReasonKind, DatedEvidence, PlaceEvidence, RuleApplicability,
+    ScopeEvidence, SessionEvidence,
 };
 use crate::closure;
 use crate::conflict::{in_conflict, view as conflict_view, ConflictView, Declarations};
@@ -436,8 +436,11 @@ fn check_with(
     // The applicability anchor is rebuilt exactly as the reasoner builds it:
     // by each referenced premise proposition's key, looked up in the
     // environment's registered occurrences. A premise proved by a derived
-    // conclusion is not missing by itself; only a proposition the environment
-    // registers no occurrence for is.
+    // conclusion is not missing by itself; when its deriving rule declares
+    // `carry_occurrence`, the inherited occurrences are rebuilt from the
+    // certificate's recorded witnesses. The declared code hierarchy is read
+    // from the current environment, so removing a `within` declaration makes
+    // the recorded coverage unreproducible.
     let fact_occurrences = fact_occurrence_index(&facts);
     validate_interpretations(env, cert)?;
 
@@ -2355,23 +2358,212 @@ fn collect_occurrence_records(records: &[OccurrenceRecord], anchor: &mut Applica
     }
 }
 
-/// Add the occurrence records registered for one proposition key to the
-/// anchor. A key with no registration is missing input.
-fn collect_proposition_occurrences(
-    env: &Env,
-    proposition: &CertExpr,
-    occurrences: &BTreeMap<String, Vec<OccurrenceRecord>>,
-    anchor: &mut ApplicabilityAnchor,
-) -> Result<(), String> {
-    let key = key(env, &Expr::from(proposition))?;
-    match occurrences.get(&key) {
-        Some(records) => collect_occurrence_records(records, anchor),
-        None => {
-            anchor.missing_event_date = true;
-            anchor.missing_event_place = true;
+/// The inherited event times/places of one conclusion, as the certificate
+/// graph records them.
+///
+/// The reasoner unions the records of every firing `carry_occurrence` witness,
+/// in certificate witness order and capped at
+/// [`MAX_CERT_WITNESSES_PER_CONCLUSION`](crate::MAX_CERT_WITNESSES_PER_CONCLUSION).
+/// This helper rebuilds the same set from the certificate's own nodes:
+///
+/// * a proposition the environment registers as a fact keeps that registration
+///   (an asserted fact is evidence, not an inherited conclusion);
+/// * otherwise every witness node of the proposition's `alternatives` group
+///   contributes its premises' records when its rule declares
+///   `carry_occurrence`, and nothing when it does not (propagation stops);
+/// * a premise with neither a registration nor an inherited record marks the
+///   event time/place missing, so known values never stand in for it.
+///
+/// A cycle in a hand-written certificate is cut by the visited set (the recorded
+/// step then contributes nothing), which the comparison rejects rather than
+/// admitting a self-supporting occurrence.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct OccurrenceSet {
+    dates: Vec<String>,
+    places: Vec<String>,
+    missing_date: bool,
+    missing_place: bool,
+}
+
+impl OccurrenceSet {
+    /// Merge another set, keeping the first-seen order.
+    fn merge(&mut self, other: &OccurrenceSet) {
+        for date in &other.dates {
+            if !self.dates.contains(date) {
+                self.dates.push(date.clone());
+            }
         }
+        for place in &other.places {
+            if !self.places.contains(place) {
+                self.places.push(place.clone());
+            }
+        }
+        self.missing_date |= other.missing_date;
+        self.missing_place |= other.missing_place;
     }
-    Ok(())
+
+    /// Append this set's known dates/places and missing flags to an anchor.
+    fn add_to_anchor(&self, anchor: &mut ApplicabilityAnchor) {
+        for date in &self.dates {
+            if !anchor.event_dates.contains(date) {
+                anchor.event_dates.push(date.clone());
+            }
+        }
+        for place in &self.places {
+            if !anchor.event_places.contains(place) {
+                anchor.event_places.push(place.clone());
+            }
+        }
+        anchor.missing_event_date |= self.missing_date;
+        anchor.missing_event_place |= self.missing_place;
+    }
+}
+
+/// Rebuild inherited occurrences from one certificate's proof graph.
+struct CarriedOccurrences<'a> {
+    env: &'a Env,
+    cert: &'a Certificate,
+    registered: &'a BTreeMap<String, Vec<OccurrenceRecord>>,
+    /// Proposition key -> the group's witness node ids, in certificate order.
+    groups: BTreeMap<String, Vec<NodeId>>,
+}
+
+impl<'a> CarriedOccurrences<'a> {
+    fn new(
+        env: &'a Env,
+        cert: &'a Certificate,
+        registered: &'a BTreeMap<String, Vec<OccurrenceRecord>>,
+    ) -> Result<Self, String> {
+        let mut groups = BTreeMap::new();
+        for alternative in &cert.alternatives {
+            let key = key(env, &Expr::from(&alternative.proposition))?;
+            groups
+                .entry(key)
+                .or_insert_with(Vec::new)
+                .extend(alternative.witnesses.iter().copied());
+        }
+        Ok(CarriedOccurrences {
+            env,
+            cert,
+            registered,
+            groups,
+        })
+    }
+
+    /// The registered records of a key, as an occurrence set.
+    fn registered_set(&self, key: &str) -> Option<OccurrenceSet> {
+        let records = self.registered.get(key)?;
+        let mut set = OccurrenceSet::default();
+        for (date, place) in records {
+            match date {
+                Some(date) => {
+                    if !set.dates.contains(date) {
+                        set.dates.push(date.clone());
+                    }
+                }
+                None => set.missing_date = true,
+            }
+            match place {
+                Some(place) => {
+                    if !set.places.contains(place) {
+                        set.places.push(place.clone());
+                    }
+                }
+                None => set.missing_place = true,
+            }
+        }
+        Some(set)
+    }
+
+    /// The inherited occurrence of a proposition, or `None` when no
+    /// `carry_occurrence` witness records one.
+    fn of_key(
+        &self,
+        key: &str,
+        fallback: Option<NodeId>,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<Option<OccurrenceSet>, String> {
+        if let Some(set) = self.registered_set(key) {
+            return Ok(Some(set));
+        }
+        if !visited.insert(key.to_owned()) {
+            return Ok(None);
+        }
+        let mut set: Option<OccurrenceSet> = None;
+        if let Some(witnesses) = self.groups.get(key) {
+            for node in witnesses {
+                if let Some(contribution) = self.witness_contribution(*node, visited)? {
+                    set.get_or_insert_with(OccurrenceSet::default)
+                        .merge(&contribution);
+                }
+            }
+        } else if let Some(node) = fallback {
+            if let Some(contribution) = self.witness_contribution(node, visited)? {
+                set.get_or_insert_with(OccurrenceSet::default)
+                    .merge(&contribution);
+            }
+        }
+        visited.remove(key);
+        Ok(set)
+    }
+
+    /// One witness node's occurrence contribution: its premises' records when
+    /// its rule declares `carry_occurrence`, otherwise nothing.
+    fn witness_contribution(
+        &self,
+        node: NodeId,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<Option<OccurrenceSet>, String> {
+        let Some(Node::RuleApplication { rule, premises, .. }) = self.cert.nodes.get(node) else {
+            return Ok(None);
+        };
+        let carries = self.env.get(rule).is_some_and(|declaration| {
+            matches!(
+                &declaration.kind,
+                DeclKind::Rule(declared) if declared.carry_occurrence
+            )
+        });
+        if !carries {
+            return Ok(None);
+        }
+        let mut set = OccurrenceSet::default();
+        for premise in premises {
+            let Some(proposition) = node_prop(self.cert, &self.cert.nodes[*premise]) else {
+                return Err(format!(
+                    "规则 `{rule}` 的见证节点 {node} 的前提 {premise} 是缺口，不能充当适用性依据"
+                ));
+            };
+            let premise_key = key(self.env, &Expr::from(proposition))?;
+            match self.of_key(&premise_key, Some(*premise), visited)? {
+                Some(inherited) => set.merge(&inherited),
+                None => {
+                    set.missing_date = true;
+                    set.missing_place = true;
+                }
+            }
+        }
+        Ok(Some(set))
+    }
+
+    /// Add one referenced premise's occurrence to the anchor: the registration
+    /// when there is one, otherwise the inherited set, otherwise a missing
+    /// mark.
+    fn add_premise(
+        &self,
+        key: &str,
+        fallback: Option<NodeId>,
+        anchor: &mut ApplicabilityAnchor,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<(), String> {
+        match self.of_key(key, fallback, visited)? {
+            Some(inherited) => inherited.add_to_anchor(anchor),
+            None => {
+                anchor.missing_event_date = true;
+                anchor.missing_event_place = true;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Rebuild the anchor for one rule application from the propositions its
@@ -2380,10 +2572,13 @@ fn collect_proposition_occurrences(
 /// The occurrence record is looked up by the premise proposition's key, not
 /// by whether the premise node is an assumption: the reasoner's occurrence
 /// index contains the environment registrations, so a derived conclusion of
-/// the same proposition carries the same event record. Only a proposition
-/// with no environment registration marks the input missing — a rule or
-/// interpretation conclusion never inherits the event time of its own
-/// premises.
+/// the same proposition carries the same event record. A derived conclusion
+/// records an event record only when the rule that derived it declares
+/// `carry_occurrence`; the checker rebuilds that set from the certificate's
+/// `alternatives` table, so an inherited date the certificate records must be
+/// reproducible from the recorded witnesses. Registered values are collected
+/// first, as the reasoner does, so the order of the recorded dates/places
+/// matches.
 fn rule_applicability_expected(
     env: &Env,
     cert: &Certificate,
@@ -2397,15 +2592,26 @@ fn rule_applicability_expected(
     let mut anchor = ApplicabilityAnchor {
         as_of,
         jurisdiction,
+        hierarchy: env.code_hierarchy(),
         ..ApplicabilityAnchor::default()
     };
+    let carried = CarriedOccurrences::new(env, cert, occurrences)?;
+    let mut pending: Vec<(String, NodeId)> = Vec::new();
     for premise in premises {
         let Some(proposition) = node_prop(cert, &cert.nodes[*premise]) else {
             return Err(format!(
                 "规则 `{rule}` 的前提 {premise} 是缺口，不能充当适用性依据"
             ));
         };
-        collect_proposition_occurrences(env, proposition, occurrences, &mut anchor)?;
+        let premise_key = key(env, &Expr::from(proposition))?;
+        match occurrences.get(&premise_key) {
+            Some(records) => collect_occurrence_records(records, &mut anchor),
+            None => pending.push((premise_key, *premise)),
+        }
+    }
+    let mut visited = BTreeSet::new();
+    for (premise_key, node) in pending {
+        carried.add_premise(&premise_key, Some(node), &mut anchor, &mut visited)?;
     }
     Ok(crate::applicability::judge(scope, &anchor))
 }
@@ -2631,10 +2837,25 @@ fn validate_candidate_applicability(
     let mut anchor = ApplicabilityAnchor {
         as_of,
         jurisdiction,
+        hierarchy: env.code_hierarchy(),
         ..ApplicabilityAnchor::default()
     };
+    // Registered occurrences are collected first, then inherited ones, in the
+    // same order as the reasoner's anchor: a held premise derived by a
+    // `carry_occurrence` rule contributes the set its recorded witnesses
+    // carry.
+    let carried = CarriedOccurrences::new(env, cert, occurrences)?;
+    let mut pending: Vec<String> = Vec::new();
     for held in &candidate.held {
-        collect_proposition_occurrences(env, held, occurrences, &mut anchor)?;
+        let held_key = key(env, &Expr::from(held))?;
+        match occurrences.get(&held_key) {
+            Some(records) => collect_occurrence_records(records, &mut anchor),
+            None => pending.push(held_key),
+        }
+    }
+    let mut visited = BTreeSet::new();
+    for held_key in pending {
+        carried.add_premise(&held_key, None, &mut anchor, &mut visited)?;
     }
     let expected = crate::applicability::judge(&declaration.scope, &anchor);
     compare_applicability_record(&place, recorded, &expected)
@@ -2788,8 +3009,25 @@ fn compare_applicability_record(
     expected: &RuleApplicability,
 ) -> Result<(), String> {
     if recorded.verdict != expected.verdict {
+        // A hierarchy declaration is what turns a prefix-looking code pair
+        // into a comparable one. When the recorded verdict used such a
+        // declaration and the current environment no longer has it, say so
+        // explicitly: the record's basis depends on a declaration that is gone,
+        // not merely on different input values.
+        let hint = match expected.reason() {
+            Some(reason)
+                if matches!(
+                    reason.detail,
+                    ApplicabilityReasonKind::IncomparableCode { .. }
+                ) =>
+            {
+                "；记录的依据依赖当前环境未声明的层级：`territory` / `jurisdiction` 的 \
+                 上下位必须用 `<维度> <子代码> within <父代码>` 显式声明，当前环境缺少该声明"
+            }
+            _ => "",
+        };
         return Err(format!(
-            "{place}的判定为 `{}`，按声明的输入与环境范围重算为 `{}`",
+            "{place}的判定为 `{}`，按声明的输入与环境范围重算为 `{}`{hint}",
             recorded.verdict.keyword(),
             expected.verdict.keyword()
         ));

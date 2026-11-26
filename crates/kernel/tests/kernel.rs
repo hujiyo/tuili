@@ -315,6 +315,7 @@ fn rule_constant_env() -> Env {
         standard: None,
         exception_burden: None,
         exception_standard: None,
+        carry_occurrence: false,
     };
     let ty = std_deduce_kernel::env::rule_type(&rdecl);
     add("r", DeclKind::Rule(Box::new(rdecl)), ty);
@@ -407,6 +408,7 @@ fn a_rule_must_be_well_typed() {
         standard: None,
         exception_burden: None,
         exception_standard: None,
+        carry_occurrence: false,
     };
     let decl = Decl {
         name: name("坏规则"),
@@ -471,6 +473,7 @@ fn a_rule_with_duplicate_binder_names_is_refused() {
         standard: None,
         exception_burden: None,
         exception_standard: None,
+        carry_occurrence: false,
     };
     let decl = Decl {
         name: name("重名规则"),
@@ -1058,6 +1061,7 @@ fn revision_groups_are_keyed_by_scope_and_identifier() {
             standard: None,
             exception_burden: None,
             exception_standard: None,
+            carry_occurrence: false,
         };
         let ty = std_deduce_kernel::env::rule_type(&decl);
         env.insert(

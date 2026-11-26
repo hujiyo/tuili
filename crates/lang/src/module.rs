@@ -8,7 +8,9 @@
 use std_deduce_kernel::env::{
     check_unique_binders, Decl, Env, PremiseDecl, PremiseKind, SourceRef,
 };
-use std_deduce_kernel::meta::{validate_date, validate_jurisdiction_code, Scope, ScopeOrigin};
+use std_deduce_kernel::meta::{
+    validate_date, validate_jurisdiction_code, CodeDimension, Scope, ScopeOrigin,
+};
 use std_deduce_kernel::{Error, Expr, FactIdentity};
 
 use crate::ast::{Defeater, Item, PremiseKind as AstPremiseKind, ScopeSpec, Term};
@@ -509,6 +511,74 @@ impl Library {
                     theory.decls.push(format!("unique:{pred}:{index}"));
                     report.declared.push(format!("unique {pred} {index}"));
                 }
+                Item::Within {
+                    dimension,
+                    child,
+                    parent,
+                } => {
+                    // A `within` declaration is the only way the judgement
+                    // learns that a rule covering the parent code also covers
+                    // the child code. It is validated here, at load time:
+                    // unknown dimension, malformed code, the reflexive
+                    // `A within A`, a repeated pair and a pair that would close
+                    // a cycle are all refused instead of being read as a
+                    // guessed hierarchy.
+                    let Some(dim) = CodeDimension::from_keyword(&dimension) else {
+                        return Err(LoadError::new(format!(
+                            "`{dimension} {child} within {parent}`：未知的代码维度 `{dimension}`；\
+                             只能写 `territory` 或 `jurisdiction`"
+                        )));
+                    };
+                    let what = format!("`{dimension} {child} within {parent}`");
+                    validate_jurisdiction_code(&format!("{what} 的子代码"), &child)
+                        .map_err(LoadError::new)?;
+                    validate_jurisdiction_code(&format!("{what} 的父代码"), &parent)
+                        .map_err(LoadError::new)?;
+                    if child == parent {
+                        return Err(LoadError::new(format!(
+                            "{what}：自反的层级声明没有意义；一个代码不包含在它自身里"
+                        )));
+                    }
+                    for (existing, c, p) in next.env.within_declarations() {
+                        if existing == dim && c == child && p == parent {
+                            return Err(LoadError::new(format!("{what}：这一条已经声明过了")));
+                        }
+                    }
+                    // Inserting `child within parent` closes a cycle exactly
+                    // when the parent already lies within the child.
+                    if next.env.code_hierarchy().contains(dim, &parent, &child) {
+                        return Err(LoadError::new(format!(
+                            "{what}：会在已声明的层级里形成环（`{parent}` 已经在 `{child}` 之内）；\
+                             环必须在这里拒绝，判定不会替人挑一个方向"
+                        )));
+                    }
+                    let decl = Decl {
+                        name: std_deduce_kernel::name(format!(
+                            "within:{}:{child}:{parent}",
+                            dim.keyword()
+                        )),
+                        kind: std_deduce_kernel::DeclKind::Within {
+                            dimension: dim,
+                            child: child.clone(),
+                            parent: parent.clone(),
+                        },
+                        ty: Expr::Sort(0),
+                        sources: Vec::new(),
+                        scope: Scope::default(),
+                        occurred_at: None,
+                        occurred_in: None,
+                        index: 0,
+                    };
+                    next.env
+                        .insert(decl, &std_deduce_kernel::Ctx::new())
+                        .map_err(|e| LoadError::new(format!("{what}：{e}")))?;
+                    theory
+                        .decls
+                        .push(format!("within:{}:{child}:{parent}", dim.keyword()));
+                    report
+                        .declared
+                        .push(format!("{dimension} {child} within {parent}"));
+                }
                 Item::Open { pred, line, col } => {
                     // The marker is metadata about a predicate, so it is
                     // inserted after the whole file is in the environment:
@@ -610,6 +680,7 @@ impl Library {
                     standard,
                     exception_burden,
                     exception_standard,
+                    carry_occurrence,
                 } => {
                     // The scope clauses are metadata; validate them before any
                     // elaboration so a bad date is reported as such and not as
@@ -1001,6 +1072,7 @@ impl Library {
                         standard,
                         exception_burden,
                         exception_standard,
+                        carry_occurrence,
                     };
                     let ty = std_deduce_kernel::env::rule_type(&rdecl);
                     let decl = Decl {
@@ -1565,6 +1637,7 @@ fn check_case_decl_names(items: &[Item]) -> Result<(), String> {
             | Item::Import(_)
             | Item::Contrary { .. }
             | Item::Unique { .. }
+            | Item::Within { .. }
             | Item::Open { .. }
             | Item::Risk { .. }
             | Item::Check(_)
@@ -1937,6 +2010,7 @@ fn decl_kind_label(kind: &std_deduce_kernel::DeclKind) -> &'static str {
         DeclKind::Contrary { .. } => "contrary",
         DeclKind::Unique { .. } => "unique",
         DeclKind::Priority { .. } => "priority",
+        DeclKind::Within { .. } => "within",
         DeclKind::OpenConcept { .. } => "open",
         DeclKind::Risk { .. } => "risk",
     }
@@ -2176,6 +2250,9 @@ fn check_module_names(ns: &str, items: &[Item]) -> Result<(), String> {
                 let what = format!("`unique {pred} {index}`");
                 require_qualified_ref(ns, &what, pred)?;
             }
+            // Codes are opaque data, not declaration names: a hierarchy
+            // declaration names no sort/pred/rule and needs no qualification.
+            Item::Within { .. } => {}
             Item::Open { pred, .. } => {
                 let what = format!("`open {pred}`");
                 require_qualified_ref(ns, &what, pred)?;

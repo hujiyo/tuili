@@ -536,6 +536,21 @@ pub enum DeclKind {
         loser: Name,
         declared_in: Name,
     },
+    /// A declared code hierarchy: `territory CN-HN within CN` or
+    /// `jurisdiction CN-HN within CN`. The child code lies within the parent
+    /// code in that dimension, and the declaration is the only way the
+    /// applicability judgement learns that a rule covering the parent covers
+    /// the child. It is declared, never guessed from the `-` spelling: without
+    /// it a prefix-looking pair stays undecidable. The loader rejects a
+    /// reflexive, repeated or cyclic declaration.
+    Within {
+        /// Which code dimension the relation belongs to.
+        dimension: crate::meta::CodeDimension,
+        /// The narrower code.
+        child: String,
+        /// The wider code it lies within.
+        parent: String,
+    },
     /// A predicate marked as an open concept: `open 重大`. The marker records
     /// that applying the concept (「重大」「合理」「善意」「情节严重」) needs a
     /// human judgement; it asserts nothing itself. The declaration is metadata:
@@ -725,6 +740,15 @@ pub struct RuleDecl {
     /// The standard for those exceptions (`exception_standard …`), or `None`
     /// when undeclared.
     pub exception_standard: Option<Standard>,
+    /// `carry_occurrence`: when true, this rule's conclusion inherits the event
+    /// times/places of the premise facts it references (the union over its
+    /// premises). It is off by default: without the clause, a rule conclusion
+    /// records no occurrence, so a downstream rule that consumes it falls back
+    /// to `:asof` or stays unchecked exactly as before. The clause is a
+    /// declaration, never inferred, and the inheritance follows only carry
+    /// rules: a premise derived by a rule that did not declare it contributes
+    /// nothing.
+    pub carry_occurrence: bool,
     /// Rules that defeat this one.
     pub exceptions: Vec<Name>,
     /// Rules this one outranks, declared with `prefer R`. The reverse of
@@ -1153,6 +1177,44 @@ impl Env {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Every declared `within` relation, in ledger order, as
+    /// `(dimension, child, parent)`.
+    pub fn within_declarations(&self) -> Vec<(crate::meta::CodeDimension, String, String)> {
+        self.iter()
+            .filter_map(|d| match &d.kind {
+                DeclKind::Within {
+                    dimension,
+                    child,
+                    parent,
+                } => Some((*dimension, child.clone(), parent.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The declared code hierarchy of both dimensions.
+    ///
+    /// The relation is data the judgement reads; the kernel stores it and
+    /// never compares codes itself. A hand-built environment may contain a
+    /// cycle (the loader refuses one); the lookup still terminates and reports
+    /// containment instead of looping.
+    pub fn code_hierarchy(&self) -> crate::meta::CodeHierarchy {
+        crate::meta::CodeHierarchy::new(self.within_declarations())
+    }
+
+    /// Whether any rule declares `carry_occurrence`.
+    ///
+    /// This is the switch that keeps the untouched path free of the occurrence
+    /// resolver: with no such rule, a conclusion records no occurrence and the
+    /// judgement reads only the environment fact registrations, exactly as
+    /// before.
+    pub fn any_carry_occurrence(&self) -> bool {
+        self.iter().any(|d| match &d.kind {
+            DeclKind::Rule(rule) => rule.carry_occurrence,
+            _ => false,
+        })
     }
 }
 

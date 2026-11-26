@@ -826,6 +826,65 @@ axiom 陈述事实 : 违规 张三
     );
 }
 
+/// The three-step chain inherits the 2019 event time through every
+/// `carry_occurrence` rule, so the third step is judged by 2019 and its basis
+/// names the premise it came from.
+#[test]
+fn event_time_carry_example_judges_the_third_step_by_the_inherited_time() {
+    check(
+        load("事件时间传播-三步链.std"),
+        PROVED,
+        &["已加载", "规则A", "规则C"],
+    );
+    check(
+        session("事件时间传播-三步链.std", &[":why 责任 甲"]),
+        PROVED,
+        &[
+            "▸ 责任 甲",
+            "适用（事件时间 2019-05-01（区间内",
+            "继承自前提「中间 甲」",
+            "推导已通过独立校验",
+        ],
+    );
+}
+
+/// The declared hierarchy makes the national rule cover the province-level
+/// fact and the province rule fail on the national fact.
+#[test]
+fn territory_hierarchy_example_covers_a_child_fact_and_rejects_a_parent_fact() {
+    check(
+        load("地域层级-省与国.std"),
+        PROVED,
+        &[
+            "已加载",
+            "territory CN-HN within CN",
+            "jurisdiction CN-HN within CN",
+        ],
+    );
+    check(
+        session(
+            "地域层级-省与国.std",
+            &[":jurisdiction CN-HN", ":why 应适用 甲"],
+        ),
+        PROVED,
+        &[
+            "事件地点 CN-HN（覆盖：依据层级 CN-HN ⊂ CN 落入规则范围）",
+            "推导已通过独立校验",
+        ],
+    );
+    check(
+        session(
+            "地域层级-省与国.std",
+            &[":jurisdiction CN-HN", ":gap 省级规定 乙"],
+        ),
+        GAP_OR_CONFLICT,
+        &[
+            "候选 ⟨省级规则⟩〔不适用",
+            "规则地域 CN-HN 是事件地点 CN 的子区域",
+        ],
+    );
+}
+
 /// Every example file that has a regression test in this crate
 /// (`宪法第三十九条-默认环境.std` is exercised by `environment.rs`,
 /// `复核-*.std` by `review.rs`, `赔偿合计.std` and `金额算错-合计冲突.std` by
@@ -861,6 +920,8 @@ const COVERED_EXAMPLES: &[&str] = &[
     "历史版本-新版适用.std",
     "历史版本-重叠未决.std",
     "历史版本-从旧兼从轻.std",
+    "事件时间传播-三步链.std",
+    "地域层级-省与国.std",
 ];
 
 #[test]

@@ -1723,6 +1723,7 @@ impl Session {
                         DeclKind::Contrary { .. } => "contr ",
                         DeclKind::Unique { .. } => "uniq  ",
                         DeclKind::Priority { .. } => "prior ",
+                        DeclKind::Within { .. } => "with  ",
                         DeclKind::OpenConcept { .. } => "open ",
                         DeclKind::Risk { .. } => "risk ",
                     };
@@ -4556,6 +4557,7 @@ fn record_case_extensions(
             DeclKind::Interpretation(_) => "interpret",
             DeclKind::Contrary { .. } => "contrary",
             DeclKind::Unique { .. } => "unique",
+            DeclKind::Within { .. } => "within",
             DeclKind::OpenConcept { .. } => "open",
             DeclKind::Risk { .. } => "risk",
             DeclKind::Obj | DeclKind::Axiom | DeclKind::Fact { .. } | DeclKind::Priority { .. } => {

@@ -137,6 +137,11 @@ pub enum Item {
         exception_burden: Option<Burden>,
         /// `exception_standard …`: the standard for every `unless` of this rule.
         exception_standard: Option<Standard>,
+        /// `carry_occurrence`: the rule's conclusion inherits the event
+        /// times/places of the premise facts it references. Written as a bare
+        /// keyword clause on its own line; absent means off, and nothing
+        /// inherits through this rule.
+        carry_occurrence: bool,
     },
     /// `interpret 解释A : P → Q` followed by a required `direction` line and
     /// at least one `source` line. Both sides must be propositions; the
@@ -162,6 +167,20 @@ pub enum Item {
         pred: String,
         index: usize,
         source: Option<SourceSpec>,
+    },
+    /// `within` 声明：`territory CN-HN within CN` / `jurisdiction CN-HN within CN`.
+    ///
+    /// The child code lies within the parent code in the written dimension.
+    /// The relation is declared, never inferred from a `-`-separated prefix;
+    /// the loader rejects a reflexive, repeated or cyclic declaration. `dimension`
+    /// is the written keyword (`jurisdiction` or `territory`).
+    Within {
+        /// The written dimension keyword.
+        dimension: String,
+        /// The narrower code.
+        child: String,
+        /// The wider code.
+        parent: String,
     },
     /// `open 重大` — marks a declared predicate as an open concept.
     ///
