@@ -12,6 +12,11 @@ pub enum Term {
     Type(Option<u32>),
     /// A variable or constant, resolved later.
     Ident(String),
+    /// An exact integer literal, `5000` or `-5000`. Its kernel form is
+    /// `Expr::Num`, typed by the built-in `Int`; the `+ - *` operators of the
+    /// surface syntax elaborate to the built-in `add` / `sub` / `mul` / `neg`
+    /// constants, so the parser needs no operator node.
+    Num(i64),
     /// `∀ (x : A), B` or `A → B`
     Pi {
         name: Option<String>,

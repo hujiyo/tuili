@@ -1,0 +1,30 @@
+-- 赔偿合计：按规则求和的确定性计算。
+-- 金额一律用整数「分」：医疗费 3000 分 + 误工费 2000 分 = 合计 5000 分。
+-- 这里没有裁量：合计只是把已给定的两笔金额相加，法院酌定金额不属于计算。
+
+sort 人
+-- 金额是内核整数类型 Int 的别名；一个字面量 `3000` 的类型就是 Int。
+def 金额 : Type := Int
+
+pred 医疗费 : 人 → 金额 → Prop
+pred 误工费 : 人 → 金额 → Prop
+pred 合计 : 人 → 金额 → Prop
+
+obj 甲 : 人
+
+axiom 医疗费事实 : 医疗费 甲 3000
+  identity verified
+  source text "示例卷宗" locator "医疗费票据" version "2024" quote "医疗费 3000 分"
+
+axiom 误工费事实 : 误工费 甲 2000
+  identity verified
+  source text "示例卷宗" locator "误工证明" version "2024" quote "误工费 2000 分"
+
+-- 结论写的是 `(a + b)`：前提把 a、b 绑定到两个整数，推理时内核把它算成 5000，
+-- 证书同时记录算之前的 `add 3000 2000` 与算之后的 `5000`。
+rule 赔偿合计 :
+  params p : 人, a : 金额, b : 金额
+  premise 医疗费 p a
+  premise 误工费 p b
+  conclude 合计 p (a + b)
+  source text "示例法" locator "赔偿范围" version "2024" quote "医疗费与误工费应当计入赔偿合计"

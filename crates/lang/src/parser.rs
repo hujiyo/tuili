@@ -47,16 +47,32 @@
 //! DATE     := IDENT matching YYYY-MM-DD (validated on load)
 //! CODE     := IDENT matching the manifest jurisdiction/territory code
 //! term     := arrow
-//! arrow    := app ('→' term)?
+//! arrow    := arith ('→' term)?
+//! arith    := product (('+'|'-') product)*      -- left associative
+//! product  := unary ('*' unary)*                -- left associative
+//! unary    := '-' unary | app
 //! app      := atom atom*
-//! atom     := IDENT | '(' term ')' | '∀' binder ',' term | 'fun' binder '=>' term
+//! atom     := IDENT | NUM | '(' term ')' | '∀' binder ',' term | 'fun' binder '=>' term
 //!         | 'Prop' | 'Type' NUM?
 //! ```
+//!
+//! Integers are written as literal digits (`5000`, `-5000`) and are exact
+//! `i64` values. `+`, `-` and `*` are notation for the kernel's built-in
+//! `add` / `sub` / `mul` / `neg` constants: `a + b` elaborates to `add a b`,
+//! `a - b` to `sub a b`, `a * b` to `mul a b` and a leading `-` of a non-literal
+//! to `neg a`. `*` binds tighter than `+` / `-`, both associate to the left, a
+//! leading `-` binds tighter than `*`, and application binds tighter than all
+//! of them. Comparisons are written in prefix form: `(less a b)`, `(le a b)`.
+//! A binary `-` must be separated from its operands by whitespace or brackets;
+//! `3000-2000` lexes as one identifier (as a date does), and the name is then
+//! reported as unknown rather than silently read as a subtraction. A numeric
+//! literal outside the `i64` range is a parse error at its own position.
 //!
 //! The parser is line-oriented at the item/clause level: a newline ends a
 //! clause unless a term is syntactically incomplete. This keeps rule blocks
 //! looking like prose, which is what a legal reader needs.
 
+use std_deduce_kernel::builtin;
 use std_deduce_kernel::{Burden, FactIdentity, InterpretationDirection, RiskTheme, Standard};
 
 use crate::ast::*;
@@ -540,7 +556,22 @@ impl Parser {
             "unique" => {
                 self.bump();
                 let pred = self.ident()?;
-                let raw = self.ident()?;
+                // The position is a positive integer; it is written as a bare
+                // literal, which the lexer emits as a number token.
+                let raw = match self.peek().clone() {
+                    Tok::Num(value) => {
+                        self.bump();
+                        value
+                    }
+                    Tok::Ident(value) => {
+                        self.bump();
+                        value
+                    }
+                    other => {
+                        return self
+                            .err(format!("`unique {pred}` 缺少参数位置，实际是 `{other:?}`"))
+                    }
+                };
                 let index: usize = match raw.parse() {
                     Ok(n) => n,
                     Err(_) => {
@@ -1522,7 +1553,7 @@ impl Parser {
     }
 
     fn arrow(&mut self) -> PResult<Term> {
-        let dom = self.application()?;
+        let dom = self.arith()?;
         if self.eat(&Tok::Arrow) {
             // An arrow is an explicit continuation: allow the codomain to
             // start on the next line, as in Lean.
@@ -1540,7 +1571,7 @@ impl Parser {
     fn application(&mut self) -> PResult<Term> {
         let mut t = self.atom()?;
         let mut arguments = 0usize;
-        while let Tok::Ident(_) | Tok::LParen = self.peek() {
+        while let Tok::Ident(_) | Tok::LParen | Tok::Num(_) = self.peek() {
             arguments += 1;
             if arguments > MAX_APPLICATION_ARITY {
                 return self.err(format!("应用的参数数量超过上限 {MAX_APPLICATION_ARITY}"));
@@ -1549,6 +1580,71 @@ impl Parser {
             t = Term::App(Box::new(t), Box::new(a));
         }
         Ok(t)
+    }
+
+    /// `a + b - c`: the additive level. Left associative; `*` binds tighter.
+    ///
+    /// The operators are notation for the kernel's built-in constants, so the
+    /// parser builds an application rather than an operator node: there is one
+    /// meaning for `+` in the whole system, and it is the kernel's `add`.
+    fn arith(&mut self) -> PResult<Term> {
+        let mut left = self.product()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Plus => builtin::ADD,
+                Tok::Minus => builtin::SUB,
+                _ => return Ok(left),
+            };
+            self.bump();
+            let right = self.product()?;
+            left = binary(op, left, right);
+        }
+    }
+
+    /// `a * b`: the multiplicative level. Left associative.
+    fn product(&mut self) -> PResult<Term> {
+        let mut left = self.unary()?;
+        while self.peek() == &Tok::Star {
+            self.bump();
+            let right = self.unary()?;
+            left = binary(builtin::MUL, left, right);
+        }
+        Ok(left)
+    }
+
+    /// A leading `-`: a negative literal when a literal follows, otherwise
+    /// `neg <term>`. A literal that does not fit `i64` is a parse error at the
+    /// minus sign's position.
+    fn unary(&mut self) -> PResult<Term> {
+        if self.peek() == &Tok::Minus {
+            let (line, col) = (self.here().line, self.here().col);
+            self.bump();
+            if let Tok::Num(digits) = self.peek().clone() {
+                self.bump();
+                return match integer_value(&digits, true) {
+                    Ok(value) => Ok(Term::Num(value)),
+                    Err(msg) => Err(ParseError { msg, line, col }),
+                };
+            }
+            let operand = self.unary()?;
+            return match operand {
+                // `- -5` is `5`; a literal is folded here so the surface never
+                // depends on a runtime operation for a written constant.
+                Term::Num(value) => match value.checked_neg() {
+                    Some(negated) => Ok(Term::Num(negated)),
+                    None => Err(ParseError {
+                        msg: format!("整数取负溢出：-({value}) 超出 i64 范围"),
+                        line,
+                        col,
+                    }),
+                },
+                other => Ok(Term::App(
+                    Box::new(Term::Ident(builtin::NEG.into())),
+                    Box::new(other),
+                )),
+            };
+        }
+        self.application()
     }
 
     /// Application parsing for an interpretation's `to` side.
@@ -1607,12 +1703,28 @@ impl Parser {
                     body: Box::new(body),
                 })
             }
+            Tok::Num(digits) => {
+                let (line, col) = (self.here().line, self.here().col);
+                self.bump();
+                match integer_value(&digits, false) {
+                    Ok(value) => Ok(Term::Num(value)),
+                    Err(msg) => Err(ParseError { msg, line, col }),
+                }
+            }
             Tok::Ident(s) => {
                 self.bump();
                 match s.as_str() {
                     "Prop" => Ok(Term::Prop),
                     "Type" => {
-                        // `Type n`: look ahead for a numeral identifier.
+                        // `Type n`: look ahead for a numeral. It is a bare
+                        // literal token, not an identifier, but the surface
+                        // still writes `Type 1`.
+                        if let Tok::Num(n) = self.peek().clone() {
+                            if let Ok(level) = n.parse::<u32>() {
+                                self.bump();
+                                return Ok(Term::Type(Some(level)));
+                            }
+                        }
                         if let Tok::Ident(n) = self.peek().clone() {
                             if n.chars().all(|c| c.is_ascii_digit()) {
                                 self.bump();
@@ -1686,6 +1798,51 @@ fn duplicate_clause(rule: &str, field: &str, line: usize, col: usize) -> ParseEr
         msg: format!("规则 `{rule}` 的 {field} 重复声明；同一子句只能出现一次"),
         line,
         col,
+    }
+}
+
+/// Lower one surface operator into the built-in constant it stands for.
+///
+/// `+` is `add`, `-` is `sub` and `*` is `mul`. There is deliberately no
+/// operator node in the AST: one meaning, in the kernel.
+fn binary(op: &str, left: Term, right: Term) -> Term {
+    Term::App(
+        Box::new(Term::App(
+            Box::new(Term::Ident(op.to_owned())),
+            Box::new(left),
+        )),
+        Box::new(right),
+    )
+}
+
+/// The exact `i64` a written literal denotes, or why it does not fit.
+///
+/// The magnitude is parsed as a `u128` only to detect out-of-range digits
+/// before converting; the value itself is an `i64`, and `-9223372036854775808`
+/// is accepted because the check is done on the magnitude. No floating point
+/// is involved anywhere.
+fn integer_value(digits: &str, negative: bool) -> Result<i64, String> {
+    let range = format!("{}..={}", i64::MIN, i64::MAX);
+    let magnitude: u128 = digits
+        .parse()
+        .map_err(|_| format!("整数 `{digits}` 超出 i64 范围（{range}）"))?;
+    let limit: u128 = if negative {
+        1u128 << 63
+    } else {
+        i64::MAX as u128
+    };
+    if magnitude > limit {
+        let sign = if negative { "-" } else { "" };
+        return Err(format!("整数 `{sign}{digits}` 超出 i64 范围（{range}）"));
+    }
+    if negative {
+        if magnitude == 1u128 << 63 {
+            Ok(i64::MIN)
+        } else {
+            Ok(-(magnitude as i64))
+        }
+    } else {
+        Ok(magnitude as i64)
     }
 }
 

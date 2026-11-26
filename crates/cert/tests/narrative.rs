@@ -89,6 +89,7 @@ fn rule(
     sources: Vec<Source>,
 ) -> Node {
     Node::RuleApplication {
+        computed: None,
         rule: rule.to_owned(),
         conclusion,
         premises,

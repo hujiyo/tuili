@@ -130,7 +130,7 @@
 //! function over the rule's [`Scope`](std_deduce_kernel::meta::Scope) and
 //! the instance's anchor (the premise facts' occurrence records plus the
 //! session fallback values). The reasoner only supplies those records; the
-//! CLI only renders the recorded verdict. Certificate v9 records the verdict,
+//! CLI only renders the recorded verdict. Certificate v10 records the verdict,
 //! basis, declared scope and reason on every rule application and gap
 //! candidate, and `:verify-cert` recomputes them independently.
 //!
@@ -209,7 +209,7 @@ use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{
     named_binders, Decl, DeclKind, Env, FactIdentity, RuleDecl, RulePleading, SourceRef,
 };
-use std_deduce_kernel::norm::normalize;
+use std_deduce_kernel::norm::{evaluate_arithmetic, normalize};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::{instantiate_telescope, is_closed};
 use std_deduce_kernel::{check, Ctx, Expr, Name};
@@ -235,6 +235,14 @@ pub enum Node {
     RuleApplication {
         rule: Name,
         conclusion: Expr,
+        /// The instance's conclusion exactly as the rule wrote it with the
+        /// parameter values substituted, recorded only when the kernel's
+        /// arithmetic evaluation changed it. It is the record of the
+        /// computation: the certificate checker requires it to be the rule's
+        /// own conclusion under the recorded bindings, and the recorded
+        /// `conclusion` to be that expression's value. Boxed because a term is
+        /// much larger than the other node payloads.
+        computed: Option<Box<Expr>>,
         premises: Vec<usize>,
         /// The rule's parameters and the values this step bound them to.
         bindings: Vec<(Name, Expr)>,
@@ -624,7 +632,14 @@ struct Assumption {
 
 /// One instantiation of a rule against a set of known facts.
 struct Instance {
+    /// The proposition this instance derives: the rule's conclusion with the
+    /// parameter values substituted and the built-in arithmetic evaluated, so
+    /// `合计 甲 (add 3000 2000)` is recorded as `合计 甲 5000`.
     conclusion: Expr,
+    /// The pre-evaluation form, kept only when the evaluation changed it. It
+    /// is what makes the arithmetic step auditable: the certificate records
+    /// both, and the checker recomputes the second from the first.
+    computed: Option<Box<Expr>>,
     premise_keys: Vec<String>,
     /// Open `unless` expressions, already closed by this instantiation.
     unlesses: Vec<Expr>,
@@ -873,6 +888,7 @@ fn match_axiom_body(
     match (pattern, goal) {
         (Expr::Sort(left), Expr::Sort(right)) => left == right,
         (Expr::Const(left), Expr::Const(right)) => left == right,
+        (Expr::Num(left), Expr::Num(right)) => left == right,
         (Expr::Var(left), Expr::Var(right)) if left < &depth || right < &depth => *left == *right,
         (Expr::Var(left), other) if *left >= depth => {
             // `position` counts from the outermost binder; `0` is de Bruijn
@@ -1728,6 +1744,11 @@ impl<'a> Reasoner<'a> {
         }
         check::check(self.env, &Ctx::new(), prop, &Expr::Sort(0))
             .map_err(|e| format!("假设不是命题：{e}"))?;
+        // Exact integer arithmetic in an asserted proposition is evaluated
+        // here, so an overflowing literal is reported when the fact is
+        // registered instead of silently surviving as an unevaluated term.
+        evaluate_arithmetic(self.env, prop)
+            .map_err(|error| format!("假设「{}」的整数运算失败：{error}", print_expr(prop)))?;
         // One proposition has one identity. Comparisons use kernel
         // conversion, not the printed or normalized form: alpha- and
         // eta-variants are the same proposition, and a string key would let a
@@ -2058,7 +2079,6 @@ impl<'a> Reasoner<'a> {
             env: self.env,
             rule,
             facts,
-            unless_len: rule.unlesses.len(),
         };
         backtrack_demanding(
             self,
@@ -2107,8 +2127,8 @@ impl<'a> Reasoner<'a> {
                 }
                 let (ka, a) = items[i];
                 let (kb, b) = items[j];
-                let left = self.support(ka, rule_facts, applications);
-                let right = self.support(kb, rule_facts, applications);
+                let left = self.support(ka, rule_facts, applications)?;
+                let right = self.support(kb, rule_facts, applications)?;
                 let resolution = self.resolve(&left, &right);
                 out.push(Conflict {
                     left: a.clone(),
@@ -2135,32 +2155,32 @@ impl<'a> Reasoner<'a> {
         target: &str,
         rule_facts: &BTreeMap<String, Expr>,
         applications: &BTreeMap<String, Name>,
-    ) -> Support {
+    ) -> Result<Support, String> {
         if let Some(identity) = self.assumption_identity(target) {
-            return Support::Fact(identity);
+            return Ok(Support::Fact(identity));
         }
         if let Some(interpretation) = applications.get(target) {
-            return Support::Interpretation(interpretation.clone());
+            return Ok(Support::Interpretation(interpretation.clone()));
         }
-        let derivers = self.derivers(target, rule_facts);
+        let derivers = self.derivers(target, rule_facts)?;
         if !derivers.is_empty() {
-            return Support::Rules(derivers);
+            return Ok(Support::Rules(derivers));
         }
         if let Some(instance) = self.axiom_state.borrow().instances.get(target) {
-            return Support::Axiom(instance.axiom.clone());
+            return Ok(Support::Axiom(instance.axiom.clone()));
         }
-        Support::Rules(Vec::new())
+        Ok(Support::Rules(Vec::new()))
     }
 
     /// Every rule that has an unblocked instance concluding `target`, with all
     /// premises already in `facts`.
-    fn derivers(&self, target: &str, facts: &BTreeMap<String, Expr>) -> Vec<Name> {
+    fn derivers(&self, target: &str, facts: &BTreeMap<String, Expr>) -> Result<Vec<Name>, String> {
         let mut out = BTreeSet::new();
         for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
-            for inst in self.enumerate(rule, facts) {
+            for inst in self.enumerate(rule, facts)? {
                 if self.key_of(&inst.conclusion) != target {
                     continue;
                 }
@@ -2182,7 +2202,7 @@ impl<'a> Reasoner<'a> {
                 }
             }
         }
-        out.into_iter().collect()
+        Ok(out.into_iter().collect())
     }
 
     /// Decide a conflict from the support on each side.
@@ -2489,6 +2509,7 @@ impl<'a> Reasoner<'a> {
                 nodes.push(Node::RuleApplication {
                     rule: rule.clone(),
                     conclusion: conclusion.clone(),
+                    computed: instance.computed.clone(),
                     premises,
                     bindings: instance.bindings.clone(),
                     sources: sources.clone(),
@@ -2793,7 +2814,7 @@ impl<'a> Reasoner<'a> {
             // The witness is an argument the reader may be shown, so it must
             // be an instance that could actually fire under the case
             // judgement.
-            for inst in self.enumerate(rule, rule_facts) {
+            for inst in self.enumerate(rule, rule_facts)? {
                 if blocked(&inst.unlesses, rule_facts, self.env) {
                     continue;
                 }
@@ -2855,7 +2876,13 @@ impl<'a> Reasoner<'a> {
     /// Ordered backtracking over the premise list: premise `i` is a pattern
     /// open over the rule's binders; try each known fact, match, extend the
     /// binding, recurse. Facts are ground, so this is first-order matching.
-    fn enumerate(&self, rule: &RuleDecl, facts: &BTreeMap<String, Expr>) -> Vec<Instance> {
+    /// A conclusion whose built-in arithmetic overflows is an error, never a
+    /// skipped instance.
+    fn enumerate(
+        &self,
+        rule: &RuleDecl,
+        facts: &BTreeMap<String, Expr>,
+    ) -> Result<Vec<Instance>, String> {
         let mut out = Vec::new();
         let mut binding: Vec<(Name, Expr)> = Vec::new();
         let mut keys: Vec<String> = Vec::new();
@@ -2863,10 +2890,9 @@ impl<'a> Reasoner<'a> {
             env: self.env,
             rule,
             facts,
-            unless_len: rule.unlesses.len(),
         };
-        backtrack(&matching, 0, &mut binding, &mut keys, &mut out);
-        out
+        backtrack(&matching, 0, &mut binding, &mut keys, &mut out)?;
+        Ok(out)
     }
 
     // ------------------------------------------------------------ queries
@@ -2891,7 +2917,7 @@ impl<'a> Reasoner<'a> {
 
     /// Every declared rule's burden/standard, keyed by rule name.
     ///
-    /// Certificate v9 does not record these declarations (adding them would
+    /// Certificate v10 does not record these declarations (adding them would
     /// change the format), so `:explain` supplies this map when it narrates a
     /// certificate gap. The values come from the environment declaration, the
     /// same one the derivation used.
@@ -2982,7 +3008,7 @@ impl<'a> Reasoner<'a> {
             // conflict. Reconstruct its interpretation witness only when no
             // rule can still conclude it; otherwise the rule is the witness
             // the conflict recorded.
-            if self.derivers(&k, &facts).is_empty() {
+            if self.derivers(&k, &facts).ok()?.is_empty() {
                 if let Ok(Some(interpretation)) =
                     self.interpretation_for(&k, prop, &base.rule_facts)
                 {
@@ -3794,7 +3820,6 @@ struct Matching<'a> {
     env: &'a Env,
     rule: &'a RuleDecl,
     facts: &'a BTreeMap<String, Expr>,
-    unless_len: usize,
 }
 
 fn backtrack(
@@ -3803,20 +3828,11 @@ fn backtrack(
     binding: &mut Vec<(Name, Expr)>,
     keys: &mut Vec<String>,
     out: &mut Vec<Instance>,
-) {
+) -> Result<(), String> {
     let rule = matching.rule;
     if idx == rule.premises.len() {
-        let conclusion = close_pattern(&rule.open_conclusion(), binding);
-        let unlesses: Vec<Expr> = (0..matching.unless_len)
-            .map(|i| close_pattern(&rule.open_unless_text(&rule.unlesses[i]), binding))
-            .collect();
-        out.push(Instance {
-            conclusion,
-            premise_keys: keys.clone(),
-            unlesses,
-            bindings: binding.clone(),
-        });
-        return;
+        out.push(finish_instance(matching.env, rule, binding, keys.clone())?);
+        return Ok(());
     }
 
     let pattern = close_pattern(&rule.open_premise(idx), binding);
@@ -3833,10 +3849,49 @@ fn backtrack(
         }
         *binding = b;
         keys.push(k.clone());
-        backtrack(matching, idx + 1, binding, keys, out);
+        backtrack(matching, idx + 1, binding, keys, out)?;
         keys.pop();
         binding.truncate(before);
     }
+    Ok(())
+}
+
+/// The instance a complete binding produces: the rule's conclusion closed by
+/// the binding, then the built-in arithmetic in it evaluated by the kernel.
+///
+/// The two forms are kept apart on purpose. `computed` is what the rule wrote
+/// (a record of the computation), `conclusion` is its value; a certificate
+/// records both, and the checker re-derives the first from the rule and the
+/// bindings and the second from the first. An overflow aborts the reasoning
+/// with an error; it never becomes a wraparound or an unrecorded number.
+fn finish_instance(
+    env: &Env,
+    rule: &RuleDecl,
+    binding: &[(Name, Expr)],
+    premise_keys: Vec<String>,
+) -> Result<Instance, String> {
+    let raw = close_pattern(&rule.open_conclusion(), binding);
+    let conclusion = evaluate_arithmetic(env, &raw).map_err(|error| {
+        format!(
+            "规则实例的结论无法计算：{error}（结论写的是「{}」）",
+            print_expr(&raw)
+        )
+    })?;
+    let computed = if conclusion == raw {
+        None
+    } else {
+        Some(Box::new(raw))
+    };
+    let unlesses = (0..rule.unlesses.len())
+        .map(|i| close_pattern(&rule.open_unless_text(&rule.unlesses[i]), binding))
+        .collect();
+    Ok(Instance {
+        conclusion,
+        computed,
+        premise_keys,
+        unlesses,
+        bindings: binding.to_vec(),
+    })
 }
 
 /// [`backtrack`] with universal elimination: a premise no fact satisfies but
@@ -3858,16 +3913,7 @@ fn backtrack_demanding(
 ) -> Result<(), String> {
     let rule = matching.rule;
     if idx == rule.premises.len() {
-        let conclusion = close_pattern(&rule.open_conclusion(), binding);
-        let unlesses: Vec<Expr> = (0..matching.unless_len)
-            .map(|i| close_pattern(&rule.open_unless_text(&rule.unlesses[i]), binding))
-            .collect();
-        out.push(Instance {
-            conclusion,
-            premise_keys: keys.clone(),
-            unlesses,
-            bindings: binding.clone(),
-        });
+        out.push(finish_instance(reasoner.env, rule, binding, keys.clone())?);
         return Ok(());
     }
 
@@ -3957,6 +4003,7 @@ fn match_fact(p: &Expr, f: &Expr, b: &mut Vec<(Name, Expr)>) -> bool {
             match_fact(pf, ff, b) && match_fact(pa, fa, b)
         }
         (Expr::Sort(x), Expr::Sort(y)) => x == y,
+        (Expr::Num(x), Expr::Num(y)) => x == y,
         _ => false,
     }
 }
@@ -4051,7 +4098,7 @@ fn open_names(expression: &Expr) -> BTreeSet<Name> {
                     names.insert(std_deduce_kernel::name(stripped));
                 }
             }
-            Expr::Sort(_) | Expr::Var(_) => {}
+            Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => {}
             Expr::Pi {
                 domain, codomain, ..
             } => {
@@ -4092,7 +4139,7 @@ fn close_pattern(p: &Expr, binding: &[(Name, Expr)]) -> Expr {
             }
             None => p.clone(),
         },
-        Expr::Sort(_) | Expr::Var(_) => p.clone(),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => p.clone(),
         Expr::Pi {
             name,
             domain,
@@ -4401,7 +4448,7 @@ fn has_open_pattern(expression: &Expr) -> bool {
         } => has_open_pattern(domain) || has_open_pattern(codomain),
         Expr::Lam { domain, body, .. } => has_open_pattern(domain) || has_open_pattern(body),
         Expr::Let { value, body, .. } => has_open_pattern(value) || has_open_pattern(body),
-        Expr::Sort(_) | Expr::Var(_) => false,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => false,
     }
 }
 
@@ -4922,6 +4969,7 @@ pub fn certificate(
             Node::RuleApplication {
                 rule,
                 conclusion,
+                computed,
                 premises,
                 bindings,
                 sources,
@@ -4935,9 +4983,14 @@ pub fn certificate(
                     });
                 }
                 let scope = rule_scope(env, rule, id)?;
+                let computed = match computed {
+                    Some(expression) => Some(cert_expr(expression, Some(id), "计算前的结论")?),
+                    None => None,
+                };
                 nodes.push(std_deduce_cert::Node::RuleApplication {
                     rule: rule.to_string(),
                     conclusion: cert_expr(conclusion, Some(id), "结论")?,
+                    computed,
                     premises: premises.clone(),
                     bindings: converted,
                     sources: sources.iter().map(std_deduce_cert::Source::from).collect(),

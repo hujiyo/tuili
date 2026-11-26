@@ -31,6 +31,16 @@ fn write_expression(expression: &Expr, out: &mut String) {
             out.push_str(&index.to_string());
             out.push(';');
         }
+        // An integer literal gets its own tag. The `n` prefix cannot collide
+        // with `s` (sort), `v` (variable), `c` (constant) or the structural
+        // tags, so `3` and a constant named `3` stay different propositions.
+        // The value is written in full including the sign, so no two different
+        // literals share a key.
+        Expr::Num(value) => {
+            out.push('n');
+            out.push_str(&value.to_string());
+            out.push(';');
+        }
         Expr::Const(name) => {
             out.push('c');
             out.push_str(&name.len().to_string());

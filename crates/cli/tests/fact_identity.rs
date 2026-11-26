@@ -384,7 +384,7 @@ axiom 违法事实 : 违法 张三
     let generated = check(session(&theory, &[":cert 违法 张三"]), PROVED, &[]);
     let certificate = certificate_json(&generated);
     let json = certificate.to_json_pretty().unwrap();
-    let old = json.replacen("\"format_version\": 9", "\"format_version\": 4", 1);
+    let old = json.replacen("\"format_version\": 10", "\"format_version\": 4", 1);
     assert_ne!(old, json, "the generated certificate must be version 6");
     let file = TempFile::new("version-4", "json", &old);
 
@@ -394,7 +394,7 @@ axiom 违法事实 : 违法 张三
         ERROR,
         &["环境校验：未运行（证书 JSON 无效）", "逻辑校验：未运行"],
     );
-    check_stderr(checked, ERROR, &["不是有效的证书 JSON", "supports 9"]);
+    check_stderr(checked, ERROR, &["不是有效的证书 JSON", "supports 10"]);
 }
 
 /// Changing a claim's recorded identity to a strict one is caught by the
@@ -645,6 +645,7 @@ fn deleting_the_conflict_and_rerooting_at_a_defeated_rule_is_rejected() {
         .expect("the binding value is a certificate expression");
     let root = certificate.nodes.len();
     certificate.nodes.push(Node::RuleApplication {
+        computed: None,
         rule: "拒绝".to_owned(),
         conclusion,
         premises: vec![premise],
@@ -737,6 +738,7 @@ rule 推定有罪 :
         .expect("the binding value is a certificate expression");
     let branch = certificate.nodes.len();
     certificate.nodes.push(Node::RuleApplication {
+        computed: None,
         rule: "推定有罪".to_owned(),
         conclusion,
         premises: vec![premise],

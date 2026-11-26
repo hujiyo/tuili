@@ -25,6 +25,11 @@ pub enum Expr {
     Var(usize),
     /// A constant, resolved from the environment.
     Const(Name),
+    /// An exact integer literal. Its type is the built-in `Int`; the built-in
+    /// arithmetic in [`crate::builtin`] evaluates over these, and an `i64`
+    /// overflow is an error rather than a wraparound. There is no floating
+    /// point in the kernel.
+    Num(i64),
     /// `Pi (x : A) B` — dependent function space. `name = None` means the
     /// binder is anonymous, which is what `A → B` elaborates to.
     Pi {
@@ -57,6 +62,9 @@ impl Expr {
     }
     pub fn constant(n: impl AsRef<str>) -> Expr {
         Expr::Const(name(n))
+    }
+    pub fn num(value: i64) -> Expr {
+        Expr::Num(value)
     }
     pub fn app(f: Expr, a: Expr) -> Expr {
         Expr::App {
@@ -105,7 +113,7 @@ impl Expr {
 /// cutoff is bound and must not move.
 pub fn shift(e: &Expr, d: isize, cutoff: usize) -> Expr {
     match e {
-        Expr::Sort(_) | Expr::Const(_) => e.clone(),
+        Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) => e.clone(),
         Expr::Var(i) => {
             if *i < cutoff {
                 e.clone()
@@ -146,7 +154,7 @@ pub fn shift(e: &Expr, d: isize, cutoff: usize) -> Expr {
 /// replacement; entering a binder shifts it by one and raises the target.
 pub fn subst(e: &Expr, j: usize, s: &Expr) -> Expr {
     match e {
-        Expr::Sort(_) | Expr::Const(_) => e.clone(),
+        Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) => e.clone(),
         Expr::Var(i) => {
             if *i == j {
                 s.clone()
@@ -215,7 +223,7 @@ pub fn is_closed(e: &Expr) -> bool {
 pub fn free_vars(e: &Expr, depth: usize) -> Vec<usize> {
     fn go(e: &Expr, depth: usize, out: &mut Vec<usize>) {
         match e {
-            Expr::Sort(_) | Expr::Const(_) => {}
+            Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) => {}
             Expr::Var(i) => {
                 if *i >= depth {
                     out.push(*i - depth);

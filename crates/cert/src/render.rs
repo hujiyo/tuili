@@ -258,6 +258,7 @@ fn render_node(
         Node::RuleApplication {
             rule,
             conclusion,
+            computed,
             premises,
             bindings,
             sources,
@@ -293,6 +294,16 @@ fn render_node(
                     .collect::<Vec<_>>()
                     .join("，");
                 out.push_str(&format!("{pad}  实例：{instance}\n"));
+            }
+            // The arithmetic step, when the certificate records it: the
+            // instance exactly as the rule wrote it, and the value the kernel
+            // computed from it. A step without arithmetic prints nothing extra.
+            if let Some(computed) = computed {
+                out.push_str(&format!(
+                    "{pad}  计算：{} = {}\n",
+                    print_expr(&Expr::from(computed)),
+                    print_expr(&Expr::from(conclusion))
+                ));
             }
             for premise in premises {
                 render_node(certificate, *premise, depth + 1, annotations, out)?;

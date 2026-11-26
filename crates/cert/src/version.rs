@@ -26,12 +26,20 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// instantiated from and why they were refused. Version 9 records every
 /// independent witness of each derived conclusion: the `alternatives` table
 /// names a proposition and the nodes that derive it, in a stable order, with an
-/// explicit truncation flag for the per-conclusion bound.
+/// explicit truncation flag for the per-conclusion bound. Version 10 records
+/// exact integers: a certificate expression may carry a `num` literal, a rule
+/// application may carry the `computed` form of its conclusion (the rule's own
+/// conclusion under the recorded bindings, before the kernel evaluated the
+/// arithmetic), and the recorded conclusion is its evaluated value. The field
+/// is required exactly when that substitution really computes something: a
+/// step whose instance evaluates differently must record the pre-evaluation
+/// form, so a missing arithmetic step cannot hide behind the recorded number.
 /// Older certificates are
 /// refused rather than read with guessed evidence: a proof that silently drops
 /// an applicability judgement, an interpretation step, a universal
-/// elimination step or an independent argument cannot be checked.
-pub const FORMAT_VERSION: u32 = 9;
+/// elimination step, an independent argument or the arithmetic step cannot be
+/// checked.
+pub const FORMAT_VERSION: u32 = 10;
 
 /// A certificate format version.
 ///

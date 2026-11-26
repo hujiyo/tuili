@@ -186,6 +186,7 @@ fn rule_node(
     applicability: RuleApplicability,
 ) -> Node {
     Node::RuleApplication {
+        computed: None,
         rule: rule.to_owned(),
         conclusion,
         premises,

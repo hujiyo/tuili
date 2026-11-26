@@ -203,6 +203,7 @@ rule r :
     // the premise is simply absent.
     let mut d = Derivation::default();
     d.nodes.push(Node::RuleApplication {
+        computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![],
@@ -220,6 +221,7 @@ rule r :
     // A conclusion that is not even an instance of the rule's head must fail.
     let mut d2 = Derivation::default();
     d2.nodes.push(Node::RuleApplication {
+        computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("侵占"), p("张三")),
         premises: vec![],
@@ -262,6 +264,7 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
@@ -306,6 +309,7 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("李四")),
         premises: vec![0],
@@ -359,6 +363,7 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
@@ -415,6 +420,7 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],

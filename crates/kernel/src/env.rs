@@ -767,6 +767,17 @@ impl Env {
         if self.decls.contains_key(&decl.name) {
             return Err(Error::DuplicateName(decl.name.to_string()));
         }
+        // A built-in name means exactly what the kernel's evaluator says it
+        // means. Shadowing it would make a record of a computation impossible
+        // to recheck, so the declaration is refused rather than silently
+        // overriding it.
+        if crate::builtin::is_reserved(&decl.name) {
+            return Err(Error::other(format!(
+                "`{}` 是内核内建名称（{}），不能声明：内建运算的语义由内核固定",
+                decl.name,
+                crate::builtin::NAMES.join(" / ")
+            )));
+        }
         let ty_ty = check::infer(self, ctx, &decl.ty)?;
         match &ty_ty {
             Expr::Sort(_) => {}
@@ -797,6 +808,19 @@ impl Env {
         }
         if let DeclKind::Rule(rule) = &decl.kind {
             rule.check(self, &Expr::Sort(0))?;
+        }
+        // Exact integer arithmetic reaching a closed literal expression is
+        // evaluated here, so a declaration that would overflow fails when it is
+        // loaded instead of becoming a term the normalizer refuses later. The
+        // evaluated form is discarded: declarations keep the term the source
+        // wrote, and only rule instances record their computed conclusion.
+        crate::norm::evaluate_arithmetic(self, &decl.ty).map_err(|error| {
+            Error::other(format!("`{}` 的声明里整数运算失败：{error}", decl.name))
+        })?;
+        if let DeclKind::Def { body } = &decl.kind {
+            crate::norm::evaluate_arithmetic(self, body).map_err(|error| {
+                Error::other(format!("`{}` 的定义体里整数运算失败：{error}", decl.name))
+            })?;
         }
         decl.index = self.next_index;
         self.next_index += 1;
@@ -1066,6 +1090,15 @@ impl RuleDecl {
         for (i, (n, p)) in self.premises.iter().enumerate() {
             check::check_is_type(env, &ctx, p)
                 .map_err(|e| Error::other(format!("前提 {} 不成立：{e}", i + 1)))?;
+            if let Some(op) = crate::builtin::comparison_head(&self.open_premise(i)) {
+                return Err(Error::other(format!(
+                    "前提 {number} 是以 `{name}` 打头的比较（`{name} a b`）：比较目前不参与规则触发，\
+                     不能靠“求值成 True 再当作前提已成立”来让规则开火；\
+                     数字比较请写在结论的计算里，或先作为事实登记",
+                    name = op.name(),
+                    number = i + 1
+                )));
+            }
             let bind = n
                 .clone()
                 .unwrap_or_else(|| crate::term::name(format!("_p{i}")));
@@ -1074,6 +1107,14 @@ impl RuleDecl {
         for (i, u) in self.unlesses.iter().enumerate() {
             check::check(env, &ctx, u, &Expr::Sort(0))
                 .map_err(|e| Error::other(format!("unless {} 不是命题：{e}", i + 1)))?;
+            if let Some(op) = crate::builtin::comparison_head(&self.open_unless_text(u)) {
+                return Err(Error::other(format!(
+                    "unless {number} 是以 `{name}` 打头的比较（`{name} a b`）：比较目前不参与规则触发，\
+                     不能靠“求值成 True 再当作阻断条件已成立”来阻断规则",
+                    name = op.name(),
+                    number = i + 1
+                )));
+            }
         }
         let t = check::infer(env, &ctx, &self.conclusion)
             .map_err(|e| Error::other(format!("结论不成立：{e}")))?;
@@ -1167,7 +1208,7 @@ fn open_vars(e: &Expr, names: &[Name], depth: usize, in_scope: usize) -> Expr {
                 }
             }
         }
-        Expr::Sort(_) | Expr::Const(_) => e.clone(),
+        Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) => e.clone(),
         Expr::Pi {
             name,
             domain,
@@ -1207,7 +1248,7 @@ fn mentions_pattern(e: &Expr, binder: &Name) -> bool {
     match is_pattern_var(e) {
         Some(pv) => pv == binder.as_ref(),
         None => match e {
-            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) => false,
+            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => false,
             Expr::Pi {
                 domain, codomain, ..
             } => mentions_pattern(domain, binder) || mentions_pattern(codomain, binder),

@@ -24,6 +24,11 @@ pub enum CertExpr {
     Var { index: u32 },
     /// A constant resolved through the environment.
     Const { name: String },
+    /// An exact integer literal, written as `{"kind": "num", "value": <i64>}`.
+    /// The field is a signed 64-bit integer: the certificate format has no
+    /// floating point and no rounding, and a value outside the `i64` range is
+    /// refused by the kernel before a certificate can be written.
+    Num { value: i64 },
     /// A dependent function space.
     Pi {
         binder: Option<String>,
@@ -81,6 +86,7 @@ impl TryFrom<&Expr> for CertExpr {
             Expr::Const(name) => CertExpr::Const {
                 name: name.to_string(),
             },
+            Expr::Num(value) => CertExpr::Num { value: *value },
             Expr::Pi {
                 name,
                 domain,
@@ -122,6 +128,7 @@ impl From<&CertExpr> for Expr {
             CertExpr::Sort { level } => Expr::Sort(*level),
             CertExpr::Var { index } => Expr::Var(*index as usize),
             CertExpr::Const { name } => Expr::constant(name),
+            CertExpr::Num { value } => Expr::Num(*value),
             CertExpr::Pi {
                 binder,
                 domain,

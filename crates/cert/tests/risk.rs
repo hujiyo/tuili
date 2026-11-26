@@ -70,6 +70,7 @@ fn source(text: &str, locator: &str) -> Source {
 
 fn rule(name: &str, conclusion: CertExpr, premises: Vec<usize>, sources: Vec<Source>) -> Node {
     Node::RuleApplication {
+        computed: None,
         rule: name.to_owned(),
         conclusion,
         premises,

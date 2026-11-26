@@ -454,8 +454,8 @@ fn the_disclaimer_appears_once_in_all_four_commands_and_never_in_the_tree_or_jso
         "the certificate JSON must not contain display text\n{json}"
     );
     assert!(
-        json.contains("\"format_version\": 9"),
-        "the certificate stays v9\n{json}"
+        json.contains("\"format_version\": 10"),
+        "the certificate stays v10\n{json}"
     );
     assert!(
         !json.contains("\"disclaimer\"") && !json.contains("\"risk\""),

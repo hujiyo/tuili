@@ -1,4 +1,4 @@
-//! End-to-end tests for certificate v9 applicability: the generated record,
+//! End-to-end tests for certificate v10 applicability: the generated record,
 //! the independent recomputation of `:verify-cert`, and hand-edited
 //! counterexamples that must be rejected.
 //!
@@ -778,6 +778,7 @@ rule 后规 :
     };
     let rule_node =
         |rule: &str, conclusion: CertExpr, premises: Vec<usize>| Node::RuleApplication {
+            computed: None,
             rule: rule.to_owned(),
             conclusion,
             premises,

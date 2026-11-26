@@ -20,6 +20,9 @@ fn eq(env: &Env, ctx: &Ctx, a: &Expr, b: &Expr) -> Result<bool> {
         (Expr::Sort(x), Expr::Sort(y)) => Ok(x == y),
         (Expr::Var(x), Expr::Var(y)) => Ok(x == y),
         (Expr::Const(x), Expr::Const(y)) => Ok(x == y),
+        // Two literals are the same integer, or they are not convertible. The
+        // comparison is exact; there is no rounding and no tolerance.
+        (Expr::Num(x), Expr::Num(y)) => Ok(x == y),
         (
             Expr::Pi {
                 domain: d1,
