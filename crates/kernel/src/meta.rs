@@ -22,6 +22,121 @@
 
 use crate::term::Name;
 
+/// The two kinds of opaque code a declaration can place in a hierarchy.
+///
+/// A `territory` code is compared with a fact's `occurred_in`; a
+/// `jurisdiction` code is compared with the session's `:jurisdiction`. They are
+/// separate hierarchies: `territory CN-HN within CN` says nothing about the
+/// legal-system dimension, and the judgement keeps the two dimensions apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CodeDimension {
+    /// Legal system / enacting authority.
+    Jurisdiction,
+    /// Event place.
+    Territory,
+}
+
+impl CodeDimension {
+    /// The keyword the declaration is written with.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            CodeDimension::Jurisdiction => "jurisdiction",
+            CodeDimension::Territory => "territory",
+        }
+    }
+
+    /// The Chinese label used in a diagnostic or a basis text.
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            CodeDimension::Jurisdiction => "管辖",
+            CodeDimension::Territory => "地域",
+        }
+    }
+
+    /// The dimension written as a keyword, or `None` for an unknown word.
+    pub fn from_keyword(keyword: &str) -> Option<Self> {
+        match keyword {
+            "jurisdiction" => Some(CodeDimension::Jurisdiction),
+            "territory" => Some(CodeDimension::Territory),
+            _ => None,
+        }
+    }
+}
+
+/// The declared `code within code` relations of both dimensions.
+///
+/// The relations are declared, never guessed: a code pair that looks like a
+/// parent and a child (one is a `-`-separated prefix of the other) is *not*
+/// compared by that spelling alone. Only a `territory … within …` /
+/// `jurisdiction … within …` declaration relates two codes, and
+/// [`CodeHierarchy::contains`] follows the declared chain transitively
+/// (`A within B` plus `B within C` makes `A` lie within `C`).
+///
+/// The loader rejects a cycle, a repeated declaration and the reflexive
+/// `A within A`, so the relation is a strict partial order. The lookup still
+/// handles a cyclic hand-built environment without looping: it takes the
+/// transitive closure with a visited set and reports containment, it never
+/// silently picks a direction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct CodeHierarchy {
+    pairs: Vec<(CodeDimension, String, String)>,
+}
+
+impl CodeHierarchy {
+    /// Build the hierarchy from declarations in ledger order.
+    pub fn new(pairs: Vec<(CodeDimension, String, String)>) -> Self {
+        CodeHierarchy { pairs }
+    }
+
+    /// Whether no `within` declaration exists at all.
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
+    /// Whether any declaration of this dimension exists.
+    pub fn has_dimension(&self, dimension: CodeDimension) -> bool {
+        self.pairs.iter().any(|(d, _, _)| *d == dimension)
+    }
+
+    /// Whether `child` lies within `parent` according to the declared chain.
+    ///
+    /// `contains` is strict: a code does not lie within itself, and the loader
+    /// refuses the reflexive declaration. A direct declaration is followed
+    /// transitively; a cyclic hand-built environment terminates on the visited
+    /// set.
+    pub fn contains(&self, dimension: CodeDimension, child: &str, parent: &str) -> bool {
+        if child == parent {
+            return false;
+        }
+        let mut visited: Vec<&str> = Vec::new();
+        let mut queue: Vec<&str> = vec![child];
+        while let Some(current) = queue.pop() {
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.push(current);
+            for (d, c, p) in &self.pairs {
+                if *d == dimension && c == current {
+                    if p == parent {
+                        return true;
+                    }
+                    if !visited.contains(&p.as_str()) {
+                        queue.push(p.as_str());
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether the two codes are related by a declared chain in either
+    /// direction. Used only by the basis text, to say that a comparison used a
+    /// declared hierarchy instead of the bare spelling.
+    pub fn related(&self, dimension: CodeDimension, left: &str, right: &str) -> bool {
+        self.contains(dimension, left, right) || self.contains(dimension, right, left)
+    }
+}
+
 /// Check that `value` is a real `YYYY-MM-DD` calendar day.
 ///
 /// Only the shape and the calendar are checked; whether the date makes legal
@@ -239,5 +354,54 @@ impl RevisionGroup {
         match &self.scope {
             RevisionScope::Namespace(name) | RevisionScope::File(name) => name,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hierarchy(pairs: &[(CodeDimension, &str, &str)]) -> CodeHierarchy {
+        CodeHierarchy::new(
+            pairs
+                .iter()
+                .map(|(dimension, child, parent)| {
+                    (*dimension, child.to_string(), parent.to_string())
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_declared_chain_is_followed_transitively() {
+        let declared = hierarchy(&[
+            (CodeDimension::Territory, "CN-HN", "CN"),
+            (CodeDimension::Territory, "CN", "ASIA"),
+        ]);
+        assert!(declared.contains(CodeDimension::Territory, "CN-HN", "CN"));
+        assert!(declared.contains(CodeDimension::Territory, "CN-HN", "ASIA"));
+        assert!(!declared.contains(CodeDimension::Territory, "CN", "CN-HN"));
+        // The dimensions are independent.
+        assert!(!declared.contains(CodeDimension::Jurisdiction, "CN-HN", "ASIA"));
+    }
+
+    #[test]
+    fn the_bare_spelling_never_relates_codes() {
+        let empty = CodeHierarchy::default();
+        assert!(!empty.contains(CodeDimension::Territory, "CN-HN", "CN"));
+        assert!(!empty.contains(CodeDimension::Territory, "CN-HN-XX", "CN"));
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn a_hand_built_cycle_terminates_and_reports_containment() {
+        let declared = hierarchy(&[
+            (CodeDimension::Territory, "A", "B"),
+            (CodeDimension::Territory, "B", "A"),
+        ]);
+        assert!(declared.contains(CodeDimension::Territory, "A", "B"));
+        assert!(declared.contains(CodeDimension::Territory, "B", "A"));
+        // `contains` is strict: a code is not inside itself.
+        assert!(!declared.contains(CodeDimension::Territory, "A", "A"));
     }
 }

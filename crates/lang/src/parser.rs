@@ -510,10 +510,7 @@ impl Parser {
                 // annotate this fact is reported here.
                 self.skip_newlines();
                 if let Tok::Ident(keyword) = self.peek().clone() {
-                    if matches!(
-                        keyword.as_str(),
-                        "effective" | "repealed" | "jurisdiction" | "territory" | "revision"
-                    ) {
+                    if matches!(keyword.as_str(), "effective" | "repealed" | "revision") {
                         return self.err(format!(
                             "`axiom {name}`：`{keyword}` 只能写在规则（rule）上；事实只能写 occurred_at / occurred_in"
                         ));
@@ -732,6 +729,36 @@ impl Parser {
                     winner,
                     loser,
                     sources,
+                })
+            }
+            // `territory CN-HN within CN` / `jurisdiction CN-HN within CN`: an
+            // explicitly declared code hierarchy. Without it, two codes whose
+            // spelling looks parent/child stay incomparable (the judgement
+            // never guesses). The clause is line-oriented: the parent code ends
+            // the declaration.
+            "territory" | "jurisdiction" => {
+                let dimension = kw.to_owned();
+                self.bump();
+                let child = self.ident()?;
+                if !self.keyword("within") {
+                    return self.err(format!(
+                        "`{dimension} {child}` 缺少 `within`：层级声明应写成 \
+                         `{dimension} <子代码> within <父代码>`；\
+                         规则上的 `{dimension}` 作用域子句必须写在 rule 体内"
+                    ));
+                }
+                self.bump();
+                let parent = self.ident()?;
+                if !matches!(self.peek(), Tok::Newline | Tok::Eof) {
+                    return self.err(format!(
+                        "`{dimension} {child} within {parent}` 之后必须是换行；\
+                         一条 within 声明只写一对代码"
+                    ));
+                }
+                Ok(Item::Within {
+                    dimension,
+                    child,
+                    parent,
                 })
             }
             "interpret" | "interpretation" => self.interpretation(),
@@ -1030,6 +1057,10 @@ impl Parser {
         let mut standard = None;
         let mut exception_burden = None;
         let mut exception_standard = None;
+        // `carry_occurrence` is a bare keyword clause on its own line. It is
+        // off unless written: a rule conclusion records no event time/place by
+        // default, so the existing fallback behaviour is unchanged.
+        let mut carry_occurrence = false;
 
         loop {
             // Whether the next clause starts on a fresh line. Scope clauses
@@ -1156,6 +1187,20 @@ impl Parser {
                     }
                     exception_standard = Some(self.standard_value(&name, "exception_standard")?);
                 }
+                // `carry_occurrence` is a flag, not a valued clause: the rule's
+                // conclusion inherits the event times/places of the premise
+                // facts it references. It must stand on its own line (a flag
+                // crammed onto another clause would read as an extra token) and
+                // may appear once.
+                "carry_occurrence" => {
+                    self.require_clause_new_line(&name, "carry_occurrence", on_new_line)?;
+                    let (line, col) = (self.here().line, self.here().col);
+                    self.bump();
+                    if carry_occurrence {
+                        return Err(duplicate_clause(&name, "carry_occurrence", line, col));
+                    }
+                    carry_occurrence = true;
+                }
                 "source" => {
                     // A source clause inside a rule body names the rule in its
                     // diagnostics, so a malformed quote or a misplaced scope
@@ -1178,10 +1223,20 @@ impl Parser {
                     self.scope_clause(&name, "repealed", &mut scope.effective_to)?;
                 }
                 "jurisdiction" => {
+                    // `jurisdiction <child> within <parent>` is a top-level
+                    // hierarchy declaration, not this rule's scope clause. It
+                    // starts the next item instead of being read as a scope
+                    // value followed by an unknown clause.
+                    if matches!(self.peek_at(2), Tok::Ident(word) if word == "within") {
+                        break;
+                    }
                     self.require_clause_new_line(&name, "jurisdiction", on_new_line)?;
                     self.scope_clause(&name, "jurisdiction", &mut scope.jurisdiction)?;
                 }
                 "territory" => {
+                    if matches!(self.peek_at(2), Tok::Ident(word) if word == "within") {
+                        break;
+                    }
                     self.require_clause_new_line(&name, "territory", on_new_line)?;
                     self.scope_clause(&name, "territory", &mut scope.territory)?;
                 }
@@ -1255,6 +1310,7 @@ impl Parser {
             standard,
             exception_burden,
             exception_standard,
+            carry_occurrence,
         })
     }
 

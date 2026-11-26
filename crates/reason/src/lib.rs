@@ -134,7 +134,12 @@
 //! `territory`) and the occurrence records of the premise facts an instance
 //! consumes (`occurred_at` / `occurred_in`) are judged before that instance
 //! may fire. The reference point is the event, not the query date: `:asof` is
-//! only a fallback when the instance references no event time. [`Applicability`]
+//! only a fallback when the instance references no event time. A conclusion
+//! inherits its premises' occurrences only when the deriving rule declares
+//! `carry_occurrence`; without that clause propagation stops and the downstream
+//! instance falls back exactly as before. Two codes are compared by a declared
+//! `territory` / `jurisdiction` `within` chain when one exists; a pair whose
+//! spelling merely looks parent/child stays undecidable. [`Applicability`]
 //! keeps four outcomes apart: applicable (with the covered event times/places),
 //! inapplicable (with the concrete dates/places that excluded the rule),
 //! unchecked (a needed input is missing), and undecidable (the inputs are
@@ -147,9 +152,10 @@
 //!
 //! The judgement itself is [`std_deduce_cert::judge_applicability`]: a pure
 //! function over the rule's [`Scope`](std_deduce_kernel::meta::Scope) and
-//! the instance's anchor (the premise facts' occurrence records plus the
-//! session fallback values). The reasoner only supplies those records; the
-//! CLI only renders the recorded verdict. Certificate v12 records the verdict,
+//! the instance's anchor (the premise facts' occurrence records, inherited
+//! occurrences, the session fallback values and the declared code hierarchy).
+//! The reasoner only supplies those records; the CLI only renders the recorded
+//! verdict. Certificate v12 records the verdict,
 //! basis, declared scope and reason on every rule application and gap
 //! candidate, and `:verify-cert` recomputes them independently.
 //!
@@ -745,6 +751,28 @@ pub struct InterpretationHint {
 type OccurrenceRecord = (Option<String>, Option<String>);
 /// Registered facts' occurrence records keyed by structural proposition key.
 type OccurrenceIndex = BTreeMap<String, Vec<OccurrenceRecord>>;
+
+/// The event times/places a `carry_occurrence` rule's conclusion inherits.
+///
+/// The set is the union over the conclusion's firing `carry_occurrence` witnesses
+/// of each premise's event records (a registered fact's own record, or the
+/// inherited record of a premise conclusion). A premise with no record at all
+/// marks the corresponding dimension missing instead of being skipped: known
+/// event times never stand in for unknown ones. `rules` names the witnesses
+/// that contributed, for the display only; the certificate records the dates
+/// and places, not this provenance.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct InheritedOccurrence {
+    dates: Vec<String>,
+    places: Vec<String>,
+    missing_date: bool,
+    missing_place: bool,
+    /// Deriving rule names, sorted and deduplicated, for the display.
+    rules: Vec<Name>,
+}
+
+/// Inherited occurrences keyed by the conclusion's structural key.
+type OccurrenceMap = BTreeMap<String, InheritedOccurrence>;
 
 struct Assumption {
     prop: Expr,
@@ -1609,6 +1637,18 @@ pub struct Reasoner<'a> {
     /// an instance judgement does not scan the whole assumption table for
     /// every premise. The `Rc` is cloned per lookup, not the strings.
     occurrence_index: RefCell<Option<Rc<OccurrenceIndex>>>,
+    /// Inherited event times/places of conclusions derived by rules that
+    /// declare `carry_occurrence`. Empty unless such a rule exists, so the
+    /// untouched path judges exactly as before.
+    occurrences: RefCell<Rc<OccurrenceMap>>,
+    /// The declared `territory` / `jurisdiction` code hierarchy. The
+    /// applicability judgement reads it; a code pair whose hierarchy is not
+    /// declared stays undecidable.
+    hierarchy: std_deduce_kernel::meta::CodeHierarchy,
+    /// Whether any rule declares `carry_occurrence`. With none, the fixed point
+    /// skips the occurrence pass entirely and the settled occurrences stay
+    /// empty.
+    carries_occurrence: bool,
     /// Universal facts grouped by the normalized predicate head of their body.
     /// This is the candidate filter: instantiation never scans the whole
     /// ledger, only the declarations that can conclude the goal's predicate.
@@ -1643,6 +1683,9 @@ impl<'a> Reasoner<'a> {
             as_of: None,
             jurisdiction: None,
             occurrence_index: RefCell::new(None),
+            occurrences: RefCell::new(Rc::new(OccurrenceMap::new())),
+            hierarchy: env.code_hierarchy(),
+            carries_occurrence: env.any_carry_occurrence(),
             axioms,
             axiom_error,
             axiom_state: RefCell::new(AxiomState::default()),
@@ -1694,63 +1737,135 @@ impl<'a> Reasoner<'a> {
     /// The occurrence records of the premise facts a rule instance references.
     ///
     /// A premise key that names a registered fact is looked up in the
-    /// occurrence index; one that names only a derived conclusion carries no
-    /// occurrence record, so it is flagged as missing rather than inherited
-    /// from its own premises. The session's as-of date and jurisdiction are
-    /// copied in as the fallback/legal-system values.
-    fn instance_anchor(&self, premise_keys: &[String]) -> InstanceAnchor {
+    /// occurrence index. A premise that names only a derived conclusion has no
+    /// registration; its event record is inherited only when the rule that
+    /// derived it declares `carry_occurrence`, and the inherited record stops at
+    /// the first rule that does not (such a premise is flagged missing). The
+    /// session's as-of date and jurisdiction are copied in as the
+    /// fallback/legal-system values.
+    ///
+    /// Registered dates/places are collected first, so a date that a fact
+    /// records is never labelled as inherited merely because another premise's
+    /// conclusion passes it down too.
+    fn instance_anchor(
+        &self,
+        premise_keys: &[String],
+        facts: &BTreeMap<String, Expr>,
+        occurrences: &OccurrenceMap,
+    ) -> InstanceAnchor {
         let index = self.occurrence_index();
-        let mut event_dates: Vec<String> = Vec::new();
-        let mut event_places: Vec<String> = Vec::new();
-        let mut missing_event_date = false;
-        let mut missing_event_place = false;
+        let mut anchor = InstanceAnchor {
+            as_of: self.as_of.clone(),
+            jurisdiction: self.jurisdiction.clone(),
+            hierarchy: self.hierarchy.clone(),
+            ..InstanceAnchor::default()
+        };
+        let mut registered_dates: Vec<String> = Vec::new();
+        let mut registered_places: Vec<String> = Vec::new();
         for key in premise_keys {
-            match index.get(key) {
-                Some(records) => {
-                    for (date, place) in records {
-                        match date {
-                            Some(date) => {
-                                if !event_dates.contains(date) {
-                                    event_dates.push(date.clone());
-                                }
+            if let Some(records) = index.get(key) {
+                for (date, place) in records {
+                    match date {
+                        Some(date) => {
+                            registered_dates.push(date.clone());
+                            if !anchor.event_dates.contains(date) {
+                                anchor.event_dates.push(date.clone());
                             }
-                            None => missing_event_date = true,
                         }
-                        match place {
-                            Some(place) => {
-                                if !event_places.contains(place) {
-                                    event_places.push(place.clone());
-                                }
-                            }
-                            None => missing_event_place = true,
-                        }
+                        None => anchor.missing_event_date = true,
                     }
-                }
-                // A rule conclusion is a fact but not a registered occurrence:
-                // it does not inherit the event time/place of its premises.
-                None => {
-                    missing_event_date = true;
-                    missing_event_place = true;
+                    match place {
+                        Some(place) => {
+                            registered_places.push(place.clone());
+                            if !anchor.event_places.contains(place) {
+                                anchor.event_places.push(place.clone());
+                            }
+                        }
+                        None => anchor.missing_event_place = true,
+                    }
                 }
             }
         }
-        InstanceAnchor {
-            as_of: self.as_of.clone(),
-            jurisdiction: self.jurisdiction.clone(),
-            event_dates,
-            missing_event_date,
-            event_places,
-            missing_event_place,
+        for key in premise_keys {
+            if index.contains_key(key) {
+                continue;
+            }
+            match occurrences.get(key) {
+                Some(inherited) => {
+                    let label = Self::inherited_source_label(facts.get(key), &inherited.rules);
+                    for date in &inherited.dates {
+                        if !anchor.event_dates.contains(date) {
+                            anchor.event_dates.push(date.clone());
+                        }
+                        if !registered_dates.contains(date) {
+                            anchor
+                                .inherited_dates
+                                .entry(date.clone())
+                                .or_default()
+                                .push(label.clone());
+                        }
+                    }
+                    for place in &inherited.places {
+                        if !anchor.event_places.contains(place) {
+                            anchor.event_places.push(place.clone());
+                        }
+                        if !registered_places.contains(place) {
+                            anchor
+                                .inherited_places
+                                .entry(place.clone())
+                                .or_default()
+                                .push(label.clone());
+                        }
+                    }
+                    anchor.missing_event_date |= inherited.missing_date;
+                    anchor.missing_event_place |= inherited.missing_place;
+                }
+                // A conclusion derived by a rule that does not declare
+                // `carry_occurrence` records no occurrence: propagation stops
+                // here, exactly as before this clause existed.
+                None => {
+                    anchor.missing_event_date = true;
+                    anchor.missing_event_place = true;
+                }
+            }
+        }
+        anchor
+    }
+
+    /// The display label of an inherited occurrence: the premise conclusion that
+    /// handed the event time/place down and the rule(s) that derived it.
+    ///
+    /// The label is display-only; the certificate records the date/place, not this
+    /// provenance. It is what lets `:why` say `继承自前提「…」（规则 ⟨…⟩）` instead
+    /// of presenting an inherited event as if a fact itself recorded it.
+    fn inherited_source_label(proposition: Option<&Expr>, rules: &[Name]) -> String {
+        let proposition = match proposition {
+            Some(proposition) => print_expr(proposition),
+            None => "前提".to_owned(),
+        };
+        if rules.is_empty() {
+            format!("前提「{proposition}」")
+        } else {
+            let names: Vec<String> = rules.iter().map(|rule| format!("⟨{rule}⟩")).collect();
+            format!("前提「{proposition}」（规则 {}）", names.join("、"))
         }
     }
 
     /// Judge one rule instance against the facts it consumes.
+    ///
+    /// `facts` supplies the premise propositions, so the basis text can name
+    /// which premise handed an inherited event time/place down.
     fn judge_instance(
         &self,
         scope: &std_deduce_kernel::meta::Scope,
         premise_keys: &[String],
+        facts: &BTreeMap<String, Expr>,
     ) -> Applicability {
-        applicability::judge(scope, &self.instance_anchor(premise_keys))
+        let occurrences = Rc::clone(&self.occurrences.borrow());
+        applicability::judge(
+            scope,
+            &self.instance_anchor(premise_keys, facts, &occurrences),
+        )
     }
 
     /// Split one instantiated premise list into the facts it already holds and
@@ -2661,7 +2776,154 @@ impl<'a> Reasoner<'a> {
         Ok(applications)
     }
 
+    /// Compute the least fixed point, including inherited event occurrences.
+    ///
+    /// Inheritance is a declared, explicit step: when any rule writes
+    /// `carry_occurrence`, the fact set is settled together with the event
+    /// times/places its conclusions inherit. The pass alternates the two:
+    ///
+    /// 1. settle the fact set under the current occurrence map, judging every
+    ///    rule instance against it;
+    /// 2. recompute the inherited occurrences from that fact set and the
+    ///    witnesses that fire under the current map.
+    ///
+    /// It stops when the recomputed map equals the one the fact set was judged
+    /// under, so the recorded applicability is exactly the judgement that
+    /// settled the facts. A map that oscillates (an added event time can exclude
+    /// the instance that produced it) is an explicit error; nothing silently
+    /// picks one of the two states. With no `carry_occurrence` rule the map
+    /// stays empty and the fact set is settled exactly as before.
     fn fixed_point(&self, removed: &BTreeSet<String>) -> Result<BTreeMap<String, Expr>, String> {
+        if !self.carries_occurrence {
+            *self.occurrences.borrow_mut() = Rc::new(OccurrenceMap::new());
+            return self.fixed_point_rounds(removed);
+        }
+        let mut occurrences = OccurrenceMap::new();
+        let mut previous: Option<OccurrenceMap> = None;
+        for _ in 0..self.max_rounds {
+            *self.occurrences.borrow_mut() = Rc::new(occurrences.clone());
+            let facts = self.fixed_point_rounds(removed)?;
+            let next = self.compute_occurrences(&facts)?;
+            if next == occurrences {
+                return Ok(facts);
+            }
+            if previous.as_ref() == Some(&next) {
+                return Err(
+                    "继承的事件时间/地点在两组集合之间来回振荡：一个事件时间会让某条规则不再适用，\
+                     而不再适用又移除了该事件时间。这需要显式规则或让 carry_occurrence 链无环，\
+                     系统不会静默挑一种状态。"
+                        .into(),
+                );
+            }
+            previous = Some(occurrences.clone());
+            occurrences = next;
+        }
+        Err("继承的事件时间/地点在 256 轮内未收敛：carry_occurrence 链可能存在环".into())
+    }
+
+    /// Recompute every conclusion's inherited event times/places from `facts`
+    /// and the witnesses that fire under the current occurrence map.
+    ///
+    /// A witness is a rule instance that would fire: premises all held, guards
+    /// hold, not blocked by an `unless`, and applicable under the current map.
+    /// Only a witness whose rule declares `carry_occurrence` contributes its
+    /// premises' records; a witness of any other rule leaves the conclusion's
+    /// inherited set unchanged. The union over the conclusion's witnesses is
+    /// taken in the certificate's witness order and capped at
+    /// [`std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION`], so the certificate
+    /// checker can recompute the same set from the recorded witnesses.
+    ///
+    /// A premise with neither a registered occurrence nor an inherited one
+    /// marks the dimension missing; known event times never stand in for it.
+    fn compute_occurrences(&self, facts: &BTreeMap<String, Expr>) -> Result<OccurrenceMap, String> {
+        let axiom_instances = self.axiom_state.borrow().instances.clone();
+        let witnesses = self.witness_index(facts, &axiom_instances)?;
+        let registry = self.occurrence_index();
+        let current = Rc::clone(&self.occurrences.borrow());
+        let mut out = OccurrenceMap::new();
+        for (target, candidates) in &witnesses {
+            let mut inherited = InheritedOccurrence::default();
+            let mut rules: BTreeSet<Name> = BTreeSet::new();
+            let mut carried = false;
+            for candidate in candidates
+                .iter()
+                .take(std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION)
+            {
+                let WitnessCandidate::Rule { rule, instance, .. } = candidate else {
+                    continue;
+                };
+                if !self.rule_carries_occurrence(rule) {
+                    continue;
+                }
+                carried = true;
+                rules.insert(rule.clone());
+                for premise_key in &instance.premise_keys {
+                    match registry.get(premise_key) {
+                        Some(records) => {
+                            for (date, place) in records {
+                                match date {
+                                    Some(date) => {
+                                        if !inherited.dates.contains(date) {
+                                            inherited.dates.push(date.clone());
+                                        }
+                                    }
+                                    None => inherited.missing_date = true,
+                                }
+                                match place {
+                                    Some(place) => {
+                                        if !inherited.places.contains(place) {
+                                            inherited.places.push(place.clone());
+                                        }
+                                    }
+                                    None => inherited.missing_place = true,
+                                }
+                            }
+                        }
+                        None => match current.get(premise_key) {
+                            Some(record) => {
+                                for date in &record.dates {
+                                    if !inherited.dates.contains(date) {
+                                        inherited.dates.push(date.clone());
+                                    }
+                                }
+                                for place in &record.places {
+                                    if !inherited.places.contains(place) {
+                                        inherited.places.push(place.clone());
+                                    }
+                                }
+                                inherited.missing_date |= record.missing_date;
+                                inherited.missing_place |= record.missing_place;
+                            }
+                            // Propagation stops at a rule without
+                            // `carry_occurrence`: this premise contributes no
+                            // record, and the known values cannot stand in for it.
+                            None => {
+                                inherited.missing_date = true;
+                                inherited.missing_place = true;
+                            }
+                        },
+                    }
+                }
+            }
+            if carried {
+                inherited.rules = rules.into_iter().collect();
+                out.insert(target.clone(), inherited);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether the named rule declares `carry_occurrence`.
+    fn rule_carries_occurrence(&self, rule: &Name) -> bool {
+        self.env.get(rule).is_some_and(
+            |decl| matches!(&decl.kind, DeclKind::Rule(declared) if declared.carry_occurrence),
+        )
+    }
+
+    fn fixed_point_rounds(
+        &self,
+        removed: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Expr>, String> {
         let seeds: BTreeMap<String, Expr> = self
             .assumptions
             .iter()
@@ -2697,7 +2959,7 @@ impl<'a> Reasoner<'a> {
                         continue;
                     }
                     if !self
-                        .judge_instance(&decl.scope, &inst.premise_keys)
+                        .judge_instance(&decl.scope, &inst.premise_keys, &k)
                         .allows_firing()
                     {
                         continue;
@@ -2900,7 +3162,7 @@ impl<'a> Reasoner<'a> {
                 // through an inapplicable rule, and would make a rebuilt
                 // derivation cite a step that never fired.
                 if !self
-                    .judge_instance(&decl.scope, &inst.premise_keys)
+                    .judge_instance(&decl.scope, &inst.premise_keys, facts)
                     .allows_firing()
                 {
                     continue;
@@ -3540,7 +3802,7 @@ impl<'a> Reasoner<'a> {
                 {
                     continue;
                 }
-                let verdict = self.judge_instance(&decl.scope, &inst.premise_keys);
+                let verdict = self.judge_instance(&decl.scope, &inst.premise_keys, rule_facts);
                 if !verdict.allows_firing() {
                     continue;
                 }
@@ -3973,7 +4235,7 @@ impl<'a> Reasoner<'a> {
                     .iter()
                     .filter_map(|status| status.held.as_ref().map(|held| self.key_of(held)))
                     .collect();
-                let verdict = self.judge_instance(&decl.scope, &held_keys);
+                let verdict = self.judge_instance(&decl.scope, &held_keys, &facts);
                 // The conclusion is an issue even when this instance is
                 // excluded: the gap tree must show why the rule did not fire.
                 let key = structural_key(self.env, &conclusion);
@@ -4367,7 +4629,7 @@ impl<'a> Reasoner<'a> {
                 blocked_by,
                 guards,
                 sources: decl.sources.clone(),
-                applicability: self.judge_instance(&decl.scope, &held_keys),
+                applicability: self.judge_instance(&decl.scope, &held_keys, &facts),
             });
         }
         Ok(candidates)

@@ -634,6 +634,7 @@ fn kernel_rejects_a_malformed_telescope() {
         standard: None,
         exception_burden: None,
         exception_standard: None,
+        carry_occurrence: false,
     };
     let _ = rule;
     // A rule whose conclusion is a bare predicate symbol is not a proposition.
@@ -656,6 +657,7 @@ fn kernel_rejects_a_malformed_telescope() {
         standard: None,
         exception_burden: None,
         exception_standard: None,
+        carry_occurrence: false,
     };
     let decl = Decl {
         name: name("r2"),
@@ -1894,6 +1896,7 @@ fn a_priority_self_loop_is_reported_as_a_cycle() {
             standard: None,
             exception_burden: None,
             exception_standard: None,
+            carry_occurrence: false,
         };
         let ty = std_deduce_kernel::env::rule_type(&rule);
         env.insert(

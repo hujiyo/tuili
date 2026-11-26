@@ -17,6 +17,13 @@
 //! result says so (`session.as_of` is then the date used, otherwise the
 //! explicit `null`). It is never stored as a fact's occurrence.
 //!
+//! An instance's anchor may also carry occurrences inherited through the
+//! explicit `carry_occurrence` clause; the judgement treats them as event
+//! times but records only the dates/places, not which premise passed them
+//! down. Code pairs are related only by declared `territory` / `jurisdiction`
+//! `within` chains: the anchor carries the hierarchy, and an undeclared
+//! parent/child-looking pair stays undecidable.
+//!
 //! ## Partial coverage is never rounded
 //!
 //! One event time inside the range and another outside is
@@ -45,7 +52,9 @@
 use serde::{Deserialize, Serialize};
 
 use std_deduce_kernel::env::escape_control;
-use std_deduce_kernel::meta::{validate_date, Scope, ScopeOrigin};
+use std_deduce_kernel::meta::{
+    validate_date, CodeDimension as MetaCodeDimension, CodeHierarchy, Scope, ScopeOrigin,
+};
 
 use crate::model::Explicit;
 
@@ -604,7 +613,9 @@ impl RuleApplicability {
 /// The reasoner builds this from the premise facts it consumed and the
 /// session values; the checker rebuilds it from the certificate's own nodes
 /// (rule applications) or from the recorded basis (gap candidates) and the
-/// environment identity's session values.
+/// environment identity's session values. `hierarchy` carries the declared
+/// `within` relations: it is data, not an inferred prefix rule, and a
+/// comparison that has no declaration stays undecidable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ApplicabilityAnchor {
     /// The session's legal as-of date, used only when no event time exists.
@@ -619,6 +630,8 @@ pub struct ApplicabilityAnchor {
     pub event_places: Vec<String>,
     /// Whether some referenced premise fact records no `occurred_in`.
     pub missing_event_place: bool,
+    /// The declared `within` relations of both code dimensions.
+    pub hierarchy: CodeHierarchy,
 }
 
 /// Judge one rule instance's recorded scope against its event time and place.
@@ -664,9 +677,14 @@ pub fn judge(scope: &Scope, anchor: &ApplicabilityAnchor) -> RuleApplicability {
             None => missing = missing.or(Some(ApplicabilityReasonKind::NoQueryJurisdiction)),
             Some(case_code) => {
                 basis.session.jurisdiction = Explicit::some(case_code.to_owned());
-                match compare_codes(rule_code, case_code) {
-                    CodeRelation::Equal => {}
-                    CodeRelation::Disjoint => {
+                match compare_codes(
+                    &anchor.hierarchy,
+                    MetaCodeDimension::Jurisdiction,
+                    rule_code,
+                    case_code,
+                ) {
+                    CodeRelation::Equal | CodeRelation::Covered => {}
+                    CodeRelation::Reverse | CodeRelation::Disjoint => {
                         return RuleApplicability {
                             verdict: ApplicabilityVerdict::Inapplicable,
                             basis,
@@ -678,7 +696,7 @@ pub fn judge(scope: &Scope, anchor: &ApplicabilityAnchor) -> RuleApplicability {
                             )),
                         };
                     }
-                    CodeRelation::Nested => {
+                    CodeRelation::Undeclared => {
                         undecidable =
                             undecidable.or(Some(ApplicabilityReasonKind::IncomparableCode {
                                 dimension: CodeDimension::Jurisdiction,
@@ -705,7 +723,6 @@ pub fn judge(scope: &Scope, anchor: &ApplicabilityAnchor) -> RuleApplicability {
             PlaceVerdict::Undecidable(reason) => undecidable = undecidable.or(Some(reason)),
         }
     }
-
     let (verdict, reason) = if let Some(reason) = missing {
         (ApplicabilityVerdict::Unchecked, Some(reason))
     } else if let Some(reason) = undecidable {
@@ -896,11 +913,11 @@ fn judge_places(
     let mut uncovered = Vec::new();
     let mut nested = None;
     for place in references {
-        let relation = compare_codes(rule, place);
+        let relation = compare_codes(&anchor.hierarchy, MetaCodeDimension::Territory, rule, place);
         let covered_flag = match relation {
-            CodeRelation::Equal => Some(true),
-            CodeRelation::Disjoint => Some(false),
-            CodeRelation::Nested => None,
+            CodeRelation::Equal | CodeRelation::Covered => Some(true),
+            CodeRelation::Reverse | CodeRelation::Disjoint => Some(false),
+            CodeRelation::Undeclared => None,
         };
         basis.places.push(PlaceEvidence {
             place: place.to_owned(),
@@ -939,21 +956,41 @@ fn judge_places(
     })
 }
 
-/// How two opaque codes relate.
+/// How a rule's code relates to the event's (or the case's) code.
 enum CodeRelation {
     /// The same code.
     Equal,
-    /// One is a `-`-separated prefix of the other.
-    Nested,
-    /// Neither contains the other.
+    /// The event's code is declared to lie within the rule's code, so the
+    /// rule covers it.
+    Covered,
+    /// The rule's code is declared to lie within the event's code: the rule
+    /// covers only a subregion, so it does not cover the event.
+    Reverse,
+    /// One code is a `-`-separated prefix of the other, but no `within`
+    /// declaration relates them. The spelling alone is never read as a
+    /// hierarchy.
+    Undeclared,
+    /// Neither code contains the other.
     Disjoint,
 }
 
-fn compare_codes(rule: &str, case: &str) -> CodeRelation {
+fn compare_codes(
+    hierarchy: &CodeHierarchy,
+    dimension: MetaCodeDimension,
+    rule: &str,
+    case: &str,
+) -> CodeRelation {
     if rule == case {
-        CodeRelation::Equal
-    } else if is_nested(rule, case) || is_nested(case, rule) {
-        CodeRelation::Nested
+        return CodeRelation::Equal;
+    }
+    if hierarchy.contains(dimension, case, rule) {
+        return CodeRelation::Covered;
+    }
+    if hierarchy.contains(dimension, rule, case) {
+        return CodeRelation::Reverse;
+    }
+    if is_nested(rule, case) || is_nested(case, rule) {
+        CodeRelation::Undeclared
     } else {
         CodeRelation::Disjoint
     }
@@ -982,5 +1019,145 @@ fn range_text(from: Option<&String>, to: Option<&String>) -> String {
         (Some(from), None) => format!("{}..", escape_control(from)),
         (None, Some(to)) => format!("..{}", escape_control(to)),
         (None, None) => "（无端点）".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std_deduce_kernel::meta::{CodeDimension as MetaCodeDimension, CodeHierarchy};
+
+    fn hierarchy(pairs: &[(MetaCodeDimension, &str, &str)]) -> CodeHierarchy {
+        CodeHierarchy::new(
+            pairs
+                .iter()
+                .map(|(dimension, child, parent)| {
+                    (*dimension, child.to_string(), parent.to_string())
+                })
+                .collect(),
+        )
+    }
+
+    fn territory_anchor(place: &str, hierarchy: CodeHierarchy) -> ApplicabilityAnchor {
+        ApplicabilityAnchor {
+            event_places: vec![place.to_owned()],
+            hierarchy,
+            ..ApplicabilityAnchor::default()
+        }
+    }
+
+    fn jurisdiction_anchor(case: &str, hierarchy: CodeHierarchy) -> ApplicabilityAnchor {
+        ApplicabilityAnchor {
+            jurisdiction: Some(case.to_owned()),
+            hierarchy,
+            ..ApplicabilityAnchor::default()
+        }
+    }
+
+    fn territory_scope(code: &str) -> Scope {
+        Scope {
+            territory: Some(code.to_owned()),
+            ..Scope::default()
+        }
+    }
+
+    fn jurisdiction_scope(code: &str) -> Scope {
+        Scope {
+            jurisdiction: Some(code.to_owned()),
+            ..Scope::default()
+        }
+    }
+
+    #[test]
+    fn a_declared_child_is_covered_by_the_parent_rules_territory() {
+        let declared = hierarchy(&[(MetaCodeDimension::Territory, "CN-HN", "CN")]);
+        let verdict = judge(&territory_scope("CN"), &territory_anchor("CN-HN", declared));
+        assert_eq!(verdict.verdict, ApplicabilityVerdict::Applicable);
+        assert_eq!(
+            verdict.basis.places,
+            [PlaceEvidence {
+                place: "CN-HN".into(),
+                covered: Some(true),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_declared_chain_is_transitive() {
+        let declared = hierarchy(&[
+            (MetaCodeDimension::Territory, "CN-HN", "CN"),
+            (MetaCodeDimension::Territory, "CN", "ASIA"),
+        ]);
+        let verdict = judge(
+            &territory_scope("ASIA"),
+            &territory_anchor("CN-HN", declared),
+        );
+        assert_eq!(verdict.verdict, ApplicabilityVerdict::Applicable);
+    }
+
+    #[test]
+    fn a_child_rule_does_not_cover_a_parent_event() {
+        let declared = hierarchy(&[(MetaCodeDimension::Territory, "CN-HN", "CN")]);
+        let verdict = judge(&territory_scope("CN-HN"), &territory_anchor("CN", declared));
+        assert_eq!(verdict.verdict, ApplicabilityVerdict::Inapplicable);
+        assert!(matches!(
+            verdict.reason().map(|reason| &reason.detail),
+            Some(ApplicabilityReasonKind::TerritoryMismatch { .. })
+        ));
+        assert_eq!(verdict.basis.places[0].covered, Some(false));
+    }
+
+    #[test]
+    fn an_undeclared_prefix_relation_stays_undecidable() {
+        let verdict = judge(
+            &territory_scope("CN"),
+            &territory_anchor("CN-HN", CodeHierarchy::default()),
+        );
+        assert_eq!(verdict.verdict, ApplicabilityVerdict::Undecidable);
+        assert!(matches!(
+            verdict.reason().map(|reason| &reason.detail),
+            Some(ApplicabilityReasonKind::IncomparableCode {
+                dimension: CodeDimension::Territory,
+                ..
+            })
+        ));
+        assert_eq!(verdict.basis.places[0].covered, None);
+    }
+
+    #[test]
+    fn jurisdiction_hierarchy_uses_the_same_relation_in_its_own_dimension() {
+        let declared = hierarchy(&[(MetaCodeDimension::Jurisdiction, "CN-HN", "CN")]);
+        let covered = judge(
+            &jurisdiction_scope("CN"),
+            &jurisdiction_anchor("CN-HN", declared.clone()),
+        );
+        assert_eq!(covered.verdict, ApplicabilityVerdict::Applicable);
+        let reverse = judge(
+            &jurisdiction_scope("CN-HN"),
+            &jurisdiction_anchor("CN", declared),
+        );
+        assert_eq!(reverse.verdict, ApplicabilityVerdict::Inapplicable);
+        assert!(matches!(
+            reverse.reason().map(|reason| &reason.detail),
+            Some(ApplicabilityReasonKind::JurisdictionMismatch { .. })
+        ));
+        // The two dimensions are independent: a territory declaration does not
+        // relate jurisdiction codes.
+        let territory_only = hierarchy(&[(MetaCodeDimension::Territory, "CN-HN", "CN")]);
+        assert_eq!(
+            judge(
+                &jurisdiction_scope("CN"),
+                &jurisdiction_anchor("CN-HN", territory_only)
+            )
+            .verdict,
+            ApplicabilityVerdict::Undecidable
+        );
+    }
+
+    #[test]
+    fn unrelated_codes_remain_a_plain_mismatch() {
+        let declared = hierarchy(&[(MetaCodeDimension::Territory, "CN-HN", "CN")]);
+        let verdict = judge(&territory_scope("CN"), &territory_anchor("JP", declared));
+        assert_eq!(verdict.verdict, ApplicabilityVerdict::Inapplicable);
     }
 }

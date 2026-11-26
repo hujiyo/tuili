@@ -25,6 +25,13 @@
 //! record must be covered by the rule's `territory`. A fact without a recorded
 //! place is missing input, never filled in from the rule itself.
 //!
+//! Event times/places may also reach a conclusion through the explicit
+//! `carry_occurrence` clause: a rule that declares it passes its premises'
+//! records to its conclusion, and the display names the step they came
+//! from (`继承自前提 …`). Propagation stops at a rule without the clause. Code
+//! hierarchies are read from explicit `territory` / `jurisdiction` `within`
+//! declarations only; a pair that merely looks parent/child stays undecidable.
+//!
 //! ## Partial coverage is never silently rounded
 //!
 //! One event time inside the range and another outside is not "pick the
@@ -61,8 +68,10 @@
 //! `:issues` with their reason; an undecidable one also says that the dispute
 //! needs an explicit reference time, which is not implemented yet.
 
+use std::collections::BTreeMap;
+
 use std_deduce_kernel::env::escape_control;
-use std_deduce_kernel::meta::Scope;
+use std_deduce_kernel::meta::{CodeDimension as MetaCodeDimension, CodeHierarchy, Scope};
 
 /// The outcome of judging one rule instance against its event time and place.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -117,6 +126,24 @@ pub struct Basis {
     pub session_as_of: Option<String>,
     /// The session jurisdiction the judgement compared, if it did.
     pub session_jurisdiction: Option<String>,
+    /// Display-only: how a declared jurisdiction hierarchy related the rule's
+    /// code to the case's code. Present only when the codes differ and a
+    /// `jurisdiction … within …` declaration made the comparison; the
+    /// certificate records only the codes themselves.
+    pub jurisdiction_hierarchy: Option<JurisdictionCoverage>,
+}
+
+/// One comparison that used a declared code hierarchy.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct JurisdictionCoverage {
+    /// The rule's `jurisdiction` code.
+    pub rule: String,
+    /// The case's `:jurisdiction` code.
+    pub case: String,
+    /// `true` when the case's code was declared to lie within the rule's; the
+    /// rule then covers the case. `false` when the rule's code is the
+    /// narrower one, so the rule covers only a subregion.
+    pub case_within_rule: bool,
 }
 
 /// One reference date and whether the rule's range covers it.
@@ -129,6 +156,11 @@ pub struct DatedEvidence {
     pub query_date_fallback: bool,
     /// `true` when the effective range contains the date.
     pub covered: bool,
+    /// Display-only: the premise conclusions whose inherited occurrence
+    /// supplied this date, when no registered fact recorded it. Empty for a
+    /// date read from an environment fact registration (or from `:asof`).
+    /// The certificate records only the date, not this provenance.
+    pub inherited_from: Vec<String>,
 }
 
 /// One event place and whether the rule's territory covers it.
@@ -139,6 +171,13 @@ pub struct PlaceEvidence {
     /// `Some(true)` covered, `Some(false)` not covered, `None` when the two
     /// codes are in a containment relation whose direction is not declared.
     pub covered: Option<bool>,
+    /// Display-only: the rule's `territory` code when a declared hierarchy
+    /// decided the comparison (`Some` only when the codes differ). The
+    /// certificate records only `place` and `covered`.
+    pub hierarchy_rule: Option<String>,
+    /// Display-only: the premise conclusions whose inherited occurrence
+    /// supplied this place, when no registered fact recorded it.
+    pub inherited_from: Vec<String>,
 }
 
 /// The concrete restriction that excluded a rule.
@@ -327,6 +366,16 @@ pub struct InstanceAnchor {
     pub event_places: Vec<String>,
     /// Whether some referenced premise fact records no `occurred_in`.
     pub missing_event_place: bool,
+    /// The declared code hierarchy the judgement reads.
+    pub hierarchy: CodeHierarchy,
+    /// Display-only provenance of the event dates that were *inherited* from a
+    /// premise conclusion rather than read from a fact registration: the date
+    /// maps to the premise conclusions (and their rules) that passed it down.
+    /// The judgement itself does not depend on this map; the certificate stores
+    /// only the dates.
+    pub inherited_dates: BTreeMap<String, Vec<String>>,
+    /// Display-only provenance of inherited event places, in the same form.
+    pub inherited_places: BTreeMap<String, Vec<String>>,
 }
 
 impl Applicability {
@@ -384,7 +433,21 @@ impl Applicability {
             }
             Applicability::Inapplicable { reason, basis } => {
                 let mut summary = format!("不适用（{}）", reason.text_zh());
-                if basis.dates.iter().any(|dated| dated.query_date_fallback) {
+                let used_fallback = basis.dates.iter().any(|dated| dated.query_date_fallback);
+                let used_hierarchy = basis.jurisdiction_hierarchy.is_some()
+                    || basis
+                        .places
+                        .iter()
+                        .any(|place| place.hierarchy_rule.is_some());
+                let used_inheritance = basis
+                    .dates
+                    .iter()
+                    .any(|dated| !dated.inherited_from.is_empty())
+                    || basis
+                        .places
+                        .iter()
+                        .any(|place| !place.inherited_from.is_empty());
+                if used_fallback || used_hierarchy || used_inheritance {
                     summary.push_str(&format!("；依据：{}", basis.text_zh()));
                 }
                 summary
@@ -397,8 +460,20 @@ impl Applicability {
                     format!("适用性未判定（{}；已记录：{evidence}）", missing.text_zh())
                 }
             }
-            Applicability::Undecidable { reason, .. } => {
-                format!("适用性无法判定（{}）", reason.text_zh())
+            Applicability::Undecidable { reason, basis } => {
+                let mut summary = format!("适用性无法判定（{}）", reason.text_zh());
+                if basis
+                    .dates
+                    .iter()
+                    .any(|dated| !dated.inherited_from.is_empty())
+                    || basis.places.iter().any(|place| {
+                        !place.inherited_from.is_empty() || place.hierarchy_rule.is_some()
+                    })
+                    || basis.jurisdiction_hierarchy.is_some()
+                {
+                    summary.push_str(&format!("；依据：{}", basis.text_zh()));
+                }
+                summary
             }
         }
     }
@@ -409,7 +484,10 @@ impl Basis {
     ///
     /// A query date that stood in for an event time says so explicitly
     /// (`以查询基准日 … 代替行为时`); it is never presented as a fact's
-    /// occurrence.
+    /// occurrence. A date that was inherited from a premise conclusion says so
+    /// too (`继承自前提 …`), so a reader does not mistake it for a fact's own
+    /// `occurred_at`. A code comparison decided by a declared hierarchy names
+    /// the chain it used (`依据层级 CN-HN ⊂ CN 落入规则范围`).
     pub fn text_zh(&self) -> String {
         let mut parts = Vec::new();
         if !self.dates.is_empty() {
@@ -426,8 +504,18 @@ impl Basis {
                         escape_control(&dated.date)
                     ));
                 } else {
+                    let mut detail = coverage.to_owned();
+                    if !dated.inherited_from.is_empty() {
+                        detail.push_str("；继承自");
+                        let sources: Vec<String> = dated
+                            .inherited_from
+                            .iter()
+                            .map(|source| escape_control(source))
+                            .collect();
+                        detail.push_str(&sources.join("、"));
+                    }
                     items.push(format!(
-                        "事件时间 {}（{coverage}）",
+                        "事件时间 {}（{detail}）",
                         escape_control(&dated.date)
                     ));
                 }
@@ -437,14 +525,51 @@ impl Basis {
         if !self.places.is_empty() {
             let mut items = Vec::new();
             for place in &self.places {
-                let coverage = match place.covered {
-                    Some(true) => "覆盖",
-                    Some(false) => "不覆盖",
-                    None => "层级未声明",
+                let mut coverage = match (place.covered, place.hierarchy_rule.as_deref()) {
+                    (Some(true), Some(rule)) => format!(
+                        "覆盖：依据层级 {} ⊂ {} 落入规则范围",
+                        escape_control(&place.place),
+                        escape_control(rule)
+                    ),
+                    (Some(false), Some(rule)) => format!(
+                        "不覆盖：规则地域 {} 是事件地点 {} 的子区域，只覆盖子区域",
+                        escape_control(rule),
+                        escape_control(&place.place)
+                    ),
+                    (Some(true), None) => "覆盖".to_owned(),
+                    (Some(false), None) => "不覆盖".to_owned(),
+                    (None, _) => "层级未声明".to_owned(),
                 };
+                if !place.inherited_from.is_empty() {
+                    let sources: Vec<String> = place
+                        .inherited_from
+                        .iter()
+                        .map(|source| escape_control(source))
+                        .collect();
+                    coverage.push_str(&format!("；继承自{}", sources.join("、")));
+                }
                 items.push(format!("{}（{coverage}）", escape_control(&place.place)));
             }
             parts.push(format!("事件地点 {}", items.join("、")));
+        }
+        if let Some(coverage) = &self.jurisdiction_hierarchy {
+            let detail = if coverage.case_within_rule {
+                format!(
+                    "依据层级 {} ⊂ {} 落入规则范围",
+                    escape_control(&coverage.case),
+                    escape_control(&coverage.rule)
+                )
+            } else {
+                format!(
+                    "规则管辖 {} 是案件管辖 {} 的子区域，只覆盖子区域",
+                    escape_control(&coverage.rule),
+                    escape_control(&coverage.case)
+                )
+            };
+            parts.push(format!(
+                "案件管辖 {}（{detail}）",
+                escape_control(&coverage.case)
+            ));
         }
         parts.join("；")
     }
@@ -578,13 +703,27 @@ pub fn judge(scope: &Scope, case: &InstanceAnchor) -> Applicability {
         missing_event_date: case.missing_event_date,
         event_places: case.event_places.clone(),
         missing_event_place: case.missing_event_place,
+        hierarchy: case.hierarchy.clone(),
     };
-    from_certificate(std_deduce_cert::judge_applicability(scope, &anchor))
+    from_certificate(
+        std_deduce_cert::judge_applicability(scope, &anchor),
+        scope,
+        case,
+    )
 }
 
 /// Convert the certificate-side judgement into the display type.
-fn from_certificate(value: std_deduce_cert::RuleApplicability) -> Applicability {
-    let basis = basis_from_certificate(&value.basis);
+///
+/// The display adds only provenance the certificate does not carry: which
+/// premise conclusion supplied an inherited event date/place, and which declared
+/// hierarchy decided a code comparison. The verdict and the recorded evidence
+/// are the certificate's own values.
+fn from_certificate(
+    value: std_deduce_cert::RuleApplicability,
+    scope: &Scope,
+    case: &InstanceAnchor,
+) -> Applicability {
+    let basis = basis_from_certificate(&value.basis, scope, case);
     match value.verdict {
         std_deduce_cert::ApplicabilityVerdict::Applicable => Applicability::Applicable { basis },
         std_deduce_cert::ApplicabilityVerdict::Inapplicable => Applicability::Inapplicable {
@@ -603,7 +742,70 @@ fn from_certificate(value: std_deduce_cert::RuleApplicability) -> Applicability 
 }
 
 /// The certificate-side basis in the display form.
-fn basis_from_certificate(basis: &std_deduce_cert::ApplicabilityBasis) -> Basis {
+fn basis_from_certificate(
+    basis: &std_deduce_cert::ApplicabilityBasis,
+    scope: &Scope,
+    case: &InstanceAnchor,
+) -> Basis {
+    let places: Vec<PlaceEvidence> = basis
+        .places
+        .iter()
+        .map(|place| {
+            let hierarchy_rule = match (place.covered, scope.territory.as_deref()) {
+                // A differing code that is covered can only be a declared
+                // `place within rule` chain: equality is the `None` branch.
+                (Some(true), Some(rule)) if rule != place.place => Some(rule.to_owned()),
+                // A differing code that is *not* covered used a declared
+                // hierarchy only when the rule is the narrower code; a plainly
+                // disjoint code is not a hierarchy answer.
+                (Some(false), Some(rule))
+                    if rule != place.place
+                        && case.hierarchy.contains(
+                            MetaCodeDimension::Territory,
+                            rule,
+                            &place.place,
+                        ) =>
+                {
+                    Some(rule.to_owned())
+                }
+                _ => None,
+            };
+            PlaceEvidence {
+                place: place.place.clone(),
+                covered: place.covered,
+                hierarchy_rule,
+                inherited_from: case
+                    .inherited_places
+                    .get(&place.place)
+                    .cloned()
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+    let jurisdiction_hierarchy = match (
+        scope.jurisdiction.as_deref(),
+        basis.session.jurisdiction.as_ref(),
+    ) {
+        (Some(rule), Some(case_code)) if rule != case_code => {
+            let case_within_rule =
+                case.hierarchy
+                    .contains(MetaCodeDimension::Jurisdiction, case_code, rule);
+            if case_within_rule
+                || case
+                    .hierarchy
+                    .contains(MetaCodeDimension::Jurisdiction, rule, case_code)
+            {
+                Some(JurisdictionCoverage {
+                    rule: rule.to_owned(),
+                    case: case_code.clone(),
+                    case_within_rule,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     Basis {
         dates: basis
             .dates
@@ -612,20 +814,22 @@ fn basis_from_certificate(basis: &std_deduce_cert::ApplicabilityBasis) -> Basis 
                 date: dated.date.clone(),
                 query_date_fallback: dated.query_date_fallback,
                 covered: dated.covered,
+                inherited_from: if dated.query_date_fallback {
+                    Vec::new()
+                } else {
+                    case.inherited_dates
+                        .get(&dated.date)
+                        .cloned()
+                        .unwrap_or_default()
+                },
             })
             .collect(),
-        places: basis
-            .places
-            .iter()
-            .map(|place| PlaceEvidence {
-                place: place.place.clone(),
-                covered: place.covered,
-            })
-            .collect(),
+        places,
         missing_event_date: basis.missing_event_date,
         missing_event_place: basis.missing_event_place,
         session_as_of: basis.session.as_of.as_ref().cloned(),
         session_jurisdiction: basis.session.jurisdiction.as_ref().cloned(),
+        jurisdiction_hierarchy,
     }
 }
 
@@ -1022,6 +1226,7 @@ mod tests {
             missing_event_date: false,
             event_places: places.iter().map(|place| (*place).to_owned()).collect(),
             missing_event_place: false,
+            ..InstanceAnchor::default()
         }
     }
 
@@ -1291,6 +1496,8 @@ mod tests {
             [PlaceEvidence {
                 place: "CN-HN".into(),
                 covered: Some(true),
+                hierarchy_rule: None,
+                inherited_from: Vec::new(),
             }]
         );
         assert!(matches!(
@@ -1425,5 +1632,86 @@ mod tests {
             basis: Basis::default(),
         }
         .allows_firing());
+    }
+
+    fn declared_within(child: &str, parent: &str, dimension: &str) -> CodeHierarchy {
+        let dimension = if dimension == "jurisdiction" {
+            MetaCodeDimension::Jurisdiction
+        } else {
+            MetaCodeDimension::Territory
+        };
+        CodeHierarchy::new(vec![(dimension, child.to_owned(), parent.to_owned())])
+    }
+
+    #[test]
+    fn a_declared_hierarchy_is_named_in_the_basis_text() {
+        let s = scope(None, None, None, Some("CN"));
+        let mut case = anchor(None, None, &[], &["CN-HN"]);
+        case.hierarchy = declared_within("CN-HN", "CN", "territory");
+        let verdict = judge(&s, &case);
+        assert!(verdict.is_applicable());
+        assert_eq!(
+            verdict.basis().places,
+            [PlaceEvidence {
+                place: "CN-HN".into(),
+                covered: Some(true),
+                hierarchy_rule: Some("CN".into()),
+                inherited_from: Vec::new(),
+            }]
+        );
+        let summary = verdict.summary_zh();
+        assert!(
+            summary.contains("依据层级 CN-HN ⊂ CN 落入规则范围"),
+            "the basis must name the declared chain: {summary}"
+        );
+    }
+
+    #[test]
+    fn the_reverse_direction_says_the_rule_covers_only_a_subregion() {
+        let s = scope(None, None, None, Some("CN-HN"));
+        let mut case = anchor(None, None, &[], &["CN"]);
+        case.hierarchy = declared_within("CN-HN", "CN", "territory");
+        let verdict = judge(&s, &case);
+        let Applicability::Inapplicable { .. } = verdict else {
+            panic!("expected inapplicable, got {verdict:?}");
+        };
+        let summary = verdict.summary_zh();
+        assert!(
+            summary.contains("规则地域 CN-HN 是事件地点 CN 的子区域"),
+            "the basis must say the rule only covers a subregion: {summary}"
+        );
+    }
+
+    #[test]
+    fn inherited_event_dates_name_the_premise_step_they_came_from() {
+        let s = scope(Some("2018-01-01"), Some("2020-01-01"), None, None);
+        let mut case = anchor(None, None, &["2019-05-01"], &[]);
+        case.inherited_dates.insert(
+            "2019-05-01".into(),
+            vec!["前提「义务 甲」（规则 ⟨规则A⟩）".into()],
+        );
+        let verdict = judge(&s, &case);
+        let summary = verdict.summary_zh();
+        assert!(
+            summary.contains("继承自前提「义务 甲」（规则 ⟨规则A⟩）"),
+            "an inherited date must not look like a fact's own occurrence: {summary}"
+        );
+        assert!(
+            verdict.basis().dates[0].inherited_from.len() == 1,
+            "the display records the inheritance source"
+        );
+    }
+
+    #[test]
+    fn jurisdiction_hierarchy_is_named_in_the_basis_text() {
+        let s = scope(None, None, Some("CN"), None);
+        let mut case = anchor(None, Some("CN-HN"), &[], &[]);
+        case.hierarchy = declared_within("CN-HN", "CN", "jurisdiction");
+        let verdict = judge(&s, &case);
+        let summary = verdict.summary_zh();
+        assert!(
+            summary.contains("案件管辖 CN-HN（依据层级 CN-HN ⊂ CN 落入规则范围）"),
+            "the jurisdiction basis must name the chain: {summary}"
+        );
     }
 }

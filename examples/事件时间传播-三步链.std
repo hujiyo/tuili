@@ -1,0 +1,70 @@
+-- 事件时间沿结论传播：`carry_occurrence` 让一条规则的结论继承它引用的
+-- 前提事实的事件时间/地点（并集）。这是显式声明，默认关闭；不写该子句的
+-- 结论不继承任何事件时间，下游规则仍按原样落到 `:asof` 兜底或“未判定”。
+--
+-- 运行：
+--   :load examples/事件时间传播-三步链.std
+--   :why 责任 甲
+--   :applicability 责任 甲
+--   :cert 责任 甲
+--
+-- 三步链：行为 → 义务 → 中间 → 责任。
+-- 只有最底层的「行为」事实记录了 occurred_at 2019-05-01；规则 A、B、C 都写
+-- 了 `carry_occurrence`，所以「义务」继承 2019，「中间」从「义务」继承 2019，
+-- 「责任」从「中间」继承 2019。规则 C 的生效区间是 2018–2020，因此 C 按
+-- 2019 判定为“适用”，而不是按查询基准日或“未判定”。
+--
+-- 依据文本会写明继承来源：`事件时间 2019-05-01（区间内；继承自前提「中间 甲」
+-- （规则 ⟨规则B⟩））`，读者不会把继承来的事件时间误当成立法事实自己的发生时间。
+--
+-- 传递边界：继承只沿 `carry_occurrence` 链传播，遇到没有声明该子句的规则就
+-- 停止；同一结论由多条见证推导时取所有见证的并集（见下一段链式示例的说明）。
+--
+-- 缺口候选：前提尚未满足时没有事件可以继承，仍保持“未判定”，系统不会凭空造
+-- 一个发生时间。
+
+sort 人
+
+pred 行为 : 人 → Prop
+pred 义务 : 人 → Prop
+pred 中间 : 人 → Prop
+pred 责任 : 人 → Prop
+
+obj 甲 : 人
+
+-- 唯一记录事件时间的事实：2019-05-01。
+axiom 甲的行为 : 行为 甲
+  occurred_at 2019-05-01
+  occurred_in CN-HN
+  source text "示例卷宗" locator "行为（甲）" version "2024"
+
+-- 第一步：行为 → 义务，声明 carry_occurrence，结论「义务 甲」继承 2019。
+rule 规则A :
+  params p : 人
+  premise 行为 p
+  conclude 义务 p
+  carry_occurrence
+  effective 2018-01-01
+  repealed 2020-01-01
+  source text "示例法" locator "规则A" version "2024"
+
+-- 第二步：义务 → 中间，继续声明 carry_occurrence，2019 继续向下传播。
+rule 规则B :
+  params p : 人
+  premise 义务 p
+  conclude 中间 p
+  carry_occurrence
+  effective 2018-01-01
+  repealed 2020-01-01
+  source text "示例法" locator "规则B" version "2024"
+
+-- 第三步：中间 → 责任，同样声明 carry_occurrence。规则 C 没有自己的
+-- occurred_at，它的适用性完全由继承来的 2019 判定。
+rule 规则C :
+  params p : 人
+  premise 中间 p
+  conclude 责任 p
+  carry_occurrence
+  effective 2018-01-01
+  repealed 2020-01-01
+  source text "示例法" locator "规则C" version "2024"

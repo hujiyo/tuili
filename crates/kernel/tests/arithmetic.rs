@@ -302,6 +302,7 @@ fn a_comparison_cannot_be_a_rule_premise_or_blocker() {
         revision: None,
         sources: Vec::new(),
         declared_in: None,
+        carry_occurrence: false,
     };
     let comparison = op(builtin::LESS, vec![Expr::Var(0), num(5000)]);
     let error = rule_with(vec![(None, comparison.clone())], Vec::new())
