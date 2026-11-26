@@ -190,6 +190,7 @@ fn an_unencodable_expression_is_a_clear_error() {
             note: None,
         }],
         root: Some(0),
+        alternatives: Vec::new(),
         conflicts: Vec::new(),
         interpretations: Vec::new(),
     };
@@ -591,4 +592,55 @@ fn a_claim_against_a_rule_carries_its_identity_into_the_certificate() {
         let report = cert::check(&lib.env, &document).expect("the unresolved claim checks");
         assert!(!report.root_proved);
     }
+}
+
+const TWO_RULE_CASE: &str = r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+obj 甲 : 人
+axiom 事实 : P 甲
+  source text "测试" locator "1"
+rule 规则A :
+  params x : 人
+  premise P x
+  conclude Q x
+  source text "测试" locator "A"
+rule 规则B :
+  params x : 人
+  premise P x
+  conclude Q x
+  source text "测试" locator "B"
+"#;
+
+/// Two rules derive the same proposition: the derivation keeps both nodes,
+/// records them in rule-name order, and the certificate checker accepts both.
+#[test]
+fn every_independent_witness_of_a_conclusion_is_kept() {
+    let lib = load_sources("two-rule-cert", &[("case.std", TWO_RULE_CASE)]);
+    let goal = Expr::apps(Expr::constant("Q"), [Expr::constant("甲")]);
+    let (d, order) = derive(&lib, &goal);
+    let group = d
+        .alternatives
+        .iter()
+        .find(|group| group.proposition == goal)
+        .expect("the derived conclusion has a witness group");
+    assert_eq!(group.witnesses.len(), 2, "both derivations are kept");
+    assert!(!group.truncated);
+    let rules: Vec<String> = group
+        .witnesses
+        .iter()
+        .map(|id| match &d.nodes[*id] {
+            ReasonNode::RuleApplication { rule, .. } => rule.to_string(),
+            other => panic!("a witness is not a rule step: {other:?}"),
+        })
+        .collect();
+    assert_eq!(rules, ["规则A", "规则B"], "witnesses sort by rule name");
+
+    let document = certificate(&lib.env, &d, &order).expect("the two-witness derivation converts");
+    let document = document.with_environment(cert::EnvironmentIdentity::none());
+    assert_eq!(document.alternatives.len(), 1);
+    assert_eq!(document.alternatives[0].witnesses.len(), 2);
+    let report = cert::check(&lib.env, &document).expect("both witnesses check");
+    assert!(report.root_proved);
 }

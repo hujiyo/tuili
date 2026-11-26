@@ -4,7 +4,7 @@
 //! practising lawyer can read. It is a **derived view**, not a new inference
 //! and not legal advice. Every sentence is read from one of four inputs:
 //!
-//! * the certificate v8 the query path produced (`:why` / `:cert` build the
+//! * the certificate v9 the query path produced (`:why` / `:cert` build the
 //!   same certificate),
 //! * the reasoner's gap trees (the root's tree and the `:issues` scan),
 //! * the rules' declared burden of proof (`RulePleading`, the same map
@@ -335,6 +335,39 @@ fn write_conclusion_section(
     out.push_str(&format!(
         "**根是否可达（即本次推导是否证明了结论）：**{root_state}\n"
     ));
+    // The certificate's witness table is the only source for this line: a
+    // second, independent argument is reported exactly as `:cert` records it.
+    if let Some(group) = certificate
+        .root
+        .and_then(|root| certificate.nodes.get(root))
+        .and_then(|node| match node {
+            Node::RuleApplication { conclusion, .. }
+            | Node::InterpretationApplication { conclusion, .. }
+            | Node::AxiomInstance { conclusion, .. } => Some(conclusion),
+            Node::Assumption { assumption } => certificate
+                .assumptions
+                .get(*assumption)
+                .map(|entry| &entry.proposition),
+            Node::Gap { .. } => None,
+        })
+        .and_then(|proposition| {
+            certificate
+                .alternatives
+                .iter()
+                .find(|group| &group.proposition == proposition)
+        })
+    {
+        if group.witnesses.len() > 1 {
+            out.push_str(&format!(
+                "**独立推导：**已记录 {} 条见证（另有 {} 条已记录）。\n",
+                group.witnesses.len(),
+                group.witnesses.len() - 1
+            ));
+        }
+        if group.truncated {
+            out.push_str("**见证截断：**该结论的见证已达到记录上限，还有更多推导未列出。\n");
+        }
+    }
     out.push_str("信任标签（模型内确定性，不表示法律上正确）：\n");
     for label in ALL_LABELS {
         let name = label.name_zh();

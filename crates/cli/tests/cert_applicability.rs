@@ -1,4 +1,4 @@
-//! End-to-end tests for certificate v8 applicability: the generated record,
+//! End-to-end tests for certificate v9 applicability: the generated record,
 //! the independent recomputation of `:verify-cert`, and hand-edited
 //! counterexamples that must be rejected.
 //!
@@ -816,6 +816,7 @@ rule 后规 :
             rule_node("后规", atom("结论"), vec![1]),
         ],
         root: Some(2),
+        alternatives: Vec::new(),
         conflicts: Vec::new(),
         open_obligations: Vec::new(),
         metadata: Metadata::default(),

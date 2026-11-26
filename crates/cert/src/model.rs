@@ -37,6 +37,18 @@ pub const MAX_CERT_NODES: usize = 10_000;
 /// The largest number of assumptions in one certificate.
 pub const MAX_CERT_ASSUMPTIONS: usize = 10_000;
 
+/// The largest number of independent witnesses recorded for one conclusion.
+///
+/// A conclusion can be derived by several rules (or by a rule instance with
+/// different bindings). The reasoner keeps every distinct witness up to this
+/// fixed bound and marks truncation beyond it; the certificate format cannot
+/// carry more than this per conclusion. The bound is intentionally a constant,
+/// not a caller option: the checker's auditable boundary must not drift with
+/// the caller. It keeps the proof graph finite and readable: a legal rule chain
+/// rarely has more than a handful of independent arguments, while a
+/// pathological rule set must not grow without limit.
+pub const MAX_CERT_WITNESSES_PER_CONCLUSION: usize = 8;
+
 /// The largest number of expression nodes in one certificate term.
 ///
 /// One proposition, binding value, gap candidate or conflict side may not
@@ -118,8 +130,8 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Explicit<T> {
 ///
 /// The JSON object has exactly the fields below, in this order:
 /// `format_version`, `environment`, `assumptions`, `interpretations`, `nodes`,
-/// `root`, `conflicts`, `open_obligations`, `metadata`. Unknown fields are
-/// rejected.
+/// `root`, `alternatives`, `conflicts`, `open_obligations`, `metadata`. Unknown
+/// fields are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Certificate {
@@ -144,6 +156,13 @@ pub struct Certificate {
     /// The node that proves the requested conclusion. `null` means the
     /// certificate has no single root (for example a gap-only certificate).
     pub root: Option<NodeId>,
+    /// Every conclusion the derivation established by rules or universal
+    /// elimination, with all of its independent witness nodes. The main proof
+    /// tree is still followed through [`Certificate::root`]; this table says
+    /// which other nodes prove the same proposition. Entries are ordered by
+    /// proposition key and witnesses by rule name and binding structure, so
+    /// repeated generation of the same case is byte-identical.
+    pub alternatives: Vec<Alternative>,
     /// Conflicts found while deriving, including defeated ones.
     #[serde(default)]
     pub conflicts: Vec<Conflict>,
@@ -267,6 +286,23 @@ impl Certificate {
                 ));
             }
         }
+        if self.alternatives.len() > MAX_CERT_NODES {
+            return Err(format!(
+                "证书结论见证表数量超过上限 {MAX_CERT_NODES}：实际 {} 条",
+                self.alternatives.len()
+            ));
+        }
+        for (index, alternative) in self.alternatives.iter().enumerate() {
+            let place = format!("第 {} 条结论见证", index + 1);
+            check_expression(&alternative.proposition, &format!("{place}的命题"))?;
+            if alternative.witnesses.len() > MAX_CERT_WITNESSES_PER_CONCLUSION {
+                return Err(format!(
+                    "{place}的见证数量超过每个结论 {MAX_CERT_WITNESSES_PER_CONCLUSION} 条上限：\
+                     实际 {} 条",
+                    alternative.witnesses.len()
+                ));
+            }
+        }
         for (index, node) in self.nodes.iter().enumerate() {
             let place = format!("第 {} 个证书节点", index + 1);
             match node {
@@ -379,6 +415,41 @@ impl Certificate {
         }
         Ok(())
     }
+}
+
+/// Every independent witness of one derived conclusion.
+///
+/// The conclusion is a proposition, the witnesses are nodes that each derive
+/// it. Two witnesses are independent when they are not the same rule instance:
+/// the same rule with the same binding values is one witness, however many
+/// premise nodes could have been cited for it; a different rule, or the same
+/// rule with different binding values, is another. The main proof tree still
+/// follows [`Certificate::root`]; this group records the arguments the tree
+/// does not show, so a reader can see that a conclusion has more than one
+/// reason and deleting the shown path does not remove the conclusion itself.
+///
+/// A universal elimination is an independent step too: it is recorded as an
+/// `axiom_instance` witness. An interpretation application is not a witness:
+/// it is a one-step licence and only applies when its conclusion was not
+/// already established, so it never competes with a rule or a universal
+/// instance for the same conclusion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Alternative {
+    /// The conclusion this group is about.
+    pub proposition: CertExpr,
+    /// The nodes that derive it, ordered by the deriving rule's name and the
+    /// binding structure of the instance (a universal instance sorts by axiom
+    /// name and binding structure after the rule witnesses). The order is the
+    /// same on every run of the same case.
+    pub witnesses: Vec<NodeId>,
+    /// Whether more independent witnesses exist than the record can carry.
+    /// A truncated group has exactly [`MAX_CERT_WITNESSES_PER_CONCLUSION`]
+    /// witnesses; the flag says that at least one more argument exists, never
+    /// a silent cut. The exact number of omitted arguments is not recorded:
+    /// the checker does not re-run the reasoner, so an omitted count could not
+    /// be verified and is deliberately left out.
+    pub truncated: bool,
 }
 
 /// Who asserts an assumption's proposition.

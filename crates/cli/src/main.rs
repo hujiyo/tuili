@@ -53,7 +53,7 @@
 //! while a rule judged *unchecked* (no evidence at all) keeps firing and every
 //! conclusion line it produces carries `适用性未判定（…）`. The verdict and
 //! the event times/places it relied on are printed on the conclusion line; a
-//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v8
+//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v9
 //! records the verdict, its basis and its reason on every rule application and
 //! gap candidate, and `:verify-cert` recomputes it from the environment
 //! declaration and the certificate's own inputs.
@@ -98,7 +98,7 @@
 //! without affecting explicit imports; `--profile` selects a profile by name or
 //! alias. The preload lines are printed only after the whole load commits, so a
 //! failed file never claims that the environment loaded. The profile and the
-//! packs it loaded are session objects, but a certificate v8 records the
+//! packs it loaded are session objects, but a certificate v9 records the
 //! environment identity it was produced in: the profile, the as-of date, the
 //! jurisdiction code and the loaded packs/corpora. `:cert` stamps it before
 //! writing, and `:verify-cert` compares it with the current environment before
@@ -120,7 +120,7 @@
 //! be instantiated with closed values: a queried goal that no rule or fact
 //! proves demands one instance, and a rule premise that is already closed under
 //! the bindings collected so far demands one during saturation. Every instance
-//! is a derived `axiom_instance` step in certificate v8, never an assumption;
+//! is a derived `axiom_instance` step in certificate v9, never an assumption;
 //! `:why` prints the universal fact, its identity and the binding, and
 //! `:verify-cert` recomputes the conclusion from the declaration. `:gap` lists
 //! the universal facts that unify with a goal, with the values an instance
@@ -338,8 +338,17 @@
 //! certificate does not change the root's label. `已验证` says only that the
 //! certificate proves the root under strict facts and leaves no root-relevant
 //! obligation — it is not a claim that the conclusion is legally correct.
-//! `:cert` JSON is unchanged: the labels are not a certificate field and the
-//! format stays v8.
+//! `:cert` JSON has no label field; the five labels are a derived view of the
+//! recorded proof, and the v9 witness table does not change them.
+//!
+//! A derived conclusion can have several independent witnesses. `:why` still
+//! expands one main tree, then prints `另有 N 条独立推导。` when the root's
+//! witness group has more than one node, and the truncation line when the
+//! table stopped at the per-conclusion bound. Conflict sides print the same
+//! note from their own certificate, and a side supported by several rules
+//! names the first rule as the main witness and the others as further rule
+//! witnesses. A single-witness tree prints neither line, so its `:why` output
+//! is unchanged.
 //!
 //! `:review` uses the same certificate and the same two proof layers as
 //! `:why`, then renders a Markdown review report from the certificate, the
@@ -2380,7 +2389,7 @@ impl Session {
         // annotation is rendered from the derivation's judgement.
         let annotations = derivation_annotations(&d);
         // The burden/standard declarations the narrative prints come from the
-        // environment, not from the certificate: certificate v8 does not record
+        // environment, not from the certificate: certificate v9 does not record
         // them. The map is built once by the reasoner from the same rule
         // declarations the gap tree reads, so `:explain` and `:gap` report the
         // same values.
@@ -2391,6 +2400,13 @@ impl Session {
             render_with_annotations(&certificate, &annotations)?
         };
         writeln!(out, "{rendered}").ok();
+        // A conclusion with more than one independent argument still expands
+        // one main tree. The count of the others comes from the same
+        // certificate the tree is rendered from; a single-witness tree prints
+        // nothing here.
+        if cmd == "why" {
+            write_alternative_note(out, &certificate);
+        }
         // A gap root's candidate lines cannot carry a verdict through the
         // certificate, so its candidates are listed here with their state.
         if let Some(root) = d.root {
@@ -5449,6 +5465,7 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
             // evidence inline, so a conflict side is judged exactly as a
             // normal derivation.
             writeln!(out, "{rendered}").ok();
+            write_alternative_note(out, &certificate);
         }
         Err(error) => {
             writeln!(out, "  （该推导的证书无法渲染：{error}）").ok();
@@ -5482,6 +5499,59 @@ fn show_derivation(out: &mut impl Write, r: &Reasoner, prop: &Expr) {
             )
             .ok();
         }
+    }
+}
+
+/// The proposition a certificate node proves, if it proves one.
+///
+/// The table's own node type is the certificate's, not the reasoner's: a
+/// rendered derivation and an exported certificate use the same API.
+fn certificate_node_prop<'a>(
+    certificate: &'a Certificate,
+    node: &'a CertNode,
+) -> Option<&'a std_deduce_cert::CertExpr> {
+    match node {
+        CertNode::Assumption { assumption } => certificate
+            .assumptions
+            .get(*assumption)
+            .map(|entry| &entry.proposition),
+        CertNode::RuleApplication { conclusion, .. }
+        | CertNode::InterpretationApplication { conclusion, .. }
+        | CertNode::AxiomInstance { conclusion, .. } => Some(conclusion),
+        CertNode::Gap { .. } => None,
+    }
+}
+
+/// The number of independent witnesses the certificate records for its root.
+///
+/// The note is shown only when a conclusion has a second argument (or when the
+/// table says more arguments exist than the bound can list); a single-witness
+/// certificate prints nothing, so its `:why` output stays byte-identical.
+fn alternative_note(certificate: &Certificate) -> Option<(usize, bool)> {
+    let root = certificate.root?;
+    let proposition = certificate_node_prop(certificate, certificate.nodes.get(root)?)?;
+    let group = certificate
+        .alternatives
+        .iter()
+        .find(|group| &group.proposition == proposition)?;
+    Some((group.witnesses.len(), group.truncated))
+}
+
+/// Print how many independent arguments besides the shown tree exist.
+///
+/// The formal tree still expands one main path; this line says the conclusion
+/// does not rest on that path alone. A truncated table says so explicitly
+/// instead of pretending the listed count is the whole set.
+fn write_alternative_note(out: &mut impl Write, certificate: &Certificate) {
+    let Some((witnesses, truncated)) = alternative_note(certificate) else {
+        return;
+    };
+    if witnesses <= 1 && !truncated {
+        return;
+    }
+    writeln!(out, "  另有 {} 条独立推导。", witnesses.saturating_sub(1)).ok();
+    if truncated {
+        writeln!(out, "  该结论的见证已截断：还有更多推导未列出。").ok();
     }
 }
 
@@ -6011,13 +6081,23 @@ fn describe(p: &Provenance, identity: Option<FactIdentity>) -> String {
             None => "事实（身份未记录）".into(),
         },
         Provenance::Rules(rs) if rs.is_empty() => "已无可重建的规则实例".into(),
-        Provenance::Rules(rs) => format!(
-            "规则 {}",
-            rs.iter()
-                .map(|r| format!("⟨{r}⟩"))
-                .collect::<Vec<_>>()
-                .join("、")
-        ),
+        Provenance::Rules(rs) => {
+            let mut text = format!("规则 ⟨{}⟩", rs[0]);
+            if rs.len() > 1 {
+                // Name the other rules as additional arguments, not as a
+                // replacement of the first: both derivations exist.
+                text.push_str(&format!(
+                    "，另有 {} 条规则见证：{}",
+                    rs.len() - 1,
+                    rs[1..]
+                        .iter()
+                        .map(|r| format!("⟨{r}⟩"))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                ));
+            }
+            text
+        }
         Provenance::Axiom(axiom) => format!("公理实例 ⟨{axiom}⟩"),
         Provenance::Interpretation(interpretation) => {
             format!("解释⟨{}⟩", escape_control(interpretation))

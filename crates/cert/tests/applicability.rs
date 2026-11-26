@@ -208,6 +208,7 @@ fn certificate(
         interpretations: Vec::new(),
         nodes,
         root,
+        alternatives: Vec::new(),
         conflicts: Vec::new(),
         open_obligations: Vec::new(),
         metadata: Metadata::default(),

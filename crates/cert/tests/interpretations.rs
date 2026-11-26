@@ -117,6 +117,7 @@ fn certificate(lib: &Library) -> Certificate {
             },
         ],
         root: Some(1),
+        alternatives: Vec::new(),
         conflicts: Vec::new(),
         open_obligations: Vec::new(),
         metadata: Metadata::default(),

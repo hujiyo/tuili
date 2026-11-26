@@ -130,7 +130,7 @@
 //! function over the rule's [`Scope`](std_deduce_kernel::meta::Scope) and
 //! the instance's anchor (the premise facts' occurrence records plus the
 //! session fallback values). The reasoner only supplies those records; the
-//! CLI only renders the recorded verdict. Certificate v8 records the verdict,
+//! CLI only renders the recorded verdict. Certificate v9 records the verdict,
 //! basis, declared scope and reason on every rule application and gap
 //! candidate, and `:verify-cert` recomputes them independently.
 //!
@@ -146,6 +146,28 @@
 //! certificate records an `open_concept` obligation naming the concepts and
 //! the nodes that state them. An open concept is never exported as an
 //! unconditional conclusion.
+//!
+//! Every conclusion derived by rules or universal elimination keeps all of its
+//! independent witnesses. A witness is one rule instance (rule name plus
+//! binding values) or one universal instance (axiom name plus binding values);
+//! the same argument reached through different premise nodes is still one
+//! witness, and premise-level alternatives are recorded under the premise's
+//! own conclusion, never multiplied into the parent's witness list. Each
+//! conclusion keeps at most
+//! [`std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION`] witnesses; beyond it
+//! the group is marked truncated. Rules are enumerated once into a
+//! conclusion-keyed witness index (not once per pending conclusion), so a case
+//! with many objects and many rules does not become quadratic. The proof graph
+//! is built incrementally: a conclusion gets its first node as soon as one
+//! witness is ready, and the remaining witnesses join in later rounds. If some
+//! witnesses exist but none can make progress, the construction reports the
+//! dependency cycle instead of silently dropping the extra arguments.
+//! Witnesses sort by rule name and binding
+//! structure (universal instances after rules); the first in that order is the
+//! main path shown by `root`, which is deterministic but carries no claim of
+//! being the most credible argument. Repeated generation of the same case is
+//! byte-identical. Keeping them changes neither the fixed point nor conflict
+//! adjudication: the same rules win and lose, but both paths stay visible.
 //!
 //! ## Open concepts are not silently booleanised
 //!
@@ -321,9 +343,29 @@ pub struct Derivation {
     pub nodes: Vec<Node>,
     pub root: Option<usize>,
     pub conflicts: Vec<Conflict>,
+    /// Every derived conclusion with all of its independent witness nodes, in
+    /// proposition-key order. The main proof tree follows `root`; this table
+    /// records the other arguments that establish the same conclusions.
+    pub alternatives: Vec<WitnessGroup>,
     /// The interpretations enabled for this derivation, sorted by id. A
     /// certificate lists only the entries its nodes or conflicts cite.
     pub interpretations: Vec<InterpretationRecord>,
+}
+
+/// One derived conclusion and the nodes that each independently derive it.
+///
+/// The witness nodes are a subset of [`Derivation::nodes`]. A node that is
+/// already a premise of the main tree still counts as a witness; the table is
+/// what makes a second, third or later argument visible instead of silently
+/// dropped by the first one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WitnessGroup {
+    pub proposition: Expr,
+    /// Witness node ids, ordered by the deriving rule's name and the binding
+    /// structure of the instance, with universal instances after the rules.
+    pub witnesses: Vec<usize>,
+    /// More distinct witnesses exist than the per-conclusion bound allows.
+    pub truncated: bool,
 }
 
 /// One enabled interpretation declaration, as the derivation records it.
@@ -608,6 +650,139 @@ impl Support {
     }
 }
 
+/// The witnesses recorded for one conclusion while its proof graph is being
+/// built. A conclusion may get its first node before every witness is ready:
+/// witnesses whose premises depend on another pending conclusion are appended
+/// in a later round. Entries keep their structural identity so the final order
+/// is the stable witness order, not the round that happened to construct them.
+struct WitnessBuild {
+    proposition: Expr,
+    main_identity: (u8, String, String),
+    entries: Vec<((u8, String, String), usize)>,
+    /// Distinct witnesses the index found for this conclusion, before the
+    /// per-conclusion bound. Truncation is `total > entries.len()`.
+    total: usize,
+}
+
+/// The capacity error for a proof graph that would exceed the certificate's
+/// node bound. It is raised before the node vector is built past the bound, so
+/// a large multi-witness case fails early instead of after minutes of work.
+fn node_capacity_error(estimate: usize) -> String {
+    format!(
+        "证书节点数量将超过上限 {}：按当前事实与规则预估约 {estimate} 个节点\
+         （同一结论的多条见证使节点数约等于已推导结论数 × 见证数，每个结论最多 {} 条）。\
+         请减少可推导的对象或规则，或收紧查询目标。",
+        std_deduce_cert::MAX_CERT_NODES,
+        std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION
+    )
+}
+
+/// Whether two witnesses are the same argument: same derivation kind and name,
+/// and the same binding values under kernel conversion.
+///
+/// Bindings are compared by parameter name, not by the order they happen to be
+/// listed in: a checker accepts any binding order, so the same instance must
+/// not become a second independent witness merely by reordering its bindings.
+/// Kernel conversion also folds η-equivalent function values.
+fn same_witness(
+    env: &Env,
+    left: &WitnessCandidate,
+    right: &WitnessCandidate,
+) -> Result<bool, String> {
+    let (left_kind, left_name, left_bindings) = match left {
+        WitnessCandidate::Rule { rule, instance, .. } => (0u8, rule, &instance.bindings),
+        WitnessCandidate::Axiom { instance } => (1u8, &instance.axiom, &instance.bindings),
+    };
+    let (right_kind, right_name, right_bindings) = match right {
+        WitnessCandidate::Rule { rule, instance, .. } => (0u8, rule, &instance.bindings),
+        WitnessCandidate::Axiom { instance } => (1u8, &instance.axiom, &instance.bindings),
+    };
+    if left_kind != right_kind
+        || left_name != right_name
+        || left_bindings.len() != right_bindings.len()
+    {
+        return Ok(false);
+    }
+    let mut left_sorted: Vec<(&Name, &Expr)> = left_bindings
+        .iter()
+        .map(|(name, value)| (name, value))
+        .collect();
+    let mut right_sorted: Vec<(&Name, &Expr)> = right_bindings
+        .iter()
+        .map(|(name, value)| (name, value))
+        .collect();
+    left_sorted.sort_by_key(|(name, _)| name.to_string());
+    right_sorted.sort_by_key(|(name, _)| name.to_string());
+    for ((left_name, left_value), (right_name, right_value)) in
+        left_sorted.iter().zip(right_sorted.iter())
+    {
+        if left_name != right_name {
+            return Ok(false);
+        }
+        let same = convertible(env, &Ctx::new(), left_value, right_value)
+            .map_err(|error| format!("无法判定两个见证的绑定值是否等价：{error}"))?;
+        if !same {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// One node that independently derives a conclusion.
+enum WitnessCandidate {
+    Rule {
+        rule: Name,
+        instance: Instance,
+        sources: Vec<SourceRef>,
+        applicability: Box<Applicability>,
+    },
+    Axiom {
+        instance: AxiomInstance,
+    },
+}
+
+impl WitnessCandidate {
+    /// The propositions a witness consumes; a universal instance consumes
+    /// none because its evidence is the declaration itself.
+    fn premise_keys(&self) -> &[String] {
+        match self {
+            WitnessCandidate::Rule { instance, .. } => &instance.premise_keys,
+            WitnessCandidate::Axiom { .. } => &[],
+        }
+    }
+
+    /// The stable structural identity of a witness: derivation kind, rule or
+    /// axiom name, and the binding values by structural key. Two records with
+    /// the same key are the same argument, not two independent ones.
+    fn identity_key(&self, env: &Env) -> (u8, String, String) {
+        match self {
+            WitnessCandidate::Rule { rule, instance, .. } => (
+                0,
+                rule.to_string(),
+                instance_binding_key(env, &instance.bindings),
+            ),
+            WitnessCandidate::Axiom { instance } => (
+                1,
+                instance.axiom.to_string(),
+                instance_binding_key(env, &instance.bindings),
+            ),
+        }
+    }
+}
+
+/// The binding structure of a rule or universal instance.
+///
+/// Values are compared by the collision-free structural encoding of their
+/// normal forms, so a `def` alias and its underlying term describe the same
+/// binding, and printed text is never the identity.
+fn instance_binding_key(env: &Env, bindings: &[(Name, Expr)]) -> String {
+    bindings
+        .iter()
+        .map(|(parameter, value)| format!("{parameter}={}", structural_key(env, value)))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 // ------------------------------------------------------- universal facts
 
 /// Collect the environment's instantiable universal facts, grouped by the
@@ -786,6 +961,9 @@ struct Fixed {
     /// Interpretation conclusion key -> interpretation id, for the applications
     /// that produced the settled fact base.
     applications: BTreeMap<String, Name>,
+    /// Every derived conclusion's independent witness node ids, keyed by the
+    /// same structural key as `facts`.
+    alternatives: BTreeMap<String, WitnessGroup>,
 }
 
 /// How many universal facts one goal may be tried against.
@@ -1676,7 +1854,7 @@ impl<'a> Reasoner<'a> {
             // interpretation's conclusion, so there is no interpretation
             // chain.
             let applications = self.apply_interpretations(&mut facts, &removed)?;
-            let conflicts = self.detect_conflicts(&facts, &applications)?;
+            let conflicts = self.detect_conflicts(&facts, &rule_facts, &applications)?;
             let mut next_removed = removed.clone();
             for c in &conflicts {
                 let lk = self.key_of(&c.left);
@@ -1896,6 +2074,7 @@ impl<'a> Reasoner<'a> {
     fn detect_conflicts(
         &self,
         facts: &BTreeMap<String, Expr>,
+        rule_facts: &BTreeMap<String, Expr>,
         applications: &BTreeMap<String, Name>,
     ) -> Result<Vec<Conflict>, String> {
         let items: Vec<(&String, &Expr)> = facts.iter().collect();
@@ -1918,8 +2097,8 @@ impl<'a> Reasoner<'a> {
                 }
                 let (ka, a) = items[i];
                 let (kb, b) = items[j];
-                let left = self.support(ka, facts, applications);
-                let right = self.support(kb, facts, applications);
+                let left = self.support(ka, rule_facts, applications);
+                let right = self.support(kb, rule_facts, applications);
                 let resolution = self.resolve(&left, &right);
                 out.push(Conflict {
                     left: a.clone(),
@@ -1944,7 +2123,7 @@ impl<'a> Reasoner<'a> {
     fn support(
         &self,
         target: &str,
-        facts: &BTreeMap<String, Expr>,
+        rule_facts: &BTreeMap<String, Expr>,
         applications: &BTreeMap<String, Name>,
     ) -> Support {
         if let Some(identity) = self.assumption_identity(target) {
@@ -1953,7 +2132,7 @@ impl<'a> Reasoner<'a> {
         if let Some(interpretation) = applications.get(target) {
             return Support::Interpretation(interpretation.clone());
         }
-        let derivers = self.derivers(target, facts);
+        let derivers = self.derivers(target, rule_facts);
         if !derivers.is_empty() {
             return Support::Rules(derivers);
         }
@@ -2171,6 +2350,157 @@ impl<'a> Reasoner<'a> {
         edges
     }
 
+    /// Construct whatever is already ready for one conclusion, and keep its
+    /// remaining witnesses for a later round.
+    ///
+    /// A conclusion is allowed to get its first node as soon as **one** of its
+    /// witnesses has all premises id'd. Waiting for every witness would
+    /// deadlock two conclusions that cite each other while a third,
+    /// premise-free witness (an assumption or a legal universal instance)
+    /// could have broken the cycle. The remaining witnesses are appended in
+    /// later rounds; the group's order is restored from their structural
+    /// identities, not from creation order. A witness that never becomes ready
+    /// eventually leaves the target in `waiting`; when no target makes
+    /// progress, the caller reports the dependency cycle instead of silently
+    /// dropping the extra witnesses.
+    fn advance_witness_build(
+        &self,
+        target: &str,
+        candidates_by_target: &mut BTreeMap<String, Vec<WitnessCandidate>>,
+        ids: &mut BTreeMap<String, usize>,
+        nodes: &mut Vec<Node>,
+        builds: &mut BTreeMap<String, WitnessBuild>,
+        waiting: &mut BTreeSet<String>,
+    ) -> Result<bool, String> {
+        let Some(candidates) = candidates_by_target.remove(target) else {
+            return Ok(false);
+        };
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+        let known_total =
+            builds.get(target).map_or(0, |build| build.entries.len()) + candidates.len();
+        let mut ready: Vec<WitnessCandidate> = Vec::new();
+        let mut not_ready: Vec<WitnessCandidate> = Vec::new();
+        for candidate in candidates {
+            if candidate
+                .premise_keys()
+                .iter()
+                .all(|pk| ids.contains_key(pk))
+            {
+                ready.push(candidate);
+            } else {
+                not_ready.push(candidate);
+            }
+        }
+        if ready.is_empty() {
+            if !not_ready.is_empty() {
+                candidates_by_target.insert(target.to_string(), not_ready);
+            }
+            return Ok(false);
+        }
+        let existing_entries = builds.get(target).map_or(0, |build| build.entries.len());
+        let room = std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION - existing_entries;
+        if room == 0 {
+            if let Some(build) = builds.get_mut(target) {
+                build.total = build.total.max(known_total);
+            }
+            waiting.remove(target);
+            return Ok(true);
+        }
+        let mut remaining: Vec<WitnessCandidate> = Vec::new();
+        let mut created = false;
+        for (index, candidate) in ready.into_iter().enumerate() {
+            if index >= room {
+                remaining.push(candidate);
+                continue;
+            }
+            let (id, conclusion) = self.create_witness_node(nodes, &candidate, ids)?;
+            let identity = candidate.identity_key(self.env);
+            created = true;
+            match builds.get_mut(target) {
+                Some(build) => {
+                    build.entries.push((identity.clone(), id));
+                    build.total = build.total.max(known_total);
+                    if identity < build.main_identity {
+                        build.main_identity = identity;
+                        build.proposition = conclusion;
+                        ids.insert(target.to_string(), id);
+                    }
+                }
+                None => {
+                    builds.insert(
+                        target.to_string(),
+                        WitnessBuild {
+                            proposition: conclusion,
+                            main_identity: identity.clone(),
+                            entries: vec![(identity, id)],
+                            total: known_total,
+                        },
+                    );
+                    ids.insert(target.to_string(), id);
+                }
+            }
+        }
+        remaining.extend(not_ready);
+        remaining.sort_by_key(|candidate| candidate.identity_key(self.env));
+        let filled = builds.get(target).map_or(0, |build| build.entries.len());
+        if filled >= std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION || remaining.is_empty() {
+            waiting.remove(target);
+        } else {
+            candidates_by_target.insert(target.to_string(), remaining);
+            waiting.insert(target.to_string());
+        }
+        Ok(created)
+    }
+
+    /// Create one witness node, refusing to exceed the certificate's node
+    /// bound. The bound is shared with the certificate format, so the
+    /// reasoner fails with the same limit and an actionable explanation.
+    fn create_witness_node(
+        &self,
+        nodes: &mut Vec<Node>,
+        candidate: &WitnessCandidate,
+        ids: &BTreeMap<String, usize>,
+    ) -> Result<(usize, Expr), String> {
+        if nodes.len() >= std_deduce_cert::MAX_CERT_NODES {
+            return Err(node_capacity_error(nodes.len() + 1));
+        }
+        let id = nodes.len();
+        let conclusion = match candidate {
+            WitnessCandidate::Rule {
+                rule,
+                instance,
+                sources,
+                applicability,
+            } => {
+                let premises: Vec<usize> = instance.premise_keys.iter().map(|pk| ids[pk]).collect();
+                let conclusion = instance.conclusion.clone();
+                nodes.push(Node::RuleApplication {
+                    rule: rule.clone(),
+                    conclusion: conclusion.clone(),
+                    premises,
+                    bindings: instance.bindings.clone(),
+                    sources: sources.clone(),
+                    applicability: (**applicability).clone(),
+                });
+                conclusion
+            }
+            WitnessCandidate::Axiom { instance } => {
+                let conclusion = instance.conclusion.clone();
+                nodes.push(Node::AxiomInstance {
+                    axiom: instance.axiom.clone(),
+                    identity: instance.identity,
+                    bindings: instance.bindings.clone(),
+                    conclusion: conclusion.clone(),
+                    sources: instance.sources.clone(),
+                });
+                conclusion
+            }
+        };
+        Ok((id, conclusion))
+    }
+
     /// Build nodes in dependency order: an assumption first, then any rule
     /// application whose premises all already have ids.
     fn build_nodes(
@@ -2194,6 +2524,9 @@ impl<'a> Reasoner<'a> {
             if !facts.contains_key(&k) && !contested.contains_key(&k) {
                 continue;
             }
+            if nodes.len() >= std_deduce_cert::MAX_CERT_NODES {
+                return Err(node_capacity_error(nodes.len() + 1));
+            }
             let id = nodes.len();
             nodes.push(Node::Assumption {
                 prop: a.prop.clone(),
@@ -2206,59 +2539,121 @@ impl<'a> Reasoner<'a> {
             ids.insert(k, id);
         }
 
+        // One pass over the rules builds every witness, keyed by conclusion.
+        // This keeps the construction independent of how many conclusions the
+        // case has; the previous per-conclusion enumeration made a big case
+        // quadratic (and eight witnesses made it eight times worse).
+        let mut candidates_by_target = self.witness_index(&rule_facts, &axiom_instances)?;
+
+        // Fail before allocating a proof graph the certificate format cannot
+        // carry. The estimate is exact for the witnesses the index found: each
+        // pending conclusion contributes at most its witness count, capped at
+        // the per-conclusion bound.
+        let assumption_nodes = self
+            .assumptions
+            .iter()
+            .filter(|a| {
+                let key = self.key_of(&a.prop);
+                facts.contains_key(&key) || contested.contains_key(&key)
+            })
+            .count();
+        let witness_nodes: usize = facts
+            .keys()
+            .filter(|key| {
+                !ids.contains_key(key.as_str()) && !applications.contains_key(key.as_str())
+            })
+            .map(|key| {
+                candidates_by_target.get(key).map_or(0, |candidates| {
+                    candidates
+                        .len()
+                        .min(std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION)
+                })
+            })
+            .sum();
+        let contested_axiom_nodes = axiom_instances
+            .iter()
+            .filter(|(key, _)| {
+                contested.contains_key((*key).as_str()) && !facts.contains_key((*key).as_str())
+            })
+            .count();
+        let estimated_nodes =
+            assumption_nodes + applications.len() + witness_nodes + contested_axiom_nodes;
+        if estimated_nodes > std_deduce_cert::MAX_CERT_NODES {
+            return Err(node_capacity_error(estimated_nodes));
+        }
+
         let mut pending: Vec<String> = facts
             .keys()
             .filter(|k| !ids.contains_key(k.as_str()) && !applications.contains_key(k.as_str()))
             .cloned()
             .collect();
         pending.sort();
+        let mut builds: BTreeMap<String, WitnessBuild> = BTreeMap::new();
+        let mut waiting: BTreeSet<String> = BTreeSet::new();
 
-        while !pending.is_empty() {
+        loop {
             let mut progressed = false;
             let mut i = 0;
             while i < pending.len() {
                 let target = pending[i].clone();
-                if let Some((rule, inst, sources, applicability)) =
-                    self.witness(&target, &facts, &ids)
-                {
-                    let id = nodes.len();
-                    let premises: Vec<usize> = inst.premise_keys.iter().map(|pk| ids[pk]).collect();
-                    nodes.push(Node::RuleApplication {
-                        rule,
-                        conclusion: inst.conclusion,
-                        premises,
-                        bindings: inst.bindings,
-                        sources,
-                        applicability,
-                    });
-                    ids.insert(target, id);
-                    pending.remove(i);
-                    progressed = true;
-                } else if let Some(instance) = axiom_instances.get(&target) {
-                    // A conclusion no rule can witness is proved by universal
-                    // elimination. The step is preferred over a rule when both
-                    // exist, which is why the rule witness is tried first.
-                    let id = nodes.len();
-                    nodes.push(Node::AxiomInstance {
-                        axiom: instance.axiom.clone(),
-                        identity: instance.identity,
-                        bindings: instance.bindings.clone(),
-                        conclusion: instance.conclusion.clone(),
-                        sources: instance.sources.clone(),
-                    });
-                    ids.insert(target, id);
+                if self.advance_witness_build(
+                    &target,
+                    &mut candidates_by_target,
+                    &mut ids,
+                    &mut nodes,
+                    &mut builds,
+                    &mut waiting,
+                )? {
                     pending.remove(i);
                     progressed = true;
                 } else {
                     i += 1;
                 }
             }
+            let waiting_targets: Vec<String> = waiting.iter().cloned().collect();
+            for target in waiting_targets {
+                if self.advance_witness_build(
+                    &target,
+                    &mut candidates_by_target,
+                    &mut ids,
+                    &mut nodes,
+                    &mut builds,
+                    &mut waiting,
+                )? {
+                    progressed = true;
+                }
+            }
+            if pending.is_empty() && waiting.is_empty() {
+                break;
+            }
             if !progressed {
+                let mut stuck: Vec<String> = pending.clone();
+                stuck.extend(waiting.iter().cloned());
+                stuck.sort();
+                stuck.dedup();
                 return Err(format!(
-                    "无法为以下结论构造推导（可能存在依赖环）：{}",
-                    pending.join("，")
+                    "无法为以下结论构造推导（可能存在依赖环）：{}。\
+                     存在见证，但没有一条见证的前提已经全部就绪；\
+                     系统不会为了绕过环而退回单见证。",
+                    stuck.join("，")
                 ));
             }
+        }
+
+        let mut alternatives: BTreeMap<String, WitnessGroup> = BTreeMap::new();
+        for (target, build) in builds {
+            let mut entries = build.entries;
+            entries.sort_by_key(|(identity, _)| identity.clone());
+            let witnesses: Vec<usize> = entries.into_iter().map(|(_, id)| id).collect();
+            let truncated = build.total > witnesses.len();
+            alternatives.insert(
+                target,
+                WitnessGroup {
+                    proposition: build.proposition,
+                    witnesses,
+                    truncated,
+                },
+            );
         }
 
         // A conclusion that lost an unresolved conflict is not in `facts`, but
@@ -2273,6 +2668,9 @@ impl<'a> Reasoner<'a> {
             .collect();
         contested_instances.sort_by_key(|instance| instance.sort_key(self.env));
         for instance in contested_instances {
+            if nodes.len() >= std_deduce_cert::MAX_CERT_NODES {
+                return Err(node_capacity_error(nodes.len() + 1));
+            }
             let key = self.key_of(&instance.conclusion);
             let id = nodes.len();
             nodes.push(Node::AxiomInstance {
@@ -2299,6 +2697,9 @@ impl<'a> Reasoner<'a> {
                 return Err(format!("解释 `{interpretation}` 不在本次启用的解释记录中"));
             };
             let premise = self.premise_node(&facts, &ids, &record.from, interpretation)?;
+            if nodes.len() >= std_deduce_cert::MAX_CERT_NODES {
+                return Err(node_capacity_error(nodes.len() + 1));
+            }
             let id = nodes.len();
             nodes.push(Node::InterpretationApplication {
                 interpretation: interpretation.clone(),
@@ -2313,6 +2714,7 @@ impl<'a> Reasoner<'a> {
             rule_facts,
             nodes,
             ids,
+            alternatives,
             conflicts,
             contested,
             applications,
@@ -2349,38 +2751,93 @@ impl<'a> Reasoner<'a> {
         ))
     }
 
-    /// Find an unblocked rule application that concludes `target` and whose
-    /// premises already have node ids, together with the applicability verdict
-    /// the instance fired under.
-    fn witness(
+    /// Every independent witness of every derivable conclusion, grouped by
+    /// the conclusion's structural key.
+    ///
+    /// The rules are enumerated **once** over `rule_facts`, not once per
+    /// pending conclusion: a proof graph with many derived conclusions must
+    /// not make the witness index quadratic in the number of facts. Rules read
+    /// only `rule_facts`, the rule-visible fact set: an interpretation
+    /// conclusion is not there, so a rule that consumes one is never recorded
+    /// as a witness (a certificate could never make that step pass the
+    /// checker).
+    ///
+    /// A witness is a rule instance whose premises all hold in `rule_facts`,
+    /// is not blocked by an `unless`, fires under the case applicability
+    /// judgement, plus the demanded universal instance for the same
+    /// conclusion. Instances of the same rule with the same binding values are
+    /// one witness (their premises are the same propositions); a different
+    /// rule, or the same rule with different bindings, is another. The lists
+    /// are sorted by [`WitnessCandidate::identity_key`] so the construction
+    /// order never depends on enumeration order.
+    fn witness_index(
         &self,
-        target: &str,
-        facts: &BTreeMap<String, Expr>,
-        ids: &BTreeMap<String, usize>,
-    ) -> Option<(Name, Instance, Vec<SourceRef>, Applicability)> {
+        rule_facts: &BTreeMap<String, Expr>,
+        axiom_instances: &BTreeMap<String, AxiomInstance>,
+    ) -> Result<BTreeMap<String, Vec<WitnessCandidate>>, String> {
+        let mut index: BTreeMap<String, Vec<WitnessCandidate>> = BTreeMap::new();
         for decl in self.ordered_rules() {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
-            // The witness is the argument shown to the reader, so it must be
-            // an instance that could actually fire under the case judgement.
-            for inst in self.enumerate(rule, facts) {
-                if self.key_of(&inst.conclusion) != target {
+            // The witness is an argument the reader may be shown, so it must
+            // be an instance that could actually fire under the case
+            // judgement.
+            for inst in self.enumerate(rule, rule_facts) {
+                if blocked(&inst.unlesses, rule_facts, self.env) {
                     continue;
                 }
-                if blocked(&inst.unlesses, facts, self.env) {
+                if !inst
+                    .premise_keys
+                    .iter()
+                    .all(|pk| rule_facts.contains_key(pk))
+                {
                     continue;
                 }
-                if inst.premise_keys.iter().all(|pk| ids.contains_key(pk)) {
-                    let verdict = self.judge_instance(&decl.scope, &inst.premise_keys);
-                    if !verdict.allows_firing() {
-                        continue;
+                let verdict = self.judge_instance(&decl.scope, &inst.premise_keys);
+                if !verdict.allows_firing() {
+                    continue;
+                }
+                let key = self.key_of(&inst.conclusion);
+                let candidate = WitnessCandidate::Rule {
+                    rule: decl.name.clone(),
+                    instance: inst,
+                    sources: decl.sources.clone(),
+                    applicability: Box::new(verdict),
+                };
+                let entry = index.entry(key).or_default();
+                let mut duplicate = false;
+                for existing in entry.iter() {
+                    if same_witness(self.env, existing, &candidate)? {
+                        duplicate = true;
+                        break;
                     }
-                    return Some((decl.name.clone(), inst, decl.sources.clone(), verdict));
+                }
+                if !duplicate {
+                    entry.push(candidate);
                 }
             }
         }
-        None
+        for (key, instance) in axiom_instances {
+            let candidate = WitnessCandidate::Axiom {
+                instance: instance.clone(),
+            };
+            let entry = index.entry(key.clone()).or_default();
+            let mut duplicate = false;
+            for existing in entry.iter() {
+                if same_witness(self.env, existing, &candidate)? {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if !duplicate {
+                entry.push(candidate);
+            }
+        }
+        for candidates in index.values_mut() {
+            candidates.sort_by_key(|candidate| candidate.identity_key(self.env));
+        }
+        Ok(index)
     }
 
     /// Enumerate instances of `rule` against `facts`.
@@ -2424,7 +2881,7 @@ impl<'a> Reasoner<'a> {
 
     /// Every declared rule's burden/standard, keyed by rule name.
     ///
-    /// Certificate v8 does not record these declarations (adding them would
+    /// Certificate v9 does not record these declarations (adding them would
     /// change the format), so `:explain` supplies this map when it narrates a
     /// certificate gap. The values come from the environment declaration, the
     /// same one the derivation used.
@@ -2487,6 +2944,7 @@ impl<'a> Reasoner<'a> {
             Some(f) => Derivation {
                 nodes: f.nodes.clone(),
                 root: None,
+                alternatives: f.alternatives.values().cloned().collect(),
                 conflicts: f.conflicts.clone(),
                 interpretations: self.enabled_records(),
             },
@@ -2540,6 +2998,7 @@ impl<'a> Reasoner<'a> {
         Some(Derivation {
             root: fixed.ids.get(&k).copied(),
             nodes: fixed.nodes,
+            alternatives: fixed.alternatives.values().cloned().collect(),
             conflicts: Vec::new(),
             interpretations: self.enabled_records(),
         })
@@ -4648,6 +5107,45 @@ pub fn certificate(
         }
     }
 
+    // The certificate's witness table follows the derivation's: entries are
+    // ordered by the structural key of the conclusion and witnesses by the
+    // order the reasoner already fixed (rule name, then binding structure).
+    let mut groups: Vec<&WitnessGroup> = d.alternatives.iter().collect();
+    groups.sort_by_key(|group| structural_key(env, &group.proposition));
+    let mut alternatives = Vec::with_capacity(groups.len());
+    for (index, group) in groups.iter().enumerate() {
+        let label = format!("第 {} 条结论见证", index + 1);
+        if group.witnesses.len() > std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION {
+            return Err(format!(
+                "{label}的见证数量超过每个结论 {} 条上限：实际 {} 条",
+                std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION,
+                group.witnesses.len()
+            ));
+        }
+        if group.truncated
+            && group.witnesses.len() != std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION
+        {
+            return Err(format!(
+                "{label}标记为截断，但见证数量是 {} 条而不是上限 {} 条：截断标记与实际记录不符",
+                group.witnesses.len(),
+                std_deduce_cert::MAX_CERT_WITNESSES_PER_CONCLUSION
+            ));
+        }
+        for witness in &group.witnesses {
+            if *witness >= d.nodes.len() {
+                return Err(format!(
+                    "{label}引用的见证节点 {witness} 越界：推导只有 {} 个节点",
+                    d.nodes.len()
+                ));
+            }
+        }
+        alternatives.push(std_deduce_cert::Alternative {
+            proposition: cert_expr(&group.proposition, None, &format!("{label}的命题"))?,
+            witnesses: group.witnesses.clone(),
+            truncated: group.truncated,
+        });
+    }
+
     let conflicts = d
         .conflicts
         .iter()
@@ -4757,6 +5255,7 @@ pub fn certificate(
         interpretations,
         nodes,
         root: d.root,
+        alternatives,
         conflicts,
         open_obligations,
         metadata: std_deduce_cert::Metadata {
