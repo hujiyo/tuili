@@ -42,6 +42,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// evaluates the comparison itself, so the recorded boolean is evidence that
 /// can be rechecked, not a claim to be trusted. A gap candidate whose bindings
 /// leave a guard's parameter open records `null`, never `false`.
+///
 /// Version 12 records the premise choices of a rule instance: a disjunctive
 /// premise records which branch was proved, and an existential premise records
 /// the concrete declared individual that witnesses the body. The choices are
@@ -49,12 +50,25 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// premise node onto the selected branch/body, so neither the branch number nor
 /// the witness can be forged. Unselected branches are deliberately not
 /// required: the certificate proves that one branch holds, not that all do.
+///
+/// Version 13 records calendar dates: a certificate expression may carry a
+/// `date` literal (`{"kind": "date", "value": "2020-05-06"}`), one canonical
+/// `YYYY-MM-DD` day inside `1900-01-01..=9999-12-31`. The record is a term, not
+/// declaration metadata: it is the value the kernel's date operations produce
+/// and consume. Date arithmetic in a rule's conclusion uses the same
+/// `computed` field as integer arithmetic (the rule's own conclusion under the
+/// recorded bindings, before evaluation), and a date comparison in a guard uses
+/// the same `guards` record; the checker re-evaluates `daysBetween` / `addDays`
+/// / `addMonths` / `addYears` from the environment rule and the recorded
+/// bindings, so a tampered day, step or operation is a logical failure instead
+/// of a number to be trusted.
+///
 /// Older certificates are
 /// refused rather than read with guessed evidence: a proof that silently drops
 /// an applicability judgement, an interpretation step, a universal
 /// elimination step, an independent argument, the arithmetic step, a guard
-/// judgement or the branch/witness choice cannot be checked.
-pub const FORMAT_VERSION: u32 = 12;
+/// judgement, a date literal or the branch/witness choice cannot be checked.
+pub const FORMAT_VERSION: u32 = 13;
 
 /// A certificate format version.
 ///

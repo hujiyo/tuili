@@ -36,12 +36,19 @@
 //!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 12. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 13. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
-//! Version 12 records the premise choices of a rule application: a
+//! Version 13 records calendar dates: a certificate expression may carry a
+//! `date` literal (`{"kind": "date", "value": "2020-05-06"}`), one canonical
+//! `YYYY-MM-DD` day inside `1900-01-01..=9999-12-31`, validated while the
+//! certificate is parsed. Date arithmetic in a rule conclusion uses the same
+//! `computed` field as integer arithmetic, and a date comparison in a guard
+//! uses the same [`GuardRecord`]; the checker re-evaluates `daysBetween` /
+//! `addDays` / `addMonths` / `addYears` from the environment rule and the
+//! recorded bindings. Version 12 records the premise choices of a rule application: a
 //! disjunctive premise records which written branch was proved, and an
 //! existential premise records the concrete declared individual that
 //! witnesses the body. The choice is mandatory exactly for compound premises;
@@ -226,7 +233,7 @@
 //! five labels are `已验证`, `依赖假设`, `事实待举证`, `争点未决` and
 //! `需律师判断`; [`trust`](mod@trust) documents the exact field-to-label
 //! mapping. The labels are a derived view: they are never serialized into the
-//! certificate, and the v12 witness table does not change them. `:why`,
+//! certificate, and the v13 witness table does not change them. `:why`,
 //! `:explain` and `:labels` all print the same [`TrustReport::summary`] and the
 //! same evidence, so a conclusion cannot be labelled differently by different
 //! renderers. A label never asserts legal correctness: `已验证` means the
@@ -281,7 +288,7 @@ pub use environment::{
     CorpusRecord, EnvironmentDifference, EnvironmentIdentity, EnvironmentRecord, ExplicitText,
     PackRecord, TrustLevel, UnrecordedEnvironment,
 };
-pub use expr::{CertExpr, ExprEncodeError};
+pub use expr::{CertDate, CertExpr, ExprEncodeError};
 pub use key::expression_key;
 pub use model::{
     Alternative, Assumption, Binding, Certificate, Conflict, Explicit, FactIdentity,

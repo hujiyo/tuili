@@ -1857,7 +1857,7 @@ fn require_qualified_ref(ns: &str, what: &str, name: &str) -> Result<(), String>
 /// other `Ident` is a reference to a declaration and must be qualified.
 fn check_term(ns: &str, what: &str, locals: &[String], term: &Term) -> Result<(), String> {
     match term {
-        Term::Prop | Term::Type(_) | Term::Num(_) => Ok(()),
+        Term::Prop | Term::Type(_) | Term::Num(_) | Term::Date(_) => Ok(()),
         Term::Ident(s) => {
             // An identifier bound in the local telescope, the `_` wildcard, or
             // a kernel built-in (`Int`, `add`, …) needs no namespace prefix:
@@ -2006,7 +2006,7 @@ fn premise_constrains_ident(kind: &AstPremiseKind, ident: &str) -> bool {
 
 fn collect_free_names(term: &Term, bound: &mut Vec<String>, out: &mut Vec<String>) {
     match term {
-        Term::Prop | Term::Type(_) | Term::Num(_) => {}
+        Term::Prop | Term::Type(_) | Term::Num(_) | Term::Date(_) => {}
         Term::Ident(name) => {
             if !bound.iter().any(|binder| binder == name) && !out.iter().any(|seen| seen == name) {
                 out.push(name.clone());

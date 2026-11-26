@@ -1,5 +1,5 @@
 //! End-to-end tests for disjunctive and existential rule premises (certificate
-//! v12).
+//! v13).
 //!
 //! A disjunctive premise needs one written branch proved; an existential premise
 //! needs one concrete declared individual whose body is proved. The selection is
@@ -178,7 +178,7 @@ fn a_disjunction_fires_when_only_the_second_branch_holds_and_records_it() {
     let output = session(&theory, &[":cert 有情 甲 乙".to_owned()]);
     assert_exit(&output, PROVED);
     let certificate = certificate_json(&output);
-    assert_eq!(certificate.format_version.get(), 12);
+    assert_eq!(certificate.format_version.get(), 13);
 
     // `有情 甲 乙` binds p := 甲, q := 乙, so branch 1 (`配偶 q p` = 配偶 乙 甲)
     // is the proof. Branch 0 (`配偶 甲 乙`) is false.
@@ -369,9 +369,9 @@ fn a_v10_or_v11_certificate_is_rejected_by_the_version_probe() {
     let output = session(&theory, &[":cert 有情 甲 乙".to_owned()]);
     assert_exit(&output, PROVED);
     let text = certificate_text(&output);
-    for old in [10, 11] {
+    for old in [10, 11, 12] {
         let downgraded = text.replace(
-            "\"format_version\": 12",
+            "\"format_version\": 13",
             &format!("\"format_version\": {old}"),
         );
         let certificate_file = write_certificate("version", &downgraded);
@@ -380,7 +380,7 @@ fn a_v10_or_v11_certificate_is_rejected_by_the_version_probe() {
         let message = stderr(&verified);
         assert!(
             message.contains(&format!("unsupported certificate format version {old}"))
-                && message.contains("this build supports 12"),
+                && message.contains("this build supports 13"),
             "the version probe must reject v{old}: {message}"
         );
     }
@@ -514,20 +514,24 @@ fn why_labels_each_branch_of_a_failing_disjunction() {
     assert!(text.contains("第 2 个分支"), "{text}");
 }
 
-/// The v10 and v11 fixtures are kept as rejected samples: a version probe must
-/// refuse them before reading any field.
+/// The v10 fixture is kept as a rejected sample: a version probe must refuse it
+/// before reading any field. A v11 or v12 document is the same shape at an
+/// older version, so the probe is exercised for all three.
 #[test]
-fn the_v10_and_v11_fixtures_are_rejected() {
-    for (name, version) in [("certificate_v10.json", 10), ("certificate_v11.json", 11)] {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../crates/cert/tests/fixtures")
-            .join(name);
-        let text =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let error = Certificate::from_json(&text).unwrap_err().to_string();
+fn the_versions_below_the_current_one_are_rejected() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/cert/tests/fixtures")
+        .join("certificate_v10.json");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    for version in [10, 11, 12] {
+        let sample = text.replace(
+            "\"format_version\": 10",
+            &format!("\"format_version\": {version}"),
+        );
+        let error = Certificate::from_json(&sample).unwrap_err().to_string();
         assert!(
             error.contains(&format!("unsupported certificate format version {version}")),
-            "{name}: {error}"
+            "v{version}: {error}"
         );
     }
 }

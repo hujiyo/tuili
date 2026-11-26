@@ -513,7 +513,7 @@ fn verify_cert_escapes_a_read_failure_path_onto_one_line() {
 #[test]
 fn verify_cert_requires_a_loaded_environment() {
     let certificate = Certificate::from_json(
-        r#"{"format_version": 12, "environment": {"profile": null, "packs": [],
+        r#"{"format_version": 13, "environment": {"profile": null, "packs": [],
             "corpora": [], "as_of": null, "jurisdiction": null},
             "interpretations": [], "nodes": [], "root": null, "alternatives": []}"#,
     )

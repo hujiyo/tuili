@@ -4,7 +4,7 @@
 //! practising lawyer can read. It is a **derived view**, not a new inference
 //! and not legal advice. Every sentence is read from one of four inputs:
 //!
-//! * the certificate v12 the query path produced (`:why` / `:cert` build the
+//! * the certificate v13 the query path produced (`:why` / `:cert` build the
 //!   same certificate),
 //! * the reasoner's gap trees (the root's tree and the `:issues` scan),
 //! * the rules' declared burden of proof (`RulePleading`, the same map
@@ -1399,7 +1399,7 @@ fn write_gap_body(
                 }
                 None => {
                     out.push_str(&format!(
-                        "{indent}  - 守卫：`{}` 无法判定（守卫参数没有全部绑定，或操作数不是整数字面量），本规则不触发。\n",
+                        "{indent}  - 守卫：`{}` 无法判定（守卫参数没有全部绑定，或操作数不是 Int/Date 字面量），本规则不触发。\n",
                         print_parenthesized(&guard.instance)
                     ));
                 }

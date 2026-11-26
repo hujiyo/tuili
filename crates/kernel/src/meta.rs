@@ -40,14 +40,8 @@ pub fn validate_date(field: &str, value: &str) -> Result<(), String> {
     }
     let year = decimal(&bytes[0..4]);
     let month = decimal(&bytes[5..7]);
-    let max_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap_year(year) => 29,
-        2 => 28,
-        _ => {
-            return Err(format!("{field} `{value}` 的月份 {month} 超出 1..12"));
-        }
+    let Some(max_day) = crate::date::days_in_month(year, month) else {
+        return Err(format!("{field} `{value}` 的月份 {month} 超出 1..12"));
     };
     let day = decimal(&bytes[8..10]);
     if !(1..=max_day).contains(&day) {
@@ -76,10 +70,6 @@ pub fn validate_jurisdiction_code(field: &str, value: &str) -> Result<(), String
         ));
     }
     Ok(())
-}
-
-fn leap_year(year: u32) -> bool {
-    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 fn digits(bytes: &[u8]) -> bool {

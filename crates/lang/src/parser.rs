@@ -1734,7 +1734,10 @@ impl Parser {
     fn application(&mut self) -> PResult<Term> {
         let mut t = self.atom()?;
         let mut arguments = 0usize;
-        while matches!(self.peek(), Tok::Ident(_) | Tok::LParen | Tok::Num(_)) {
+        while matches!(
+            self.peek(),
+            Tok::Ident(_) | Tok::LParen | Tok::Num(_) | Tok::Date(_)
+        ) {
             // Inside a disjunctive premise, `or` separates branches; it is
             // never an application argument there.
             if self.stop_at_or {
@@ -1838,7 +1841,7 @@ impl Parser {
         let mut t = self.atom()?;
         loop {
             match self.peek() {
-                Tok::LParen => {}
+                Tok::LParen | Tok::Date(_) => {}
                 Tok::Ident(next) if next == "direction" || next == "source" => break,
                 Tok::Ident(_) => {}
                 _ => break,
@@ -1884,6 +1887,10 @@ impl Parser {
                     domain: Box::new(d),
                     body: Box::new(body),
                 })
+            }
+            Tok::Date(date) => {
+                self.bump();
+                Ok(Term::Date(date))
             }
             Tok::Num(digits) => {
                 let (line, col) = (self.here().line, self.here().col);
