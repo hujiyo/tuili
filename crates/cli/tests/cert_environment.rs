@@ -432,11 +432,11 @@ fn a_v2_certificate_is_rejected_before_its_missing_environment() {
     let certificate = root.generate(&[], CASE, GOAL);
 
     let mut v2 = remove_environment_member(&pretty(&certificate));
-    v2 = v2.replacen("\"format_version\": 11", "\"format_version\": 2", 1);
+    v2 = v2.replacen("\"format_version\": 12", "\"format_version\": 2", 1);
 
     let checked = reject_certificate(&root, "v2", &v2, "unsupported certificate format version 2");
     let err = stderr(&checked);
-    assert!(err.contains("this build supports 11"), "{err}");
+    assert!(err.contains("this build supports 12"), "{err}");
     assert!(
         !err.contains("missing field `environment`"),
         "the version error must win over the missing field:\n{err}"

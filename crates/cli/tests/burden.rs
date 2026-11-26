@@ -297,12 +297,12 @@ fn declaring_burden_and_standard_does_not_change_the_certificate() {
     let base_out = check(
         load_and(&base, ":cert 违法 张三"),
         PROVED,
-        &["\"format_version\": 11"],
+        &["\"format_version\": 12"],
     );
     let declared_out = check(
         load_and(&declared, ":cert 违法 张三"),
         PROVED,
-        &["\"format_version\": 11"],
+        &["\"format_version\": 12"],
     );
     assert_eq!(
         cert_section(&base_out),

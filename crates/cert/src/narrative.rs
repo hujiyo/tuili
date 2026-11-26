@@ -93,7 +93,7 @@ pub fn render_narrative(certificate: &Certificate) -> Result<String, String> {
 /// [`render_narrative`] does.
 ///
 /// `pleadings` is every declared rule's burden/standard, keyed by rule name.
-/// Certificate v11 does not record these declarations, so the caller supplies
+/// Certificate v12 does not record these declarations, so the caller supplies
 /// them; a missing-premise sentence then says who must present the evidence
 /// and to what standard. An undeclared burden or standard reads `未声明举证责任`
 /// / `未声明证明标准`, never a default; the standard itself is only a label and

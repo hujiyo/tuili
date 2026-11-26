@@ -398,7 +398,7 @@
 //! certificate proves the root under strict facts and leaves no root-relevant
 //! obligation — it is not a claim that the conclusion is legally correct.
 //! `:cert` JSON has no label field; the five labels are a derived view of the
-//! recorded proof, and the v11 witness table does not change them.
+//! recorded proof, and the v12 witness table does not change them.
 //!
 //! A derived conclusion can have several independent witnesses. `:why` still
 //! expands one main tree, then prints `另有 N 条独立推导。` when the root's
@@ -638,6 +638,7 @@ use std_deduce_lawpack::{
 use std_deduce_reason::{
     certificate as reason_certificate, Applicability, Conflict, Derivation, GapLimit, GapLimits,
     GapStatus, GapTree, Node as ReasonNode, Provenance, Reasoner, Resolution, Side,
+    MAX_GAP_WITNESS_CANDIDATES,
 };
 
 /// How a query ended. Only `Proved` is a success; the other two make the
@@ -6782,6 +6783,33 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
             writeln!(out, "{pad}  ← {}", source.one_line()).ok();
         }
         for missing in &candidate.missing {
+            if !missing.branches.is_empty() {
+                // A disjunction is not reported as one lump-sum proposition:
+                // every written branch is listed with its own gap, so a reader
+                // sees exactly what each alternative would need.
+                writeln!(
+                    out,
+                    "{pad}  缺析取前提（{} 个分支，按书写顺序）{}",
+                    missing.branches.len(),
+                    requirement_burden_note(reasoner, candidate.rule.as_ref())
+                )
+                .ok();
+                for branch in &missing.branches {
+                    writeln!(
+                        out,
+                        "{pad}    分支 {} ⟨{}⟩",
+                        branch.index + 1,
+                        print_expr(&branch.proposition)
+                    )
+                    .ok();
+                    if let Some(child) = &branch.gap {
+                        render_gap_body(out, child, reasoner, indent + 6);
+                    } else {
+                        writeln!(out, "{pad}      该分支未展开（见上方截断说明）。").ok();
+                    }
+                }
+                continue;
+            }
             writeln!(
                 out,
                 "{pad}  缺 ⟨{}⟩{}",
@@ -6789,6 +6817,42 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
                 requirement_burden_note(reasoner, candidate.rule.as_ref())
             )
             .ok();
+            if let Some(exists) = &missing.exists {
+                writeln!(
+                    out,
+                    "{pad}    存在前提：需要某个已声明个体满足 ⟨{}⟩。",
+                    print_expr(&exists.body)
+                )
+                .ok();
+                if exists.candidates.is_empty() {
+                    writeln!(
+                        out,
+                        "{pad}    没有已声明的候选个体（域内没有 `obj`；系统不枚举数字或凭空构造个体）。"
+                    )
+                    .ok();
+                } else {
+                    let names = exists
+                        .candidates
+                        .iter()
+                        .map(print_expr)
+                        .collect::<Vec<_>>()
+                        .join("、");
+                    writeln!(
+                        out,
+                        "{pad}    候选个体（{} 个，按名称排序）：{}",
+                        exists.candidates.len(),
+                        names
+                    )
+                    .ok();
+                }
+                if exists.truncated {
+                    writeln!(
+                        out,
+                        "{pad}    候选个体已截断：最多列出 {MAX_GAP_WITNESS_CANDIDATES} 个。"
+                    )
+                    .ok();
+                }
+            }
             if let Some(child) = &missing.gap {
                 render_gap_body(out, child, reasoner, indent + 4);
             }

@@ -205,7 +205,28 @@ pub enum Item {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Premise {
     pub name: Option<String>,
-    pub ty: Term,
+    pub kind: PremiseKind,
+}
+
+/// The surface form of one rule premise.
+///
+/// Multiple `premise` lines of a rule are still conjoined. A disjunctive
+/// premise `P or Q` requires one of its branches; an existential premise
+/// `exists x : T, P x` requires some declared individual of type `T` as a
+/// witness. Both are parsed here, before elaboration.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PremiseKind {
+    /// A plain proposition.
+    Plain(Term),
+    /// `P or Q [or R …]`: the branches are a flat list of two or more.
+    Or(Vec<Term>),
+    /// `exists x : T, P x`: one named witness binder, whose scope is the body
+    /// only. Nested quantifiers are refused by the parser.
+    Exists {
+        binder: String,
+        domain: Term,
+        body: Term,
+    },
 }
 
 /// One `guard` clause of a rule: a comparison that must hold for the instance.

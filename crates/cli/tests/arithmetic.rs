@@ -137,7 +137,7 @@ fn the_certificate_is_v11_and_records_the_computed_step() {
     let output = session("赔偿合计.std", &[":cert 合计 甲 5000".into()]);
     assert_exit(&output, PROVED);
     let certificate = certificate_json(&output);
-    assert_eq!(certificate.format_version.get(), 11);
+    assert_eq!(certificate.format_version.get(), 12);
     let text = certificate_text(&output);
     assert!(
         text.contains("\"kind\": \"num\""),
@@ -287,7 +287,7 @@ fn a_tampered_binding_is_rejected() {
 fn a_version_nine_certificate_is_rejected() {
     let output = session("赔偿合计.std", &[":cert 合计 甲 5000".into()]);
     let json = certificate_text(&output);
-    let old = json.replace("\"format_version\": 11", "\"format_version\": 9");
+    let old = json.replace("\"format_version\": 12", "\"format_version\": 9");
     assert_ne!(old, json, "the fixture must record the version");
     let file = TempFile::new("version-nine", "json", &old);
     let verify = session(
@@ -296,7 +296,7 @@ fn a_version_nine_certificate_is_rejected() {
     );
     assert_exit(&verify, ERROR);
     assert!(
-        stderr(&verify).contains("supports 11"),
+        stderr(&verify).contains("supports 12"),
         "{}",
         stderr(&verify)
     );

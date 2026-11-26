@@ -287,7 +287,10 @@ fn a_comparison_cannot_be_a_rule_premise_or_blocker() {
     let rule_with = |premises: Vec<(Option<Name>, Expr)>, unlesses: Vec<Expr>| RuleDecl {
         guards: Vec::new(),
         params: vec![(name("a"), c("Int"))],
-        premises,
+        premises: premises
+            .into_iter()
+            .map(|(binder, ty)| PremiseDecl::plain(binder, ty))
+            .collect(),
         conclusion: Expr::apps(c("小"), [Expr::Var(0)]),
         unlesses,
         burden: None,

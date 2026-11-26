@@ -526,7 +526,7 @@ fn cert_json_keeps_the_v11_top_level_fields_and_no_label_field() {
         ],
         "the certificate must keep exactly v11's top-level fields: {text}"
     );
-    assert_eq!(object["format_version"], 11, "{text}");
+    assert_eq!(object["format_version"], 12, "{text}");
     for unexpected in ["trust", "labels", "label", "trust_labels"] {
         assert!(
             !object.contains_key(unexpected),

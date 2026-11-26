@@ -531,7 +531,7 @@ fn the_certificate_is_v11_and_records_each_guard() {
     let output = session_with(&theory, &[":cert 重大 乙 3000".into()]);
     assert_exit(&output, PROVED);
     let certificate = certificate_json(&output);
-    assert_eq!(certificate.format_version.get(), 11);
+    assert_eq!(certificate.format_version.get(), 12);
     let step = certificate
         .nodes
         .iter()
@@ -569,13 +569,13 @@ fn a_v10_certificate_is_rejected_by_the_version_probe() {
     let output = session_with(&theory, &[":cert 重大 乙 3000".into()]);
     assert_exit(&output, PROVED);
     let json = certificate_text(&output);
-    let old = json.replace("\"format_version\": 11", "\"format_version\": 10");
+    let old = json.replace("\"format_version\": 12", "\"format_version\": 10");
     assert_ne!(old, json, "the fixture must record the version");
     let file = TempFile::new("version-ten", "json", &old);
     let verify = session_with(&theory, &[format!(":verify-cert {}", file.path_text())]);
     assert_exit(&verify, ERROR);
     assert!(
-        stderr(&verify).contains("supports 11"),
+        stderr(&verify).contains("supports 12"),
         "{}",
         stderr(&verify)
     );

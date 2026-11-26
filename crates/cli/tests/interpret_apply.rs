@@ -384,7 +384,7 @@ fn two_enabled_interpretations_are_listed_by_id_in_the_certificate() {
     );
 
     let value = certificate_value(&first);
-    assert_eq!(value["format_version"], 11);
+    assert_eq!(value["format_version"], 12);
     let interpretations = value["interpretations"]
         .as_array()
         .expect("v11 records an interpretations array");
@@ -424,7 +424,7 @@ fn the_certificate_records_the_interpretation_and_its_application() {
     ]);
     assert_exit(&output, PROVED);
     let value = certificate_value(&output);
-    assert_eq!(value["format_version"], 11);
+    assert_eq!(value["format_version"], 12);
     let interpretations = value["interpretations"].as_array().unwrap();
     assert_eq!(interpretations.len(), 1);
     assert_eq!(interpretations[0]["id"], "解释");
@@ -468,7 +468,7 @@ fn a_v5_certificate_is_rejected_with_the_version_probe() {
         COMMAND_ERROR,
         &[
             "unsupported certificate format version 5",
-            "this build supports 11",
+            "this build supports 12",
         ],
     );
     let out = stdout(&output);

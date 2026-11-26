@@ -301,7 +301,7 @@ fn rule_constant_env() -> Env {
     let rdecl = RuleDecl {
         guards: Vec::new(),
         params: vec![(name("x"), c("公民"))],
-        premises: vec![(None, Expr::app(c("P"), Expr::Var(0)))],
+        premises: vec![PremiseDecl::plain(None, Expr::app(c("P"), Expr::Var(0)))],
         // The conclusion lives under the whole telescope: `x` is behind the
         // premise binder.
         conclusion: Expr::app(c("Q"), Expr::Var(1)),
@@ -453,9 +453,9 @@ fn a_rule_with_duplicate_binder_names_is_refused() {
         params: vec![(name("p"), Expr::Sort(0))],
         premises: vec![
             // r : R p
-            (Some(name("r")), Expr::app(c("R"), Expr::Var(0))),
+            PremiseDecl::plain(Some(name("r")), Expr::app(c("R"), Expr::Var(0))),
             // p : P
-            (Some(name("p")), c("P")),
+            PremiseDecl::plain(Some(name("p")), c("P")),
         ],
         // Q p, applied to the parameter behind the premise binders.
         conclusion: Expr::app(c("Q"), Expr::Var(2)),

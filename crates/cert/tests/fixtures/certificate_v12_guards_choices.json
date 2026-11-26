@@ -1,0 +1,510 @@
+{
+  "format_version": 12,
+  "environment": {
+    "profile": "cn.default",
+    "packs": [
+      {
+        "name": "cn.constitution",
+        "version": "0.4.0",
+        "hash": "sha256:7e69a4302d72ddb6e3387a1b4c068faaf0d12f17bf35867fd07d4b55d2395407",
+        "trust": "official"
+      }
+    ],
+    "corpora": [
+      {
+        "law": "cn.constitution",
+        "version": "2018",
+        "file_sha256": "sha256:2ac2fd5288d12c0eaab235f99a3908ea3001b1df3c34f244214b90869b6db01a"
+      }
+    ],
+    "as_of": null,
+    "jurisdiction": null
+  },
+  "assumptions": [
+    {
+      "proposition": {
+        "kind": "app",
+        "func": {
+          "kind": "app",
+          "func": {
+            "kind": "const",
+            "name": "分数"
+          },
+          "arg": {
+            "kind": "const",
+            "name": "乙"
+          }
+        },
+        "arg": {
+          "kind": "num",
+          "value": 5000
+        }
+      },
+      "identity": "user_asserted",
+      "sources": [
+        {
+          "text": "测试",
+          "locator": "三",
+          "version": "",
+          "effective": null,
+          "note": "",
+          "quote": "",
+          "url": "",
+          "jurisdiction": "",
+          "retrieved_at": "",
+          "hash": ""
+        }
+      ],
+      "label": "分一",
+      "occurred_at": null,
+      "occurred_in": null
+    },
+    {
+      "proposition": {
+        "kind": "app",
+        "func": {
+          "kind": "app",
+          "func": {
+            "kind": "const",
+            "name": "配偶"
+          },
+          "arg": {
+            "kind": "const",
+            "name": "乙"
+          }
+        },
+        "arg": {
+          "kind": "const",
+          "name": "甲"
+        }
+      },
+      "identity": "user_asserted",
+      "sources": [
+        {
+          "text": "测试",
+          "locator": "一",
+          "version": "",
+          "effective": null,
+          "note": "",
+          "quote": "",
+          "url": "",
+          "jurisdiction": "",
+          "retrieved_at": "",
+          "hash": ""
+        }
+      ],
+      "label": "婚一",
+      "occurred_at": null,
+      "occurred_in": null
+    },
+    {
+      "proposition": {
+        "kind": "app",
+        "func": {
+          "kind": "app",
+          "func": {
+            "kind": "const",
+            "name": "配偶"
+          },
+          "arg": {
+            "kind": "const",
+            "name": "甲"
+          }
+        },
+        "arg": {
+          "kind": "const",
+          "name": "乙"
+        }
+      },
+      "identity": "user_asserted",
+      "sources": [
+        {
+          "text": "测试",
+          "locator": "二",
+          "version": "",
+          "effective": null,
+          "note": "",
+          "quote": "",
+          "url": "",
+          "jurisdiction": "",
+          "retrieved_at": "",
+          "hash": ""
+        }
+      ],
+      "label": "婚二",
+      "occurred_at": null,
+      "occurred_in": null
+    }
+  ],
+  "interpretations": [],
+  "nodes": [
+    {
+      "kind": "assumption",
+      "assumption": 0
+    },
+    {
+      "kind": "assumption",
+      "assumption": 1
+    },
+    {
+      "kind": "assumption",
+      "assumption": 2
+    },
+    {
+      "kind": "rule_application",
+      "rule": "组合",
+      "conclusion": {
+        "kind": "app",
+        "func": {
+          "kind": "app",
+          "func": {
+            "kind": "app",
+            "func": {
+              "kind": "const",
+              "name": "有情"
+            },
+            "arg": {
+              "kind": "const",
+              "name": "甲"
+            }
+          },
+          "arg": {
+            "kind": "const",
+            "name": "乙"
+          }
+        },
+        "arg": {
+          "kind": "num",
+          "value": 5000
+        }
+      },
+      "premises": [
+        2,
+        2,
+        0
+      ],
+      "choices": [
+        {
+          "kind": "branch",
+          "premise": 0,
+          "branch": 0
+        },
+        {
+          "kind": "witness",
+          "premise": 1,
+          "witness": {
+            "kind": "const",
+            "name": "乙"
+          }
+        }
+      ],
+      "bindings": [
+        {
+          "parameter": "p",
+          "value": {
+            "kind": "const",
+            "name": "甲"
+          }
+        },
+        {
+          "parameter": "q",
+          "value": {
+            "kind": "const",
+            "name": "乙"
+          }
+        },
+        {
+          "parameter": "a",
+          "value": {
+            "kind": "num",
+            "value": 5000
+          }
+        }
+      ],
+      "guards": [
+        {
+          "index": 0,
+          "expression": {
+            "kind": "app",
+            "func": {
+              "kind": "app",
+              "func": {
+                "kind": "const",
+                "name": "le"
+              },
+              "arg": {
+                "kind": "num",
+                "value": 5000
+              }
+            },
+            "arg": {
+              "kind": "const",
+              "name": "?a"
+            }
+          },
+          "instance": {
+            "kind": "app",
+            "func": {
+              "kind": "app",
+              "func": {
+                "kind": "const",
+                "name": "le"
+              },
+              "arg": {
+                "kind": "num",
+                "value": 5000
+              }
+            },
+            "arg": {
+              "kind": "num",
+              "value": 5000
+            }
+          },
+          "holds": true
+        }
+      ],
+      "sources": [
+        {
+          "text": "测试",
+          "locator": "四",
+          "version": "",
+          "effective": null,
+          "note": "",
+          "quote": "",
+          "url": "",
+          "jurisdiction": "",
+          "retrieved_at": "",
+          "hash": ""
+        }
+      ],
+      "applicability": {
+        "verdict": "unchecked",
+        "basis": {
+          "dates": [],
+          "places": [],
+          "missing_event_date": false,
+          "missing_event_place": false,
+          "scope": {
+            "effective_from": null,
+            "effective_to": null,
+            "jurisdiction": null,
+            "territory": null,
+            "effective_from_origin": null,
+            "effective_to_origin": null,
+            "jurisdiction_origin": null,
+            "territory_origin": null
+          },
+          "session": {
+            "as_of": null,
+            "jurisdiction": null
+          }
+        },
+        "reason": {
+          "detail": {
+            "kind": "rule_has_no_scope"
+          },
+          "text": "规则没有声明任何范围"
+        }
+      }
+    },
+    {
+      "kind": "rule_application",
+      "rule": "组合",
+      "conclusion": {
+        "kind": "app",
+        "func": {
+          "kind": "app",
+          "func": {
+            "kind": "app",
+            "func": {
+              "kind": "const",
+              "name": "有情"
+            },
+            "arg": {
+              "kind": "const",
+              "name": "甲"
+            }
+          },
+          "arg": {
+            "kind": "const",
+            "name": "乙"
+          }
+        },
+        "arg": {
+          "kind": "num",
+          "value": 5000
+        }
+      },
+      "premises": [
+        1,
+        2,
+        0
+      ],
+      "choices": [
+        {
+          "kind": "branch",
+          "premise": 0,
+          "branch": 1
+        },
+        {
+          "kind": "witness",
+          "premise": 1,
+          "witness": {
+            "kind": "const",
+            "name": "乙"
+          }
+        }
+      ],
+      "bindings": [
+        {
+          "parameter": "p",
+          "value": {
+            "kind": "const",
+            "name": "甲"
+          }
+        },
+        {
+          "parameter": "q",
+          "value": {
+            "kind": "const",
+            "name": "乙"
+          }
+        },
+        {
+          "parameter": "a",
+          "value": {
+            "kind": "num",
+            "value": 5000
+          }
+        }
+      ],
+      "guards": [
+        {
+          "index": 0,
+          "expression": {
+            "kind": "app",
+            "func": {
+              "kind": "app",
+              "func": {
+                "kind": "const",
+                "name": "le"
+              },
+              "arg": {
+                "kind": "num",
+                "value": 5000
+              }
+            },
+            "arg": {
+              "kind": "const",
+              "name": "?a"
+            }
+          },
+          "instance": {
+            "kind": "app",
+            "func": {
+              "kind": "app",
+              "func": {
+                "kind": "const",
+                "name": "le"
+              },
+              "arg": {
+                "kind": "num",
+                "value": 5000
+              }
+            },
+            "arg": {
+              "kind": "num",
+              "value": 5000
+            }
+          },
+          "holds": true
+        }
+      ],
+      "sources": [
+        {
+          "text": "测试",
+          "locator": "四",
+          "version": "",
+          "effective": null,
+          "note": "",
+          "quote": "",
+          "url": "",
+          "jurisdiction": "",
+          "retrieved_at": "",
+          "hash": ""
+        }
+      ],
+      "applicability": {
+        "verdict": "unchecked",
+        "basis": {
+          "dates": [],
+          "places": [],
+          "missing_event_date": false,
+          "missing_event_place": false,
+          "scope": {
+            "effective_from": null,
+            "effective_to": null,
+            "jurisdiction": null,
+            "territory": null,
+            "effective_from_origin": null,
+            "effective_to_origin": null,
+            "jurisdiction_origin": null,
+            "territory_origin": null
+          },
+          "session": {
+            "as_of": null,
+            "jurisdiction": null
+          }
+        },
+        "reason": {
+          "detail": {
+            "kind": "rule_has_no_scope"
+          },
+          "text": "规则没有声明任何范围"
+        }
+      }
+    }
+  ],
+  "root": 3,
+  "alternatives": [
+    {
+      "proposition": {
+        "kind": "app",
+        "func": {
+          "kind": "app",
+          "func": {
+            "kind": "app",
+            "func": {
+              "kind": "const",
+              "name": "有情"
+            },
+            "arg": {
+              "kind": "const",
+              "name": "甲"
+            }
+          },
+          "arg": {
+            "kind": "const",
+            "name": "乙"
+          }
+        },
+        "arg": {
+          "kind": "num",
+          "value": 5000
+        }
+      },
+      "witnesses": [
+        3,
+        4
+      ],
+      "truncated": false
+    }
+  ],
+  "conflicts": [],
+  "open_obligations": [],
+  "metadata": {
+    "generated_at": null,
+    "tool": "std-deduce",
+    "tool_version": "0.1.0"
+  }
+}

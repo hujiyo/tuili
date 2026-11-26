@@ -34,11 +34,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use std_deduce_kernel::conv::convertible;
-use std_deduce_kernel::env::DeclKind;
+use std_deduce_kernel::env::{DeclKind, PremiseKind};
 use std_deduce_kernel::term::is_closed;
 use std_deduce_kernel::{check as kernel_check, Ctx, Env, Expr};
 
-use crate::model::{Certificate, Node, NodeId};
+use crate::model::{Certificate, Node, NodeId, PremiseChoice};
 
 /// A successful kernel check of a certificate's monotone skeleton.
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +157,7 @@ pub fn kernel_proof(env: &Env, cert: &Certificate) -> Result<KernelProofReport, 
                 conclusion,
                 premises,
                 bindings,
+                choices,
                 ..
             } => {
                 let decl = env
@@ -207,19 +208,26 @@ pub fn kernel_proof(env: &Env, cert: &Certificate) -> Result<KernelProofReport, 
 
                 let mut arguments =
                     Vec::with_capacity(rule_decl.params.len() + rule_decl.premises.len());
-                for (parameter, _) in &rule_decl.params {
-                    let value = binding_map.get(parameter.as_ref()).ok_or_else(|| {
-                        KernelProofError::at(
-                            id,
-                            format!(
-                                "参数 `{parameter}` 没有绑定；本步不是规则 `{rule}` 的完整实例"
-                            ),
-                        )
-                    })?;
-                    arguments.push(value.clone());
-                }
+                let values: Vec<(std_deduce_kernel::Name, Expr)> = rule_decl                    .params
+                    .iter()
+                    .map(|(parameter, _)| {
+                        binding_map
+                            .get(parameter.as_ref())
+                            .map(|value| (parameter.clone(), value.clone()))
+                            .ok_or_else(|| {
+                                KernelProofError::at(
+                                    id,
+                                    format!(
+                                        "参数 `{parameter}` 没有绑定；本步不是规则 `{rule}` 的完整实例"
+                                    ),
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                arguments.extend(values.iter().map(|(_, value)| value.clone()));
+                let selections = resolve_step_choices(id, rule, rule_decl, choices)?;
 
-                for premise in premises {
+                for (index, premise) in premises.iter().enumerate() {
                     if *premise >= cert.nodes.len() {
                         return Err(KernelProofError::at(
                             id,
@@ -243,7 +251,32 @@ pub fn kernel_proof(env: &Env, cert: &Certificate) -> Result<KernelProofReport, 
                         };
                         KernelProofError::at(id, format!("前提 {premise} {reason}"))
                     })?;
-                    arguments.push(proof.clone());
+                    let argument = match (&rule_decl.premises[index].kind, &selections[index]) {
+                        (PremiseKind::Plain(_), StepChoice::Plain) => Some(proof.clone()),
+                        (PremiseKind::Or(_), StepChoice::Branch)
+                        | (PremiseKind::Exists { .. }, StepChoice::Witness) => {
+                            // A compound premise is a logical side condition:
+                            // the kernel telescope does not carry its proof
+                            // term (the kernel's prefix-relative context types
+                            // cannot express the impredicative encoding). The
+                            // cited node's proposition is checked by the
+                            // logical certificate layer, which rejects a gap
+                            // node here as well.
+                            None
+                        }
+                        _ => {
+                            return Err(KernelProofError::at(
+                                id,
+                                format!(
+                                    "规则 `{rule}` 的第 {} 个前提的选择与声明不一致",
+                                    index + 1
+                                ),
+                            ));
+                        }
+                    };
+                    if let Some(argument) = argument {
+                        arguments.push(argument);
+                    }
                 }
 
                 let term = Expr::apps(Expr::constant(rule), arguments);
@@ -469,4 +502,111 @@ pub fn kernel_proof(env: &Env, cert: &Certificate) -> Result<KernelProofReport, 
         root_term,
         steps,
     })
+}
+
+/// Which branch or witness one compound premise of a step used, as read from
+/// the certificate's `choices` array.
+enum StepChoice {
+    Plain,
+    Branch,
+    Witness,
+}
+
+/// Structural resolution of a step's choices before building the kernel term.
+///
+/// The logical checker validates the same records in detail; this pass only
+/// needs to know which branch/witness to build, and refuses mismatched or
+/// missing selections so the kernel layer is never handed a guessed choice.
+fn resolve_step_choices(
+    id: NodeId,
+    rule: &str,
+    declared: &std_deduce_kernel::RuleDecl,
+    choices: &[PremiseChoice],
+) -> Result<Vec<StepChoice>, KernelProofError> {
+    let mut selected: Vec<StepChoice> = (0..declared.premises.len())
+        .map(|_| StepChoice::Plain)
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for choice in choices {
+        let index = match choice {
+            PremiseChoice::Branch { premise, .. } => *premise,
+            PremiseChoice::Witness { premise, .. } => *premise,
+        };
+        if index >= declared.premises.len() {
+            return Err(KernelProofError::at(
+                id,
+                format!(
+                    "规则 `{rule}` 只有 {} 个前提，选择记录了不存在的第 {} 个前提",
+                    declared.premises.len(),
+                    index + 1
+                ),
+            ));
+        }
+        if !seen.insert(index) {
+            return Err(KernelProofError::at(
+                id,
+                format!("规则 `{rule}` 的第 {} 个前提被多次选择", index + 1),
+            ));
+        }
+        selected[index] = match (&declared.premises[index].kind, choice) {
+            (PremiseKind::Plain(_), _) => {
+                return Err(KernelProofError::at(
+                    id,
+                    format!(
+                        "规则 `{rule}` 的第 {} 个前提是普通命题，不能记录选择",
+                        index + 1
+                    ),
+                ));
+            }
+            (PremiseKind::Or(branches), PremiseChoice::Branch { branch, .. }) => {
+                if *branch >= branches.len() {
+                    return Err(KernelProofError::at(
+                        id,
+                        format!(
+                            "规则 `{rule}` 的第 {} 个前提只有 {} 个分支，选择指向第 {} 个",
+                            index + 1,
+                            branches.len(),
+                            branch + 1
+                        ),
+                    ));
+                }
+                StepChoice::Branch
+            }
+            (PremiseKind::Or(_), PremiseChoice::Witness { .. }) => {
+                return Err(KernelProofError::at(
+                    id,
+                    format!(
+                        "规则 `{rule}` 的第 {} 个前提是析取，不能记录见证",
+                        index + 1
+                    ),
+                ));
+            }
+            (PremiseKind::Exists { .. }, PremiseChoice::Witness { .. }) => StepChoice::Witness,
+            (PremiseKind::Exists { .. }, PremiseChoice::Branch { .. }) => {
+                return Err(KernelProofError::at(
+                    id,
+                    format!(
+                        "规则 `{rule}` 的第 {} 个前提是存在量词，不能记录分支",
+                        index + 1
+                    ),
+                ));
+            }
+        };
+    }
+    for (index, premise) in declared.premises.iter().enumerate() {
+        if matches!(
+            premise.kind,
+            PremiseKind::Or(_) | PremiseKind::Exists { .. }
+        ) && !seen.contains(&index)
+        {
+            return Err(KernelProofError::at(
+                id,
+                format!(
+                    "规则 `{rule}` 的第 {} 个前提是复合前提，本步没有记录选择",
+                    index + 1
+                ),
+            ));
+        }
+    }
+    Ok(selected)
 }

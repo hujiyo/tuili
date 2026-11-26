@@ -417,7 +417,7 @@ fn cert_records_both_witnesses_and_verify_accepts_it() {
     let dir = TempDir::new("cert-two");
     let theory = dir.write("two.std", TWO_RULES);
     let certificate = generated(&theory, "Q 甲");
-    assert_eq!(certificate.format_version.get(), 11);
+    assert_eq!(certificate.format_version.get(), 12);
     let group = &certificate.alternatives[root_group(&certificate)];
     assert_eq!(group.witnesses.len(), 2);
     assert!(!group.truncated);

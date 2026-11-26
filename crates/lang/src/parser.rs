@@ -89,6 +89,12 @@ pub struct Parser {
     /// Current recursive `term()` depth, used to reject adversarially nested
     /// input before the stack overflows.
     depth: usize,
+    /// While parsing one branch of a disjunctive premise, an application
+    /// spine stops before the top-level `or` keyword so the branch is read as
+    /// one proposition instead of `or` becoming an argument. The flag is
+    /// saved/restored around the branch parse and never leaks into ordinary
+    /// terms.
+    stop_at_or: bool,
 }
 
 pub type PResult<T> = Result<T, ParseError>;
@@ -198,6 +204,7 @@ impl Parser {
             toks,
             pos: 0,
             depth: 0,
+            stop_at_or: false,
         }
     }
 
@@ -1044,10 +1051,13 @@ impl Parser {
                 }
                 "premise" | "premises" | "pre" => {
                     self.bump();
-                    // Three accepted spellings:
+                    // Three accepted spellings for a plain premise:
                     //   premise <term>
                     //   premise p : <term>
                     //   premise p : <term>   (the name is then usable later)
+                    // plus the compound forms:
+                    //   premise P or Q [or R …]
+                    //   premise exists x : T, P x
                     let named =
                         matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon;
                     let nm = if named {
@@ -1057,8 +1067,8 @@ impl Parser {
                     } else {
                         None
                     };
-                    let t = self.term()?;
-                    premises.push(Premise { name: nm, ty: t });
+                    let kind = self.premise_kind(&name)?;
+                    premises.push(Premise { name: nm, kind });
                     if params.len() + premises.len() > MAX_RULE_BINDERS {
                         return self.err(format!(
                             "规则 `{name}` 的参数与前提合计超过上限 {MAX_RULE_BINDERS}"
@@ -1190,6 +1200,78 @@ impl Parser {
             exception_burden,
             exception_standard,
         })
+    }
+
+    /// Parse the body of one `premise` clause into its surface kind.
+    ///
+    /// `P or Q or R` is a flat three-way disjunction (two or more branches,
+    /// at most [`std_deduce_kernel::MAX_OR_BRANCHES`]). `exists x : T, P x`
+    /// has exactly one named witness binder; a nested `exists` in the body is
+    /// refused explicitly because nested quantifiers are outside this syntax.
+    fn premise_kind(&mut self, rule: &str) -> PResult<PremiseKind> {
+        if let Tok::Ident(word) = self.peek().clone() {
+            if word == "exists" {
+                self.bump();
+                let (binder, domain) = if self.peek() == &Tok::LParen {
+                    self.bump();
+                    let n = self.ident()?;
+                    self.expect(&Tok::Colon, "`:`")?;
+                    let t = self.term()?;
+                    self.expect(&Tok::RParen, "`)`")?;
+                    (n, t)
+                } else {
+                    let n = self.ident()?;
+                    self.expect(&Tok::Colon, "`:`")?;
+                    let t = self.term()?;
+                    (n, t)
+                };
+                self.expect(&Tok::Comma, "`,`")?;
+                if let Tok::Ident(word) = self.peek() {
+                    if word == "exists" {
+                        return self.err(format!(
+                            "规则 `{rule}` 的存在前提：体里又出现 `exists`；\
+                             嵌套量词暂不支持，请拆成多条 `premise exists …` 或先登记相应事实"
+                        ));
+                    }
+                }
+                let body = self.term_until_or()?;
+                if let Tok::Ident(word) = self.peek() {
+                    if word == "or" {
+                        return self.err(format!(
+                            "规则 `{rule}` 的存在前提：体内出现顶层 `or`；\
+                             存在前提的体必须是一个命题，析取请另写一条前提"
+                        ));
+                    }
+                }
+                return Ok(PremiseKind::Exists {
+                    binder,
+                    domain,
+                    body,
+                });
+            }
+        }
+        let mut branches = vec![self.term_until_or()?];
+        while let Tok::Ident(word) = self.peek().clone() {
+            if word != "or" {
+                break;
+            }
+            self.bump();
+            branches.push(self.term_until_or()?);
+        }
+        if branches.len() == 1 {
+            // The `or` keyword is reserved for premise disjunction; a term
+            // that mentions it outside a disjunction is not silently accepted
+            // as an application argument.
+            return Ok(PremiseKind::Plain(branches.remove(0)));
+        }
+        if branches.len() > std_deduce_kernel::MAX_OR_BRANCHES {
+            return self.err(format!(
+                "规则 `{rule}` 的析取前提有 {} 个分支，超过每个析取前提 {} 个分支的上限",
+                branches.len(),
+                std_deduce_kernel::MAX_OR_BRANCHES
+            ));
+        }
+        Ok(PremiseKind::Or(branches))
     }
 
     /// Refuse a rule scope clause that does not start its own line.
@@ -1596,7 +1678,16 @@ impl Parser {
     fn application(&mut self) -> PResult<Term> {
         let mut t = self.atom()?;
         let mut arguments = 0usize;
-        while let Tok::Ident(_) | Tok::LParen | Tok::Num(_) = self.peek() {
+        while matches!(self.peek(), Tok::Ident(_) | Tok::LParen | Tok::Num(_)) {
+            // Inside a disjunctive premise, `or` separates branches; it is
+            // never an application argument there.
+            if self.stop_at_or {
+                if let Tok::Ident(word) = self.peek() {
+                    if word == "or" {
+                        break;
+                    }
+                }
+            }
             arguments += 1;
             if arguments > MAX_APPLICATION_ARITY {
                 return self.err(format!("应用的参数数量超过上限 {MAX_APPLICATION_ARITY}"));
@@ -1605,6 +1696,16 @@ impl Parser {
             t = Term::App(Box::new(t), Box::new(a));
         }
         Ok(t)
+    }
+
+    /// Parse one branch of a disjunctive premise: a term whose application
+    /// spine stops at the top-level `or` keyword.
+    fn term_until_or(&mut self) -> PResult<Term> {
+        let saved = self.stop_at_or;
+        self.stop_at_or = true;
+        let result = self.term();
+        self.stop_at_or = saved;
+        result
     }
 
     /// `a + b - c`: the additive level. Left associative; `*` binds tighter.
