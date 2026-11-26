@@ -24,7 +24,20 @@ fn go(e: &Expr, prec: u8, out: &mut String, names: &mut Vec<String>) {
             }
         }
         Expr::Const(n) => out.push_str(&escape_control(n)),
-        Expr::Num(value) => out.push_str(&value.to_string()),
+        // A negative literal is an atom on its own (`-3000`), but the surface
+        // grammar does not read a leading `-` as the start of an application
+        // argument: `add -3000 2000` would reparse as a subtraction or fail. In
+        // operand position it is therefore printed in parentheses, which the
+        // parser reads back as the same literal.
+        Expr::Num(value) => {
+            if *value < 0 && prec >= 2 {
+                out.push('(');
+                out.push_str(&value.to_string());
+                out.push(')');
+            } else {
+                out.push_str(&value.to_string());
+            }
+        }
         Expr::Pi {
             name,
             domain,

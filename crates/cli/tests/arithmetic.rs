@@ -481,7 +481,7 @@ fn negation_comparisons_and_arithmetic_type_check() {
     let stdout = stdout(&output);
     assert!(stdout.contains("✓ add 3000 2000 : Int"), "{stdout}");
     assert!(stdout.contains("✓ -3000 : Int"), "{stdout}");
-    assert!(stdout.contains("✓ add (mul 3000 -2) 1 : Int"), "{stdout}");
+    assert!(stdout.contains("✓ add (mul 3000 (-2)) 1 : Int"), "{stdout}");
     assert!(stdout.contains("命题：less 3000 5000"), "{stdout}");
 }
 
@@ -622,3 +622,181 @@ rule 赔偿合计 :
   conclude 合计 p (a + b)
   source text "法" locator "一"
 "#;
+
+/// A universal fact whose conclusion is an arithmetic expression. The same
+/// proposition can be written as the operation (`(5000 + 0)`) or as its value
+/// (`5000`); both spellings must produce the same instance.
+const AXIOM_SUM_THEORY: &str = r#"
+sort 人
+obj 甲 : 人
+pred 合计 : 人 → Int → Prop
+axiom 全称合计 : ∀ (x : Int), 合计 甲 (x + 0)
+  identity verified
+  source text "卷" locator "一"
+"#;
+
+/// Two rules whose `unless` conditions block each other, plus an overflowing
+/// exception condition. The overflow must be reported as an arithmetic error,
+/// never read as "the blocker holds" and reported as an oscillation.
+const OVERFLOWING_UNLESS_THEORY: &str = r#"
+sort 人
+obj 甲 : 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+pred 合计 : 人 → Int → Prop
+axiom 种子 : P 甲
+  identity verified
+  source text "卷" locator "一"
+rule 规则一 :
+  params x : 人
+  premise P x
+  conclude Q x
+  unless Q x
+  source text "法" locator "一"
+rule 规则二 :
+  params x : 人
+  premise Q x
+  conclude P x
+  unless 合计 甲 (9223372036854775807 + 1)
+  source text "法" locator "二"
+"#;
+
+#[test]
+fn an_axiom_instance_records_the_evaluated_conclusion_for_every_spelling() {
+    let theory = TempFile::new("axiom-sum", "std", AXIOM_SUM_THEORY);
+    for (index, (goal, value)) in [
+        ("合计 甲 (5000 + 0)", 5000),
+        ("合计 甲 5000", 5000),
+        ("合计 甲 (1000 + 2000)", 3000),
+        ("合计 甲 3000", 3000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let why = session_with(&theory, &[format!(":why {goal}")]);
+        assert_exit(&why, PROVED);
+        let out = stdout(&why);
+        assert!(
+            out.contains(&format!("▸ 合计 甲 {value}")),
+            "the root must show the evaluated conclusion: {out}"
+        );
+        assert!(
+            !out.contains("add "),
+            "the root must not keep the unevaluated operation: {out}"
+        );
+        assert!(out.contains("推导已通过独立校验。"), "{out}");
+
+        let cert_output = session_with(&theory, &[format!(":cert {goal}")]);
+        assert_exit(&cert_output, PROVED);
+        let certificate = certificate_json(&cert_output);
+        let conclusion = certificate
+            .nodes
+            .iter()
+            .find_map(|node| match node {
+                std_deduce_cert::Node::AxiomInstance { conclusion, .. } => Some(conclusion),
+                _ => None,
+            })
+            .expect("the certificate records the axiom instance");
+        let printed =
+            std_deduce_kernel::pretty::print_expr(&std_deduce_kernel::Expr::from(conclusion));
+        assert_eq!(
+            printed,
+            format!("合计 甲 {value}"),
+            "the certificate records the evaluated conclusion"
+        );
+        let text = certificate_text(&cert_output);
+        let file = TempFile::new(&format!("axiom-cert-{index}"), "json", &text);
+        let verify = session_with(&theory, &[format!(":verify-cert {}", file.path_text())]);
+        assert_exit(&verify, PROVED);
+        let out = stdout(&verify);
+        assert!(out.contains("逻辑校验：通过"), "{out}");
+        assert!(out.contains("内核证明：通过"), "{out}");
+    }
+}
+
+#[test]
+fn an_overflowing_unless_is_an_error_not_an_oscillation() {
+    let theory = TempFile::new("overflow-unless", "std", OVERFLOWING_UNLESS_THEORY);
+    let output = session_with(&theory, &[":why Q 甲".to_string()]);
+    assert_exit(&output, ERROR);
+    let text = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(text.contains("整数运算溢出"), "{text}");
+    assert!(text.contains("9223372036854775807"), "{text}");
+    assert!(
+        !text.contains("振荡"),
+        "an evaluation failure is not a rule cycle: {text}"
+    );
+}
+
+#[test]
+fn check_and_proposition_evaluate_arithmetic_and_report_overflow() {
+    let success = TempFile::new(
+        "check-evaluates",
+        "std",
+        "sort 人\n#check (3000 + 2000)\n#check (add (-3000) 2000)\n#proposition (less 3000 5000)\n",
+    );
+    let output = session_with(&success, &[]);
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(out.contains("✓ add 3000 2000 : Int（求值：5000）"), "{out}");
+    assert!(
+        out.contains("✓ add (-3000) 2000 : Int（求值：-1000）"),
+        "{out}"
+    );
+    assert!(out.contains("命题：less 3000 5000（求值：True）"), "{out}");
+
+    for (tag, source) in [
+        (
+            "check-overflow",
+            "sort 人\n#check (9223372036854775807 + 1)\n",
+        ),
+        (
+            "proposition-overflow",
+            "sort 人\n#proposition (less (9223372036854775807 + 1) 0)\n",
+        ),
+    ] {
+        let file = TempFile::new(tag, "std", source);
+        let output = run(vec![file.path_text()]);
+        assert_exit(&output, GAP);
+        let text = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(text.contains("整数运算溢出"), "{tag}: {text}");
+        assert!(text.contains("9223372036854775807"), "{tag}: {text}");
+        assert!(text.contains("求值时出错"), "{tag}: {text}");
+    }
+}
+
+#[test]
+fn a_given_fact_cannot_register_the_same_proposition_twice() {
+    let theory = TempFile::new(
+        "given-duplicate",
+        "std",
+        "sort 人\nobj 甲 : 人\ndef 金额 : Type := Int\npred 医疗费 : 人 → 金额 → Prop\n",
+    );
+    let output = session_with(
+        &theory,
+        &[
+            ":given 医疗费 甲 (1000 + 2000)".to_string(),
+            ":given 医疗费 甲 3000".to_string(),
+        ],
+    );
+    assert_exit(&output, ERROR);
+    let out = stdout(&output);
+    assert!(
+        out.contains("已登记用户陈述：医疗费 甲 (add 1000 2000)"),
+        "{out}"
+    );
+    assert_eq!(
+        out.matches("已登记用户陈述").count(),
+        1,
+        "the rejected duplicate must not print a success line: {out}"
+    );
+    let text = format!("{}{}", out, stderr(&output));
+    assert!(
+        text.contains("同一命题只能登记为一条事实"),
+        "the duplicate must be named: {text}"
+    );
+    assert!(
+        text.contains("已知1"),
+        "the existing fact name must be reported: {text}"
+    );
+}

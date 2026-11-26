@@ -2006,10 +2006,12 @@ impl Session {
     ///
     /// The session is cloned first, so a failed insert (a name collision)
     /// leaves no partial declaration behind. Registration also refuses a
-    /// second identity for the same proposition: the identity is evidence, so
-    /// `:given` (or `:fact add`) cannot relabel a proposition the ledger
-    /// already records under another identity. The comparison uses kernel
-    /// conversion, so an alpha variant cannot bypass it.
+    /// second registration of the same proposition: the ledger is the fact
+    /// list, and two entries for one proposition (including two spellings that
+    /// are kernel-equivalent, such as `医疗费 甲 (1000 + 2000)` and
+    /// `医疗费 甲 3000`) would double-count it and could relabel its identity.
+    /// The comparison uses kernel conversion, so an alpha variant or an
+    /// arithmetic spelling cannot bypass it.
     fn insert_fact(
         &mut self,
         prop: Expr,
@@ -2023,19 +2025,28 @@ impl Session {
             else {
                 continue;
             };
-            if registered == &identity {
-                continue;
-            }
             let same = convertible(&self.lib.env, &Ctx::new(), &existing.ty, &prop)
                 .map_err(|error| format!("无法判定命题是否已登记为事实：{error}"))?;
-            if same {
+            if !same {
+                continue;
+            }
+            if registered == &identity {
                 return Err(format!(
-                    "同一命题只能有一种事实身份：`{}` 已登记为{}，不能同时是{}",
+                    "同一命题只能登记为一条事实：`{}` 已登记为{}（事实名「{}」），\
+                     同一身份下不能重复登记",
                     print_expr(&prop),
                     registered.label_zh(),
-                    identity.label_zh()
+                    existing.name
                 ));
             }
+            return Err(format!(
+                "同一命题只能有一种事实身份：`{}` 已登记为{}（事实名「{}」），\
+                 不能同时是{}",
+                print_expr(&prop),
+                registered.label_zh(),
+                existing.name,
+                identity.label_zh()
+            ));
         }
         let decl = std_deduce_kernel::Decl {
             name: std_deduce_kernel::name(&name),

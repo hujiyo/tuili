@@ -2,6 +2,7 @@
 //! precedence, negation, parentheses, dates and the error positions.
 
 use std_deduce_kernel::builtin;
+use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::{check, Ctx, Expr};
 use std_deduce_lang::ast::{Item, Term};
 use std_deduce_lang::elab::elab_top;
@@ -297,4 +298,58 @@ fn a_unique_argument_position_still_parses() {
         }
         other => panic!("expected a unique item, got {other:?}"),
     }
+}
+
+#[test]
+fn a_leading_zero_is_a_lexical_error_at_its_position() {
+    // `007` is not another spelling of 7: ten-based literals are written in
+    // their canonical form, and only `0` may start with a zero.
+    let error = lex("#check 007").expect_err("a leading zero is not an integer literal");
+    assert_eq!(error.line, 1);
+    assert_eq!(error.col, 8, "the error points at the literal: {error}");
+    assert!(error.msg.contains("前导零"), "{error}");
+    assert!(error.msg.contains("007"), "{error}");
+
+    assert_eq!(checked_term("#check 0"), Term::Num(0));
+
+    let mut library = std_deduce_lang::Library::new();
+    let error = library
+        .load("leading-zero.std", "sort 人\n#check 007\n")
+        .expect_err("a theory with a leading zero cannot load");
+    assert_eq!(
+        error.position(),
+        Some((2, 8)),
+        "the load diagnostic keeps the position: {error}"
+    );
+    assert!(error.to_string().contains("前导零"), "{error}");
+}
+
+#[test]
+fn a_printed_negative_argument_parses_back_as_the_same_term() {
+    // A negative literal used as an operand is printed in parentheses:
+    // `add (-3000) 2000` reads back as the same application, while
+    // `add -3000 2000` would read as a subtraction.
+    let env = std_deduce_kernel::Env::new();
+    let expression = elab_top(&env, &checked_term("#check (add (-3000) 2000)"))
+        .expect("the negative operand elaborates");
+    let printed = print_expr(&expression);
+    assert_eq!(printed, "add (-3000) 2000");
+    let reparsed = elab_top(&env, &checked_term(&format!("#check {printed}")))
+        .expect("the printed form parses back");
+    assert_eq!(reparsed, expression);
+
+    // A negative literal in the function position and in both operands of an
+    // application keeps the same shape.
+    let nested = elab_top(
+        &env,
+        &checked_term("#check (mul (add (-3000) 2000) (-4000))"),
+    )
+    .expect("the nested term elaborates");
+    assert_eq!(print_expr(&nested), "mul (add (-3000) 2000) (-4000)");
+    let reparsed = elab_top(
+        &env,
+        &checked_term(&format!("#check {}", print_expr(&nested))),
+    )
+    .expect("the printed nested form parses back");
+    assert_eq!(reparsed, nested);
 }

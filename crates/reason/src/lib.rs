@@ -968,6 +968,191 @@ fn match_axiom_body(
     }
 }
 
+/// How many closed candidate values one evaluation-aware axiom match may draw
+/// from a goal.
+///
+/// The fallback is only used when a structural match failed and the
+/// declaration's body contains a built-in operation: its instance can become
+/// the goal after the operation evaluates (`x + 0` with `x = 5000` becomes
+/// `5000`). Exceeding the bound is an error that names it, never a silently
+/// skipped candidate.
+pub const MAX_AXIOM_MATCH_VALUES: usize = 64;
+
+/// How many complete binder assignments one evaluation-aware axiom match may
+/// try. An assignment is one value per still-unbound binder variable; the
+/// product of the candidate sets above is checked before anything is tried.
+pub const MAX_AXIOM_MATCH_ASSIGNMENTS: usize = 4096;
+
+/// Does `expression` mention a built-in operation?
+///
+/// The evaluation-aware match fallback is meaningful only here: without such
+/// an operation, evaluating the instantiated body cannot change it, so the
+/// ordinary structural and normalized matches already cover the goal.
+fn contains_builtin_arithmetic(expression: &Expr) -> bool {
+    match expression {
+        Expr::Const(name) => std_deduce_kernel::builtin::Op::from_name(name).is_some(),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => false,
+        Expr::Pi {
+            domain, codomain, ..
+        } => contains_builtin_arithmetic(domain) || contains_builtin_arithmetic(codomain),
+        Expr::Lam { domain, body, .. } => {
+            contains_builtin_arithmetic(domain) || contains_builtin_arithmetic(body)
+        }
+        Expr::App { func, arg } => {
+            contains_builtin_arithmetic(func) || contains_builtin_arithmetic(arg)
+        }
+        Expr::Let { value, body, .. } => {
+            contains_builtin_arithmetic(value) || contains_builtin_arithmetic(body)
+        }
+    }
+}
+
+/// Every closed subterm of `expression`, in pre-order.
+fn closed_subterms(expression: &Expr, out: &mut Vec<Expr>) {
+    if !is_closed(expression) {
+        return;
+    }
+    out.push(expression.clone());
+    match expression {
+        Expr::App { func, arg } => {
+            closed_subterms(func, out);
+            closed_subterms(arg, out);
+        }
+        Expr::Pi {
+            domain, codomain, ..
+        } => {
+            closed_subterms(domain, out);
+            closed_subterms(codomain, out);
+        }
+        Expr::Lam { domain, body, .. } => {
+            closed_subterms(domain, out);
+            closed_subterms(body, out);
+        }
+        Expr::Let { value, body, .. } => {
+            closed_subterms(value, out);
+            closed_subterms(body, out);
+        }
+        _ => {}
+    }
+}
+
+/// The binder positions a universal body still mentions, as the positions
+/// [`match_axiom_body`] records.
+fn free_binder_positions(
+    expression: &Expr,
+    depth: usize,
+    binders: usize,
+    out: &mut BTreeSet<usize>,
+    axiom: &str,
+) -> Result<(), String> {
+    match expression {
+        Expr::Var(index) if *index >= depth => {
+            let offset = *index - depth;
+            let position = binders
+                .checked_sub(offset + 1)
+                .ok_or_else(|| format!("公理 `{axiom}` 的命题体含有超出绑定范围的自由变量"))?;
+            out.insert(position);
+        }
+        Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) | Expr::Var(_) => {}
+        Expr::Pi {
+            domain, codomain, ..
+        } => {
+            free_binder_positions(domain, depth, binders, out, axiom)?;
+            free_binder_positions(codomain, depth + 1, binders, out, axiom)?;
+        }
+        Expr::Lam { domain, body, .. } => {
+            free_binder_positions(domain, depth, binders, out, axiom)?;
+            free_binder_positions(body, depth + 1, binders, out, axiom)?;
+        }
+        Expr::App { func, arg } => {
+            free_binder_positions(func, depth, binders, out, axiom)?;
+            free_binder_positions(arg, depth, binders, out, axiom)?;
+        }
+        Expr::Let { value, body, .. } => {
+            free_binder_positions(value, depth, binders, out, axiom)?;
+            free_binder_positions(body, depth + 1, binders, out, axiom)?;
+        }
+    }
+    Ok(())
+}
+
+/// Every complete binder assignment the evaluation-aware match may try.
+///
+/// Values are closed subterms of the goal's normal form: an operation inside
+/// the axiom body only evaluates once its operands are literals
+/// (`x + 0`), so the value that makes the instance equal the goal is one of
+/// those subterms. Literal values are tried first, which keeps the ordinary
+/// case (a goal that is already a number) cheap and deterministic. The whole
+/// search space is bounded before it is enumerated; exceeding a bound is an
+/// error naming it.
+fn value_bindings(axiom: &AxiomDecl, goal: &Expr) -> Result<Vec<Vec<(usize, Expr)>>, String> {
+    let mut positions = BTreeSet::new();
+    free_binder_positions(
+        &axiom.body,
+        0,
+        axiom.binders.len(),
+        &mut positions,
+        &axiom.name,
+    )?;
+    let mut candidates = Vec::new();
+    closed_subterms(goal, &mut candidates);
+    if candidates.len() > MAX_AXIOM_MATCH_VALUES {
+        return Err(format!(
+            "目标「{}」有 {} 个闭合子项，超过公理 `{}` 的算术匹配候选上限 {} 个",
+            print_expr(goal),
+            candidates.len(),
+            axiom.name,
+            MAX_AXIOM_MATCH_VALUES
+        ));
+    }
+    candidates.sort_by_key(|value| u8::from(!matches!(value, Expr::Num(_))));
+    let positions: Vec<usize> = positions.into_iter().collect();
+    if positions.is_empty() || candidates.is_empty() {
+        // Nothing to assign. A body with no free binder variable is already
+        // closed and the structural matches would have covered it; this path
+        // produces no assignment rather than an empty one.
+        return Ok(Vec::new());
+    }
+    let space = candidates
+        .len()
+        .checked_pow(positions.len() as u32)
+        .filter(|space| *space <= MAX_AXIOM_MATCH_ASSIGNMENTS);
+    let Some(space) = space else {
+        return Err(format!(
+            "公理 `{}` 的算术匹配需要 {} 个候选值的 {} 重组合，超过 {} 个赋值上限",
+            axiom.name,
+            candidates.len(),
+            positions.len(),
+            MAX_AXIOM_MATCH_ASSIGNMENTS
+        ));
+    };
+    let mut out = Vec::with_capacity(space);
+    let mut current = vec![0usize; positions.len()];
+    loop {
+        out.push(
+            positions
+                .iter()
+                .zip(current.iter())
+                .map(|(position, index)| (*position, candidates[*index].clone()))
+                .collect(),
+        );
+        // Odometer increment. The last digit is advanced first, so the first
+        // candidate is tried in every position before any position moves on.
+        let mut digit = current.len();
+        loop {
+            if digit == 0 {
+                return Ok(out);
+            }
+            digit -= 1;
+            current[digit] += 1;
+            if current[digit] < candidates.len() {
+                break;
+            }
+            current[digit] = 0;
+        }
+    }
+}
+
 /// The settled result: the set of facts and a derivation for each.
 struct Fixed {
     /// The settled fact base, including the conclusions an interpretation
@@ -1561,19 +1746,45 @@ impl<'a> Reasoner<'a> {
         }
         let mut trials = Vec::new();
         for axiom in candidates {
+            // Structural match first, against the goal as written and then
+            // against both normal forms. Each attempt starts from an empty
+            // binding: a failed match may have recorded values for the prefix
+            // it got through, and those must not leak into the next attempt.
             let mut binding = Vec::new();
-            let matched = match_axiom_body(&axiom.body, goal, 0, axiom.binders.len(), &mut binding)
-                || match_axiom_body(
-                    &axiom.normalized_body,
-                    &normalized_goal,
-                    0,
-                    axiom.binders.len(),
-                    &mut binding,
-                );
-            if !matched {
+            if match_axiom_body(&axiom.body, goal, 0, axiom.binders.len(), &mut binding) {
+                trials.push(self.instantiate_trial(axiom, binding, goal)?);
                 continue;
             }
-            trials.push(self.instantiate_trial(axiom, binding, goal)?);
+            let mut normalized_binding = Vec::new();
+            if match_axiom_body(
+                &axiom.normalized_body,
+                &normalized_goal,
+                0,
+                axiom.binders.len(),
+                &mut normalized_binding,
+            ) {
+                trials.push(self.instantiate_trial(axiom, normalized_binding, goal)?);
+                continue;
+            }
+            // The axiom writes an operation (`合计 甲 (x + 0)`); the goal is
+            // already its value (`合计 甲 5000`). Every equivalent spelling of
+            // the same proposition has the same normal form, so a value the
+            // operation can consume is drawn from that normal form and the
+            // whole instance is evaluated before it is compared with the goal.
+            // The two paths share one judgement: this is the same
+            // `instantiate_trial` the structural match uses, so a proof and a
+            // gap candidate can never disagree about whether the axiom applies.
+            if !contains_builtin_arithmetic(&axiom.normalized_body) {
+                continue;
+            }
+            let assignments = value_bindings(axiom, &normalized_goal)?;
+            for assignment in assignments {
+                let trial = self.instantiate_trial(axiom, assignment, goal)?;
+                if let AxiomTrial::Instantiated(_) = trial {
+                    trials.push(trial);
+                    break;
+                }
+            }
         }
         Ok(trials)
     }
@@ -1616,26 +1827,39 @@ impl<'a> Reasoner<'a> {
                 });
             }
         }
-        let conclusion = instantiate_telescope(&axiom.body, &values);
+        let raw = instantiate_telescope(&axiom.body, &values);
         // Applying the declaration to the values makes the kernel check every
         // value against its binder domain and confirms the substituted body is
         // the instance's type. Checking the application against the computed
         // body ties both sides together.
         let applied = Expr::apps(Expr::constant(&axiom.name), values.iter().cloned());
-        if let Err(error) = check::check(self.env, &Ctx::new(), &applied, &conclusion) {
+        if let Err(error) = check::check(self.env, &Ctx::new(), &applied, &raw) {
             return Ok(AxiomTrial::Refused {
                 axiom: axiom.name.clone(),
                 bindings: ordered,
                 problem: format!("绑定值不满足公理的参数类型：{error}"),
             });
         }
-        if !is_closed(&conclusion) {
+        if !is_closed(&raw) {
             return Ok(AxiomTrial::Refused {
                 axiom: axiom.name.clone(),
                 bindings: ordered,
                 problem: "实例化后的结论不是闭合命题（绑定不足或发生变量捕获）".to_owned(),
             });
         }
+        // The instance's conclusion is the value of the substituted body; an
+        // `i64` overflow here is an error, never a term that survives because
+        // the binding path happened to be `x + 0` instead of `5000`. The
+        // certificate records this evaluated form, and `cert::check` recomputes
+        // the body from the same bindings and compares by kernel conversion,
+        // so the two sides agree.
+        let conclusion = evaluate_arithmetic(self.env, &raw).map_err(|error| {
+            format!(
+                "公理 `{}` 的实例结论无法计算：{error}（结论写的是「{}」）",
+                axiom.name,
+                print_expr(&raw)
+            )
+        })?;
         let same = convertible(self.env, &Ctx::new(), &conclusion, goal).map_err(|error| {
             format!(
                 "无法判定公理 `{}` 的实例结论「{}」与目标「{}」是否等价：{error}",
@@ -1999,7 +2223,7 @@ impl<'a> Reasoner<'a> {
                 // premise, an `unless` blocker or a conflict side. The verdict
                 // is per instance because it depends on the facts it consumes.
                 for inst in self.enumerate_demanding(rule, &k, removed)? {
-                    if blocked(&inst.unlesses, &k, self.env) {
+                    if blocked(&inst.unlesses, &k, self.env)? {
                         continue;
                     }
                     if !self
@@ -2184,7 +2408,7 @@ impl<'a> Reasoner<'a> {
                 if self.key_of(&inst.conclusion) != target {
                     continue;
                 }
-                if blocked(&inst.unlesses, facts, self.env) {
+                if blocked(&inst.unlesses, facts, self.env)? {
                     continue;
                 }
                 // A rule that does not apply to this instance is no witness.
@@ -2815,7 +3039,7 @@ impl<'a> Reasoner<'a> {
             // be an instance that could actually fire under the case
             // judgement.
             for inst in self.enumerate(rule, rule_facts)? {
-                if blocked(&inst.unlesses, rule_facts, self.env) {
+                if blocked(&inst.unlesses, rule_facts, self.env)? {
                     continue;
                 }
                 if !inst
@@ -3110,7 +3334,7 @@ impl<'a> Reasoner<'a> {
         let (candidates, axiom_candidates) = if note.is_some() {
             (Vec::new(), Vec::new())
         } else {
-            (self.gap_candidates(goal), self.axiom_candidates(goal)?)
+            (self.gap_candidates(goal)?, self.axiom_candidates(goal)?)
         };
         Ok(GapExplanation {
             goal: goal.clone(),
@@ -3356,7 +3580,7 @@ impl<'a> Reasoner<'a> {
         // the wrong type, an incomplete match). They are diagnostics, bounded
         // by the same per-goal candidate cap as instantiation.
         tree.axiom_candidates = self.axiom_candidates(goal)?;
-        let candidates = self.gap_candidates(goal);
+        let candidates = self.gap_candidates(goal)?;
         if candidates.is_empty() {
             return Ok(tree);
         }
@@ -3506,7 +3730,7 @@ impl<'a> Reasoner<'a> {
     /// both sides. A premise is missing only when no rule-visible fact
     /// satisfies that judgment, so a candidate with no missing premises means
     /// the rule really can fire, and one with a missing premise really cannot.
-    fn gap_candidates(&self, goal: &Expr) -> Vec<GapCandidate> {
+    fn gap_candidates(&self, goal: &Expr) -> Result<Vec<GapCandidate>, String> {
         let facts: BTreeMap<String, Expr> = self
             .fixed
             .as_ref()
@@ -3533,12 +3757,13 @@ impl<'a> Reasoner<'a> {
             // premise facts that already hold; a still-missing premise is not
             // a fact yet, so it does not contribute an event record.
             let (held_keys, held, missing) = self.premise_status(&premises, &facts);
-            let blocked_by: Vec<Expr> = rule
-                .unlesses
-                .iter()
-                .map(|u| close_pattern(&rule.open_unless_text(u), &binding))
-                .filter(|u| blocked(std::slice::from_ref(u), &facts, self.env))
-                .collect();
+            let mut blocked_by: Vec<Expr> = Vec::new();
+            for u in &rule.unlesses {
+                let closed = close_pattern(&rule.open_unless_text(u), &binding);
+                if blocked(std::slice::from_ref(&closed), &facts, self.env)? {
+                    blocked_by.push(closed);
+                }
+            }
             candidates.push(GapCandidate {
                 rule: decl.name.clone(),
                 bindings: binding,
@@ -3549,7 +3774,7 @@ impl<'a> Reasoner<'a> {
                 applicability: self.judge_instance(&decl.scope, &held_keys),
             });
         }
-        candidates
+        Ok(candidates)
     }
 
     /// Is `goal` already being expanded on this path?
@@ -3945,14 +4170,18 @@ fn backtrack_demanding(
     Ok(())
 }
 
-fn blocked(unlesses: &[Expr], facts: &BTreeMap<String, Expr>, env: &Env) -> bool {
-    unlesses.iter().any(|u| {
+fn blocked(unlesses: &[Expr], facts: &BTreeMap<String, Expr>, env: &Env) -> Result<bool, String> {
+    for unless in unlesses {
         // A comparison that could not be decided is not evidence that the
-        // blocker is absent: an undecidable condition may still hold, so the
-        // conservative answer is "blocked". Never turn a failed comparison
-        // into "not blocked".
-        blocker_proved(env, facts, u).unwrap_or(true)
-    })
+        // blocker is absent, and it is not evidence that it is present either:
+        // an integer-overflow while evaluating the condition is an error that
+        // must reach the user, never a silent "blocked" that can masquerade as
+        // a rule cycle. It is also never "not blocked".
+        if blocker_proved(env, facts, unless)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Is the blocker `unless` established by a known fact, up to kernel
@@ -3960,14 +4189,21 @@ fn blocked(unlesses: &[Expr], facts: &BTreeMap<String, Expr>, env: &Env) -> bool
 ///
 /// The normalized printed key is an exact fast path. Alpha- and eta-equivalent
 /// facts have different keys, so a miss compares every fact with the kernel's
-/// [`convertible`]. A conversion error is returned to the caller, which must
-/// not read it as "not a blocker".
+/// [`convertible`]. Normalizing the condition itself may fail (an `i64`
+/// overflow in an arithmetic `unless` is such a failure); that error is
+/// returned, never swallowed into a text key or into "blocked".
 fn blocker_proved(
     env: &Env,
     facts: &BTreeMap<String, Expr>,
     unless: &Expr,
 ) -> Result<bool, String> {
-    if facts.contains_key(&key(env, unless)) {
+    let unless_key = normalized_key(env, unless).map_err(|error| {
+        format!(
+            "无法判定阻断条件「{}」是否已成立：{error}",
+            print_expr(unless)
+        )
+    })?;
+    if facts.contains_key(&unless_key) {
         return Ok(true);
     }
     for fact in facts.values() {
@@ -4187,6 +4423,19 @@ fn key(env: &Env, e: &Expr) -> String {
         Ok(n) => print_expr(&n),
         Err(_) => print_expr(e),
     }
+}
+
+/// The normalized printed key, with a normalization failure returned as an
+/// error.
+///
+/// [`key`] falls back to the printed text because it is a display/ordering
+/// helper. Where the key decides a judgement (a blocker condition), a failed
+/// evaluation must not turn into a text key: that would let an overflowing
+/// arithmetic condition silently compare as an opaque string.
+fn normalized_key(env: &Env, e: &Expr) -> Result<String, String> {
+    normalize(env, &Ctx::new(), e)
+        .map(|n| print_expr(&n))
+        .map_err(|error| format!("{error}"))
 }
 
 // ---------------------------------------------------------------- gaps

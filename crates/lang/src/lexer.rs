@@ -381,6 +381,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 // identifier. Keyword recognition therefore never fires for a
                 // numeric token.
                 let tok = if s.bytes().all(|b| b.is_ascii_digit()) {
+                    // `007` is not a different spelling of 7: the only legal
+                    // decimal forms are the canonical ones. Refusing the
+                    // leading zero keeps an amount from being silently read as
+                    // an octal-looking label.
+                    if s.len() > 1 && s.starts_with('0') {
+                        return Err(LexError {
+                            msg: format!(
+                                "整数字面量 `{s}` 有前导零：十进制整数不写前导零（`0` 除外）"
+                            ),
+                            line: start_line,
+                            col: start_col,
+                        });
+                    }
                     Tok::Num(s)
                 } else if s.starts_with(|c: char| c.is_ascii_digit()) && s.contains('.') {
                     // There is no decimal number type in this kernel: `3.5` is
