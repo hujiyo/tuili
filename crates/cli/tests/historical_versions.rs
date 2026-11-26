@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std_deduce_lawpack::{build_lock, LOCK_FILE};
+
 /// A proved root with no unresolved obligation.
 const PROVED: i32 = 0;
 /// A gap, an unresolved conflict, or a root with an unresolved obligation.
@@ -79,6 +81,105 @@ impl Drop for TempTheory {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+
+/// A temporary `lawpacks` registry, used by the one test that needs a pack whose
+/// theory files split one revision group.
+struct TempRegistry {
+    path: PathBuf,
+}
+
+impl TempRegistry {
+    fn new(tag: &str) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "std-deduce-cli-historical-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path)
+            .unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
+        TempRegistry { path }
+    }
+
+    fn root(&self) -> &Path {
+        &self.path
+    }
+
+    fn lawpacks(&self) -> PathBuf {
+        self.path.join("lawpacks")
+    }
+
+    fn write(&self, relative: &str, text: &str) -> PathBuf {
+        let path = self.path.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .unwrap_or_else(|error| panic!("create {}: {error}", parent.display()));
+        }
+        fs::write(&path, text).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+        path
+    }
+
+    fn write_pack(&self, name: &str, manifest: &str, files: &[(&str, &str)]) {
+        let dir = self.lawpacks().join(name);
+        fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("create {}: {error}", dir.display()));
+        fs::write(dir.join("lawpack.toml"), manifest)
+            .unwrap_or_else(|error| panic!("write manifest: {error}"));
+        for (relative, text) in files {
+            let path = dir.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .unwrap_or_else(|error| panic!("create {}: {error}", parent.display()));
+            }
+            fs::write(&path, text)
+                .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+        }
+    }
+
+    /// Hash every pack and write `<root>/lawpacks/std.lock`; panic on errors.
+    fn lock(&self) {
+        let root = self.lawpacks();
+        let lockfile = build_lock(&root).unwrap_or_else(|errors| {
+            panic!(
+                "build_lock failed: {}",
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        });
+        lockfile
+            .write(&root.join(LOCK_FILE))
+            .unwrap_or_else(|error| panic!("write lock: {error}"));
+    }
+}
+
+impl Drop for TempRegistry {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// The manifest for the temporary split pack: a module (namespace) with the
+/// listed theory files.
+fn manifest(name: &str, namespace: Option<&str>, files: &[(&str, &str)]) -> String {
+    let mut text = format!(
+        "[pack]\nname = \"{name}\"\nversion = \"0.1.0\"\n\
+         jurisdiction = \"CN\"\nterritory = \"CN\"\n"
+    );
+    if let Some(namespace) = namespace {
+        text.push_str(&format!("namespace = \"{namespace}\"\n"));
+    }
+    for (path, kind) in files {
+        text.push_str("\n[[files]]\n");
+        text.push_str(&format!("path = \"{path}\"\n"));
+        if !kind.is_empty() {
+            text.push_str(&format!("kind = \"{kind}\"\n"));
+        }
+    }
+    text
 }
 
 fn stdout(output: &Output) -> String {
@@ -163,7 +264,7 @@ fn two_versions(
 /// outside a group.
 #[test]
 fn inspect_shows_the_revision_group_on_every_version() {
-    let output = session("历史版本-新旧法.std", &[":inspect"]);
+    let output = session("历史版本-重叠未决.std", &[":inspect"]);
     let out = stdout(&output);
     let marked = out
         .lines()
@@ -177,22 +278,21 @@ fn inspect_shows_the_revision_group_on_every_version() {
 }
 
 /// Time point 1 (2019-05-01): only the old version covers the event, so the old
-/// version fires and the new version is inapplicable.
+/// version fires and the new version is inapplicable. The file holds only this
+/// time point, so the query is a clean proof.
 #[test]
 fn the_old_version_fires_at_a_time_point_it_alone_covers() {
-    let output = session("历史版本-新旧法.std", &[":why 应适用 旧版 甲"]);
-    // The time point 3 conflict involves the same rules, so the certificate
-    // reports it as a related unresolved conflict: honesty over a clean exit
-    // code. The old version's own instance is applicable and proved.
+    let output = session("历史版本-旧版适用.std", &[":why 应适用 旧版 甲"]);
     check(
         &output,
-        GAP_OR_CONFLICT,
+        PROVED,
         &[
             "▸ 应适用 旧版 甲  ⟨旧版规则⟩〔适用（事件时间 2019-05-01（区间内））〕",
             "实例：p ↦ 甲",
+            "推导已通过独立校验。",
         ],
     );
-    let gap = session("历史版本-新旧法.std", &[":gap 应适用 新版 甲"]);
+    let gap = session("历史版本-旧版适用.std", &[":gap 应适用 新版 甲"]);
     check(
         &gap,
         GAP_OR_CONFLICT,
@@ -207,16 +307,17 @@ fn the_old_version_fires_at_a_time_point_it_alone_covers() {
 /// version fires and the old version is inapplicable because it was repealed.
 #[test]
 fn the_new_version_fires_at_a_time_point_the_old_version_no_longer_covers() {
-    let output = session("历史版本-新旧法.std", &[":why 应适用 新版 丙"]);
+    let output = session("历史版本-新版适用.std", &[":why 应适用 新版 丙"]);
     check(
         &output,
-        GAP_OR_CONFLICT,
+        PROVED,
         &[
             "▸ 应适用 新版 丙  ⟨新版规则⟩〔适用（事件时间 2023-02-01（区间内））〕",
             "实例：p ↦ 丙",
+            "推导已通过独立校验。",
         ],
     );
-    let gap = session("历史版本-新旧法.std", &[":gap 应适用 旧版 丙"]);
+    let gap = session("历史版本-新版适用.std", &[":gap 应适用 旧版 丙"]);
     check(
         &gap,
         GAP_OR_CONFLICT,
@@ -233,7 +334,7 @@ fn the_new_version_fires_at_a_time_point_the_old_version_no_longer_covers() {
 /// printed.
 #[test]
 fn both_versions_at_the_overlap_are_an_unresolved_historical_conflict() {
-    let output = session("历史版本-新旧法.std", &[":why 应适用 旧版 乙"]);
+    let output = session("历史版本-重叠未决.std", &[":why 应适用 旧版 乙"]);
     check(
         &output,
         GAP_OR_CONFLICT,
@@ -248,7 +349,7 @@ fn both_versions_at_the_overlap_are_an_unresolved_historical_conflict() {
     );
     // `:gap` on a conflicted target takes the unresolved-conflict report and
     // names the same relation; the note is produced by the same code as `:why`.
-    let gap = session("历史版本-新旧法.std", &[":gap 应适用 旧版 乙"]);
+    let gap = session("历史版本-重叠未决.std", &[":gap 应适用 旧版 乙"]);
     check(
         &gap,
         GAP_OR_CONFLICT,
@@ -294,7 +395,7 @@ fn a_nested_gap_names_the_historical_versions() {
 /// gains the relation.
 #[test]
 fn the_certificate_names_the_historical_versions_in_the_obligation() {
-    let output = session("历史版本-新旧法.std", &[":cert 应适用 旧版 乙"]);
+    let output = session("历史版本-重叠未决.std", &[":cert 应适用 旧版 乙"]);
     check(&output, GAP_OR_CONFLICT, &["open_obligations", "历史版本"]);
     let out = stdout(&output);
     let json_start = out.find('{').expect("the certificate JSON starts");
@@ -404,11 +505,12 @@ fn the_priority_certificate_records_and_verifies_the_edge() {
 
 /// The loader refuses the group declarations that cannot mean anything: a lone
 /// version, a reused rule name inside one group, a version without an effective
-/// range, and an identifier that names an existing declaration. Every error
-/// carries the rule name and the source position of the clause.
+/// range, and an identifier that names an existing declaration.
 #[test]
 fn the_loader_refuses_invalid_revision_groups() {
-    // A group needs at least two rules.
+    // A group needs at least two rules. The check is environment-wide (a pack
+    // may split a group across files), so it names the group and its member
+    // count instead of a single clause's position.
     let src = two_versions("旧版规则", "新版规则", "1999-01-01", "2021-01-01");
     let (first, _) = src
         .split_once("rule 新版规则 :")
@@ -419,14 +521,13 @@ fn the_loader_refuses_invalid_revision_groups() {
         &output,
         GAP_OR_CONFLICT,
         &[
-            "error: `rule 旧版规则` 的 `revision 第二十条`：同一 revision 组内必须至少有两条规则",
-            "单条声明不是一组历史版本",
+            "error: 组 `第二十条` 只声明了 1 个成员，历史版本至少需要 2 个；\
+             其余版本应与本次加载一起提供",
         ],
     );
-    let err = stderr(&output);
-    assert!(err.contains(":15:3: error:"), "{err}");
 
-    // Two versions of one group may not reuse a rule name.
+    // Two versions of one group may not reuse a rule name. The ledger refuses
+    // the duplicate name at the clause that wrote the group.
     let same_name = TempTheory::new(
         "same-name",
         &two_versions("旧版规则", "旧版规则", "1999-01-01", "2021-01-01"),
@@ -441,7 +542,8 @@ fn the_loader_refuses_invalid_revision_groups() {
         ],
     );
 
-    // Every version must declare an effective range.
+    // Every version must declare an effective range. The environment-wide check
+    // names the version that lacks one.
     let no_range = TempTheory::new(
         "no-range",
         &two_versions("旧版规则", "新版规则", "1999-01-01", ""),
@@ -451,7 +553,7 @@ fn the_loader_refuses_invalid_revision_groups() {
         &output,
         GAP_OR_CONFLICT,
         &[
-            "`rule 新版规则` 的 `revision 第二十条`：历史版本必须声明生效区间",
+            "`rule 新版规则` 属于组 `第二十条`：历史版本必须声明生效区间",
             "请写 `effective <YYYY-MM-DD>`",
         ],
     );
@@ -470,5 +572,140 @@ fn the_loader_refuses_invalid_revision_groups() {
             "组标识不得与已声明规则名/谓词冲突",
             "`行为` 已声明为 `pred`",
         ],
+    );
+}
+
+/// A case file scopes its revision group by itself: two case files that each
+/// declare one version of the same provision are two groups of one member, so
+/// both are refused rather than merged into a group of two.
+#[test]
+fn two_case_files_cannot_complete_each_others_group() {
+    for name in ["case-a.std", "case-b.std"] {
+        let file = TempTheory::new(
+            name,
+            "sort 人\n\
+             pred 行为 : 人 → Prop\n\
+             pred 应适用 : 人 → Prop\n\
+             obj 甲 : 人\n\
+             axiom 事 : 行为 甲\n  source text \"示例卷宗\" locator \"行为\"\n\
+             rule 唯一 :\n  params p : 人\n  premise 行为 p\n  conclude 应适用 p\n  \
+             effective 1999-01-01\n  revision 第二十条\n  \
+             source text \"示例刑法\" locator \"第二十条\"\n",
+        );
+        let output = run(vec![file.path.display().to_string()]);
+        check_stderr(
+            &output,
+            GAP_OR_CONFLICT,
+            &[
+                "error: 组 `第二十条` 只声明了 1 个成员，历史版本至少需要 2 个；\
+                 其余版本应与本次加载一起提供",
+            ],
+        );
+    }
+}
+
+/// A law pack may keep one version of a provision per theory file. Loading one
+/// file alone is a group of one and fails; importing the pack loads both files
+/// in one transaction, so the group is complete and the case proves.
+#[test]
+fn a_pack_may_split_one_revision_group_across_theory_files() {
+    let dir = TempRegistry::new("split");
+    let base = "namespace split.pack\n\
+                sort split.pack.人\n\
+                pred split.pack.行为 : split.pack.人 → Prop\n\
+                pred split.pack.应适用 : split.pack.人 → Prop\n";
+    let rule = |rule: &str, effective: &str| {
+        format!(
+            "rule split.pack.{rule} :\n  params p : split.pack.人\n  \
+             premise split.pack.行为 p\n  conclude split.pack.应适用 p\n  \
+             effective {effective}\n  revision 第二十条\n  \
+             source text \"示例刑法\" locator \"第二十条（{rule}）\"\n"
+        )
+    };
+    // Two theory files of one pack, one version of the provision each.
+    dir.write_pack(
+        "split.pack",
+        &manifest(
+            "split.pack",
+            Some("split.pack"),
+            &[("a.std", "theory"), ("b.std", "theory")],
+        ),
+        &[
+            ("a.std", &format!("{base}{}", rule("旧", "1999-01-01"))),
+            (
+                "b.std",
+                &format!("namespace split.pack\n{}", rule("新", "2021-01-01")),
+            ),
+        ],
+    );
+    dir.lock();
+    let case = dir.write(
+        "case.std",
+        "import split.pack\n\
+         obj 甲 : split.pack.人\n\
+         axiom 事 : split.pack.行为 甲\n  source text \"案件\" locator \"一\"\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_std-deduce"))
+        .current_dir(dir.root())
+        .args([case.display().to_string(), ":inspect".to_owned()])
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run the CLI: {error}"));
+    let out = stdout(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(PROVED),
+        "the split group must load as one transaction\nstdout:\n{out}\nstderr:\n{}",
+        stderr(&output)
+    );
+    assert!(
+        out.contains("rule  split.pack.旧"),
+        "the pack's versions are loaded\n{out}"
+    );
+}
+
+/// A pack that declares only one version of a provision is a group of one and
+/// is refused at import.
+#[test]
+fn a_pack_with_a_single_version_group_is_refused() {
+    let dir = TempRegistry::new("single");
+    let source = "namespace split.pack\n\
+                  sort split.pack.人\n\
+                  pred split.pack.行为 : split.pack.人 → Prop\n\
+                  pred split.pack.应适用 : split.pack.人 → Prop\n\
+                  rule split.pack.旧 :\n  params p : split.pack.人\n  \
+                  premise split.pack.行为 p\n  conclude split.pack.应适用 p\n  \
+                  effective 1999-01-01\n  revision 第二十条\n  \
+                  source text \"示例刑法\" locator \"第二十条\"\n";
+    dir.write_pack(
+        "split.pack",
+        &manifest(
+            "split.pack",
+            Some("split.pack"),
+            &[("theory.std", "theory")],
+        ),
+        &[("theory.std", source)],
+    );
+    dir.lock();
+    let case = dir.write(
+        "case.std",
+        "import split.pack\n\
+         obj 甲 : split.pack.人\n\
+         axiom 事 : split.pack.行为 甲\n  source text \"案件\" locator \"一\"\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_std-deduce"))
+        .current_dir(dir.root())
+        .args([case.display().to_string()])
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run the CLI: {error}"));
+    let err = stderr(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(GAP_OR_CONFLICT),
+        "the import must fail\nstdout:\n{}\nstderr:\n{err}",
+        stdout(&output)
+    );
+    assert!(
+        err.contains("组 `split.pack.第二十条` 只声明了 1 个成员"),
+        "{err}"
     );
 }

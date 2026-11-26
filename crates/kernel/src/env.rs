@@ -600,15 +600,15 @@ pub struct RuleDecl {
     /// The historical-version group this rule belongs to, written as
     /// `revision <id>`; `None` when the rule declared none.
     ///
-    /// Rules that carry the same identifier under the same namespace are
-    /// versions of one provision ([`crate::meta::RevisionGroup`]). The reasoner
-    /// never picks one of them: which version applies to an instance is the
-    /// applicability judgement from the declared effective range, and which
-    /// version wins a conflict is an explicitly declared priority. The field
-    /// exists so reports can say that two rules are old and new versions of the
-    /// same provision, and so the loader can require a group to have at least
-    /// two versions.
-    pub revision: Option<Name>,
+    /// Rules that carry the same identifier under the same scope (a module
+    /// namespace or, for a case file, the file's load identity) are versions of
+    /// one provision ([`crate::meta::RevisionGroup`]). The reasoner never picks
+    /// one of them: which version applies to an instance is the applicability
+    /// judgement from the declared effective range, and which version wins a
+    /// conflict is an explicitly declared priority. The field exists so reports
+    /// can say that two rules are old and new versions of the same provision,
+    /// and so the loader can require a group to have at least two versions.
+    pub revision: Option<crate::meta::RevisionGroup>,
     pub sources: Vec<SourceRef>,
     /// Namespace of the module that declared the rule; `None` for a rule in a
     /// case file (a file without a namespace). Rule-internal `defeated_by` /
@@ -903,18 +903,14 @@ impl Env {
     /// The revision group one rule declares, or `None` when the declaration is
     /// not a rule or declared no `revision` clause.
     ///
-    /// A group's identity is the declaring namespace plus the written
-    /// identifier; see [`crate::meta::RevisionGroup`].
+    /// The group carries its own scope (a module namespace, or a case file's
+    /// load identity) and identifier; see [`crate::meta::RevisionGroup`].
     pub fn revision_group_of(&self, rule: &Name) -> Option<crate::meta::RevisionGroup> {
         let decl = self.get(rule)?;
         let DeclKind::Rule(declared) = &decl.kind else {
             return None;
         };
-        let revision = declared.revision.clone()?;
-        Some(crate::meta::RevisionGroup {
-            declared_in: declared.declared_in.clone(),
-            revision,
-        })
+        declared.revision.clone()
     }
 
     /// Every declared revision group, each with its member rules in ledger
@@ -930,14 +926,11 @@ impl Env {
             let DeclKind::Rule(rule) = &decl.kind else {
                 continue;
             };
-            let Some(revision) = rule.revision.clone() else {
+            let Some(revision) = &rule.revision else {
                 continue;
             };
             groups
-                .entry(crate::meta::RevisionGroup {
-                    declared_in: rule.declared_in.clone(),
-                    revision,
-                })
+                .entry(revision.clone())
                 .or_default()
                 .push(decl.name.clone());
         }

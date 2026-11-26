@@ -1,0 +1,49 @@
+-- 同一法条的两个历史版本（`revision 第二十条`），行为发生在 2023-02-01：只有新版适用。
+--
+-- 运行：
+--   :load examples/历史版本-新版适用.std
+--   :why 应适用 新版 丙        -- 新版触发，退出码 0
+--   :gap 应适用 旧版 丙        -- 旧版「不适用（已达到规则废止日 2022-01-01，规则已经失效）」，退出码 1
+--
+-- 版本关系是「声明」的，不是系统推断的：两条规则写同一个 `revision` 标识才成为同一法条的两个版本。
+-- 哪种时间点只落入新版区间，就由新版触发；旧版对该事件已经失效。本文件只有这一个时间点，所以查询里
+-- 出现的每一条判定都属于它想演示的场景。
+--
+-- 只有旧版适用的时间点见 examples/历史版本-旧版适用.std；
+-- 两版都适用的时间点见 examples/历史版本-重叠未决.std。
+
+sort 人
+sort 法条
+
+pred 行为 : 人 → Prop
+pred 应适用 : 法条 → 人 → Prop
+
+-- 同一案件只能适用一版法条：法条参数（第 1 个参数）单值。
+unique 应适用 1
+
+obj 丙 : 人
+obj 旧版 : 法条
+obj 新版 : 法条
+
+axiom 行为丙 : 行为 丙
+  occurred_at 2023-02-01
+  source text "示例卷宗" locator "行为（丙）" version "2024"
+
+-- 旧版：1999-01-01 生效，2022-01-01 起失效（`repealed` 不含当天，左闭右开）。
+rule 旧版规则 :
+  params p : 人
+  premise 行为 p
+  conclude 应适用 旧版 p
+  effective 1999-01-01
+  repealed 2022-01-01
+  revision 第二十条
+  source text "示例刑法" locator "第二十条（1997 年文本）" version "1997"
+
+-- 新版：2021-01-01 生效，没有失效日。
+rule 新版规则 :
+  params p : 人
+  premise 行为 p
+  conclude 应适用 新版 p
+  effective 2021-01-01
+  revision 第二十条
+  source text "示例刑法" locator "第二十条（2021 年修正文本）" version "2021"

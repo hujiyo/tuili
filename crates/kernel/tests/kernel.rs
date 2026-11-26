@@ -1001,13 +1001,15 @@ fn burden_report_spells_out_declared_and_undeclared_values() {
     }
 }
 
-/// `revision` groups are keyed by the declaring namespace plus the written
-/// identifier, and only rules that declared one belong to a group.
+/// `revision` groups are keyed by their scope plus the written identifier, and
+/// only rules that declared one belong to a group.
 ///
-/// The kernel stores the relation and never chooses a version: the view is what
-/// reports and the loader read.
+/// A module's scope is its namespace; a case file's scope is the file's load
+/// identity, so two case files may each group their own `第二十条` versions
+/// without merging. The kernel stores the relation and never chooses a version:
+/// the view is what reports and the loader read.
 #[test]
-fn revision_groups_are_keyed_by_namespace_and_identifier() {
+fn revision_groups_are_keyed_by_scope_and_identifier() {
     let mut env = Env::new();
     let ctx = Ctx::new();
     let add = |env: &mut Env, name: &str, kind: DeclKind, ty: Expr| {
@@ -1027,46 +1029,87 @@ fn revision_groups_are_keyed_by_namespace_and_identifier() {
         .unwrap();
     };
     add(&mut env, "P", DeclKind::Pred, Expr::Sort(0));
-    let rule = |declared_in: Option<&str>, revision: Option<&str>| RuleDecl {
-        guards: Vec::new(),
-        params: vec![],
-        premises: vec![],
-        conclusion: Expr::constant("P"),
-        unlesses: vec![],
-        exceptions: vec![],
-        prefers: vec![],
-        revision: revision.map(std_deduce_kernel::name),
-        sources: vec![],
-        declared_in: declared_in.map(std_deduce_kernel::name),
-        burden: None,
-        standard: None,
-        exception_burden: None,
-        exception_standard: None,
-    };
-    let add_rule =
-        |env: &mut Env, name: &str, declared_in: Option<&str>, revision: Option<&str>| {
-            let decl = rule(declared_in, revision);
-            let ty = std_deduce_kernel::env::rule_type(&decl);
-            env.insert(
-                Decl {
-                    name: std_deduce_kernel::name(name),
-                    kind: DeclKind::Rule(Box::new(decl)),
-                    ty,
-                    sources: vec![],
-                    scope: Default::default(),
-                    occurred_at: None,
-                    occurred_in: None,
-                    index: 0,
-                },
-                &ctx,
-            )
-            .unwrap();
+    let add_rule = |env: &mut Env,
+                    name: &str,
+                    namespace: Option<&str>,
+                    file: Option<&str>,
+                    revision: Option<&str>| {
+        let group = revision.map(|revision| RevisionGroup {
+            scope: match namespace {
+                Some(namespace) => RevisionScope::Namespace(std_deduce_kernel::name(namespace)),
+                None => RevisionScope::File(std_deduce_kernel::name(
+                    file.expect("a case rule's group needs the file identity"),
+                )),
+            },
+            revision: std_deduce_kernel::name(revision),
+        });
+        let decl = RuleDecl {
+            guards: Vec::new(),
+            params: vec![],
+            premises: vec![],
+            conclusion: Expr::constant("P"),
+            unlesses: vec![],
+            exceptions: vec![],
+            prefers: vec![],
+            revision: group,
+            sources: vec![],
+            declared_in: namespace.map(std_deduce_kernel::name),
+            burden: None,
+            standard: None,
+            exception_burden: None,
+            exception_standard: None,
         };
-    add_rule(&mut env, "a.旧", Some("a"), Some("第二十条"));
-    add_rule(&mut env, "a.新", Some("a"), Some("第二十条"));
-    add_rule(&mut env, "b.旧", Some("b"), Some("第二十条"));
-    add_rule(&mut env, "b.新", Some("b"), Some("第二十条"));
-    add_rule(&mut env, "无关", Some("b"), None);
+        let ty = std_deduce_kernel::env::rule_type(&decl);
+        env.insert(
+            Decl {
+                name: std_deduce_kernel::name(name),
+                kind: DeclKind::Rule(Box::new(decl)),
+                ty,
+                sources: vec![],
+                scope: Default::default(),
+                occurred_at: None,
+                occurred_in: None,
+                index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+    };
+    add_rule(&mut env, "a.旧", Some("a"), None, Some("第二十条"));
+    add_rule(&mut env, "a.新", Some("a"), None, Some("第二十条"));
+    add_rule(&mut env, "b.旧", Some("b"), None, Some("第二十条"));
+    add_rule(&mut env, "b.新", Some("b"), None, Some("第二十条"));
+    add_rule(&mut env, "无关", Some("b"), None, None);
+    // Two case files, each grouping its own two versions under the same
+    // identifier. They are two groups, not one formed across the files.
+    add_rule(
+        &mut env,
+        "案件一.旧",
+        None,
+        Some("c1.std"),
+        Some("第二十条"),
+    );
+    add_rule(
+        &mut env,
+        "案件一.新",
+        None,
+        Some("c1.std"),
+        Some("第二十条"),
+    );
+    add_rule(
+        &mut env,
+        "案件二.旧",
+        None,
+        Some("c2.std"),
+        Some("第二十条"),
+    );
+    add_rule(
+        &mut env,
+        "案件二.新",
+        None,
+        Some("c2.std"),
+        Some("第二十条"),
+    );
 
     assert_eq!(
         env.revision_group_of(&std_deduce_kernel::name("a.旧"))
@@ -1079,7 +1122,7 @@ fn revision_groups_are_keyed_by_namespace_and_identifier() {
         "a rule without `revision` belongs to no group"
     );
     let groups = env.revision_groups();
-    assert_eq!(groups.len(), 2);
+    assert_eq!(groups.len(), 4);
     assert_eq!(groups[0].0.label(), "a.第二十条");
     assert_eq!(
         groups[0].1,
@@ -1097,4 +1140,20 @@ fn revision_groups_are_keyed_by_namespace_and_identifier() {
         ],
         "the rule without a revision is not a member"
     );
+    // A case-file group prints the identifier alone, but its identity is the
+    // pair of the file identity and the identifier: the two groups below are
+    // distinct even though they print the same label.
+    assert_eq!(groups[2].0.label(), "第二十条");
+    assert_eq!(
+        groups[2].0.scope_name().as_ref(),
+        "c1.std",
+        "the case group's scope is the file it was loaded from"
+    );
+    assert_eq!(groups[3].0.label(), "第二十条");
+    assert_eq!(
+        groups[3].0.scope_name().as_ref(),
+        "c2.std",
+        "two case files never share a revision group"
+    );
+    assert_ne!(groups[2].0, groups[3].0);
 }

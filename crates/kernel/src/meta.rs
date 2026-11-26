@@ -184,14 +184,29 @@ impl Scope {
     }
 }
 
+/// The declaration name space a revision group lives in.
+///
+/// A module declares qualified names, so its versions are grouped by the
+/// namespace. A case/example file has no namespace, so its versions are grouped
+/// by the file it was loaded from: two case files may each declare their own
+/// `revision 第二十条` versions without merging into one group, and neither can
+/// complete the other's group.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RevisionScope {
+    /// A module's namespace.
+    Namespace(Name),
+    /// The load identity of a case/example file: the name it was loaded under.
+    File(Name),
+}
+
 /// The group of rules that declare the same provision's historical versions.
 ///
 /// A rule writes `revision <id>` to say that it is one version of a provision;
-/// every rule carrying the same identifier in the same namespace belongs to the
-/// same group, and the versions are ordered only by the effective dates each
-/// rule declares. The group is identified by the declaring namespace *and* the
-/// written identifier, so two packages may each group their own `第20条`
-/// versions without merging into one group.
+/// every rule carrying the same identifier in the same [`RevisionScope`]
+/// belongs to the same group, and the versions are ordered only by the
+/// effective dates each rule declares. The group is identified by the scope
+/// *and* the written identifier, so two packages may each group their own
+/// `第20条` versions without merging, and so may two case files.
 ///
 /// The kernel stores the relation and never uses it to choose a version: which
 /// version covers an instance is the applicability judgement (from the
@@ -200,22 +215,29 @@ impl Scope {
 /// older version win, and nothing here compares two versions' severity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RevisionGroup {
-    /// The namespace the grouped rules are declared in; `None` for a rule in a
-    /// case/example file (a file without a `namespace`).
-    pub declared_in: Option<Name>,
+    /// Where the group's rules are declared: a module namespace or a case
+    /// file's load identity.
+    pub scope: RevisionScope,
     /// The identifier written in `revision <id>`.
     pub revision: Name,
 }
 
 impl RevisionGroup {
-    /// The group as a reader prints it: the identifier alone for a case rule,
-    /// qualified by the declaring namespace for a module rule
-    /// (`cn.criminal.第20条`). This is display only; the group's identity is
-    /// the pair of namespace and identifier, not the printed string.
+    /// The group as a reader prints it: the identifier qualified by the
+    /// declaring namespace for a module rule (`cn.criminal.第20条`), and the
+    /// identifier alone for a case rule (the file is the whole case, so its
+    /// path would only add noise; the group cannot span two case files).
     pub fn label(&self) -> String {
-        match &self.declared_in {
-            Some(namespace) => format!("{namespace}.{}", self.revision),
-            None => self.revision.to_string(),
+        match &self.scope {
+            RevisionScope::Namespace(namespace) => format!("{namespace}.{}", self.revision),
+            RevisionScope::File(_) => self.revision.to_string(),
+        }
+    }
+
+    /// The scope name, as an error or diagnostic names it.
+    pub fn scope_name(&self) -> &Name {
+        match &self.scope {
+            RevisionScope::Namespace(name) | RevisionScope::File(name) => name,
         }
     }
 }

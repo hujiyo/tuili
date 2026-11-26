@@ -1217,6 +1217,16 @@ impl Session {
                 return Err(environment.annotate_closed_error(error));
             }
         };
+        // The whole load transaction is now in the environment: the default
+        // environment, imported packs and the file itself. The `revision` group
+        // completeness is checked once here, never per file, because a law pack
+        // may split one provision's versions across theory files. A failed check
+        // drops the cloned library, so the session keeps its previous state.
+        if let Err(error) = lib.check_revision_groups() {
+            let error = error.render(path);
+            let error = environment.annotate_error(error, &imports);
+            return Err(environment.annotate_closed_error(error));
+        }
         // Interpretations named by `--interpret` or an earlier `:interpret
         // enable` must still exist in the environment that was just loaded.
         // Validating before the commit means a rejected setting leaves the
@@ -1474,6 +1484,11 @@ impl Session {
                 format!("已启用的解释无法在当前环境解析：{error}（--interpret / :interpret enable 设置）")
             })?;
         }
+        // The `revision` groups of the completed transaction: the default
+        // environment, the JSON case's imports and anything already loaded.
+        // The check runs once here, not per file.
+        lib.check_revision_groups()
+            .map_err(|error| error.render(path))?;
 
         let mut as_of_source = self.as_of_source;
         let mut jurisdiction_source = self.jurisdiction_source;
@@ -7046,7 +7061,7 @@ fn won_conflict_note(
 /// declared no `revision` prints nothing, never a placeholder.
 fn rule_revision_suffix(rule: &RuleDecl) -> String {
     match &rule.revision {
-        Some(revision) => format!("  〔历史版本 {}〕", escape_control(revision)),
+        Some(group) => format!("  〔历史版本 {}〕", escape_control(group.revision.as_ref())),
         None => String::new(),
     }
 }
