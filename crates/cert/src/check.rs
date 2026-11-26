@@ -259,7 +259,7 @@ use std::fmt;
 
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, named_binders, DeclKind, RuleDecl};
-use std_deduce_kernel::norm::normalize;
+use std_deduce_kernel::norm::{evaluate_arithmetic, normalize};
 use std_deduce_kernel::pretty::print_expr;
 use std_deduce_kernel::term::{instantiate_telescope, is_closed};
 use std_deduce_kernel::{check as kernel_check, Ctx, Env, Expr};
@@ -938,16 +938,34 @@ fn check_with(
         let actual = Expr::from(conclusion);
         let expected = close_pattern(&r.open_conclusion(), &binding);
 
-        // The arithmetic step, when the node records it. `computed` is the
-        // rule's conclusion with the bindings substituted, *before* the kernel
-        // evaluated the built-in arithmetic. It is compared structurally with
-        // the instance the checker rebuilt from the environment's rule
-        // declaration and the recorded bindings: the operation name and every
-        // operand are part of the record. Editing a number in the computed
-        // form, or swapping `add` for `mul`, therefore fails here even though
-        // the recorded conclusion still looks like one of the values. This
-        // check runs first so a tampered computation is reported as what it
-        // is, not as a mere conclusion mismatch.
+        // The arithmetic step. `computed` is the rule's conclusion with the
+        // bindings substituted, *before* the kernel evaluated the built-in
+        // arithmetic. A step whose instance really computes something must
+        // record it: without the field a reader (and this checker) could not
+        // tell "no arithmetic happened" from "the arithmetic step was left
+        // out", and the recorded number would be the only trace of the
+        // computation. Steps whose instance contains no arithmetic may omit it.
+        let evaluated = evaluate_arithmetic(env, &expected).map_err(|error| {
+            CheckError::at(
+                id,
+                format!(
+                    "规则 `{rule}` 的实例结论无法计算：{error}（结论写的是「{}」）",
+                    print_expr(&expected)
+                ),
+            )
+        })?;
+        let arithmetic_changed = evaluated != expected;
+        if arithmetic_changed && computed.is_none() {
+            return Err(CheckError::at(
+                id,
+                format!(
+                    "规则 `{rule}` 的实例结论「{}」含可计算的算术表达式，\
+                     但没有记录未求值形式（节点的 `computed` 字段）：\
+                     算术步骤必须显式记录，不能只凭结论里的数值",
+                    print_expr(&expected)
+                ),
+            ));
+        }
         if let Some(computed) = computed {
             let recorded = Expr::from(computed);
             if !is_closed(&recorded) {
@@ -959,6 +977,12 @@ fn check_with(
                     ),
                 ));
             }
+            // Structural comparison with the instance the checker rebuilt from
+            // the environment's rule declaration and the recorded bindings: the
+            // operation name and every operand are part of the record. Editing
+            // a number in the computed form, or swapping `add` for `mul`,
+            // therefore fails here even though the recorded conclusion still
+            // looks like one of the values.
             if expression_key(&recorded) != expression_key(&expected) {
                 return Err(CheckError::at(
                     id,

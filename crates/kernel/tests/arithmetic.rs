@@ -273,6 +273,48 @@ fn a_declaration_with_an_overflowing_literal_is_refused_at_load() {
 }
 
 #[test]
+fn a_comparison_cannot_be_a_rule_premise_or_blocker() {
+    // A comparison is a computed expression, not a proposition a fact can
+    // prove. Letting `less a b` stand as a premise would turn "it evaluated to
+    // True" into evidence, so the rule is refused at load time.
+    let ctx = Ctx::new();
+    let mut env = Env::new();
+    env.insert(
+        decl(DeclKind::Pred, "小", Expr::pi(c("Int"), Expr::Sort(0))),
+        &ctx,
+    )
+    .unwrap();
+    let rule_with = |premises: Vec<(Option<Name>, Expr)>, unlesses: Vec<Expr>| RuleDecl {
+        params: vec![(name("a"), c("Int"))],
+        premises,
+        conclusion: Expr::apps(c("小"), [Expr::Var(0)]),
+        unlesses,
+        burden: None,
+        standard: None,
+        exception_burden: None,
+        exception_standard: None,
+        exceptions: Vec::new(),
+        prefers: Vec::new(),
+        sources: Vec::new(),
+        declared_in: None,
+    };
+    let comparison = op(builtin::LESS, vec![Expr::Var(0), num(5000)]);
+    let error = rule_with(vec![(None, comparison.clone())], Vec::new())
+        .check(&env, &Expr::Sort(0))
+        .expect_err("a comparison premise must be refused");
+    assert!(
+        error.to_string().contains("比较目前不参与规则触发"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("前提 1"), "{error}");
+
+    let error = rule_with(Vec::new(), vec![comparison])
+        .check(&env, &Expr::Sort(0))
+        .expect_err("a comparison unless must be refused");
+    assert!(error.to_string().contains("unless 1"), "{error}");
+}
+
+#[test]
 fn the_type_of_an_amount_alias_accepts_a_literal() {
     let ctx = Ctx::new();
     let env = amount_env();

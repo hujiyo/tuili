@@ -46,10 +46,13 @@
 //! may carry the `computed` form of its conclusion — the rule's own conclusion
 //! with the recorded bindings substituted, before the kernel evaluated the
 //! built-in arithmetic — while the recorded `conclusion` is that expression's
-//! evaluated value. The checker requires `computed` to be exactly the instance
+//! evaluated value. The field is required exactly when that substitution really
+//! computes something: an arithmetic step cannot hide behind its recorded
+//! number. The checker requires `computed` to be exactly the instance
 //! the environment's rule and the recorded bindings determine, and the
-//! conclusion to be its kernel value, so a changed number or a swapped
-//! operation is rejected. There is no floating point in the format.
+//! conclusion to be its kernel value, so a changed number, a swapped
+//! operation or a dropped arithmetic record is rejected. There is no floating
+//! point in the format.
 //! Version 9 records every independent witness of each derived conclusion: the
 //! mandatory `alternatives` table names a proposition, the nodes that derive
 //! it, and whether the per-conclusion bound truncated the list. The checker

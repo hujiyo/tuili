@@ -15,12 +15,15 @@ use std_deduce_cert::{
 use std_deduce_kernel::Env;
 use std_deduce_lang::Library;
 
-/// The rule that adds two amounts. `a + b` is the built-in `add`.
+/// The rule that adds two amounts. `a + b` is the built-in `add`. The second
+/// rule concludes a proposition the premises already give, so its instance
+/// contains no arithmetic and may omit the `computed` record.
 const THEORY: &str = r#"
 sort 人
 def 金额 : Type := Int
 pred 医疗费 : 人 → 金额 → Prop
 pred 误工费 : 人 → 金额 → Prop
+pred 账单 : 人 → 金额 → Prop
 pred 合计 : 人 → 金额 → Prop
 obj 甲 : 人
 rule 赔偿合计 :
@@ -29,6 +32,11 @@ rule 赔偿合计 :
   premise 误工费 p b
   conclude 合计 p (a + b)
   source text "测试" locator "夹具"
+rule 账单合计 :
+  params p : 人, x : 金额
+  premise 账单 p x
+  conclude 合计 p x
+  source text "测试" locator "夹具二"
 "#;
 
 fn env() -> Env {
@@ -248,15 +256,63 @@ fn recorded_bindings_must_match_the_cited_premises() {
 }
 
 #[test]
-fn a_step_may_omit_the_computed_form_and_the_checker_still_recomputes_it() {
-    // The field is optional. The checker derives the instance from the rule and
-    // the bindings either way, so nothing is taken on trust.
-    check(&env(), &certificate(rule_node(amount("合计", 5000), None)))
-        .expect("the checker recomputes the instance");
-    let error = check(&env(), &certificate(rule_node(amount("合计", 6000), None)))
-        .expect_err("a wrong conclusion is still refused");
+fn an_arithmetic_step_without_the_computed_form_is_rejected() {
+    // The instance really computes `3000 + 2000`; leaving the pre-evaluation
+    // form out would leave the recorded `5000` as the only trace of the
+    // computation, so the field is required here. The message says exactly
+    // that, and the node is named.
+    let error = check(&env(), &certificate(rule_node(amount("合计", 5000), None)))
+        .expect_err("an unrecorded arithmetic step must be refused");
     assert_eq!(error.node, Some(2), "{error}");
-    assert!(error.message.contains("add 3000 2000"), "{}", error.message);
+    assert!(
+        error.message.contains("含可计算的算术表达式"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("没有记录未求值形式"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_step_without_arithmetic_may_omit_the_computed_form() {
+    // `账单合计` only passes a value through: `合计 p x` is not an arithmetic
+    // expression, so its instance does not change under evaluation and the
+    // field stays optional. The checker still rebuilds the instance from the
+    // rule and the bindings, so nothing is taken on trust.
+    let node = Node::RuleApplication {
+        rule: "账单合计".to_owned(),
+        conclusion: amount("合计", 5000),
+        computed: None,
+        premises: vec![0],
+        bindings: bindings(vec![("p", constant("甲")), ("x", num(5000))]),
+        sources: Vec::new(),
+        applicability: unscoped_applicability(),
+    };
+    let cert = Certificate {
+        format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::Recorded(EnvironmentRecord::empty()),
+        assumptions: vec![assumption(amount("账单", 5000))],
+        interpretations: Vec::new(),
+        nodes: vec![Node::Assumption { assumption: 0 }, node],
+        root: Some(1),
+        alternatives: Vec::new(),
+        conflicts: Vec::new(),
+        open_obligations: Vec::new(),
+        metadata: Default::default(),
+    };
+    check(&env(), &cert).expect("a step without arithmetic may omit `computed`");
+    kernel_proof(&env(), &cert).expect("the kernel accepts the step");
+
+    // The same rule with a wrong conclusion is still refused.
+    let mut wrong = cert.clone();
+    if let Node::RuleApplication { conclusion, .. } = &mut wrong.nodes[1] {
+        *conclusion = amount("合计", 4000);
+    }
+    let error = check(&env(), &wrong).expect_err("a wrong conclusion is still refused");
+    assert_eq!(error.node, Some(1), "{error}");
 }
 
 #[test]

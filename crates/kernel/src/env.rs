@@ -1090,6 +1090,15 @@ impl RuleDecl {
         for (i, (n, p)) in self.premises.iter().enumerate() {
             check::check_is_type(env, &ctx, p)
                 .map_err(|e| Error::other(format!("前提 {} 不成立：{e}", i + 1)))?;
+            if let Some(op) = crate::builtin::comparison_head(&self.open_premise(i)) {
+                return Err(Error::other(format!(
+                    "前提 {number} 是以 `{name}` 打头的比较（`{name} a b`）：比较目前不参与规则触发，\
+                     不能靠“求值成 True 再当作前提已成立”来让规则开火；\
+                     数字比较请写在结论的计算里，或先作为事实登记",
+                    name = op.name(),
+                    number = i + 1
+                )));
+            }
             let bind = n
                 .clone()
                 .unwrap_or_else(|| crate::term::name(format!("_p{i}")));
@@ -1098,6 +1107,14 @@ impl RuleDecl {
         for (i, u) in self.unlesses.iter().enumerate() {
             check::check(env, &ctx, u, &Expr::Sort(0))
                 .map_err(|e| Error::other(format!("unless {} 不是命题：{e}", i + 1)))?;
+            if let Some(op) = crate::builtin::comparison_head(&self.open_unless_text(u)) {
+                return Err(Error::other(format!(
+                    "unless {number} 是以 `{name}` 打头的比较（`{name} a b`）：比较目前不参与规则触发，\
+                     不能靠“求值成 True 再当作阻断条件已成立”来阻断规则",
+                    name = op.name(),
+                    number = i + 1
+                )));
+            }
         }
         let t = check::infer(env, &ctx, &self.conclusion)
             .map_err(|e| Error::other(format!("结论不成立：{e}")))?;

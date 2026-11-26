@@ -303,6 +303,77 @@ fn a_version_nine_certificate_is_rejected() {
 }
 
 #[test]
+fn a_removed_computed_form_is_rejected() {
+    // A step whose instance really computes something must carry the
+    // pre-evaluation form. Deleting it from the exported JSON would leave the
+    // total as the only trace of the computation, so the checker refuses the
+    // step and names the node.
+    let output = session("赔偿合计.std", &[":cert 合计 甲 5000".into()]);
+    let json = certificate_text(&output);
+    let mut value: serde_json::Value =
+        serde_json::from_str(&json).expect("the certificate is JSON");
+    let nodes = value["nodes"].as_array_mut().expect("nodes is an array");
+    let step = nodes
+        .iter_mut()
+        .find(|node| node["kind"] == "rule_application")
+        .expect("the rule step is recorded");
+    assert!(
+        step["computed"].is_object(),
+        "the generated step records the arithmetic"
+    );
+    step.as_object_mut()
+        .expect("a node is an object")
+        .remove("computed");
+    let text = serde_json::to_string_pretty(&value).expect("the edited certificate serializes");
+    let file = TempFile::new("missing-computed", "json", &text);
+    let verify = session(
+        "赔偿合计.std",
+        &[format!(":verify-cert {}", file.path_text())],
+    );
+    assert_exit(&verify, ERROR);
+    let stdout = stdout(&verify);
+    assert!(
+        stdout.contains("节点 2"),
+        "the step's node must be named: {stdout}"
+    );
+    assert!(
+        stdout.contains("没有记录未求值形式"),
+        "the missing arithmetic record must be named: {stdout}"
+    );
+}
+
+#[test]
+fn amounts_are_integer_cents_and_never_yuan() {
+    // The example states its unit convention: every amount is an exact integer
+    // number of 「分」, and the total is the sum of those cents.
+    let source = fs::read_to_string(example("赔偿合计.std")).expect("the example is readable");
+    assert!(
+        source.contains("金额一律用整数「分」"),
+        "the example must state the unit: {source}"
+    );
+    assert!(
+        source.contains("医疗费 3000 分 + 误工费 2000 分 = 合计 5000 分"),
+        "the example must state the sum in 分: {source}"
+    );
+    assert!(
+        !source.contains('元'),
+        "the example must not talk about 元: {source}"
+    );
+
+    let output = session("赔偿合计.std", &[":why 合计 甲 5000".into()]);
+    assert_exit(&output, PROVED);
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("计算：合计 甲 (add 3000 2000) = 合计 甲 5000"),
+        "the computed total is stated in cents: {stdout}"
+    );
+    assert!(
+        !stdout.contains('元'),
+        "the output must not convert cents to 元: {stdout}"
+    );
+}
+
+#[test]
 fn the_conflict_example_defeats_the_computed_total() {
     // The verified amount is 9000; the rule computes 5000. `unique 合计 2`
     // makes the two values a conflict, and the strict fact wins.

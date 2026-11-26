@@ -382,6 +382,17 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 // numeric token.
                 let tok = if s.bytes().all(|b| b.is_ascii_digit()) {
                     Tok::Num(s)
+                } else if s.starts_with(|c: char| c.is_ascii_digit()) && s.contains('.') {
+                    // There is no decimal number type in this kernel: `3.5` is
+                    // refused at its own position instead of being truncated,
+                    // rounded or read as a name.
+                    return Err(LexError {
+                        msg: format!(
+                            "`{s}` 不是整数：本系统没有小数与浮点，金额请写成整数（例如 `3000` 分）"
+                        ),
+                        line: start_line,
+                        col: start_col,
+                    });
                 } else {
                     match s.as_str() {
                         "_" => Tok::Underscore,

@@ -55,6 +55,21 @@ pub fn is_reserved(name: &str) -> bool {
     NAMES.contains(&name)
 }
 
+/// The comparison operation an expression is headed by, if any.
+///
+/// A rule premise or `unless` headed by a comparison is refused at load time:
+/// a comparison is a computed expression, not a proposition a fact can prove.
+/// Turning "the comparison evaluated to `True`" into "the premise holds" would
+/// be an implicit reduction pretending to be evidence, so it is not wired into
+/// rule triggering.
+pub fn comparison_head(expression: &Expr) -> Option<Op> {
+    let name = expression.head_const()?;
+    match Op::from_name(&name) {
+        Some(op @ (Op::Less | Op::Le)) => Some(op),
+        _ => None,
+    }
+}
+
 /// The type of a built-in constant, or `None` when `name` is not built in.
 ///
 /// `Int : Type`, the operations are functions over `Int`, and the two

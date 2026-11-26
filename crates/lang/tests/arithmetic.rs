@@ -58,6 +58,28 @@ fn a_literal_out_of_range_is_a_parse_error_at_its_position() {
 }
 
 #[test]
+fn a_decimal_literal_is_refused_at_its_position() {
+    // There is no floating point: `3.5` is a lexical error, not a truncated
+    // `3`, not a rounded `4`, and not a name.
+    let error = lex("#check 3.5").expect_err("a decimal is not an integer");
+    assert_eq!(error.line, 1);
+    assert_eq!(error.col, 8, "the error points at the literal: {error}");
+    assert!(error.msg.contains("没有小数与浮点"), "{error}");
+    assert!(error.msg.contains("3.5"), "{error}");
+
+    let mut library = std_deduce_lang::Library::new();
+    let error = library
+        .load("decimal.std", "sort 人\n#check 3.5\n")
+        .expect_err("a theory with a decimal cannot load");
+    assert_eq!(
+        error.position(),
+        Some((2, 8)),
+        "the load diagnostic keeps the position: {error}"
+    );
+    assert!(error.to_string().contains("没有小数与浮点"), "{error}");
+}
+
+#[test]
 fn multiplication_binds_tighter_than_addition() {
     // `1 + 2 * 3` is `add 1 (mul 2 3)`.
     let term = checked_term("#check 1 + 2 * 3");

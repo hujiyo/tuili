@@ -638,9 +638,14 @@ pub enum Node {
         /// recorded bindings (structural comparison), and the recorded
         /// `conclusion` to be the kernel's value of that expression. Editing
         /// a number or swapping `add` for `mul` breaks one of the two
-        /// comparisons. A step without arithmetic records no `computed`,
-        /// in which case the checker derives the instance from the rule and
-        /// the bindings itself.
+        /// comparisons. The field is **required** when the instance really
+        /// computes something: the checker recomputes the instance from the
+        /// environment rule and the recorded bindings, and a step whose
+        /// instance evaluates differently must record the pre-evaluation form.
+        /// A step without arithmetic may omit it; the checker then derives the
+        /// instance from the rule and the bindings itself. The absence is
+        /// therefore readable: an arithmetic step that forgot its record is
+        /// rejected instead of being taken on trust.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         computed: Option<CertExpr>,
         /// The nodes proving the rule's premises, in the rule's premise order.
