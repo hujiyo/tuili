@@ -11,7 +11,12 @@
 //!   This boundary matters: the trusted core only ever answers yes or no.
 //! * The kernel is a checker, not a prover. Given a term and a claimed type
 //!   it accepts or rejects. It has no way to "just trust" a step.
+//! * Integers are exact `i64` values ([`Expr::Num`]) typed by the built-in
+//!   `Int`, and a small set of built-in operations ([`builtin`]) is *evaluated*
+//!   by normalisation. Overflow is an error, never a wraparound, and there is
+//!   no floating point.
 
+pub mod builtin;
 pub mod check;
 pub mod conv;
 pub mod env;

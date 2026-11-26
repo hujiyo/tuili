@@ -83,13 +83,17 @@ pub fn elab(env: &Env, locals: &[(String, Expr)], t: &Term) -> Result<Expr> {
             if let Some(i) = locals.iter().rposition(|(n, _)| n == s) {
                 return Ok(Expr::Var(locals.len() - 1 - i));
             }
-            if env.contains(s) {
+            // Built-in constants (`Int`, `add`, `less`, …) are part of the
+            // kernel, not of the environment ledger, so they are resolved even
+            // though no declaration names them. A theory cannot shadow them.
+            if env.contains(s) || std_deduce_kernel::builtin::type_of(s).is_some() {
                 return Ok(Expr::constant(s));
             }
             Err(ElabError {
                 msg: format!("未知名称 `{s}`"),
             })
         }
+        Term::Num(value) => Ok(Expr::Num(*value)),
         Term::Pi {
             name,
             domain,

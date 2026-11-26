@@ -12,9 +12,21 @@ use std_deduce_kernel::env::escape_control;
 pub enum Tok {
     /// A bare identifier or keyword. `(`/`)` etc. are their own tokens.
     Ident(String),
+    /// A run of ASCII digits, as written. The parser turns it into an exact
+    /// integer literal and reports an out-of-range value at this position.
+    /// A token that mixes digits with other identifier characters (a date such
+    /// as `2020-05-06`, or a name such as `2型糖尿病`) stays an [`Tok::Ident`].
+    Num(String),
     /// A double-quoted string literal. Values in a `source` clause use it;
     /// escapes are limited to `\\`, `\"`, `\n`, `\t` and `\r`.
     Str(String),
+    /// `+` — infix addition, lowered to the built-in `add`.
+    Plus,
+    /// `-` — infix subtraction (`sub`), or unary negation (`neg`) in front of
+    /// a term. `->` and `--` keep their operator/comment meaning.
+    Minus,
+    /// `*` — infix multiplication, lowered to the built-in `mul`.
+    Star,
     /// →, in, forall, Pi, lambda are all lowered to `Tok::Ident` keywords so
     /// the parser does not care whether a user types "->" or "→".
     Arrow,
@@ -101,6 +113,37 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                         i += 1;
                     }
                 }
+            }
+            '+' => {
+                out.push(Token {
+                    tok: Tok::Plus,
+                    line,
+                    col,
+                });
+                i += 1;
+                col += 1;
+            }
+            '*' => {
+                out.push(Token {
+                    tok: Tok::Star,
+                    line,
+                    col,
+                });
+                i += 1;
+                col += 1;
+            }
+            '-' => {
+                // A `-` that does not start a comment or an arrow is the
+                // subtraction/negation token. A `-` *inside* a word
+                // (`CN-HN`, `2020-05-06`, `cn.civil-code`) is consumed by the
+                // identifier scanner below and never reaches this arm.
+                out.push(Token {
+                    tok: Tok::Minus,
+                    line,
+                    col,
+                });
+                i += 1;
+                col += 1;
             }
             '→' => {
                 out.push(Token {
@@ -333,11 +376,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                     col += 1;
                 }
                 let s: String = bytes[start..i].iter().collect();
-                let tok = match s.as_str() {
-                    "_" => Tok::Underscore,
-                    "forall" | "Pi" | "pi" => Tok::Forall,
-                    "fun" | "lambda" => Tok::Lambda,
-                    _ => Tok::Ident(s),
+                // A word of digits only is an integer literal; every other
+                // word (including a date or a code with `-` inside) is an
+                // identifier. Keyword recognition therefore never fires for a
+                // numeric token.
+                let tok = if s.bytes().all(|b| b.is_ascii_digit()) {
+                    Tok::Num(s)
+                } else {
+                    match s.as_str() {
+                        "_" => Tok::Underscore,
+                        "forall" | "Pi" | "pi" => Tok::Forall,
+                        "fun" | "lambda" => Tok::Lambda,
+                        _ => Tok::Ident(s),
+                    }
                 };
                 out.push(Token {
                     tok,

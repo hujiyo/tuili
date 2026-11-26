@@ -1382,9 +1382,15 @@ fn require_qualified_ref(ns: &str, what: &str, name: &str) -> Result<(), String>
 /// other `Ident` is a reference to a declaration and must be qualified.
 fn check_term(ns: &str, what: &str, locals: &[String], term: &Term) -> Result<(), String> {
     match term {
-        Term::Prop | Term::Type(_) => Ok(()),
+        Term::Prop | Term::Type(_) | Term::Num(_) => Ok(()),
         Term::Ident(s) => {
-            if s == "_" || locals.iter().any(|local| local == s) {
+            // An identifier bound in the local telescope, the `_` wildcard, or
+            // a kernel built-in (`Int`, `add`, …) needs no namespace prefix:
+            // built-ins belong to no module.
+            if s == "_"
+                || locals.iter().any(|local| local == s)
+                || std_deduce_kernel::builtin::type_of(s).is_some()
+            {
                 Ok(())
             } else {
                 require_qualified_ref(ns, what, s)
@@ -1480,7 +1486,10 @@ fn check_definition_body(name: &str, body: &Term, env: &Env) -> Result<(), Strin
         ));
     }
     for ident in &free {
-        if !env.contains(ident) {
+        // A kernel built-in (`Int`, `add`, `less`, …) is part of the trusted
+        // core and needs no declaration, so a definition body may mention it
+        // without it being in the ledger.
+        if !env.contains(ident) && std_deduce_kernel::builtin::type_of(ident).is_none() {
             return Err(format!(
                 "`def {name}` 的定义体里有未绑定的名字 `{ident}`：\
                  定义体的自由变量必须被 λ/∀ 绑定，其余名字必须是已声明的项；\
@@ -1493,7 +1502,7 @@ fn check_definition_body(name: &str, body: &Term, env: &Env) -> Result<(), Strin
 
 fn collect_free_names(term: &Term, bound: &mut Vec<String>, out: &mut Vec<String>) {
     match term {
-        Term::Prop | Term::Type(_) => {}
+        Term::Prop | Term::Type(_) | Term::Num(_) => {}
         Term::Ident(name) => {
             if !bound.iter().any(|binder| binder == name) && !out.iter().any(|seen| seen == name) {
                 out.push(name.clone());

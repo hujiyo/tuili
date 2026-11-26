@@ -5,6 +5,7 @@
 //! annotation the kernel does not accept guesses for. Everything else is
 //! synthesised and compared by definitional equality.
 
+use crate::builtin;
 use crate::conv::convertible;
 use crate::env::{Ctx, Env};
 use crate::error::{Error, Result};
@@ -16,10 +17,17 @@ pub fn infer(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
     match e {
         Expr::Sort(l) => Ok(Expr::Sort(l.saturating_add(1))),
         Expr::Var(i) => ctx.type_of(*i),
+        // Built-in constants are not declared in the ledger: their types are
+        // fixed by the kernel, so a theory cannot redefine `add` or `Int`.
         Expr::Const(n) => env
             .get(n)
             .map(|d| d.ty.clone())
+            .or_else(|| builtin::type_of(n))
             .ok_or_else(|| Error::UnknownName(n.to_string())),
+        // A literal is exactly an `Int`. The built-in operations are typed over
+        // that one type; a theory that wants a domain name for its amounts
+        // writes a `def` alias of `Int`, which is definitionally equal to it.
+        Expr::Num(_) => Ok(Expr::constant(builtin::INT)),
         Expr::Pi {
             name,
             domain,

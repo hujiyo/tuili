@@ -767,6 +767,17 @@ impl Env {
         if self.decls.contains_key(&decl.name) {
             return Err(Error::DuplicateName(decl.name.to_string()));
         }
+        // A built-in name means exactly what the kernel's evaluator says it
+        // means. Shadowing it would make a record of a computation impossible
+        // to recheck, so the declaration is refused rather than silently
+        // overriding it.
+        if crate::builtin::is_reserved(&decl.name) {
+            return Err(Error::other(format!(
+                "`{}` 是内核内建名称（{}），不能声明：内建运算的语义由内核固定",
+                decl.name,
+                crate::builtin::NAMES.join(" / ")
+            )));
+        }
         let ty_ty = check::infer(self, ctx, &decl.ty)?;
         match &ty_ty {
             Expr::Sort(_) => {}
@@ -797,6 +808,19 @@ impl Env {
         }
         if let DeclKind::Rule(rule) = &decl.kind {
             rule.check(self, &Expr::Sort(0))?;
+        }
+        // Exact integer arithmetic reaching a closed literal expression is
+        // evaluated here, so a declaration that would overflow fails when it is
+        // loaded instead of becoming a term the normalizer refuses later. The
+        // evaluated form is discarded: declarations keep the term the source
+        // wrote, and only rule instances record their computed conclusion.
+        crate::norm::evaluate_arithmetic(self, &decl.ty).map_err(|error| {
+            Error::other(format!("`{}` 的声明里整数运算失败：{error}", decl.name))
+        })?;
+        if let DeclKind::Def { body } = &decl.kind {
+            crate::norm::evaluate_arithmetic(self, body).map_err(|error| {
+                Error::other(format!("`{}` 的定义体里整数运算失败：{error}", decl.name))
+            })?;
         }
         decl.index = self.next_index;
         self.next_index += 1;
@@ -1167,7 +1191,7 @@ fn open_vars(e: &Expr, names: &[Name], depth: usize, in_scope: usize) -> Expr {
                 }
             }
         }
-        Expr::Sort(_) | Expr::Const(_) => e.clone(),
+        Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) => e.clone(),
         Expr::Pi {
             name,
             domain,
@@ -1207,7 +1231,7 @@ fn mentions_pattern(e: &Expr, binder: &Name) -> bool {
     match is_pattern_var(e) {
         Some(pv) => pv == binder.as_ref(),
         None => match e {
-            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) => false,
+            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => false,
             Expr::Pi {
                 domain, codomain, ..
             } => mentions_pattern(domain, binder) || mentions_pattern(codomain, binder),

@@ -24,6 +24,7 @@ fn go(e: &Expr, prec: u8, out: &mut String, names: &mut Vec<String>) {
             }
         }
         Expr::Const(n) => out.push_str(&escape_control(n)),
+        Expr::Num(value) => out.push_str(&value.to_string()),
         Expr::Pi {
             name,
             domain,
@@ -118,7 +119,7 @@ fn mentions_var0(e: &Expr) -> bool {
 
 pub fn size(e: &Expr) -> usize {
     match e {
-        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) => 1,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => 1,
         Expr::Pi {
             domain, codomain, ..
         } => 1 + size(domain) + size(codomain),
