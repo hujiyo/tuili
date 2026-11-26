@@ -36,11 +36,20 @@
 //!
 //! ## Version policy
 //!
-//! [`FORMAT_VERSION`] is 9. `format_version` is a [`FormatVersion`], whose
+//! [`FORMAT_VERSION`] is 10. `format_version` is a [`FormatVersion`], whose
 //! deserializer accepts only the version this build implements. Unknown or
 //! missing versions are rejected; there is no repair, migration or fallback.
 //! Adding, removing or reinterpreting a field requires a new format version.
 //! Unknown fields are also rejected, so a typo cannot be silently ignored.
+//! Version 10 records exact integers: a certificate expression may carry a
+//! `num` literal (`{"kind": "num", "value": …}`), and a rule application step
+//! may carry the `computed` form of its conclusion — the rule's own conclusion
+//! with the recorded bindings substituted, before the kernel evaluated the
+//! built-in arithmetic — while the recorded `conclusion` is that expression's
+//! evaluated value. The checker requires `computed` to be exactly the instance
+//! the environment's rule and the recorded bindings determine, and the
+//! conclusion to be its kernel value, so a changed number or a swapped
+//! operation is rejected. There is no floating point in the format.
 //! Version 9 records every independent witness of each derived conclusion: the
 //! mandatory `alternatives` table names a proposition, the nodes that derive
 //! it, and whether the per-conclusion bound truncated the list. The checker
@@ -192,7 +201,7 @@
 //! five labels are `已验证`, `依赖假设`, `事实待举证`, `争点未决` and
 //! `需律师判断`; [`trust`](mod@trust) documents the exact field-to-label
 //! mapping. The labels are a derived view: they are never serialized into the
-//! certificate, and the v9 witness table does not change them. `:why`,
+//! certificate, and the v10 witness table does not change them. `:why`,
 //! `:explain` and `:labels` all print the same [`TrustReport::summary`] and the
 //! same evidence, so a conclusion cannot be labelled differently by different
 //! renderers. A label never asserts legal correctness: `已验证` means the

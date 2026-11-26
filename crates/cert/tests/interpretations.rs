@@ -397,6 +397,7 @@ fn a_rule_premise_cannot_be_an_interpretation_application() {
     let mut cert = certificate(&lib);
     let rule = lib.env.get(&name("规则S")).expect("the rule exists");
     cert.nodes.push(Node::RuleApplication {
+        computed: None,
         rule: "规则S".to_owned(),
         conclusion: cert_expr("S"),
         // Node 1 is the interpretation application that licenses `Q`, which

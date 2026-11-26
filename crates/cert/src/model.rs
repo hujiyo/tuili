@@ -309,10 +309,14 @@ impl Certificate {
                 Node::Assumption { .. } => {}
                 Node::RuleApplication {
                     conclusion,
+                    computed,
                     bindings,
                     ..
                 } => {
                     check_expression(conclusion, &format!("{place}的结论"))?;
+                    if let Some(computed) = computed {
+                        check_expression(computed, &format!("{place}计算前的结论"))?;
+                    }
                     for binding in bindings {
                         check_expression(
                             &binding.value,
@@ -622,8 +626,23 @@ pub enum Node {
     RuleApplication {
         /// The rule constant's name in the environment.
         rule: String,
-        /// The instantiated conclusion.
+        /// The instantiated conclusion, as the kernel evaluates it: the built-in
+        /// arithmetic of `computed` is applied, so a rule that concludes
+        /// `合计 甲 (add a b)` records `合计 甲 5000` when the bindings are
+        /// `a = 3000`, `b = 2000`.
         conclusion: CertExpr,
+        /// The rule's conclusion with the parameter values substituted, before
+        /// the kernel evaluated the built-in arithmetic, recorded only when
+        /// evaluation changed it. It is the arithmetic step itself: the checker
+        /// requires it to be exactly the rule's own conclusion under the
+        /// recorded bindings (structural comparison), and the recorded
+        /// `conclusion` to be the kernel's value of that expression. Editing
+        /// a number or swapping `add` for `mul` breaks one of the two
+        /// comparisons. A step without arithmetic records no `computed`,
+        /// in which case the checker derives the instance from the rule and
+        /// the bindings itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        computed: Option<CertExpr>,
         /// The nodes proving the rule's premises, in the rule's premise order.
         premises: Vec<NodeId>,
         /// The parameter bindings that produced this instance, available to a
@@ -1005,7 +1024,10 @@ fn check_expression(expression: &CertExpr, place: &str) -> Result<(), String> {
             ));
         }
         match expression {
-            CertExpr::Sort { .. } | CertExpr::Var { .. } | CertExpr::Const { .. } => {}
+            CertExpr::Sort { .. }
+            | CertExpr::Var { .. }
+            | CertExpr::Const { .. }
+            | CertExpr::Num { .. } => {}
             CertExpr::Pi {
                 domain, codomain, ..
             } => {

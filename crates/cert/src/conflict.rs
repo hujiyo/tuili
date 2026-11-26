@@ -164,7 +164,7 @@ pub fn within_term_limit(expression: &Expr) -> bool {
             return false;
         }
         match expression {
-            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) => true,
+            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => true,
             Expr::Pi {
                 domain, codomain, ..
             } => count(domain, nodes) && count(codomain, nodes),

@@ -120,6 +120,7 @@ fn rule_node(
     entries: Vec<(&str, CertExpr)>,
 ) -> Node {
     Node::RuleApplication {
+        computed: None,
         rule: rule.to_owned(),
         conclusion,
         premises,

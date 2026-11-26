@@ -1,0 +1,368 @@
+//! Certificate-level arithmetic: the `num` expression, the recorded `computed`
+//! form of a rule step, and the checker's recomputation of both.
+//!
+//! The certificates here are built by hand, so the checker is tested on its own
+//! contract rather than on the reasoner's output. The end-to-end path (a
+//! generated certificate, a tampered copy, the CLI) is tested in
+//! `crates/cli/tests/arithmetic.rs`.
+
+use std_deduce_cert::{
+    check, expression_key, kernel_proof, ApplicabilityBasis, ApplicabilityReason,
+    ApplicabilityReasonKind, ApplicabilityVerdict, Assumption, Binding, CertExpr, Certificate,
+    EnvironmentIdentity, EnvironmentRecord, Explicit, FactIdentity, FormatVersion, Node,
+    RuleApplicability,
+};
+use std_deduce_kernel::Env;
+use std_deduce_lang::Library;
+
+/// The rule that adds two amounts. `a + b` is the built-in `add`.
+const THEORY: &str = r#"
+sort 人
+def 金额 : Type := Int
+pred 医疗费 : 人 → 金额 → Prop
+pred 误工费 : 人 → 金额 → Prop
+pred 合计 : 人 → 金额 → Prop
+obj 甲 : 人
+rule 赔偿合计 :
+  params p : 人, a : 金额, b : 金额
+  premise 医疗费 p a
+  premise 误工费 p b
+  conclude 合计 p (a + b)
+  source text "测试" locator "夹具"
+"#;
+
+fn env() -> Env {
+    let mut library = Library::new();
+    library
+        .load("cert-arithmetic", THEORY)
+        .expect("test theory loads");
+    library.env
+}
+
+fn constant(name: &str) -> CertExpr {
+    CertExpr::Const {
+        name: name.to_owned(),
+    }
+}
+
+fn num(value: i64) -> CertExpr {
+    CertExpr::Num { value }
+}
+
+fn app(function: CertExpr, arg: CertExpr) -> CertExpr {
+    CertExpr::App {
+        func: Box::new(function),
+        arg: Box::new(arg),
+    }
+}
+
+fn apply(function: &str, arguments: Vec<CertExpr>) -> CertExpr {
+    arguments.into_iter().fold(constant(function), app)
+}
+
+/// `医疗费 甲 3000`, `误工费 甲 2000`, `合计 甲 5000`.
+fn amount(predicate: &str, value: i64) -> CertExpr {
+    apply(predicate, vec![constant("甲"), num(value)])
+}
+
+fn assumption(proposition: CertExpr) -> Assumption {
+    Assumption {
+        proposition,
+        identity: FactIdentity::UserAsserted,
+        sources: Vec::new(),
+        label: None,
+        occurred_at: Explicit::none(),
+        occurred_in: Explicit::none(),
+    }
+}
+
+/// The record of a rule declared without any scope.
+fn unscoped_applicability() -> Box<RuleApplicability> {
+    Box::new(RuleApplicability {
+        verdict: ApplicabilityVerdict::Unchecked,
+        basis: ApplicabilityBasis::default(),
+        reason: Explicit::some(ApplicabilityReason::new(
+            ApplicabilityReasonKind::RuleHasNoScope,
+        )),
+    })
+}
+
+fn bindings(values: Vec<(&str, CertExpr)>) -> Vec<Binding> {
+    values
+        .into_iter()
+        .map(|(parameter, value)| Binding {
+            parameter: parameter.to_owned(),
+            value,
+        })
+        .collect()
+}
+
+/// A rule step deriving `合计 甲 5000` from the two amount facts, with the
+/// arithmetic step recorded as `合计 甲 (add 3000 2000)`.
+fn rule_node(conclusion: CertExpr, computed: Option<CertExpr>) -> Node {
+    Node::RuleApplication {
+        rule: "赔偿合计".to_owned(),
+        conclusion,
+        computed,
+        premises: vec![0, 1],
+        bindings: bindings(vec![
+            ("p", constant("甲")),
+            ("a", num(3000)),
+            ("b", num(2000)),
+        ]),
+        sources: Vec::new(),
+        applicability: unscoped_applicability(),
+    }
+}
+
+/// The raw instance form: `合计 甲 (add 3000 2000)`.
+fn raw_total() -> CertExpr {
+    apply(
+        "合计",
+        vec![constant("甲"), apply("add", vec![num(3000), num(2000)])],
+    )
+}
+
+fn certificate(node: Node) -> Certificate {
+    certificate_with(
+        vec![
+            assumption(amount("医疗费", 3000)),
+            assumption(amount("误工费", 2000)),
+        ],
+        node,
+    )
+}
+
+fn certificate_with(assumptions: Vec<Assumption>, node: Node) -> Certificate {
+    Certificate {
+        format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::Recorded(EnvironmentRecord::empty()),
+        assumptions,
+        interpretations: Vec::new(),
+        nodes: vec![
+            Node::Assumption { assumption: 0 },
+            Node::Assumption { assumption: 1 },
+            node,
+        ],
+        root: Some(2),
+        alternatives: Vec::new(),
+        conflicts: Vec::new(),
+        open_obligations: Vec::new(),
+        metadata: Default::default(),
+    }
+}
+
+fn legal_certificate() -> Certificate {
+    certificate(rule_node(amount("合计", 5000), Some(raw_total())))
+}
+
+fn reject(cert: &Certificate) -> String {
+    let error = check(&env(), cert).expect_err("the certificate must be rejected");
+    assert_eq!(
+        error.node,
+        Some(2),
+        "the arithmetic step's node must be named: {error}"
+    );
+    error.message
+}
+
+#[test]
+fn a_recorded_arithmetic_step_is_accepted() {
+    let cert = legal_certificate();
+    let report = check(&env(), &cert).expect("the arithmetic step is legal");
+    assert!(report.root_proved);
+    // The kernel layer independently accepts the evaluated conclusion.
+    let report = kernel_proof(&env(), &cert).expect("the kernel accepts the step");
+    assert!(report.root_proved);
+    assert_eq!(report.steps.len(), 1);
+}
+
+#[test]
+fn a_changed_number_in_the_conclusion_is_rejected() {
+    let cert = certificate(rule_node(amount("合计", 9000), Some(raw_total())));
+    let message = reject(&cert);
+    assert!(message.contains("9000"), "{message}");
+    assert!(message.contains("add 3000 2000"), "{message}");
+}
+
+#[test]
+fn a_swapped_operation_is_rejected() {
+    // `mul 3000 2000` is 6000000, so the recorded conclusion 5000 is wrong; the
+    // structural comparison with the rule's own conclusion catches the swap
+    // even if the numbers were adjusted to fit.
+    let computed = apply(
+        "合计",
+        vec![constant("甲"), apply("mul", vec![num(3000), num(2000)])],
+    );
+    let cert = certificate(rule_node(amount("合计", 6000000), Some(computed)));
+    let message = reject(&cert);
+    assert!(message.contains("算术步骤与规则不一致"), "{message}");
+    assert!(message.contains("mul 3000 2000"), "{message}");
+    assert!(message.contains("add 3000 2000"), "{message}");
+}
+
+#[test]
+fn a_changed_operand_in_the_computed_form_is_rejected() {
+    let computed = apply(
+        "合计",
+        vec![constant("甲"), apply("add", vec![num(3001), num(2000)])],
+    );
+    let cert = certificate(rule_node(amount("合计", 5001), Some(computed)));
+    let message = reject(&cert);
+    assert!(message.contains("add 3001 2000"), "{message}");
+    assert!(message.contains("add 3000 2000"), "{message}");
+}
+
+#[test]
+fn a_computed_form_that_is_not_a_proposition_is_rejected() {
+    // The evaluated form must be the closed instance; a bare literal is not.
+    let cert = certificate(rule_node(amount("合计", 5000), Some(num(5000))));
+    let message = reject(&cert);
+    assert!(message.contains("算术步骤与规则不一致"), "{message}");
+}
+
+#[test]
+fn recorded_bindings_must_match_the_cited_premises() {
+    // The premise `医疗费 甲 a` is proved by `医疗费 甲 3000`, so binding
+    // `a = 4000` is not this instance: the arithmetic step would compute from a
+    // value the premises do not give.
+    let node = Node::RuleApplication {
+        rule: "赔偿合计".to_owned(),
+        conclusion: amount("合计", 6000),
+        computed: Some(apply(
+            "合计",
+            vec![constant("甲"), apply("add", vec![num(4000), num(2000)])],
+        )),
+        premises: vec![0, 1],
+        bindings: bindings(vec![
+            ("p", constant("甲")),
+            ("a", num(4000)),
+            ("b", num(2000)),
+        ]),
+        sources: Vec::new(),
+        applicability: unscoped_applicability(),
+    };
+    let cert = certificate(node);
+    let message = reject(&cert);
+    assert!(message.contains("医疗费 甲 4000"), "{message}");
+}
+
+#[test]
+fn a_step_may_omit_the_computed_form_and_the_checker_still_recomputes_it() {
+    // The field is optional. The checker derives the instance from the rule and
+    // the bindings either way, so nothing is taken on trust.
+    check(&env(), &certificate(rule_node(amount("合计", 5000), None)))
+        .expect("the checker recomputes the instance");
+    let error = check(&env(), &certificate(rule_node(amount("合计", 6000), None)))
+        .expect_err("a wrong conclusion is still refused");
+    assert_eq!(error.node, Some(2), "{error}");
+    assert!(error.message.contains("add 3000 2000"), "{}", error.message);
+}
+
+#[test]
+fn a_num_literal_serializes_as_an_exact_integer() {
+    let cert = legal_certificate();
+    let json = cert.to_json().expect("the certificate serializes");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let conclusion = &parsed["nodes"][2]["conclusion"];
+    assert_eq!(conclusion["kind"], "app", "{conclusion}");
+    let amount_argument = &conclusion["arg"];
+    assert_eq!(amount_argument["kind"], "num", "{amount_argument}");
+    assert_eq!(amount_argument["value"], 5000, "{amount_argument}");
+    assert_eq!(parsed["format_version"], 10);
+    let round_trip = Certificate::from_json(&json).expect("an exported certificate parses back");
+    assert_eq!(round_trip, cert);
+}
+
+#[test]
+fn a_num_literal_keeps_its_sign_through_json() {
+    let expression = CertExpr::Num { value: -3000 };
+    let json = serde_json::to_string(&expression).expect("a literal serializes");
+    assert_eq!(json, r#"{"kind":"num","value":-3000}"#);
+    let parsed: CertExpr = serde_json::from_str(&json).expect("a literal parses");
+    assert_eq!(parsed, expression);
+}
+
+#[test]
+fn an_out_of_range_or_malformed_num_is_rejected() {
+    let too_large: Result<CertExpr, _> =
+        serde_json::from_str(r#"{"kind":"num","value":9223372036854775808}"#);
+    assert!(too_large.is_err(), "an i64 overflow must be refused");
+    let unknown_field: Result<CertExpr, _> =
+        serde_json::from_str(r#"{"kind":"num","value":1,"float":1.5}"#);
+    assert!(unknown_field.is_err(), "unknown fields are still refused");
+    let missing_value: Result<CertExpr, _> = serde_json::from_str(r#"{"kind":"num"}"#);
+    assert!(missing_value.is_err(), "the value field is mandatory");
+    // There is no float shape: a float value never parses.
+    let float: Result<CertExpr, _> = serde_json::from_str(r#"{"kind":"num","value":1.5}"#);
+    assert!(float.is_err(), "a literal is an integer, not a float");
+}
+
+#[test]
+fn a_literal_key_is_distinct_from_a_same_named_constant() {
+    use std_deduce_kernel::Expr;
+    assert_ne!(
+        expression_key(&Expr::Num(3000)),
+        expression_key(&Expr::constant("3000"))
+    );
+    assert_ne!(
+        expression_key(&Expr::Num(5)),
+        expression_key(&Expr::Num(-5))
+    );
+    assert_eq!(expression_key(&Expr::Num(5)), expression_key(&Expr::Num(5)));
+}
+
+#[test]
+fn a_rule_step_without_arithmetic_records_no_computed_field() {
+    // A non-arithmetic certificate keeps exactly its old JSON shape: the field
+    // is omitted rather than written as `null`, so v10 output stays stable for
+    // cases that compute nothing.
+    let cert = certificate(Node::RuleApplication {
+        rule: "赔偿合计".to_owned(),
+        conclusion: amount("合计", 5000),
+        computed: None,
+        premises: vec![0, 1],
+        bindings: bindings(vec![
+            ("p", constant("甲")),
+            ("a", num(3000)),
+            ("b", num(2000)),
+        ]),
+        sources: Vec::new(),
+        applicability: unscoped_applicability(),
+    });
+    let json = cert.to_json().expect("the certificate serializes");
+    assert!(!json.contains("computed"), "{json}");
+}
+
+#[test]
+fn an_overflowing_computed_step_is_rejected_instead_of_wrapping() {
+    // `add i64::MAX 1` cannot be evaluated, so neither the logical layer nor
+    // the kernel may accept it. The premises really do provide the two huge
+    // numbers, so the step's arithmetic — not the binding — is what overflows.
+    let node = Node::RuleApplication {
+        rule: "赔偿合计".to_owned(),
+        conclusion: amount("合计", 0),
+        computed: Some(apply(
+            "合计",
+            vec![constant("甲"), apply("add", vec![num(i64::MAX), num(1)])],
+        )),
+        premises: vec![0, 1],
+        bindings: bindings(vec![
+            ("p", constant("甲")),
+            ("a", num(i64::MAX)),
+            ("b", num(1)),
+        ]),
+        sources: Vec::new(),
+        applicability: unscoped_applicability(),
+    };
+    let cert = certificate_with(
+        vec![
+            assumption(amount("医疗费", i64::MAX)),
+            assumption(amount("误工费", 1)),
+        ],
+        node,
+    );
+    let error = check(&env(), &cert).expect_err("an overflowing step cannot be checked");
+    assert_eq!(error.node, Some(2), "{error}");
+    assert!(error.message.contains("溢出"), "{}", error.message);
+}

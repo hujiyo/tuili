@@ -755,6 +755,7 @@ fn check_with(
         let Node::RuleApplication {
             rule,
             conclusion,
+            computed,
             premises,
             bindings,
             applicability,
@@ -936,6 +937,44 @@ fn check_with(
 
         let actual = Expr::from(conclusion);
         let expected = close_pattern(&r.open_conclusion(), &binding);
+
+        // The arithmetic step, when the node records it. `computed` is the
+        // rule's conclusion with the bindings substituted, *before* the kernel
+        // evaluated the built-in arithmetic. It is compared structurally with
+        // the instance the checker rebuilt from the environment's rule
+        // declaration and the recorded bindings: the operation name and every
+        // operand are part of the record. Editing a number in the computed
+        // form, or swapping `add` for `mul`, therefore fails here even though
+        // the recorded conclusion still looks like one of the values. This
+        // check runs first so a tampered computation is reported as what it
+        // is, not as a mere conclusion mismatch.
+        if let Some(computed) = computed {
+            let recorded = Expr::from(computed);
+            if !is_closed(&recorded) {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "规则 `{rule}` 计算前的结论「{}」不是闭合命题：算术步骤必须按已绑定的参数算出",
+                        print_expr(&recorded)
+                    ),
+                ));
+            }
+            if expression_key(&recorded) != expression_key(&expected) {
+                return Err(CheckError::at(
+                    id,
+                    format!(
+                        "规则 `{rule}` 计算前的结论是 `{}`，而规则与绑定确定的实例是 `{}`：\
+                         算术步骤与规则不一致",
+                        print_expr(&recorded),
+                        print_expr(&expected)
+                    ),
+                ));
+            }
+        }
+
+        // The recorded conclusion must be that instance's value. Both sides are
+        // compared through their normal forms, which applies the built-in
+        // arithmetic, so `合计 甲 (add 3000 2000)` equals `合计 甲 5000`.
         let expected_key = key(env, &expected).map_err(|m| CheckError::at(id, m))?;
         let actual_key = key(env, &actual).map_err(|m| CheckError::at(id, m))?;
         if expected_key != actual_key {
@@ -3993,7 +4032,7 @@ pub(crate) fn mentioned_premise_binder(
             .strip_prefix('?')
             .filter(|binder| premise_binders.contains(*binder))
             .map(str::to_owned),
-        Expr::Sort(_) | Expr::Var(_) => None,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => None,
         Expr::Pi {
             domain, codomain, ..
         } => mentioned_premise_binder(domain, premise_binders)
@@ -4037,7 +4076,7 @@ fn close_pattern(pattern: &Expr, binding: &BTreeMap<&str, Expr>) -> Expr {
                 .unwrap_or_else(|| pattern.clone()),
             None => pattern.clone(),
         },
-        Expr::Sort(_) | Expr::Var(_) => pattern.clone(),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => pattern.clone(),
         Expr::Pi {
             name,
             domain,
