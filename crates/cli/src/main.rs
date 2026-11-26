@@ -458,8 +458,10 @@
 //! declared individual names (`obj`, or an `axiom` constant of a sort) with the
 //! stable placeholders `甲1`, `甲2`, … assigned in declared-name order. Source
 //! text, labels and notes are rewritten too, so a name cannot leak through a
-//! citation, and every redacted command output ends with
-//! `输出已脱敏；证书未脱敏。…`. Redaction changes display only: a verdict, an
+//! citation. A command output ends with `输出已脱敏；证书未脱敏。…` only when
+//! this output actually replaced an individual name; a plain state query such
+//! as `:redact` or `:redact off` prints no such notice. Redaction changes
+//! display only: a verdict, an
 //! exit code, the derivation and the certificate content are identical with it
 //! on or off. Silently redacting the certificate is not offered: `:verify-cert`
 //! re-checks the recorded words, so a redacted certificate could no longer be
@@ -1614,11 +1616,13 @@ impl Session {
     ///
     /// A bare line is treated as a colon command. With display redaction on,
     /// every line the command prints is buffered and rewritten once with the
-    /// session's placeholder mapping, and a one-line notice is appended; the
-    /// `:cert` command is exempt because its JSON *is* the certificate and must
-    /// stay reproducible. An error message is redacted the same way, so no path
-    /// can leak a name the user asked to hide. The decision is made once, when
-    /// the command starts: `:redact off` therefore also finishes its own output
+    /// session's placeholder mapping; the one-line notice is appended only when
+    /// that rewrite actually replaced an individual name, so a state query or
+    /// `:redact off` does not claim an output was redacted. The `:cert` command
+    /// is exempt because its JSON *is* the certificate and must stay
+    /// reproducible. An error message is redacted the same way, so no path can
+    /// leak a name the user asked to hide. The decision is made once, when the
+    /// command starts: `:redact off` therefore also finishes its own output
     /// under the old state.
     fn handle(&mut self, line: &str, out: &mut impl Write) -> Result<Outcome, String> {
         let line = line.trim();
@@ -1646,11 +1650,7 @@ impl Session {
             let mut buffer = OutputBuffer::default();
             let result = self.dispatch(cmd, arg, &mut buffer);
             let text = buffer.into_text(cmd)?;
-            let mut text = self.redact_text(&text);
-            if !text.is_empty() {
-                text.push_str(REDACT_NOTICE);
-                text.push('\n');
-            }
+            let text = self.redacted_output(&text);
             write!(out, "{text}").ok();
             return result.map_err(|error| self.redact_text(&error));
         }
@@ -1968,6 +1968,23 @@ impl Session {
         for (name, placeholder) in map {
             redacted = redacted.replace(&name, &placeholder);
         }
+        redacted
+    }
+
+    /// Redact one buffered output block and append the display notice when the
+    /// mapping actually changed it.
+    ///
+    /// A bare state query (`:redact`) or `:redact off` contains no individual
+    /// name, so the rewrite leaves it byte-identical and no notice is printed:
+    /// saying "输出已脱敏" when nothing was replaced would be a false claim.
+    fn redacted_output(&self, text: &str) -> String {
+        let redacted = self.redact_text(text);
+        if redacted == text {
+            return redacted;
+        }
+        let mut redacted = redacted;
+        redacted.push_str(REDACT_NOTICE);
+        redacted.push('\n');
         redacted
     }
 
@@ -7360,11 +7377,7 @@ fn run_batch(session: &mut Session, file: &str, commands: &[String], out: &mut i
         }
     };
     if session.redact {
-        let mut text = session.redact_text(&text);
-        if !text.is_empty() {
-            text.push_str(REDACT_NOTICE);
-            text.push('\n');
-        }
+        let text = session.redacted_output(&text);
         write!(out, "{text}").ok();
     } else {
         write!(out, "{text}").ok();
