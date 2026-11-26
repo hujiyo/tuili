@@ -102,7 +102,7 @@ fn an_unloaded_search_finds_article_39_and_lists_the_declared_rules() {
             "cn.constitution@2018 第三十九条",
             "片段：中华人民共和国公民的住宅不受侵犯。",
             "覆盖：已形式化（来源：语料 coverage 台账）",
-            "清单声明（未加载）：",
+            "清单声明（包未加载）：",
             "「cn.constitution.非法搜查侵犯住宅」",
             "「cn.constitution.非法侵入侵犯住宅」",
             "注：包未加载，无法给出条号定位；先 :load 或 import <包名> 再检索。",
@@ -113,6 +113,12 @@ fn an_unloaded_search_finds_article_39_and_lists_the_declared_rules() {
         !out.contains("尚未形式化"),
         "a formalized article must not read as unformalized:\n{out}"
     );
+    // The pack is not loaded, so no locator may be invented. The `←` form only
+    // appears on a real "引用规则（已加载）" line.
+    assert!(
+        !out.contains('←'),
+        "an unloaded pack must not produce a locator/source arrow:\n{out}"
+    );
 }
 
 #[test]
@@ -121,6 +127,7 @@ fn a_loaded_pack_search_lists_rules_with_their_locator_and_trust() {
         run(&[
             import_example().display().to_string(),
             ":search 住宅不受侵犯".to_string(),
+            ":search --article 39".to_string(),
         ]),
         PROVED,
         &[
@@ -130,6 +137,7 @@ fn a_loaded_pack_search_lists_rules_with_their_locator_and_trust() {
             "引用规则（已加载）：",
             "- cn.constitution.非法搜查侵犯住宅 ← 「宪法第三十九条」（2018）",
             "- cn.constitution.非法侵入侵犯住宅 ← 「宪法第三十九条」（2018）",
+            "哈希核对：2 条规则声明的 hash 与本地计算一致。",
         ],
     );
     let out = stdout(&output);
@@ -192,13 +200,17 @@ fn corpus_without_jurisdiction(law: &str, title: &str) -> String {
 }
 
 fn corpus_with_jurisdiction(law: &str, title: &str) -> String {
+    corpus_with_jurisdiction_code(law, title, "CN")
+}
+
+fn corpus_with_jurisdiction_code(law: &str, title: &str, code: &str) -> String {
     format!(
         r#"{{
   "format": 2,
   "law": "{law}",
   "title": "{title}",
   "version": "2018",
-  "jurisdiction": "CN",
+  "jurisdiction": "{code}",
   "articles": [ {{ "number": "第一条", "text": "住宅不受侵犯" }} ]
 }}"#
     )
@@ -215,12 +227,16 @@ fn a_jurisdiction_filter_excludes_an_unrecorded_corpus_with_a_warning() {
         "law/corpus/cn.unknown/2018.json",
         &corpus_without_jurisdiction("cn.unknown", "未记管辖法"),
     );
+    temp.corpus(
+        "law/corpus/cn.foreign/2018.json",
+        &corpus_with_jurisdiction_code("cn.foreign", "外国管辖法", "US"),
+    );
     let output = check(
         run_in(temp.path(), &[":search 住宅 --jurisdiction CN".to_string()]),
         PROVED,
         &[
             "注：cn.unknown@2018 的语料没有记录管辖，已排除；如需检索该语料请去掉 --jurisdiction",
-            "管辖过滤：`CN` 保留 1 个语料（另有 1 个管辖未记录）",
+            "管辖过滤：`CN` 保留 1 个语料（因管辖不同排除 1 份，因管辖未记录排除 1 份）",
             "cn.known@2018 第一条",
         ],
     );
@@ -228,6 +244,10 @@ fn a_jurisdiction_filter_excludes_an_unrecorded_corpus_with_a_warning() {
     assert!(
         !out.contains("cn.unknown@2018 第一条"),
         "the unrecorded corpus must not be searched under --jurisdiction:\n{out}"
+    );
+    assert!(
+        !out.contains("cn.foreign@2018 第一条"),
+        "the foreign-jurisdiction corpus must be excluded:\n{out}"
     );
 }
 
@@ -309,6 +329,45 @@ fn the_article_filter_prints_the_full_text_and_the_audit_hash() {
 }
 
 #[test]
+fn an_ascii_article_number_is_matched_literally_first() {
+    let temp = TempDir::new("article-ascii");
+    temp.corpus(
+        "law/corpus/cn.ascii/2018.json",
+        r#"{
+  "format": 2,
+  "law": "cn.ascii",
+  "title": "ASCII 条号法",
+  "version": "2018",
+  "jurisdiction": "CN",
+  "articles": [ { "number": "39", "text": "住宅不受侵犯" } ]
+}"#,
+    );
+    check(
+        run_in(temp.path(), &[":search 住宅 --article 39".to_string()]),
+        PROVED,
+        &["条号过滤：`39`", "cn.ascii@2018 39", "全文：住宅不受侵犯"],
+    );
+}
+
+#[test]
+fn a_chinese_article_number_is_also_accepted() {
+    check(
+        run(&[":search --article 第三十九条".to_string()]),
+        PROVED,
+        &["条号过滤：`第三十九条`", "cn.constitution@2018 第三十九条"],
+    );
+}
+
+#[test]
+fn an_article_number_above_9999_is_rejected() {
+    check_stderr(
+        run(&[":search 住宅 --article 10000".to_string()]),
+        ERROR,
+        &["只支持 1–9999", "10000"],
+    );
+}
+
+#[test]
 fn the_search_and_audit_agree_on_the_article_hash() {
     // `:audit` accepts the official pack's 56 quoted sources, including the two
     // citing article 39 with hash sha256:9aae…. `:search --article 39` prints
@@ -336,6 +395,15 @@ fn an_oversized_limit_is_a_usage_error() {
         run(&[":search 住宅 --limit 1000".to_string()]),
         ERROR,
         &["--limit 1000", "上限 64"],
+    );
+}
+
+#[test]
+fn a_repeated_limit_is_rejected_instead_of_taking_the_last() {
+    check_stderr(
+        run(&[":search 住宅 --limit 5 --limit 10".to_string()]),
+        ERROR,
+        &["--limit", "重复"],
     );
 }
 
@@ -415,6 +483,18 @@ fn unknown_law_and_article_filters_are_errors() {
 }
 
 #[test]
+fn a_missing_corpus_directory_is_an_environment_error() {
+    let temp = TempDir::new("missing-corpus");
+    let output = run_in(temp.path(), &[":search 住宅".to_string()]);
+    assert_exit(&output, ERROR);
+    assert!(
+        stderr(&output).contains("无法读取语料目录"),
+        "a missing directory is an environment error, not an empty corpus:\n{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn an_empty_corpus_directory_is_not_a_pass() {
     let temp = TempDir::new("empty-corpus");
     fs::create_dir_all(temp.path().join("law/corpus")).expect("create the empty corpus directory");
@@ -426,6 +506,282 @@ fn an_empty_corpus_directory_is_not_a_pass() {
         stdout(&output)
     );
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+fn coverage_two_articles(
+    first_status: &str,
+    first_rules: &str,
+    second_status: &str,
+    second_rules: &str,
+) -> String {
+    format!(
+        r#"{{ "open_concepts": [], "gaps": {{}}, "articles": [
+  {{ "number": "第一条", "status": "{first_status}"{first_rules} }},
+  {{ "number": "第二条", "status": "{second_status}"{second_rules} }}
+] }}"#
+    )
+}
+
+fn corpus_two_articles(law: &str, title: &str, first_text: &str, coverage: &str) -> String {
+    format!(
+        r#"{{
+  "format": 2,
+  "law": "{law}",
+  "title": "{title}",
+  "version": "2018",
+  "jurisdiction": "CN",
+  "coverage": {coverage},
+  "articles": [
+    {{ "number": "第一条", "text": "{first_text}" }},
+    {{ "number": "第二条", "text": "其他条文" }}
+  ]
+}}"#
+    )
+}
+
+#[test]
+fn a_loaded_rule_that_cites_another_article_is_a_ledger_inconsistency() {
+    let temp = TempDir::new("ledger-loaded-elsewhere");
+    temp.community_pack(
+        "cn.b",
+        "2018",
+        r#"namespace cn.b
+sort cn.b.人
+pred cn.b.命题 : cn.b.人 → Prop
+rule cn.b.规则一 :
+  params x : cn.b.人
+  premise cn.b.命题 x
+  conclude cn.b.命题 x
+  source text "测试法" locator "第二条" version "2018"
+"#,
+    );
+    let coverage =
+        coverage_two_articles("formalized", r#", "rules": ["cn.b.规则一"]"#, "indexed", "");
+    temp.corpus(
+        "law/corpus/cn.b/2018.json",
+        &corpus_two_articles("cn.b", "测试法", "住宅不受侵犯", &coverage),
+    );
+    temp.write("case.std", "import cn.b\n");
+    check(
+        run_in(temp.path(), &[":lock".to_string()]),
+        PROVED,
+        &["已写入", "1 个包"],
+    );
+    let output = check(
+        run_in(
+            temp.path(),
+            &["case.std".to_string(), ":search 住宅".to_string()],
+        ),
+        PROVED,
+        &[
+            "台账与已加载规则不一致：清单声明 `cn.b.规则一`，已加载规则 `cn.b.规则一` 的来源是 「测试法第二条」（2018）。",
+        ],
+    );
+    assert!(
+        !stdout(&output).contains("包未加载"),
+        "the pack is loaded; the output must not claim otherwise"
+    );
+}
+
+#[test]
+fn a_loaded_pack_with_no_loaded_ledger_rule_says_the_rule_is_not_loaded() {
+    let temp = TempDir::new("ledger-rule-not-loaded");
+    temp.community_pack("cn.c", "2018", "namespace cn.c\nsort cn.c.人\n");
+    let coverage = coverage_two_articles(
+        "formalized",
+        r#", "rules": ["cn.c.未加载规则"]"#,
+        "indexed",
+        "",
+    );
+    temp.corpus(
+        "law/corpus/cn.c/2018.json",
+        &corpus_two_articles("cn.c", "测试法", "住宅不受侵犯", &coverage),
+    );
+    temp.write("case.std", "import cn.c\n");
+    check(
+        run_in(temp.path(), &[":lock".to_string()]),
+        PROVED,
+        &["已写入", "1 个包"],
+    );
+    let output = run_in(
+        temp.path(),
+        &["case.std".to_string(), ":search 住宅".to_string()],
+    );
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("清单声明 `cn.c.未加载规则`，当前环境未加载该规则"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("包未加载"),
+        "a linked pack exists; the output must not claim it is unloaded:\n{out}"
+    );
+}
+
+#[test]
+fn a_ledger_contradiction_with_loaded_rules_is_reported() {
+    let temp = TempDir::new("ledger-contradiction");
+    temp.community_pack(
+        "cn.d",
+        "2018",
+        r#"namespace cn.d
+sort cn.d.人
+pred cn.d.命题 : cn.d.人 → Prop
+rule cn.d.规则一 :
+  params x : cn.d.人
+  premise cn.d.命题 x
+  conclude cn.d.命题 x
+  source text "测试法" locator "第一条" version "2018"
+"#,
+    );
+    let coverage =
+        coverage_two_articles("indexed", "", "formalized", r#", "rules": ["cn.d.规则二"]"#);
+    temp.corpus(
+        "law/corpus/cn.d/2018.json",
+        &corpus_two_articles("cn.d", "测试法", "住宅不受侵犯条文", &coverage),
+    );
+    temp.write("case.std", "import cn.d\n");
+    check(
+        run_in(temp.path(), &[":lock".to_string()]),
+        PROVED,
+        &["已写入", "1 个包"],
+    );
+    let output = check(
+        run_in(
+            temp.path(),
+            &["case.std".to_string(), ":search 条文".to_string()],
+        ),
+        PROVED,
+        &[
+            "台账与已加载规则不一致：台账声明仅索引，但已加载规则引用了该条。",
+            "台账与已加载规则不一致：台账声明已形式化，但当前环境没有引用该条的已加载规则。",
+        ],
+    );
+    let _ = stdout(&output);
+}
+
+#[test]
+fn a_tampered_corpus_hash_is_warned_about_and_makes_the_search_fail() {
+    let temp = TempDir::new("hash-tampered");
+    temp.community_pack(
+        "cn.hash",
+        "2018",
+        r#"namespace cn.hash
+sort cn.hash.人
+pred cn.hash.命题 : cn.hash.人 → Prop
+rule cn.hash.规则 :
+  params x : cn.hash.人
+  premise cn.hash.命题 x
+  conclude cn.hash.命题 x
+  source text "住宅法" locator "第一条" version "2018"
+         quote "公民住宅不受侵犯"
+         hash "sha256:c8e651cb5ae082ea2f90cfcaf030ec2ef70b10995d37e8261a489af84f99d76b"
+"#,
+    );
+    temp.corpus(
+        "law/corpus/cn.hash/2018.json",
+        r#"{
+  "format": 2,
+  "law": "cn.hash",
+  "title": "住宅法",
+  "version": "2018",
+  "jurisdiction": "CN",
+  "articles": [ { "number": "第一条", "text": "公民住宅不受侵犯" } ]
+}"#,
+    );
+    temp.write("case.std", "import cn.hash\n");
+    check(
+        run_in(temp.path(), &[":lock".to_string()]),
+        PROVED,
+        &["已写入", "1 个包"],
+    );
+    // The pack and its lock cover the theory file, not the linked corpus; a
+    // one-character corpus edit therefore leaves the pack loadable.
+    temp.corpus(
+        "law/corpus/cn.hash/2018.json",
+        r#"{
+  "format": 2,
+  "law": "cn.hash",
+  "title": "住宅法",
+  "version": "2018",
+  "jurisdiction": "CN",
+  "articles": [ { "number": "第一条", "text": "公民住宅不受侵范" } ]
+}"#,
+    );
+    let output = run_in(
+        temp.path(),
+        &[
+            "case.std".to_string(),
+            ":search 住宅 --article 1".to_string(),
+        ],
+    );
+    assert_exit(&output, NO_MATCH);
+    let out = stdout(&output);
+    assert!(
+        out.contains("⚠ 语料哈希与规则声明不一致（本地"),
+        "the tampered corpus must be reported:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "规则 sha256:c8e651cb5ae082ea2f90cfcaf030ec2ef70b10995d37e8261a489af84f99d76b"
+        ),
+        "{out}"
+    );
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn a_versionless_rule_with_several_corpus_versions_is_not_attributed() {
+    let temp = TempDir::new("versionless-rule");
+    temp.community_pack(
+        "cn.multi",
+        "2018",
+        r#"namespace cn.multi
+sort cn.multi.人
+pred cn.multi.命题 : cn.multi.人 → Prop
+rule cn.multi.规则 :
+  params x : cn.multi.人
+  premise cn.multi.命题 x
+  conclude cn.multi.命题 x
+  source text "多版本法" locator "第一条"
+"#,
+    );
+    for version in ["2018", "2020"] {
+        temp.corpus(
+            &format!("law/corpus/cn.multi/{version}.json"),
+            &format!(
+                r#"{{
+  "format": 2,
+  "law": "cn.multi",
+  "title": "多版本法",
+  "version": "{version}",
+  "jurisdiction": "CN",
+  "articles": [ {{ "number": "第一条", "text": "住宅不受侵犯" }} ]
+}}"#
+            ),
+        );
+    }
+    temp.write("case.std", "import cn.multi\n");
+    check(
+        run_in(temp.path(), &[":lock".to_string()]),
+        PROVED,
+        &["已写入", "1 个包"],
+    );
+    let output = run_in(
+        temp.path(),
+        &["case.std".to_string(), ":search 住宅".to_string()],
+    );
+    assert_exit(&output, PROVED);
+    let out = stdout(&output);
+    assert!(
+        out.contains("注：规则 `cn.multi.规则` 未记录版本，存在多版本（2018/2020），无法确定引用哪一版，未列为引用规则。"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("引用规则（已加载）"),
+        "a versionless rule must not be attributed to either version:\n{out}"
+    );
 }
 
 #[test]
@@ -515,6 +871,31 @@ impl TempDir {
 
     fn corpus(&self, relative: &str, text: &str) -> PathBuf {
         self.write(relative, text)
+    }
+
+    /// Write a minimal community pack whose single theory file is `theory`.
+    /// The pack name, namespace and law id are all `law`, and its manifest
+    /// links `law/corpus_version`.
+    fn community_pack(&self, law: &str, corpus_version: &str, theory: &str) {
+        self.write(
+            &format!("lawpacks/{law}/lawpack.toml"),
+            &format!(
+                r#"[pack]
+name = "{law}"
+version = "0.1.0"
+jurisdiction = "CN"
+territory = "CN"
+namespace = "{law}"
+trust = "community"
+corpus = "{law}/{corpus_version}"
+
+[[files]]
+path = "community.std"
+kind = "theory"
+"#
+            ),
+        );
+        self.write(&format!("lawpacks/{law}/community.std"), theory);
     }
 
     fn write(&self, relative: &str, text: &str) -> PathBuf {

@@ -44,7 +44,7 @@ pub(crate) fn search(
     packs: &[LoadedPackInfo],
     out: &mut impl Write,
 ) -> Result<Outcome, String> {
-    let options = Options::parse(arg)?;
+    let mut options = Options::parse(arg)?;
     let terms = keyword_terms(&options.keyword);
     let root = crate::corpus_root("")?;
     let scan =
@@ -54,6 +54,7 @@ pub(crate) fn search(
         .iter()
         .map(|loaded| format!("{}@{}", loaded.corpus.law, loaded.corpus.version))
         .collect();
+    let all_corpora: Vec<&Corpus> = scan.corpora.iter().map(|loaded| &loaded.corpus).collect();
     if !scan.errors.is_empty() {
         for error in &scan.errors {
             writeln!(out, "{}", escape_control(&error.to_string())).ok();
@@ -70,7 +71,7 @@ pub(crate) fn search(
         return Ok(Outcome::Gap);
     }
 
-    let mut scoped: Vec<&Corpus> = scan.corpora.iter().map(|loaded| &loaded.corpus).collect();
+    let mut scoped: Vec<&Corpus> = all_corpora.clone();
     write_header(out, &options, &terms, &root);
     if let Some(law) = &options.law {
         let before = scoped.len();
@@ -130,28 +131,36 @@ pub(crate) fn search(
 
     // Check the article before the jurisdiction filter: an article that exists
     // only in a corpus whose jurisdiction is unrecorded is "excluded by the
-    // filter", not "the article does not exist".
-    if let Some(article) = &options.article {
-        let exists = scoped
-            .iter()
-            .any(|corpus| find_article(corpus, article).is_some());
-        if !exists {
-            return Err(format!(
-                "没有该条号的语料：`{}`（在已选语料范围内）",
-                escape_control(article)
-            ));
+    // filter", not "the article does not exist". The literal form is tried
+    // first, so a corpus that stores `39` stays directly addressable; only when
+    // it has no such number is `第三十九条` tried.
+    if let Some(raw) = options.article.clone() {
+        let (chosen, also_present) = resolve_article(&scoped, &raw)?;
+        if let Some(also_present) = also_present {
+            writeln!(
+                out,
+                "注：条号同时存在字面 `{}` 与 `{}`，按字面 `{}` 匹配。",
+                escape_control(&raw),
+                escape_control(&also_present),
+                escape_control(&raw)
+            )
+            .ok();
         }
-        writeln!(out, "条号过滤：`{}`", escape_control(article)).ok();
+        writeln!(out, "条号过滤：`{}`", escape_control(&chosen)).ok();
+        options.article = Some(chosen);
     }
 
     if let Some(code) = &options.jurisdiction {
         let mut retained = Vec::new();
         let mut unrecorded = Vec::new();
+        let mut mismatched = 0;
         for corpus in scoped.iter().copied() {
             if corpus.jurisdiction.trim().is_empty() {
                 unrecorded.push(corpus);
             } else if corpus.jurisdiction.trim() == code.trim() {
                 retained.push(corpus);
+            } else {
+                mismatched += 1;
             }
         }
         for corpus in &unrecorded {
@@ -167,9 +176,10 @@ pub(crate) fn search(
         }
         writeln!(
             out,
-            "管辖过滤：`{}` 保留 {} 个语料（另有 {} 个管辖未记录）",
+            "管辖过滤：`{}` 保留 {} 个语料（因管辖不同排除 {} 份，因管辖未记录排除 {} 份）",
             escape_control(code),
             retained.len(),
+            mismatched,
             unrecorded.len()
         )
         .ok();
@@ -222,11 +232,22 @@ pub(crate) fn search(
         .ok();
         writeln!(out).ok();
     }
+    let context = SearchContext {
+        env,
+        packs,
+        all_corpora: &all_corpora,
+        terms: &terms,
+    };
+    let mut hash_mismatch = false;
     for hit in hits.iter().take(shown) {
-        write_hit(out, hit, &options, &terms, env, packs);
+        write_hit(out, hit, &options, &context, &mut hash_mismatch);
         writeln!(out).ok();
     }
-    Ok(Outcome::Proved)
+    if hash_mismatch {
+        Ok(Outcome::Gap)
+    } else {
+        Ok(Outcome::Proved)
+    }
 }
 
 /// The parsed command arguments.
@@ -270,6 +291,7 @@ impl Options {
             limit: SEARCH_LIMIT_DEFAULT,
         };
         let mut index = option_at.unwrap_or(pieces.len());
+        let mut limit_given = false;
         while index < pieces.len() {
             let name = pieces[index].text;
             if !name.starts_with("--") {
@@ -292,13 +314,20 @@ impl Options {
                 "--law" => set_once("--law", &mut options.law, value.text)?,
                 "--version" => set_once("--version", &mut options.version, value.text)?,
                 "--article" => {
-                    let article = normalize_article(value.text)?;
-                    set_once("--article", &mut options.article, &article)?
+                    let literal = normalize_space(value.text);
+                    if let Some(Err(error)) = numeric_article(value.text) {
+                        return Err(error);
+                    }
+                    set_once("--article", &mut options.article, &literal)?
                 }
                 "--jurisdiction" => {
                     set_once("--jurisdiction", &mut options.jurisdiction, value.text)?
                 }
                 "--limit" => {
+                    if limit_given {
+                        return Err("选项 `--limit` 重复；每个选项只能给出一次".to_owned());
+                    }
+                    limit_given = true;
                     options.limit = parse_limit(value.text)?;
                 }
                 other => {
@@ -386,10 +415,13 @@ fn parse_limit(value: &str) -> Result<usize, String> {
     Ok(limit)
 }
 
-/// Accept the stored article number, or ASCII digits such as `39`, `第39条`
-/// or `39条`, which are rendered as `第三十九条`. No other numeral form is
-/// interpreted.
-fn normalize_article(value: &str) -> Result<String, String> {
+/// The Chinese ordinal form of an ASCII article number, if the value is one.
+///
+/// `39`, `第39条` and `39条` become `第三十九条`. A value outside 1–9999 is an
+/// error instead of a literal article number, so `10000` never silently matches
+/// a corpus that happens to store that text. Any other form returns `None` and
+/// is matched literally by the caller.
+fn numeric_article(value: &str) -> Option<Result<String, String>> {
     let original = normalize_space(value);
     let mut inner = original.as_str();
     if let Some(rest) = inner.strip_prefix('第') {
@@ -398,22 +430,25 @@ fn normalize_article(value: &str) -> Result<String, String> {
     if let Some(rest) = inner.strip_suffix('条') {
         inner = rest;
     }
-    if !inner.is_empty() && inner.bytes().all(|byte| byte.is_ascii_digit()) {
-        let number: u32 = inner.parse().map_err(|_| {
-            format!(
+    if inner.is_empty() || !inner.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let number: u32 = match inner.parse() {
+        Ok(number) => number,
+        Err(_) => {
+            return Some(Err(format!(
                 "条号数字 `{}` 超出可处理范围（只支持 1–9999）",
                 escape_control(value)
-            )
-        })?;
-        if number == 0 || number > 9999 {
-            return Err(format!(
-                "条号 `{}` 无效：只支持 1–9999",
-                escape_control(value)
-            ));
+            )))
         }
-        return Ok(format!("第{}条", chinese_number(number)));
+    };
+    if number == 0 || number > 9999 {
+        return Some(Err(format!(
+            "条号 `{}` 无效：只支持 1–9999",
+            escape_control(value)
+        )));
     }
-    Ok(original)
+    Some(Ok(format!("第{}条", chinese_number(number))))
 }
 
 /// Render 1–9999 as a Chinese article-number body (`三十九`, `一百四十三`).
@@ -502,11 +537,43 @@ fn law_matches(corpus: &Corpus, wanted: &str) -> bool {
     corpus.matches_name(wanted) || normalize_space(&corpus.law) == normalize_space(wanted)
 }
 
-fn find_article<'a>(corpus: &'a Corpus, wanted: &str) -> Option<&'a Article> {
-    corpus
-        .articles
-        .iter()
-        .find(|article| numbers_equal(&article.number, wanted))
+fn article_exists(corpora: &[&Corpus], wanted: &str) -> bool {
+    corpora.iter().any(|corpus| {
+        corpus
+            .articles
+            .iter()
+            .any(|article| numbers_equal(&article.number, wanted))
+    })
+}
+
+/// Resolve `--article` against the selected corpora.
+///
+/// The literal value is checked first; only when no corpus stores it is the
+/// ASCII number's Chinese ordinal tried. When both forms exist, the literal one
+/// is used and the caller prints a note. Returns an error when neither exists,
+/// naming both attempted forms.
+fn resolve_article(corpora: &[&Corpus], raw: &str) -> Result<(String, Option<String>), String> {
+    let literal = normalize_space(raw);
+    let numeric = numeric_article(raw).transpose()?;
+    if article_exists(corpora, &literal) {
+        let also_present =
+            numeric.filter(|chinese| chinese != &literal && article_exists(corpora, chinese));
+        return Ok((literal, also_present));
+    }
+    if let Some(chinese) = numeric {
+        if article_exists(corpora, &chinese) {
+            return Ok((chinese, None));
+        }
+        return Err(format!(
+            "没有该条号的语料：`{}`（也尝试 `{}`，均不存在）",
+            escape_control(raw),
+            escape_control(&chinese)
+        ));
+    }
+    Err(format!(
+        "没有该条号的语料：`{}`（在已选语料范围内）",
+        escape_control(raw)
+    ))
 }
 
 fn numbers_equal(left: &str, right: &str) -> bool {
@@ -536,13 +603,20 @@ struct Hit<'a> {
     index: usize,
 }
 
+/// The immutable session and scan data one result needs while printing.
+struct SearchContext<'a, 'b> {
+    env: &'a Env,
+    packs: &'a [LoadedPackInfo],
+    all_corpora: &'a [&'b Corpus],
+    terms: &'a [String],
+}
+
 fn write_hit(
     out: &mut impl Write,
     hit: &Hit<'_>,
     options: &Options,
-    terms: &[String],
-    env: &Env,
-    packs: &[LoadedPackInfo],
+    context: &SearchContext<'_, '_>,
+    hash_mismatch: &mut bool,
 ) {
     writeln!(
         out,
@@ -552,15 +626,25 @@ fn write_hit(
         escape_control(&hit.article.number)
     )
     .ok();
-    write_trust(out, hit.corpus, packs);
+    write_trust(out, hit.corpus, context.packs);
     writeln!(
         out,
         "  片段：{}",
-        escape_control(&snippet(&hit.article.text, terms))
+        escape_control(&snippet(&hit.article.text, context.terms))
     )
     .ok();
-    write_coverage(out, hit);
-    write_rules(out, hit, env);
+    let report = rule_report(context.env, hit.corpus, hit.article, context.all_corpora);
+    let has_linked_pack = has_linked_pack(hit.corpus, context.packs);
+    write_coverage(out, hit, report.loaded.len(), has_linked_pack);
+    write_rules(
+        out,
+        hit,
+        context.env,
+        &report,
+        has_linked_pack,
+        options.article.is_some(),
+        hash_mismatch,
+    );
     if options.article.is_some() {
         writeln!(out, "  全文：{}", escape_control(&hit.article.text)).ok();
         writeln!(
@@ -570,6 +654,13 @@ fn write_hit(
         )
         .ok();
     }
+}
+
+fn has_linked_pack(corpus: &Corpus, packs: &[LoadedPackInfo]) -> bool {
+    let link = format!("{}/{}", corpus.law, corpus.version);
+    packs
+        .iter()
+        .any(|pack| pack.corpus.as_deref() == Some(link.as_str()))
 }
 
 /// Print the trust level of a loaded pack that links exactly this corpus.
@@ -592,7 +683,7 @@ fn write_trust(out: &mut impl Write, corpus: &Corpus, packs: &[LoadedPackInfo]) 
     }
 }
 
-fn write_coverage(out: &mut impl Write, hit: &Hit<'_>) {
+fn write_coverage(out: &mut impl Write, hit: &Hit<'_>, loaded_rules: usize, has_linked_pack: bool) {
     let entry = coverage_entry(hit);
     let Some(entry) = entry else {
         writeln!(out, "  覆盖：覆盖率台账不可用（不猜覆盖状态）").ok();
@@ -605,6 +696,25 @@ fn write_coverage(out: &mut impl Write, hit: &Hit<'_>) {
         CoverageStatus::NeedsOntology => "待本体",
     };
     writeln!(out, "  覆盖：{label}（来源：语料 coverage 台账）").ok();
+    match entry.status {
+        CoverageStatus::Indexed | CoverageStatus::NeedsOntology if loaded_rules > 0 => {
+            writeln!(
+                out,
+                "  台账与已加载规则不一致：台账声明{label}，但已加载规则引用了该条。"
+            )
+            .ok();
+        }
+        CoverageStatus::Formalized | CoverageStatus::Partial
+            if has_linked_pack && loaded_rules == 0 =>
+        {
+            writeln!(
+                out,
+                "  台账与已加载规则不一致：台账声明{label}，但当前环境没有引用该条的已加载规则。"
+            )
+            .ok();
+        }
+        _ => {}
+    }
     match entry.status {
         CoverageStatus::Partial => {
             if let Some(note) = &entry.note {
@@ -648,13 +758,46 @@ fn coverage_entry<'a>(hit: &Hit<'a>) -> Option<&'a std_deduce_lawpack::corpus::A
     numbers_equal(&entry.number, &hit.article.number).then_some(entry)
 }
 
-/// List the loaded rules whose source cites exactly this article.
-fn loaded_rules(env: &Env, corpus: &Corpus, article: &Article) -> Vec<(String, String)> {
-    let mut rules = Vec::new();
+/// A loaded rule body whose source names this article, before the quote and
+/// jurisdiction checks.
+struct MatchedRule {
+    name: String,
+    declared_hash: Option<String>,
+}
+
+/// How loaded rules relate to one article and to the corpus's declared ledger.
+struct RuleReport {
+    /// Loaded rules whose source selects this article and agrees with the
+    /// article text and recorded jurisdiction.
+    loaded: Vec<(String, String)>,
+    /// Rules that name this article but whose quote or jurisdiction disagrees.
+    rejected: Vec<(String, String)>,
+    /// Rules whose citation omits a version while several corpora of the same
+    /// law exist; the version is not guessed.
+    ambiguous: Vec<(String, Vec<String>)>,
+    /// Every rule body that names this article (used for hash checks).
+    matched: Vec<MatchedRule>,
+}
+
+fn rule_report(
+    env: &Env,
+    corpus: &Corpus,
+    article: &Article,
+    all_corpora: &[&Corpus],
+) -> RuleReport {
+    let mut report = RuleReport {
+        loaded: Vec::new(),
+        rejected: Vec::new(),
+        ambiguous: Vec::new(),
+        matched: Vec::new(),
+    };
     for decl in env.iter() {
         if !matches!(decl.kind, DeclKind::Rule(_)) {
             continue;
         }
+        let name = decl.name.to_string();
+        let mut exact = None;
+        let mut ambiguous_versions: Option<Vec<String>> = None;
         for source in &decl.sources {
             if source.text.trim().is_empty() || !corpus.matches_name(&source.text) {
                 continue;
@@ -662,40 +805,157 @@ fn loaded_rules(env: &Env, corpus: &Corpus, article: &Article) -> Vec<(String, S
             if !numbers_equal(&source.locator, &article.number) {
                 continue;
             }
-            if !source.version.is_empty() && source.version != corpus.version {
+            if source.version.is_empty() {
+                let versions = versions_for_name(all_corpora, &source.text);
+                if versions.len() > 1 {
+                    ambiguous_versions.get_or_insert(versions);
+                    continue;
+                }
+            } else if source.version != corpus.version {
                 continue;
             }
-            rules.push((decl.name.to_string(), source.one_line()));
+            exact = Some(source);
             break;
         }
+        let Some(source) = exact else {
+            if let Some(versions) = ambiguous_versions {
+                report.ambiguous.push((name, versions));
+            }
+            continue;
+        };
+        let quote_ok = source.quote.trim().is_empty()
+            || strip_whitespace(&source.quote) == strip_whitespace(&article.text);
+        let jurisdiction_ok =
+            source.jurisdiction.is_empty() || source.jurisdiction == corpus.jurisdiction;
+        let citation = source.one_line();
+        report.matched.push(MatchedRule {
+            name: name.clone(),
+            declared_hash: (!source.hash.is_empty()).then(|| source.hash.clone()),
+        });
+        if quote_ok && jurisdiction_ok {
+            report.loaded.push((name, citation));
+        } else {
+            let reason = if !quote_ok {
+                "引文与条文不一致"
+            } else {
+                "管辖不符"
+            };
+            report.rejected.push((name, reason.to_owned()));
+        }
     }
-    rules.sort();
-    rules.dedup();
-    rules
+    report.loaded.sort();
+    report.loaded.dedup();
+    report.rejected.sort();
+    report.rejected.dedup();
+    report.ambiguous.sort();
+    report.ambiguous.dedup();
+    report
 }
 
-fn write_rules(out: &mut impl Write, hit: &Hit<'_>, env: &Env) {
-    let loaded = loaded_rules(env, hit.corpus, hit.article);
-    let declared = coverage_entry(hit)
-        .map(|entry| entry.rules.as_slice())
-        .unwrap_or(&[]);
-    if !loaded.is_empty() {
+fn versions_for_name(corpora: &[&Corpus], name: &str) -> Vec<String> {
+    let mut versions: Vec<String> = corpora
+        .iter()
+        .filter(|corpus| corpus.matches_name(name))
+        .map(|corpus| corpus.version.clone())
+        .collect();
+    versions.sort();
+    versions.dedup();
+    versions
+}
+
+fn strip_whitespace(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn write_rules(
+    out: &mut impl Write,
+    hit: &Hit<'_>,
+    env: &Env,
+    report: &RuleReport,
+    has_linked_pack: bool,
+    check_hash: bool,
+    hash_mismatch: &mut bool,
+) {
+    if !report.loaded.is_empty() {
         writeln!(out, "  引用规则（已加载）：").ok();
-        for (name, citation) in &loaded {
+        for (name, citation) in &report.loaded {
             writeln!(out, "    - {} ← {}", escape_control(name), citation).ok();
         }
     }
-    let loaded_names: BTreeSet<&str> = loaded.iter().map(|(name, _)| name.as_str()).collect();
-    let unloaded: Vec<&str> = declared
-        .iter()
-        .map(String::as_str)
-        .filter(|name| !loaded_names.contains(name))
-        .collect();
-    if !unloaded.is_empty() {
+    for (name, reason) in &report.rejected {
         writeln!(
             out,
-            "  清单声明（未加载）：{}",
-            unloaded
+            "  已加载规则 `{}` 的来源与语料不一致（{reason}），未列为引用规则。",
+            escape_control(name)
+        )
+        .ok();
+    }
+    for (name, versions) in &report.ambiguous {
+        writeln!(
+            out,
+            "  注：规则 `{}` 未记录版本，存在多版本（{}），无法确定引用哪一版，未列为引用规则。",
+            escape_control(name),
+            versions
+                .iter()
+                .map(|version| escape_control(version))
+                .collect::<Vec<_>>()
+                .join("/")
+        )
+        .ok();
+    }
+
+    let declared = coverage_entry(hit)
+        .map(|entry| entry.rules.as_slice())
+        .unwrap_or(&[]);
+    let loaded_names: BTreeSet<&str> = report
+        .loaded
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let mut no_pack: Vec<&str> = Vec::new();
+    for name in declared {
+        if loaded_names.contains(name.as_str()) {
+            continue;
+        }
+        match env.get(name) {
+            Some(decl) if matches!(decl.kind, DeclKind::Rule(_)) => {
+                let sources = if decl.sources.is_empty() {
+                    "（没有来源）".to_owned()
+                } else {
+                    decl.sources
+                        .iter()
+                        .map(|source| source.one_line())
+                        .collect::<Vec<_>>()
+                        .join("、")
+                };
+                writeln!(
+                    out,
+                    "  台账与已加载规则不一致：清单声明 `{}`，已加载规则 `{}` 的来源是 {}。",
+                    escape_control(name),
+                    escape_control(name),
+                    sources
+                )
+                .ok();
+            }
+            _ if has_linked_pack => {
+                writeln!(
+                    out,
+                    "  清单声明 `{}`，当前环境未加载该规则",
+                    escape_control(name)
+                )
+                .ok();
+            }
+            _ => no_pack.push(name.as_str()),
+        }
+    }
+    if !no_pack.is_empty() {
+        writeln!(
+            out,
+            "  清单声明（包未加载）：{}",
+            no_pack
                 .iter()
                 .map(|name| format!("「{}」", escape_control(name)))
                 .collect::<Vec<_>>()
@@ -708,7 +968,63 @@ fn write_rules(out: &mut impl Write, hit: &Hit<'_>, env: &Env) {
         )
         .ok();
     }
-    if loaded.is_empty() && declared.is_empty() {
+
+    if check_hash {
+        let local = article_hash(&hit.article.text);
+        if report.matched.is_empty() {
+            if report.ambiguous.is_empty() {
+                writeln!(out, "  注：哈希为本地计算，未与包核对。").ok();
+            } else {
+                writeln!(
+                    out,
+                    "  注：规则未记录版本，无法确定引用哪一版；哈希为本地计算，未与包核对。"
+                )
+                .ok();
+            }
+        } else {
+            let declared_hashes: Vec<&String> = report
+                .matched
+                .iter()
+                .filter_map(|rule| rule.declared_hash.as_ref())
+                .collect();
+            if declared_hashes.is_empty() {
+                writeln!(out, "  注：规则未记录 hash，哈希为本地计算，未与包核对。").ok();
+            } else {
+                let mut mismatched = false;
+                for rule in &report.matched {
+                    let Some(declared) = &rule.declared_hash else {
+                        continue;
+                    };
+                    if declared != &local {
+                        mismatched = true;
+                        *hash_mismatch = true;
+                        writeln!(
+                            out,
+                            "  ⚠ 语料哈希与规则声明不一致（本地 {}，规则 {}）；规则 `{}`。",
+                            local,
+                            escape_control(declared),
+                            escape_control(&rule.name)
+                        )
+                        .ok();
+                    }
+                }
+                if !mismatched {
+                    writeln!(
+                        out,
+                        "  哈希核对：{} 条规则声明的 hash 与本地计算一致。",
+                        declared_hashes.len()
+                    )
+                    .ok();
+                }
+            }
+        }
+    }
+
+    if report.loaded.is_empty()
+        && declared.is_empty()
+        && report.matched.is_empty()
+        && report.ambiguous.is_empty()
+    {
         if coverage_entry(hit).is_none() {
             writeln!(
                 out,
