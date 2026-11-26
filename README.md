@@ -2681,7 +2681,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
 
 ## 测试
 
-`cargo test --workspace` 共 1464 个：kernel 41、lang 217、reason 134、cert 303、cli 605、lawpack 164（含 1 个 doc test）。
+`cargo test --workspace` 共 1465 个：kernel 41、lang 217、reason 134、cert 304、cli 605、lawpack 164（含 1 个 doc test）。
 
 - `crates/kernel/tests/kernel.rs`（26）：内核黄金用例（Type-in-Type 被拒、η、delta、规则良构、作用域），
   两条宇宙规则：`forall_over_individuals_stays_in_prop`（个体上的量词仍是命题）、
@@ -2776,7 +2776,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   改结论数值、换运算符、改操作数、`computed` 不是规则实例、绑定与前提不符都被拒并点名节点；
   省略 `computed` 时校验器自己重算（错结论仍拒）；`num` 的 JSON 形状与符号往返、越界/浮点/未知字段
   被拒；`num` 的结构键与同名常量不同；无算术步骤不写 `computed`；实例值溢出时显式报错。
-- `crates/cert/tests/json.rs`（39）：证书 v10 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
+- `crates/cert/tests/json.rs`（40）：证书 v10 JSON 的往返与格式稳定性——紧凑和缩进两种输出往返一致、
   v10 快照比对、假设记录的必填 `identity`/`occurred_at`/`occurred_in` 与 `non_strict_fact` 原因形状、
   `applicability` 记录的字段名与显式 `null`、解释表与
   `interpretation_application` 节点形状、顶层与 `environment`
@@ -2785,7 +2785,7 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   `corpora`、`as_of`、`jurisdiction`）、未知版本或未知字段被拒；v6 证书先报版本错误而不是缺
   `applicability`/`occurred_at`，v5 证书先报版本错误而不是缺
   `interpretations`，v4 证书先报版本错误而不是缺 `identity`，
-  v3 证书先报版本错误而不是缺 `resolution` 依据，v2 证书先报版本错误而不是缺 `environment`，v1 同理；v8 证书先报版本错误，不会被当作 v10 少读 `axiom_instance`、`axiom_candidates` 或见证表；v7 证书先报版本错误而不是缺 `axiom_instance`/`axiom_candidates`；
+  v3 证书先报版本错误而不是缺 `resolution` 依据，v2 证书先报版本错误而不是缺 `environment`，v1 同理；v8 证书先报版本错误，不会被当作 v10 少读 `axiom_instance`、`axiom_candidates` 或见证表；v9 证书同样先报版本错误，不会被当作 v10 少读 `num` 或 `computed`；v7 证书先报版本错误而不是缺 `axiom_instance`/`axiom_candidates`；
   `environment` 缺失或其 `profile`/`packs`/`corpora`/`as_of`/`jurisdiction` 任一缺键都报
   `missing field`，三个可选字段的显式 `null` 接受；
   环境哈希/重复包名/未知 trust/坏日期/坏管辖被拒；`Unrecorded` 序列化报错、反序列化只接受对象；

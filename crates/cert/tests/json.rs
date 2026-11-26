@@ -13,6 +13,7 @@ use std_deduce_kernel::env::SourceRef;
 use std_deduce_kernel::{name, Expr};
 
 const SNAPSHOT: &str = include_str!("fixtures/certificate_v10.json");
+const V9_SNAPSHOT: &str = include_str!("fixtures/certificate_v9.json");
 const V8_SNAPSHOT: &str = include_str!("fixtures/certificate_v8.json");
 const V6_SNAPSHOT: &str = include_str!("fixtures/certificate_v6.json");
 const V5_SNAPSHOT: &str = include_str!("fixtures/certificate_v5.json");
@@ -412,6 +413,22 @@ fn a_v8_certificate_is_rejected_before_its_missing_witness_table() {
     let message = error.to_string();
     assert!(
         message.contains("unsupported certificate format version 8"),
+        "{message}"
+    );
+    assert!(message.contains("this build supports 10"), "{message}");
+    assert!(!message.contains("missing field"), "{message}");
+}
+
+#[test]
+fn a_v9_certificate_is_rejected_before_its_missing_integer_fields() {
+    // Version 9 predates exact integers and the recorded arithmetic step: it
+    // cannot express a `num` literal or a `computed` instance. The version
+    // probe must reject it on the version, not read the old document under the
+    // new rules.
+    let error = Certificate::from_json(V9_SNAPSHOT).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported certificate format version 9"),
         "{message}"
     );
     assert!(message.contains("this build supports 10"), "{message}");
