@@ -94,6 +94,7 @@ pub fn elab(env: &Env, locals: &[(String, Expr)], t: &Term) -> Result<Expr> {
             })
         }
         Term::Num(value) => Ok(Expr::Num(*value)),
+        Term::Date(date) => Ok(Expr::Date(*date)),
         Term::Pi {
             name,
             domain,

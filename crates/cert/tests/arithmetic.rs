@@ -328,7 +328,7 @@ fn a_num_literal_serializes_as_an_exact_integer() {
     let amount_argument = &conclusion["arg"];
     assert_eq!(amount_argument["kind"], "num", "{amount_argument}");
     assert_eq!(amount_argument["value"], 5000, "{amount_argument}");
-    assert_eq!(parsed["format_version"], 11);
+    assert_eq!(parsed["format_version"], 13);
     let round_trip = Certificate::from_json(&json).expect("an exported certificate parses back");
     assert_eq!(round_trip, cert);
 }
@@ -374,7 +374,7 @@ fn a_literal_key_is_distinct_from_a_same_named_constant() {
 #[test]
 fn a_rule_step_without_arithmetic_records_no_computed_field() {
     // A non-arithmetic certificate keeps exactly its old JSON shape: the field
-    // is omitted rather than written as `null`, so v11 output stays stable for
+    // is omitted rather than written as `null`, so v13 output stays stable for
     // cases that compute nothing.
     let cert = certificate(Node::RuleApplication {
         guards: Vec::new(),

@@ -1,4 +1,4 @@
-//! End-to-end tests for enabling `interpret` declarations and for the v11
+//! End-to-end tests for enabling `interpret` declarations and for the v13
 //! certificate that records an interpretation application.
 //!
 //! The default session must stay byte-for-byte identical: an interpretation is
@@ -384,10 +384,10 @@ fn two_enabled_interpretations_are_listed_by_id_in_the_certificate() {
     );
 
     let value = certificate_value(&first);
-    assert_eq!(value["format_version"], 11);
+    assert_eq!(value["format_version"], 13);
     let interpretations = value["interpretations"]
         .as_array()
-        .expect("v11 records an interpretations array");
+        .expect("v13 records an interpretations array");
     assert_eq!(interpretations.len(), 2);
     assert_eq!(interpretations[0]["id"], "iA");
     assert_eq!(interpretations[1]["id"], "iB");
@@ -424,7 +424,7 @@ fn the_certificate_records_the_interpretation_and_its_application() {
     ]);
     assert_exit(&output, PROVED);
     let value = certificate_value(&output);
-    assert_eq!(value["format_version"], 11);
+    assert_eq!(value["format_version"], 13);
     let interpretations = value["interpretations"].as_array().unwrap();
     assert_eq!(interpretations.len(), 1);
     assert_eq!(interpretations[0]["id"], "解释");
@@ -468,7 +468,7 @@ fn a_v5_certificate_is_rejected_with_the_version_probe() {
         COMMAND_ERROR,
         &[
             "unsupported certificate format version 5",
-            "this build supports 11",
+            "this build supports 13",
         ],
     );
     let out = stdout(&output);
@@ -552,7 +552,7 @@ fn a_conflict_witness_can_be_an_interpretation() {
     );
 }
 
-/// Generate a valid v11 certificate for `Q 张三` and then hand-edit it.
+/// Generate a valid v13 certificate for `Q 张三` and then hand-edit it.
 fn forged_certificate(
     edit: impl FnOnce(&mut serde_json::Value),
     tag: &str,
@@ -872,7 +872,7 @@ fn a_chained_certificate_is_rejected_by_verify_cert() {
     // chain" invariant rejects the graph.
     value["interpretations"]
         .as_array_mut()
-        .expect("the v11 table is an array")
+        .expect("the v13 table is an array")
         .push(serde_json::json!({
             "id": "i2",
             "direction": "analogy",

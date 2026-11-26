@@ -477,7 +477,7 @@ fn render_node(
                             print_parenthesized(&Expr::from(&guard.instance))
                         )),
                         None => out.push_str(&format!(
-                            "{pad}    守卫：`{}` 无法判定（守卫参数没有全部绑定，或操作数不是整数字面量）\n",
+                            "{pad}    守卫：`{}` 无法判定（守卫参数没有全部绑定，或操作数不是 Int/Date 字面量）\n",
                             print_parenthesized(&Expr::from(&guard.instance))
                         )),
                     }

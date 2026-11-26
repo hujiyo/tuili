@@ -28,6 +28,8 @@ pub fn infer(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
         // that one type; a theory that wants a domain name for its amounts
         // writes a `def` alias of `Int`, which is definitionally equal to it.
         Expr::Num(_) => Ok(Expr::constant(builtin::INT)),
+        // A date literal is exactly a Date; it is never read as a number.
+        Expr::Date(_) => Ok(Expr::constant(builtin::DATE)),
         Expr::Pi {
             name,
             domain,
@@ -63,6 +65,14 @@ pub fn infer(env: &Env, ctx: &Ctx, e: &Expr) -> Result<Expr> {
             })
         }
         Expr::App { func, arg } => {
+            // `less` / `le` are the two overloaded built-ins: the same constant
+            // compares two `Int`s or two `Date`s, and the operand types select
+            // the scheme. The surface syntax always applies a comparison to both
+            // operands, so an under-applied `less` keeps the `Int` scheme from
+            // [`builtin::type_of`]. A mixed pair is refused instead of converted.
+            if let Some(inferred) = infer_comparison(env, ctx, func, arg) {
+                return inferred;
+            }
             let f_ty = whnf(env, &infer(env, ctx, func)?)?;
             match f_ty {
                 Expr::Pi {
@@ -126,6 +136,59 @@ pub fn check(env: &Env, ctx: &Ctx, e: &Expr, ty: &Expr) -> Result<()> {
 
 pub fn check_is_type(env: &Env, ctx: &Ctx, e: &Expr) -> Result<()> {
     infer_sort(env, ctx, e).map(|_| ())
+}
+
+/// Type a fully applied `less` / `le`, whose operands may be integers or dates.
+///
+/// Returns `None` when `func arg` is not a complete comparison; the ordinary
+/// application rule then applies. Both operands must have the same built-in
+/// literal type: two `Int`s or two `Date`s. Definitional equality decides the
+/// type (so a `def 日期 : Type := Date` alias counts), and anything else — a
+/// mixed pair, or an operand that is neither — is an explicit error rather than
+/// an implicit conversion.
+fn infer_comparison(env: &Env, ctx: &Ctx, func: &Expr, arg: &Expr) -> Option<Result<Expr>> {
+    // The shape is `(less left) right`: an application whose head is `less` or
+    // `le` and which already carries its first operand.
+    let Expr::App {
+        func: head,
+        arg: left,
+    } = func
+    else {
+        return None;
+    };
+    let Expr::Const(name) = head.as_ref() else {
+        return None;
+    };
+    if !matches!(
+        builtin::Op::from_name(name),
+        Some(builtin::Op::Less | builtin::Op::Le)
+    ) {
+        return None;
+    }
+    Some((|| -> Result<Expr> {
+        let left_ty = infer(env, ctx, left)?;
+        let right_ty = infer(env, ctx, arg)?;
+        let date = Expr::constant(builtin::DATE);
+        let int = Expr::constant(builtin::INT);
+        let both = |ty: &Expr| -> Result<(bool, bool)> {
+            Ok((
+                convertible(env, ctx, ty, &date)?,
+                convertible(env, ctx, ty, &int)?,
+            ))
+        };
+        let (left_date, left_int) = both(&left_ty)?;
+        let (right_date, right_int) = both(&right_ty)?;
+        if (left_date && right_date) || (left_int && right_int) {
+            return Ok(Expr::Sort(0));
+        }
+        Err(Error::other(format!(
+            "比较 `{}` 的两个操作数必须同为 Int 或同为 Date：左边是「{}」，右边是「{}」；\
+             本系统不做隐式转换",
+            name,
+            crate::pretty::print_expr(&left_ty),
+            crate::pretty::print_expr(&right_ty)
+        )))
+    })())
 }
 
 /// The universe `e` lives in, i.e. `e : Sort l`.

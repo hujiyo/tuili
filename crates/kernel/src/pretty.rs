@@ -33,6 +33,13 @@ fn go(e: &Expr, prec: u8, out: &mut String, names: &mut Vec<String>) {
             }
         }
         Expr::Const(n) => out.push_str(&escape_control(n)),
+        // A date literal is an atom, printed in the surface syntax
+        // `d"2020-05-06"`, so it reads back as the same date.
+        Expr::Date(value) => {
+            out.push_str("d\"");
+            out.push_str(&value.to_iso());
+            out.push('"');
+        }
         // A negative literal is an atom on its own (`-3000`), but the surface
         // grammar does not read a leading `-` as the start of an application
         // argument: `add -3000 2000` would reparse as a subtraction or fail. In
@@ -141,7 +148,7 @@ fn mentions_var0(e: &Expr) -> bool {
 
 pub fn size(e: &Expr) -> usize {
     match e {
-        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => 1,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => 1,
         Expr::Pi {
             domain, codomain, ..
         } => 1 + size(domain) + size(codomain),

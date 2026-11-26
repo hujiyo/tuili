@@ -1322,7 +1322,7 @@ fn open_vars(e: &Expr, names: &[Name], depth: usize, in_scope: usize) -> Expr {
                 }
             }
         }
-        Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) => e.clone(),
+        Expr::Sort(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => e.clone(),
         Expr::Pi {
             name,
             domain,
@@ -1362,7 +1362,7 @@ fn mentions_pattern(e: &Expr, binder: &Name) -> bool {
     match is_pattern_var(e) {
         Some(pv) => pv == binder.as_ref(),
         None => match e {
-            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) => false,
+            Expr::Sort(_) | Expr::Var(_) | Expr::Const(_) | Expr::Num(_) | Expr::Date(_) => false,
             Expr::Pi {
                 domain, codomain, ..
             } => mentions_pattern(domain, binder) || mentions_pattern(codomain, binder),

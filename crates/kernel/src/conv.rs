@@ -23,6 +23,8 @@ fn eq(env: &Env, ctx: &Ctx, a: &Expr, b: &Expr) -> Result<bool> {
         // Two literals are the same integer, or they are not convertible. The
         // comparison is exact; there is no rounding and no tolerance.
         (Expr::Num(x), Expr::Num(y)) => Ok(x == y),
+        // Likewise for calendar dates: the same day, or nothing.
+        (Expr::Date(x), Expr::Date(y)) => Ok(x == y),
         (
             Expr::Pi {
                 domain: d1,

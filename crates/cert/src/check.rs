@@ -4257,7 +4257,7 @@ pub(crate) fn mentioned_premise_binder(
             .strip_prefix('?')
             .filter(|binder| premise_binders.contains(*binder))
             .map(str::to_owned),
-        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => None,
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => None,
         Expr::Pi {
             domain, codomain, ..
         } => mentioned_premise_binder(domain, premise_binders)
@@ -4301,7 +4301,7 @@ fn close_pattern(pattern: &Expr, binding: &BTreeMap<&str, Expr>) -> Expr {
                 .unwrap_or_else(|| pattern.clone()),
             None => pattern.clone(),
         },
-        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) => pattern.clone(),
+        Expr::Sort(_) | Expr::Var(_) | Expr::Num(_) | Expr::Date(_) => pattern.clone(),
         Expr::Pi {
             name,
             domain,

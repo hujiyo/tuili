@@ -1652,7 +1652,7 @@ impl Parser {
     fn application(&mut self) -> PResult<Term> {
         let mut t = self.atom()?;
         let mut arguments = 0usize;
-        while let Tok::Ident(_) | Tok::LParen | Tok::Num(_) = self.peek() {
+        while let Tok::Ident(_) | Tok::LParen | Tok::Num(_) | Tok::Date(_) = self.peek() {
             arguments += 1;
             if arguments > MAX_APPLICATION_ARITY {
                 return self.err(format!("应用的参数数量超过上限 {MAX_APPLICATION_ARITY}"));
@@ -1737,7 +1737,7 @@ impl Parser {
         let mut t = self.atom()?;
         loop {
             match self.peek() {
-                Tok::LParen => {}
+                Tok::LParen | Tok::Date(_) => {}
                 Tok::Ident(next) if next == "direction" || next == "source" => break,
                 Tok::Ident(_) => {}
                 _ => break,
@@ -1783,6 +1783,10 @@ impl Parser {
                     domain: Box::new(d),
                     body: Box::new(body),
                 })
+            }
+            Tok::Date(date) => {
+                self.bump();
+                Ok(Term::Date(date))
             }
             Tok::Num(digits) => {
                 let (line, col) = (self.here().line, self.here().col);
