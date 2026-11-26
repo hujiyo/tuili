@@ -3854,12 +3854,12 @@ CI（`.github/workflows/ci.yml`，`ubuntu-latest`）跑这三条门禁，另外�
   且路径只出现一次、不出现 `错误：` 前缀；`:load` 坏语法保留 `错误：` 前缀并带同样位置；
   精化错误没有 AST span 时输出 `路径: error: ...`，不伪造行列号；含空格路径按单个参数加载；
   `check` 子命令与直接给文件输出一致；加载后继续执行 `:why`；`--help` / `-h` 与 REPL `:help`
-  都列全测试常量里的全部冒号命令（`:load`、`:load-case`、`:inspect`、`:given`、`:fact`、
+  都列全测试常量里的全部冒号查询命令（`:load`、`:load-case`、`:inspect`、`:given`、`:fact`、
   `:interpret`、`:asof`、`:jurisdiction`、`:why`、`:explain`、`:labels`、`:review`、`:gap`、
   `:branches`、`:issues`、`:applicability`、`:cert`、`:verify-cert`、`:redact`、`:packs`、
-  `:lock`、`:audit`、`:search`）
-  并由同一常量逐条对照，同时列出批处理与 `:verify-cert`、`--as-of`/`--jurisdiction` 及其会话值、
-  证书身份与适用性判定的说明；
+  `:lock`、`:audit`、`:search`），并单独断言 REPL 控制 `:help`/`:quit`/`:exit` 也都出现在
+  两处帮助且写明 `:quit` 与 `:exit` 等价；由同一常量逐条对照，同时列出批处理与 `:verify-cert`、
+  `--as-of`/`--jurisdiction` 及其会话值、证书身份与适用性判定的说明；
   `--version` / `-V` 输出 `std-deduce <版本>`；无参数与 `repl` 都进入 REPL；
   `check` 缺文件与 `repl` 带多余参数报用法错误（`2`）；文件后的 `--help`、首参未知选项、
   `check --help` 与 REPL 中的 `--foo` 都按未知选项退出 `2`，不静默忽略也不当文件；

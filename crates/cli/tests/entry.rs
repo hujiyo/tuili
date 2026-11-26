@@ -291,6 +291,11 @@ const COLON_COMMANDS: &[&str] = &[
     ":search",
 ];
 
+/// REPL controls: accepted by the session loop, not dispatched as queries.
+/// Both help surfaces must name all three, and `:quit`/`:exit` must state that
+/// they are equivalent.
+const REPL_CONTROLS: &[&str] = &[":help", ":quit", ":exit"];
+
 /// True when `command` appears as a whole colon command, not as part of a
 /// longer one: `:load` also prefixes `:load-case`, and `:cert` suffix-matches
 /// `:verify-cert`.
@@ -315,6 +320,16 @@ fn help_lists_every_user_facing_colon_command() {
                 "{flag} must list {command}:\n{out}"
             );
         }
+        for command in REPL_CONTROLS {
+            assert!(
+                mentions_command(&out, command),
+                "{flag} must list the REPL control {command}:\n{out}"
+            );
+        }
+        assert!(
+            out.contains(":quit 与 :exit 等价"),
+            "{flag} must say `:quit` and `:exit` are equivalent:\n{out}"
+        );
     }
     let repl = run_with_stdin(&[], ":help\n:quit\n");
     assert_exit(&repl, PROVED);
@@ -325,6 +340,16 @@ fn help_lists_every_user_facing_colon_command() {
             ":help must list {command}:\n{out}"
         );
     }
+    for command in REPL_CONTROLS {
+        assert!(
+            mentions_command(&out, command),
+            ":help must list the REPL control {command}:\n{out}"
+        );
+    }
+    assert!(
+        out.contains("二者等价"),
+        ":help must say `:quit` and `:exit` are equivalent:\n{out}"
+    );
 }
 
 #[test]

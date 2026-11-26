@@ -7364,7 +7364,7 @@ fn print_help(out: &mut impl Write) {
     .ok();
     writeln!(
         out,
-        "  std-deduce check <文件.std> [...]  等价于直接给文件（check 是批处理入口；.json 同样接受）"
+        "  std-deduce check <文件.std> [...]  等价于直接给文件（check 是批处理入口，不是冒号命令；.json 同样接受）"
     )
     .ok();
     writeln!(
@@ -7381,6 +7381,11 @@ fn print_help(out: &mut impl Write) {
     writeln!(
         out,
         "  std-deduce <冒号命令> [...]        把每个参数当命令执行，例如 :load <文件>"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  REPL 控制：:help 显示命令速查；:quit 与 :exit 等价，都结束会话"
     )
     .ok();
     writeln!(out, "  std-deduce --help | -h             显示本用法").ok();
@@ -7632,7 +7637,8 @@ fn run_repl(session: &mut Session, out: &mut impl Write) -> i32 {
                  :why <命题>  :explain <命题>  :labels <命题>  :review <命题> [--out <文件>]  :gap <命题>  :branches <命题>  :issues  :applicability [命题]  :cert <命题>  :verify-cert <证书文件> [目标命题]  \
                  :redact [on|off]  \
                  :packs [目录]  :lock [目录]  :audit [目录]（只核对带 quote 的来源）  \
-                 :search <关键词> [--law <法名>] [--version <版本>] [--article <条号>] [--jurisdiction <代码>] [--limit <n>]  :quit"
+                 :search <关键词> [--law <法名>] [--version <版本>] [--article <条号>] [--jurisdiction <代码>] [--limit <n>]  \
+                 :help（显示本速查）  :quit / :exit（二者等价，都结束会话）"
             )
             .ok();
             continue;
