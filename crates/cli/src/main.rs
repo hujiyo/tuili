@@ -7428,7 +7428,8 @@ fn print_help(out: &mut impl Write) {
     .ok();
     writeln!(
         out,
-        "  --interpret <解释名>         为本次会话启用一个解释（可重复；默认全部不启用）"
+        "  --interpret <解释名>         为本次会话启用一个解释（可重复；默认全部不启用；\
+         解释名在当前环境解析不到时本次加载失败并退 1）"
     )
     .ok();
     writeln!(out).ok();
@@ -7495,6 +7496,20 @@ fn print_help(out: &mut impl Write) {
         out,
         "法条检索：:search <关键词> [--law <法名>] [--version <版本>] [--article <条号>] \
          [--jurisdiction <代码>] [--limit <n>]；只读语料、不导入规则，条号与哈希口径与 :audit 一致。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "声明与事实：:inspect 打印声明台账（出处、身份、适用性与案件扩展标记）；\
+         :given <命题> 登记一条用户陈述的事实；\
+         :fact [list|show|add|assumed|disputed <命题>] 查看或登记带身份的事实。"
+    )
+    .ok();
+    writeln!(
+        out,
+        "包、锁与语料：:packs [目录] 列出已注册包（版本、信任级别与锁状态）；\
+         :lock [目录] 扫描包并写入 std.lock；\
+         :audit [目录] 只核对来源里带 quote 的引文与仓库语料。"
     )
     .ok();
     writeln!(out).ok();

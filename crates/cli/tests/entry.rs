@@ -259,31 +259,71 @@ fn help_lists_the_batch_and_certificate_entries() {
     }
 }
 
-/// Every user-facing colon command must appear in both help surfaces: a
-/// command added without a help line was discoverable only from the README.
+/// Every user-facing colon command, in one place.
+///
+/// `--help` and the REPL `:help` must both list all of them; a command added to
+/// the dispatcher without a help line failed here instead of being discoverable
+/// only from the README. `:help`, `:quit` and `:exit` are REPL controls, not
+/// query commands, so they are not in this list.
+const COLON_COMMANDS: &[&str] = &[
+    ":load",
+    ":load-case",
+    ":inspect",
+    ":given",
+    ":fact",
+    ":interpret",
+    ":asof",
+    ":jurisdiction",
+    ":why",
+    ":explain",
+    ":labels",
+    ":review",
+    ":gap",
+    ":branches",
+    ":issues",
+    ":applicability",
+    ":cert",
+    ":verify-cert",
+    ":redact",
+    ":packs",
+    ":lock",
+    ":audit",
+    ":search",
+];
+
+/// True when `command` appears as a whole colon command, not as part of a
+/// longer one: `:load` also prefixes `:load-case`, and `:cert` suffix-matches
+/// `:verify-cert`.
+fn mentions_command(text: &str, command: &str) -> bool {
+    let joins = |next: Option<char>| matches!(next, Some(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    text.match_indices(command).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + command.len()..].chars().next();
+        !joins(before) && !joins(after)
+    })
+}
+
 #[test]
-fn help_lists_every_colon_command_from_the_recent_entries() {
-    let commands = [
-        ":search",
-        ":branches",
-        ":load-case",
-        ":labels",
-        ":review",
-        ":redact",
-    ];
+fn help_lists_every_user_facing_colon_command() {
     for flag in ["--help", "-h"] {
         let output = run(&[flag.to_owned()]);
         assert_exit(&output, PROVED);
         let out = stdout(&output);
-        for command in commands {
-            assert!(out.contains(command), "{flag} must list {command}:\n{out}");
+        for command in COLON_COMMANDS {
+            assert!(
+                mentions_command(&out, command),
+                "{flag} must list {command}:\n{out}"
+            );
         }
     }
     let repl = run_with_stdin(&[], ":help\n:quit\n");
     assert_exit(&repl, PROVED);
     let out = stdout(&repl);
-    for command in commands {
-        assert!(out.contains(command), ":help must list {command}:\n{out}");
+    for command in COLON_COMMANDS {
+        assert!(
+            mentions_command(&out, command),
+            ":help must list {command}:\n{out}"
+        );
     }
 }
 
