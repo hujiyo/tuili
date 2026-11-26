@@ -10,8 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
-use std_deduce_cert::{Certificate, Node, Provenance, MAX_CERT_WITNESSES_PER_CONCLUSION};
+use std_deduce_cert::{CertExpr, Certificate, Node, Provenance, MAX_CERT_WITNESSES_PER_CONCLUSION};
 
 const PROVED: i32 = 0;
 const GAP: i32 = 1;
@@ -86,6 +87,141 @@ rule 规则C :
   source text "测试" locator "C"
 "#;
 
+/// A universal fact breaks the rule cycle: v8 proved `Q 甲` through the
+/// universal instance and must keep doing so in v9.
+const CYCLE: &str = r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+obj 甲 : 人
+axiom 全称 : ∀ (x : 人), Q x
+  source text "测试" locator "1"
+rule 规则S :
+  params x : 人
+  premise Q x
+  conclude P x
+  source text "测试" locator "S"
+rule 规则R :
+  params x : 人
+  premise P x
+  conclude Q x
+  source text "测试" locator "R"
+"#;
+
+/// `Q 甲` is licensed only by an interpretation and the rule that consumes it
+/// must not become a witness (rules never consume interpretation conclusions).
+const INTERPRETED: &str = r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+pred S : 人 → Prop
+obj 甲 : 人
+axiom 事实P : P 甲
+  source text "测试" locator "1" version "2020"
+interpret 解释Q : P 甲 → Q 甲
+  direction expand
+  source text "测试" locator "2" version "2020"
+rule 规则R :
+  params x : 人
+  premise P x
+  conclude S x
+  source text "测试" locator "R"
+rule 规则W :
+  params x : 人
+  premise Q x
+  conclude S x
+  source text "测试" locator "W"
+"#;
+
+/// A pure rule cycle with no assumption or universal fact: nothing can seed
+/// the fixed point, so the goal must stay a gap with an explicit loop marker.
+const PURE_CYCLE: &str = r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+obj 甲 : 人
+rule 规则S :
+  params x : 人
+  premise Q x
+  conclude P x
+  source text "测试" locator "S"
+rule 规则R :
+  params x : 人
+  premise P x
+  conclude Q x
+  source text "测试" locator "R"
+"#;
+
+/// Two-parameter rule; the same instance written with reordered bindings must
+/// not count as a second independent witness.
+const TWO_PARAM: &str = r#"
+sort 人
+pred P : 人 → Prop
+pred R : 人 → Prop
+pred Q : 人 → Prop
+obj 甲 : 人
+obj 乙 : 人
+obj 丙 : 人
+axiom 事实P : P 甲
+  source text "测试" locator "1"
+axiom 事实乙 : R 乙
+  source text "测试" locator "2"
+axiom 事实丙 : R 丙
+  source text "测试" locator "3"
+rule 规则 :
+  params x : 人
+  params y : 人
+  premise P x
+  premise R y
+  conclude Q x
+  source text "测试" locator "R"
+"#;
+
+/// Conclusion is a function value; the η-variant `谓 (λx. 好人 x)` is kernel
+/// equivalent to `谓 好人`.
+const ETA: &str = r#"
+sort 人
+pred 好人 : 人 → Prop
+pred 谓 : (人 → Prop) → Prop
+obj 甲 : 人
+axiom 事实 : 好人 甲
+  source text "测试" locator "1"
+rule 规则A :
+  premise 好人 甲
+  conclude 谓 好人
+  source text "测试" locator "A"
+rule 规则B :
+  premise 好人 甲
+  conclude 谓 好人
+  source text "测试" locator "B"
+"#;
+
+/// `objects` distinct `P` facts plus `rules` rules concluding the same `Q`.
+fn scale_theory(objects: usize, rules: usize) -> String {
+    let mut text = String::from(
+        r#"
+sort 人
+pred P : 人 → Prop
+pred Q : 人 → Prop
+"#,
+    );
+    for object in 1..=objects {
+        text.push_str(&format!("obj 甲{object:03} : 人\n"));
+    }
+    for object in 1..=objects {
+        text.push_str(&format!(
+            "axiom 事实{object:03} : P 甲{object:03}\n  source text \"测试\" locator \"{object:03}\"\n"
+        ));
+    }
+    for rule in 1..=rules {
+        text.push_str(&format!(
+            "rule 规则{rule:03} :\n  params x : 人\n  premise P x\n  conclude Q x\n  \
+             source text \"测试\" locator \"规则{rule:03}\"\n"
+        ));
+    }
+    text
+}
+
 fn run(commands: Vec<String>) -> Output {
     Command::new(env!("CARGO_BIN_EXE_std-deduce"))
         .args(commands)
@@ -146,7 +282,12 @@ impl Drop for TempDir {
 }
 
 fn load_and(theory: &Path, commands: &[String]) -> Output {
-    let mut all = vec![format!(":load {}", theory.display())];
+    load_and_options(&[], theory, commands)
+}
+
+fn load_and_options(options: &[&str], theory: &Path, commands: &[String]) -> Output {
+    let mut all: Vec<String> = options.iter().map(|arg| arg.to_string()).collect();
+    all.push(format!(":load {}", theory.display()));
     all.extend_from_slice(commands);
     run(all)
 }
@@ -174,8 +315,22 @@ fn write_certificate(dir: &TempDir, tag: &str, certificate: &Certificate) -> Pat
 }
 
 fn verify(dir: &TempDir, theory: &Path, tag: &str, certificate: &Certificate) -> Output {
+    verify_with_options(&[], dir, theory, tag, certificate)
+}
+
+fn verify_with_options(
+    options: &[&str],
+    dir: &TempDir,
+    theory: &Path,
+    tag: &str,
+    certificate: &Certificate,
+) -> Output {
     let path = write_certificate(dir, tag, certificate);
-    load_and(theory, &[format!(":verify-cert {}", path.display())])
+    load_and_options(
+        options,
+        theory,
+        &[format!(":verify-cert {}", path.display())],
+    )
 }
 
 /// The index of the witness table entry for the root conclusion.
@@ -502,7 +657,215 @@ fn review_reports_the_alternative_count_consistently() {
     assert_exit(&output, PROVED);
     let text = stdout(&output);
     assert!(
-        text.contains("**独立推导：**该结论共有 2 条独立推导（另有 1 条）。"),
+        text.contains("**独立推导：**已记录 2 条见证（另有 1 条已记录）。"),
         "the review report must repeat the certificate's count:\n{text}"
+    );
+}
+
+#[test]
+fn a_legal_universal_witness_breaks_a_rule_cycle() {
+    let dir = TempDir::new("cycle");
+    let theory = dir.write("cycle.std", CYCLE);
+    let output = load_and(&theory, &[":why Q 甲".to_owned()]);
+    assert_exit(&output, PROVED);
+    let text = stdout(&output);
+    assert!(
+        text.contains("〈公理 全称"),
+        "the universal instance must appear in the tree:\n{text}"
+    );
+    assert!(
+        text.contains("另有 1 条独立推导。"),
+        "both the rule and the universal instance are witnesses:\n{text}"
+    );
+
+    let certificate = generated(&theory, "Q 甲");
+    let checked = verify(&dir, &theory, "cycle", &certificate);
+    assert_exit(&checked, PROVED);
+}
+
+#[test]
+fn an_interpretation_conclusion_never_becomes_a_rule_witness() {
+    let dir = TempDir::new("interpreted");
+    let theory = dir.write("interp.std", INTERPRETED);
+    let output = load_and_options(
+        &["--interpret", "解释Q"],
+        &theory,
+        &[":why S 甲".to_owned()],
+    );
+    assert_exit(&output, PROVED);
+    let text = stdout(&output);
+    assert!(
+        !text.contains("⟨规则W⟩"),
+        "rule W consumes the interpretation conclusion and must not be a rule step:\n{text}"
+    );
+    assert!(text.contains("⟨规则R⟩"), "{text}");
+
+    let output = load_and_options(
+        &["--interpret", "解释Q"],
+        &theory,
+        &[":cert S 甲".to_owned()],
+    );
+    assert_exit(&output, PROVED);
+    let certificate = Certificate::from_json(&certificate_text(&output)).expect("valid JSON");
+    let group = &certificate.alternatives[root_group(&certificate)];
+    assert_eq!(group.witnesses.len(), 1);
+    match &certificate.nodes[group.witnesses[0]] {
+        Node::RuleApplication { rule, .. } => assert_eq!(rule, "规则R"),
+        other => panic!("the witness is not a rule step: {other:?}"),
+    }
+    let checked = verify_with_options(
+        &["--interpret", "解释Q"],
+        &dir,
+        &theory,
+        "interpreted",
+        &certificate,
+    );
+    assert_exit(&checked, PROVED);
+}
+
+#[test]
+fn a_pure_rule_cycle_is_reported_as_a_gap_with_a_loop_marker() {
+    let dir = TempDir::new("pure-cycle");
+    let theory = dir.write("cycle.std", PURE_CYCLE);
+    let output = load_and(&theory, &[":why Q 甲".to_owned(), ":gap Q 甲".to_owned()]);
+    assert_exit(&output, GAP);
+    let text = stdout(&output);
+    assert!(
+        text.contains("证书有效，但根为缺口，结论未被证明。"),
+        "the loop must never be presented as a proof:\n{text}"
+    );
+    assert!(
+        text.contains("循环依赖"),
+        "the gap must name the rule cycle explicitly:\n{text}"
+    );
+}
+
+#[test]
+fn reordering_the_bindings_of_the_same_instance_does_not_make_it_independent() {
+    let dir = TempDir::new("binding-order");
+    let theory = dir.write("two-param.std", TWO_PARAM);
+    let mut certificate = generated(&theory, "Q 甲");
+    let root = certificate.root.unwrap();
+    let group = root_group(&certificate);
+    let mut clone = certificate.nodes[root].clone();
+    match &mut clone {
+        Node::RuleApplication { bindings, .. } => bindings.reverse(),
+        other => panic!("the root is not a rule step: {other:?}"),
+    }
+    let clone_id = certificate.nodes.len();
+    certificate.nodes.push(clone);
+    certificate.alternatives[group].witnesses.push(clone_id);
+
+    let checked = verify(&dir, &theory, "binding-order", &certificate);
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(
+        out.contains("不算独立见证") || out.contains("同一条规则实例"),
+        "reordered bindings must not count as a second witness:\n{out}"
+    );
+}
+
+#[test]
+fn an_eta_variant_cannot_bypass_the_root_witness_check() {
+    let dir = TempDir::new("eta");
+    let theory = dir.write("eta.std", ETA);
+    let mut certificate = generated(&theory, "谓 好人");
+    let root = certificate.root.unwrap();
+    let group = root_group(&certificate);
+    let other = certificate.alternatives[group]
+        .witnesses
+        .iter()
+        .copied()
+        .find(|witness| *witness != root)
+        .expect("there is a second witness");
+    let eta = CertExpr::App {
+        func: Box::new(CertExpr::Const {
+            name: "谓".to_owned(),
+        }),
+        arg: Box::new(CertExpr::Lam {
+            binder: Some("x".to_owned()),
+            domain: Box::new(CertExpr::Const {
+                name: "人".to_owned(),
+            }),
+            body: Box::new(CertExpr::App {
+                func: Box::new(CertExpr::Const {
+                    name: "好人".to_owned(),
+                }),
+                arg: Box::new(CertExpr::Var { index: 0 }),
+            }),
+        }),
+    };
+    certificate.alternatives[group].proposition = eta;
+    certificate.alternatives[group].witnesses = vec![other];
+
+    let checked = verify(&dir, &theory, "eta", &certificate);
+    assert_exit(&checked, ERROR);
+    let out = stdout(&checked);
+    assert!(
+        out.contains("没有列出根节点"),
+        "the η variant is the root's conclusion and must list the root:\n{out}"
+    );
+}
+
+#[test]
+fn two_hundred_rules_truncate_at_exactly_eight_recorded_witnesses() {
+    let dir = TempDir::new("two-hundred");
+    let theory = dir.write("many.std", &scale_theory(1, 200));
+    let output = load_and(
+        &theory,
+        &[":why Q 甲001".to_owned(), ":cert Q 甲001".to_owned()],
+    );
+    assert_exit(&output, PROVED);
+    let text = stdout(&output);
+    assert!(text.contains("另有 7 条独立推导。"), "{text}");
+    assert!(
+        text.contains("该结论的见证已截断：还有更多推导未列出。"),
+        "{text}"
+    );
+    let json_start = text
+        .rfind("{\n  \"format_version\"")
+        .expect("the certificate JSON");
+    let certificate = Certificate::from_json(text[json_start..].trim_end()).expect("valid JSON");
+    let group = &certificate.alternatives[root_group(&certificate)];
+    assert_eq!(group.witnesses.len(), MAX_CERT_WITNESSES_PER_CONCLUSION);
+    assert!(group.truncated);
+    let checked = verify(&dir, &theory, "two-hundred", &certificate);
+    assert_exit(&checked, PROVED);
+}
+
+#[test]
+fn a_medium_case_stays_fast_enough_to_export() {
+    let dir = TempDir::new("scale");
+    let theory = dir.write("scale.std", &scale_theory(30, 10));
+    let started = Instant::now();
+    let output = load_and(&theory, &[":cert Q 甲001".to_owned()]);
+    let elapsed = started.elapsed();
+    assert_exit(&output, PROVED);
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "30 objects × 10 rules took {elapsed:?}; the witness index must be linear, not per-conclusion enumeration"
+    );
+}
+
+#[test]
+fn a_case_over_the_node_bound_fails_early_with_an_actionable_message() {
+    let dir = TempDir::new("capacity");
+    let theory = dir.write("capacity.std", &scale_theory(1300, 8));
+    let started = Instant::now();
+    let output = load_and(&theory, &[":why Q 甲001".to_owned()]);
+    let elapsed = started.elapsed();
+    assert_exit(&output, ERROR);
+    let text = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        text.contains("证书节点数量将超过上限"),
+        "the node bound must be reported with its cause:\n{text}"
+    );
+    assert!(
+        text.contains("同一结论的多条见证"),
+        "the message must explain the multi-witness node growth:\n{text}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(45),
+        "the estimate must stop the case early, not after minutes; took {elapsed:?}"
     );
 }

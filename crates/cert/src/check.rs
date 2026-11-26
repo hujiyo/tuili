@@ -44,10 +44,13 @@
 //!   concludes the group's proposition under kernel conversion; a group is not
 //!   empty, does not repeat a node, and does not list the same rule (or the
 //!   same universal fact) with the same binding values twice, because that is
-//!   one argument, not two. Binding values are compared by the collision-free
-//!   structural key of their normal forms. A group marked as truncated must
-//!   record exactly the per-conclusion bound; a group not marked truncated
-//!   must stay within the bound. The root, when it is a derivation
+//!   one argument, not two. Binding values are compared under kernel
+//!   conversion by parameter name, so JSON binding order does not change the
+//!   identity and η-equivalent function values remain the same binding. Group
+//!   propositions are de-duplicated and matched against the root the same way,
+//!   so an η-variant cannot bypass the root membership check. A group marked as
+//!   truncated must record exactly the per-conclusion bound; a group not marked
+//!   truncated must stay within the bound. The root, when it is a derivation
 //!   step, must appear among the witnesses of its own conclusion. Groups are
 //!   optional for a hand-written certificate, but a listed group is
 //!   authoritative and an inconsistent one is rejected.
@@ -2359,18 +2362,22 @@ fn environment_facts(env: &Env) -> Result<Vec<EnvironmentFact>, CheckError> {
 /// conversion, and no two witnesses of one group may be the same argument:
 /// identical node ids are rejected, and so are two steps of the same rule (or
 /// the same universal fact) with the same binding values. Binding values are
-/// compared by the collision-free structural key of their normal forms, never
-/// by printed text. A group must list at least one witness; a truncated group
-/// must have exactly the per-conclusion bound, so the limit cannot be applied
-/// silently. The root, when it is a derivation step, must be listed among the
-/// witnesses of its own conclusion.
+/// compared under kernel conversion by parameter name, independent of the order
+/// the JSON lists them in; η-equivalent function values count as the same
+/// binding. Group propositions are also de-duplicated and matched against the
+/// root under kernel conversion, so an η-variant conclusion cannot slip past
+/// the root membership check. A group must list at least one witness; a
+/// truncated group must have exactly the per-conclusion bound, and an
+/// untruncated group may not exceed it, so the limit cannot be applied silently.
+/// The root, when it is a derivation step, must be listed among the witnesses
+/// of its own conclusion.
 ///
 /// The table does not have to list every derivation node: a certificate
 /// without a witness table is still checked node by node. A listed group,
 /// however, is authoritative: a step it names is accepted only under the
 /// checks above, and a root whose conclusion has a group must be in it.
 fn validate_alternatives(env: &Env, cert: &Certificate) -> Result<(), CheckError> {
-    let mut group_keys: BTreeMap<String, usize> = BTreeMap::new();
+    let mut group_props: Vec<(usize, Expr)> = Vec::new();
     for (index, group) in cert.alternatives.iter().enumerate() {
         let fail = |message: String| CheckError {
             node: None,
@@ -2379,13 +2386,17 @@ fn validate_alternatives(env: &Env, cert: &Certificate) -> Result<(), CheckError
         let proposition = Expr::from(&group.proposition);
         kernel_check::check(env, &Ctx::new(), &proposition, &Expr::Sort(0))
             .map_err(|error| fail(format!("命题不是命题：{error}")))?;
-        let proposition_key = normalized_key(env, &proposition).map_err(fail)?;
-        if let Some(previous) = group_keys.insert(proposition_key, index) {
-            return Err(fail(format!(
-                "同一个结论出现了不止一次（此前是第 {} 条结论见证）",
-                previous + 1
-            )));
+        for (previous, previous_prop) in &group_props {
+            let same = convertible(env, &Ctx::new(), &proposition, previous_prop)
+                .map_err(|error| fail(format!("无法判定两个结论见证组的命题是否等价：{error}")))?;
+            if same {
+                return Err(fail(format!(
+                    "同一个结论出现了不止一次（此前是第 {} 条结论见证）",
+                    previous + 1
+                )));
+            }
         }
+        group_props.push((index, proposition.clone()));
         if group.witnesses.is_empty() {
             return Err(fail(format!(
                 "结论「{}」没有任何见证节点：结论无见证",
@@ -2428,7 +2439,7 @@ fn validate_alternatives(env: &Env, cert: &Certificate) -> Result<(), CheckError
                 ));
             }
         }
-        let mut identities: Vec<(NodeId, (u8, String, String))> = Vec::new();
+        let mut identities: Vec<(NodeId, WitnessIdentity)> = Vec::new();
         for witness in &group.witnesses {
             let node = &cert.nodes[*witness];
             let Some(conclusion) = node_prop(cert, node) else {
@@ -2461,10 +2472,7 @@ fn validate_alternatives(env: &Env, cert: &Certificate) -> Result<(), CheckError
                     ),
                 ));
             }
-            let identity = witness_identity(env, node).map_err(|message| {
-                CheckError::at(*witness, format!("第 {} 条结论见证：{message}", index + 1))
-            })?;
-            let Some(identity) = identity else {
+            let Some(identity) = witness_identity(node) else {
                 return Err(CheckError::at(
                     *witness,
                     format!(
@@ -2478,12 +2486,23 @@ fn validate_alternatives(env: &Env, cert: &Certificate) -> Result<(), CheckError
         }
         for i in 0..identities.len() {
             for j in (i + 1)..identities.len() {
-                if identities[i].1 == identities[j].1 {
+                let same = same_witness_identity(env, &identities[i].1, &identities[j].1).map_err(
+                    |error| {
+                        CheckError::at(
+                            identities[j].0,
+                            format!(
+                                "第 {} 条结论见证无法判定两个节点是否同一实例：{error}",
+                                index + 1
+                            ),
+                        )
+                    },
+                )?;
+                if same {
                     return Err(CheckError::at(
                         identities[j].0,
                         format!(
                             "第 {} 条结论见证的节点 {} 与节点 {} 是同一条规则实例\
-                             （规则与绑定相同），不算独立见证",
+                             （规则与绑定相同，绑定顺序不影响判定），不算独立见证",
                             index + 1,
                             identities[i].0,
                             identities[j].0
@@ -2508,30 +2527,33 @@ fn validate_alternatives(env: &Env, cert: &Certificate) -> Result<(), CheckError
                 ),
             ));
         };
-        if witness_identity(env, node)
-            .map_err(|message| CheckError::at(root, message))?
-            .is_some()
-        {
+        if witness_identity(node).is_some() {
             let root_prop = node_prop(cert, node)
                 .ok_or_else(|| CheckError::at(root, "根节点推导不出任何命题".to_owned()))?;
-            let root_key = normalized_key(env, &Expr::from(root_prop)).map_err(|message| {
-                CheckError::at(root, format!("无法判定根命题的结构键：{message}"))
-            })?;
+            let root_expr = Expr::from(root_prop);
             for (index, group) in cert.alternatives.iter().enumerate() {
-                let group_key =
-                    normalized_key(env, &Expr::from(&group.proposition)).map_err(|message| {
-                        CheckError::at(
-                            root,
-                            format!("无法判定第 {} 条结论见证的命题键：{message}", index + 1),
-                        )
-                    })?;
-                if group_key == root_key && !group.witnesses.contains(&root) {
+                let same = convertible(
+                    env,
+                    &Ctx::new(),
+                    &root_expr,
+                    &Expr::from(&group.proposition),
+                )
+                .map_err(|message| {
+                    CheckError::at(
+                        root,
+                        format!(
+                            "无法判定第 {} 条结论见证的命题与根是否等价：{message}",
+                            index + 1
+                        ),
+                    )
+                })?;
+                if same && !group.witnesses.contains(&root) {
                     return Err(CheckError::at(
                         root,
                         format!(
                             "根命题「{}」的见证表（第 {} 条）没有列出根节点 {root}：\
                              结论命题与根不一致",
-                            print_expr(&Expr::from(root_prop)),
+                            print_expr(&root_expr),
                             index + 1
                         ),
                     ));
@@ -2542,49 +2564,71 @@ fn validate_alternatives(env: &Env, cert: &Certificate) -> Result<(), CheckError
     Ok(())
 }
 
-/// The structural key of an expression's normal form.
-///
-/// It is the certificate's collision-free [`expression_key`] applied after
-/// kernel normalization, so a `def` alias and its expansion share a key. It is
-/// used for grouping and sorting, never as a substitute for
-/// [`convertible`] when equality is the claim being checked.
-fn normalized_key(env: &Env, expression: &Expr) -> Result<String, String> {
-    let normalized = normalize(env, &Ctx::new(), expression)
-        .map_err(|error| format!("无法规范化表达式：{error}"))?;
-    Ok(expression_key(&normalized))
+/// The identity of a derivation step: kind, rule or axiom name, and the
+/// binding values by parameter name. The binding list order is not part of the
+/// identity; the checker accepts any order, so the same instance must not
+/// become a second witness by reordering its JSON bindings.
+struct WitnessIdentity {
+    kind: u8,
+    name: String,
+    bindings: Vec<(String, Expr)>,
 }
 
-/// The structural identity of a derivation step, if it is one.
+/// The identity of a derivation step, if it is one.
 ///
-/// A rule step is identified by its rule name and binding structure; a
-/// universal instance by its axiom name and binding structure. The two kinds
-/// never coincide, so a rule and a universal fact named alike remain distinct
-/// witnesses.
-fn witness_identity(env: &Env, node: &Node) -> Result<Option<(u8, String, String)>, String> {
-    Ok(match node {
-        Node::RuleApplication { rule, bindings, .. } => {
-            Some((0, rule.clone(), binding_structure(env, bindings)?))
-        }
+/// A rule step is identified by its rule name and binding values; a universal
+/// instance by its axiom name and binding values. The two kinds never coincide,
+/// so a rule and a universal fact named alike remain distinct witnesses.
+fn witness_identity(node: &Node) -> Option<WitnessIdentity> {
+    let (kind, name, bindings) = match node {
+        Node::RuleApplication { rule, bindings, .. } => (0u8, rule.clone(), bindings),
         Node::AxiomInstance {
             axiom, bindings, ..
-        } => Some((1, axiom.clone(), binding_structure(env, bindings)?)),
-        Node::Assumption { .. } | Node::InterpretationApplication { .. } | Node::Gap { .. } => None,
+        } => (1u8, axiom.clone(), bindings),
+        Node::Assumption { .. } | Node::InterpretationApplication { .. } | Node::Gap { .. } => {
+            return None
+        }
+    };
+    let mut values: Vec<(String, Expr)> = bindings
+        .iter()
+        .map(|binding| (binding.parameter.clone(), Expr::from(&binding.value)))
+        .collect();
+    values.sort_by(|left, right| left.0.cmp(&right.0));
+    Some(WitnessIdentity {
+        kind,
+        name,
+        bindings: values,
     })
 }
 
-/// The binding names and normalized value keys of one step.
-fn binding_structure(env: &Env, bindings: &[crate::model::Binding]) -> Result<String, String> {
-    let values = bindings
-        .iter()
-        .map(|binding| {
-            Ok::<_, String>(format!(
-                "{}={}",
-                binding.parameter,
-                normalized_key(env, &Expr::from(&binding.value))?
-            ))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(values.join(";"))
+/// Whether two witness identities are the same argument.
+///
+/// Binding values are compared under kernel conversion (including η), never by
+/// their JSON order or printed text.
+fn same_witness_identity(
+    env: &Env,
+    left: &WitnessIdentity,
+    right: &WitnessIdentity,
+) -> Result<bool, String> {
+    if left.kind != right.kind
+        || left.name != right.name
+        || left.bindings.len() != right.bindings.len()
+    {
+        return Ok(false);
+    }
+    for ((left_name, left_value), (right_name, right_value)) in
+        left.bindings.iter().zip(right.bindings.iter())
+    {
+        if left_name != right_name {
+            return Ok(false);
+        }
+        let same = convertible(env, &Ctx::new(), left_value, right_value)
+            .map_err(|error| format!("无法判定两个绑定值是否等价：{error}"))?;
+        if !same {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// The identity the certificate's assumption table records for `proposition`.

@@ -347,7 +347,7 @@ fn write_conclusion_section(
     {
         if group.witnesses.len() > 1 {
             out.push_str(&format!(
-                "**独立推导：**该结论共有 {} 条独立推导（另有 {} 条）。\n",
+                "**独立推导：**已记录 {} 条见证（另有 {} 条已记录）。\n",
                 group.witnesses.len(),
                 group.witnesses.len() - 1
             ));

@@ -1256,6 +1256,22 @@ fn a_truncated_witness_group_must_hold_exactly_the_bound() {
 }
 
 #[test]
+fn the_same_conclusion_may_not_have_two_witness_groups() {
+    let mut cert = legal_certificate();
+    let group = Alternative {
+        proposition: atom("违法", "张三"),
+        witnesses: vec![1],
+        truncated: false,
+    };
+    cert.alternatives = vec![group.clone(), group];
+    let error = reject(&cert);
+    assert!(
+        error.to_string().contains("同一个结论出现了不止一次"),
+        "a duplicate witness group must be rejected: {error}"
+    );
+}
+
+#[test]
 fn assumption_root_is_a_conditional_proof() {
     let cert = certificate(
         vec![premise(atom("侵占", "张三"))],
