@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "case": "住宅搜查",
+  "imports": ["cn.constitution"],
+  "reference": {"as_of": "2020-05-06", "jurisdiction": "CN"},
+  "objects": [
+    {"name": "张三", "type": "cn.constitution.人"},
+    {"name": "甲宅", "type": "cn.constitution.住宅"}
+  ],
+  "facts": [
+    {
+      "proposition": "cn.constitution.中国国籍 张三",
+      "identity": "verified",
+      "source": {"text": "案情材料", "locator": "户籍记载"}
+    },
+    {
+      "proposition": "cn.constitution.非法搜查 张三 甲宅",
+      "identity": "user_asserted",
+      "source": {"text": "案情材料", "locator": "搜查经过"}
+    },
+    {
+      "proposition": "cn.constitution.非法侵入 张三 甲宅",
+      "identity": "disputed",
+      "source": {"text": "对方答辩", "locator": "答辩意见"}
+    }
+  ],
+  "goals": ["cn.constitution.住宅受侵犯 张三 甲宅"]
+}
