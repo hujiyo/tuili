@@ -1677,11 +1677,34 @@ fn write_open_concepts_section(
                 expr_text(proposition)
             ));
         }
+        // An already-enabled interpretation is not a branch: say whether its
+        // application released the obligation (it is the release source) or
+        // the reasoner skipped it because `to` already held. A report that
+        // claimed "no related interpretation" here would contradict its own
+        // first section.
+        for entry in &branch_scan.enabled {
+            if entry.applied {
+                out.push_str(&format!(
+                    "   - 已由已启用的解释 `{}` 许可（{} → {}）：该开放概念不再需要人判断，\
+                     义务已解除，标签为 `依赖假设`。\n",
+                    escape_control(&entry.id),
+                    expr_text(&entry.from),
+                    expr_text(&entry.to)
+                ));
+            } else {
+                out.push_str(&format!(
+                    "   - 解释 `{}` 已启用，但它的 to 已由既有事实或规则结论成立，推理器\
+                     不重复应用：它不是该概念的许可来源，义务未解除。\n",
+                    escape_control(&entry.id),
+                ));
+            }
+        }
         if branch_scan.candidates.is_empty() {
-            out.push_str(
-                "   - 候选解释：没有可用的候选解释（当前环境没有被声明的 `interpret` \
-                 与该开放概念命题相关，或相关解释的 from 在当前事实集里不成立）。\n",
-            );
+            if branch_scan.enabled.is_empty() && branch_scan.unavailable.is_empty() {
+                out.push_str(
+                    "   - 候选解释：当前环境没有被声明的 `interpret` 与这些开放概念命题相关。\n",
+                );
+            }
         } else {
             out.push_str("   - 候选解释（不自动启用，一次只启用一个）：\n");
             for candidate in &branch_scan.candidates {
@@ -1731,18 +1754,45 @@ fn write_open_concepts_section(
             .iter()
             .map(|candidate| format!("`{}`", escape_control(&candidate.id)))
             .collect::<Vec<_>>();
-        let text = if ids.is_empty() {
+        let text = if !ids.is_empty() {
             format!(
-                "开放概念命题「{}」没有可用的候选解释；请确认应当由哪一份解释材料来理解该概念\
-                 （:branches {} 可复核当前候选范围）。",
+                "候选解释 {} 都可能影响对开放概念命题「{}」的判断；请逐条确认应采用哪一条、\
+                 以及它单独启用后的后果（可用 `:branches {}` 单独查看，不自动启用）。",
+                ids.join("、"),
+                root_proposition,
+                escape_control(root_proposition),
+            )
+        } else if branch_scan.enabled.iter().any(|entry| entry.applied) {
+            let applied = branch_scan
+                .enabled
+                .iter()
+                .filter(|entry| entry.applied)
+                .map(|entry| format!("`{}`", escape_control(&entry.id)))
+                .collect::<Vec<_>>();
+            format!(
+                "开放概念命题「{}」已由已启用的解释 {} 许可（义务已解除）；请确认该解释的\
+                 适用性与来源，并确认是否需要换用其他解释（:branches {} 可复核候选范围）。",
+                root_proposition,
+                applied.join("、"),
+                escape_control(root_proposition),
+            )
+        } else if !branch_scan.enabled.is_empty() {
+            let pending = branch_scan
+                .enabled
+                .iter()
+                .map(|entry| format!("`{}`", escape_control(&entry.id)))
+                .collect::<Vec<_>>();
+            format!(
+                "解释 {} 虽已启用，但没有成为开放概念命题「{}」的许可来源（其 to 已由既有\
+                 事实或规则结论成立）；请确认是否需要换用其他解释（:branches {} 可复核）。",
+                pending.join("、"),
                 root_proposition,
                 escape_control(root_proposition),
             )
         } else {
             format!(
-                "候选解释 {} 都可能影响对开放概念命题「{}」的判断；请逐条确认应采用哪一条、\
-                 以及它单独启用后的后果（可用 `:branches {}` 单独查看，不自动启用）。",
-                ids.join("、"),
+                "开放概念命题「{}」没有可用的候选解释；请确认应当由哪一份解释材料来理解该概念\
+                 （:branches {} 可复核当前候选范围）。",
                 root_proposition,
                 escape_control(root_proposition),
             )

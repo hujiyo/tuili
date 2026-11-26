@@ -433,7 +433,7 @@ fn an_open_concept_without_candidates_says_so_in_the_hint() {
         run_case(&case, &[":why 情节严重 甲", ":branches 情节严重 甲"]),
         GAP,
         &[
-            "没有可用的候选解释：当前环境没有与受阻的开放概念命题相关的 `interpret` 声明",
+            "没有可用的候选解释：当前环境没有被声明的 `interpret` 与这些开放概念命题相关。",
             "候选解释 0 个（上限 8 个",
             "开放概念命题 1 个（基线证明图上的，含已由已启用解释许可的）：`情节严重 甲`",
         ],
@@ -513,5 +513,237 @@ fn branches_requires_a_loaded_theory_and_a_goal() {
         stderr(&empty).contains("用法：:branches <目标命题>"),
         "the command needs a goal:\n{}",
         stderr(&empty)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Relation priority, release states, residual boundary
+// ---------------------------------------------------------------------------
+
+/// Two open propositions on one proof graph; the exact interpretation's `to`
+/// (`情节严重 乙`) sorts after the unrelated same-head proposition
+/// (`情节严重 丙`) in the structural key, which used to downgrade it.
+const EXACT_OVER_SAME_HEAD: &str = r#"sort 人
+pred 损害 : 人 → Prop
+pred 情节严重 : 人 → Prop
+pred 处罚 : 人 → Prop
+obj 乙 : 人
+obj 丙 : 人
+open 情节严重
+axiom 损害乙 : 损害 乙
+  source text "案件" locator "一"
+axiom 损害丙 : 损害 丙
+  source text "案件" locator "二"
+rule 严重乙 :
+  premise 损害 乙
+  conclude 情节严重 乙
+  source text "规则" locator "三"
+rule 严重丙 :
+  premise 损害 丙
+  conclude 情节严重 丙
+  source text "规则" locator "四"
+rule 合并处罚 :
+  premise 情节严重 丙
+  premise 情节严重 乙
+  conclude 处罚 乙
+  source text "规则" locator "五"
+interpret 解释乙 : 损害 乙 → 情节严重 乙
+  direction literal
+  source text "解释" locator "六" version "2020"
+"#;
+
+#[test]
+fn exact_candidate_is_not_downgraded_to_same_head_by_list_order() {
+    let temp = TempDir::new("exact-priority");
+    let case = temp.write("case.std", EXACT_OVER_SAME_HEAD);
+    let output = check(
+        run_case(&case, &[":branches 处罚 乙"]),
+        GAP,
+        &[
+            "开放概念命题 2 个",
+            "`解释乙`：损害 乙 → 情节严重 乙〔精确匹配：与开放概念命题「情节严重 乙」内核等价，启用后许可该命题〕",
+        ],
+    );
+    let out = stdout(&output);
+    let candidate_line = out
+        .lines()
+        .find(|line| line.contains("`解释乙`："))
+        .expect("the candidate line");
+    assert!(
+        !candidate_line.contains("同谓词候选"),
+        "the exact match must not be labelled same-head:\n{candidate_line}\n{out}"
+    );
+}
+
+/// A rule already derives the open concept. Enabling an equivalent
+/// interpretation adds no application step (the reasoner never duplicates an
+/// established conclusion), so the obligation remains and the branch stays
+/// `未决`, not `证明`.
+const RULE_PROVED_OPEN: &str = r#"sort 人
+pred 损害 : 人 → Prop
+pred 重大 : 人 → Prop
+obj 甲 : 人
+open 重大
+axiom 损害事实 : 损害 甲
+  source text "案件" locator "一"
+rule 重大推定 :
+  params x : 人
+  premise 损害 x
+  conclude 重大 x
+  source text "规则" locator "二"
+interpret 重大解释 : 损害 甲 → 重大 甲
+  direction literal
+  source text "解释" locator "三" version "2020"
+"#;
+
+#[test]
+fn the_obligation_survives_when_the_reasoner_would_not_add_the_application() {
+    let temp = TempDir::new("residual");
+    let case = temp.write("case.std", RULE_PROVED_OPEN);
+    let path = case.display().to_string();
+
+    // Baseline: the rule states the concept, the obligation is real.
+    let baseline = check(
+        run_case(&case, &[":why 重大 甲"]),
+        GAP,
+        &["此处需人判断：`重大`", "仍有未决义务"],
+    );
+    assert!(
+        !stdout(&baseline).contains("推导已通过独立校验。"),
+        "a rule-proved open concept is not unconditional:\n{}",
+        stdout(&baseline)
+    );
+
+    // Enabling a `to`-equivalent interpretation does not add a step, because
+    // the conclusion already holds. The obligation therefore stays.
+    let enabled = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "重大解释".to_owned(),
+            path.clone(),
+            ":why 重大 甲".to_owned(),
+        ]),
+        GAP,
+        &[
+            "此处需人判断：`重大`",
+            "已在基线启用，但其 to 已由既有事实或规则结论成立",
+            "不是该概念的许可来源",
+        ],
+    );
+    assert!(
+        !stdout(&enabled).contains("推导已通过独立校验。"),
+        "the redundant interpretation must not release the obligation:\n{}",
+        stdout(&enabled)
+    );
+
+    // The exported certificate still records the open-concept obligation.
+    check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "重大解释".to_owned(),
+            path.clone(),
+            ":cert 重大 甲".to_owned(),
+        ]),
+        PROVED,
+        &["open-concept"],
+    );
+
+    // A branch with that candidate cannot reach `证明` either.
+    let branches = check(
+        run_case(&case, &[":branches 重大 甲"]),
+        GAP,
+        &[
+            "`重大解释`：损害 甲 → 重大 甲〔精确匹配",
+            "启用 `重大解释` 后：未决（1）",
+            "汇总（含基线）：证明 0 个，未决 2 个",
+        ],
+    );
+    assert!(
+        !stdout(&branches).contains("证明（退出码 0）"),
+        "the redundant application cannot classify as a proof:\n{}",
+        stdout(&branches)
+    );
+}
+
+/// A strict fact plus an enabled interpretation: the release is real, the label
+/// is `依赖假设` (the interpretation is an input, not verified truth), and the
+/// release-state wording names that enabled interpretation instead of claiming
+/// that no candidate exists.
+const STRICT_FACT_RELEASE: &str = r#"sort 人
+pred 损害 : 人 → Prop
+pred 重大 : 人 → Prop
+obj 甲 : 人
+open 重大
+axiom 损害事实 : 损害 甲
+  identity verified
+  source text "案件" locator "一"
+interpret 重大解释 : 损害 甲 → 重大 甲
+  direction literal
+  source text "解释" locator "二" version "2020"
+"#;
+
+#[test]
+fn a_strict_fact_with_an_interpretation_release_is_depends_on_assumption() {
+    let temp = TempDir::new("strict-release");
+    let case = temp.write("case.std", STRICT_FACT_RELEASE);
+    let path = case.display().to_string();
+    let run_interp = |command: &str| {
+        run(&[
+            "--no-default-packs".to_owned(),
+            "--interpret".to_owned(),
+            "重大解释".to_owned(),
+            path.clone(),
+            command.to_owned(),
+        ])
+    };
+
+    let why = check(
+        run_interp(":why 重大 甲"),
+        PROVED,
+        &[
+            "〈解释 重大解释（literal）〉",
+            "推导已通过独立校验。",
+            "依赖假设（解释应用 1 处",
+            "法院查明 1 条",
+        ],
+    );
+    assert!(
+        !stdout(&why).contains("此处需人判断"),
+        "the release removes the pending-judgement line:\n{}",
+        stdout(&why)
+    );
+
+    // Review names the enabled interpretation as the release source and does
+    // not claim that no related declaration exists.
+    let review = check(
+        run_interp(":review 重大 甲"),
+        PROVED,
+        &[
+            "已由已启用的解释 `重大解释` 许可",
+            "义务已解除",
+            "该解释的适用性与来源",
+        ],
+    );
+    assert!(
+        !stdout(&review).contains("当前环境没有被声明的 `interpret`"),
+        "the report must not contradict its own release:\n{}",
+        stdout(&review)
+    );
+
+    // The branch report says the same state, not "no related declaration".
+    let branches = check(
+        run_interp(":branches 重大 甲"),
+        PROVED,
+        &[
+            "没有可用的候选解释：解释 `重大解释`（损害 甲 → 重大 甲）已在基线启用并许可该概念",
+            "基线：证明（0）",
+        ],
+    );
+    assert!(
+        !stdout(&branches).contains("当前环境没有被声明的 `interpret`"),
+        "the branch header must name the enabled release source:\n{}",
+        stdout(&branches)
     );
 }

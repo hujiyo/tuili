@@ -6175,6 +6175,73 @@ fn write_interpretation_hints(
     Ok(())
 }
 
+/// Explain why a candidate scan has no usable branch, with the three states
+/// kept apart.
+///
+/// * a related interpretation is already enabled in the baseline: its
+///   application may be the release source (`applied`) or the reasoner may have
+///   skipped it because `to` already held (`applied = false`);
+/// * no declared `interpret` relates to the blocked propositions at all;
+/// * related declarations exist but none is usable, so the concrete reasons are
+///   listed instead of a blanket "from does not hold".
+///
+/// "No related declaration" is never claimed when an enabled interpretation is
+/// the reason there is no branch, and a release source is never reported as
+/// "from does not hold".
+fn write_no_candidate_state(
+    out: &mut impl Write,
+    scan: &std_deduce_reason::BranchCandidateScan,
+    indent: usize,
+) {
+    let pad = " ".repeat(indent);
+    if !scan.enabled.is_empty() {
+        for entry in &scan.enabled {
+            let why = if entry.applied {
+                "已在基线启用并许可该概念，义务已解除"
+            } else {
+                "已在基线启用，但其 to 已由既有事实或规则结论成立，推理器不重复应用，\
+                 因此不是该概念的许可来源（义务未解除）"
+            };
+            writeln!(
+                out,
+                "{pad}没有可用的候选解释：解释 `{}`（{} → {}）{why}。",
+                escape_control(&entry.id),
+                print_expr(&entry.from),
+                print_expr(&entry.to)
+            )
+            .ok();
+        }
+        return;
+    }
+    if scan.unavailable.is_empty() {
+        writeln!(
+            out,
+            "{pad}没有可用的候选解释：当前环境没有被声明的 `interpret` 与这些开放概念命题相关。"
+        )
+        .ok();
+        return;
+    }
+    let reasons = scan
+        .unavailable
+        .iter()
+        .map(|entry| {
+            format!(
+                "`{}`：{}",
+                escape_control(&entry.candidate.id),
+                entry.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    writeln!(
+        out,
+        "{pad}没有可用的候选解释：相关的 {} 条解释都不可用（{}）。",
+        scan.unavailable.len(),
+        reasons
+    )
+    .ok();
+}
+
 /// The candidate-interpretation block printed after a query that is blocked by
 /// an open concept.
 ///
@@ -6201,12 +6268,7 @@ fn write_branch_candidate_hints(
     )
     .ok();
     if scan.candidates.is_empty() {
-        writeln!(
-            out,
-            "  没有可用的候选解释：当前环境没有与受阻的开放概念命题相关的 `interpret` 声明，\
-             或相关解释的 from 在当前事实集（已登记事实与规则结论）里不成立。"
-        )
-        .ok();
+        write_no_candidate_state(out, scan, 2);
         return;
     }
     writeln!(
@@ -6294,12 +6356,7 @@ fn write_branch_header(
     )
     .ok();
     if scan.candidates.is_empty() {
-        writeln!(
-            out,
-            "    没有可用的候选解释：当前环境没有与受阻的开放概念命题相关的 `interpret` 声明，\
-             或相关解释的 from 在当前事实集里不成立。"
-        )
-        .ok();
+        write_no_candidate_state(out, scan, 4);
     }
     for candidate in &scan.candidates {
         writeln!(

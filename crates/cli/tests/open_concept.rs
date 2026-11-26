@@ -2,14 +2,15 @@
 //!
 //! The marker is declared in a case, module or pack. These tests cover what is
 //! visible to a reader (`:inspect`), the closed-environment gate, pack loading,
-//! and the inference-layer obligation added in M2-9b: a rule step that concludes
-//! an open concept (or a root that is one) makes the derivation depend on a
-//! human judgement, so `:why`, `:explain` and `:verify-cert` report it and exit
-//! non-zero instead of presenting the conclusion as proved.
-//!
-//! The candidate interpretations and the branch re-run the marker will
-//! eventually drive are not implemented yet; this layer only records the
-//! obligation.
+//! and the inference-layer obligation: a rule step that concludes an open
+//! concept (or a root that is one) makes the derivation depend on a human
+//! judgement, so `:why`, `:explain` and `:verify-cert` report it and exit
+//! non-zero instead of presenting the conclusion as proved. An enabled
+//! interpretation that licenses the concept releases the obligation instead
+//! (the sourced interpretation is the explicit human reading), and the tests
+//! also forge the certificate back to a non-licensed proof to show the
+//! obligation reappears. Candidate enumeration and the `:branches` re-run are
+//! covered by `branches.rs`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

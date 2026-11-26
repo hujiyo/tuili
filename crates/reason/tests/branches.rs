@@ -201,3 +201,51 @@ fn a_reasoner_without_a_settled_fact_base_is_an_error_not_an_empty_scan() {
         "the error must name the missing saturation: {error}"
     );
 }
+
+/// The relation is decided over the whole blocked set: a same-head proposition
+/// that sorts before the kernel-equivalent one must not hide the exact match.
+#[test]
+fn exact_match_wins_even_when_a_same_head_proposition_sorts_first() {
+    let lib = load(
+        r#"
+sort 人
+pred 情节严重 : 人 → Prop
+pred 触发 : 人 → Prop
+obj 丙 : 人
+obj 乙 : 人
+open 情节严重
+axiom 触发丙 : 触发 丙
+  source text "案情" locator "一"
+axiom 触发乙 : 触发 乙
+  source text "案情" locator "二"
+interpret iOther : 触发 丙 → 情节严重 丙
+  direction literal
+  source text "解释" locator "一" version "2020"
+interpret iExact : 触发 乙 → 情节严重 乙
+  direction literal
+  source text "解释" locator "二" version "2020"
+"#,
+    );
+    let reasoner = reasoner(&lib, &[]);
+    let exact = atom("情节严重", "乙");
+    let same_head = atom("情节严重", "丙");
+    // `丙` sorts before `乙` by the structural key, so the blocked list is
+    // [情节严重 丙, 情节严重 乙] — the same-head proposition comes first.
+    let scan = reasoner
+        .branch_candidates(&[exact.clone(), same_head.clone()])
+        .expect("candidate scan");
+    let candidate = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.id.as_ref() == "iExact")
+        .expect("iExact is related");
+    assert_eq!(
+        candidate.relation,
+        CandidateRelation::Exact,
+        "a kernel-equivalent to must not be downgraded to same-head"
+    );
+    assert_eq!(
+        candidate.blocked, exact,
+        "the exact candidate names the proposition it licenses"
+    );
+}

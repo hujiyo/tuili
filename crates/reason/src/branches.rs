@@ -16,7 +16,9 @@
 //!
 //! * **exact** — `to` is kernel-equivalent to the blocked proposition (up to
 //!   beta / `def` / zeta and eta), so enabling it licenses exactly that
-//!   conclusion or premise;
+//!   conclusion or premise. Exact matches are searched over the whole blocked
+//!   set before any same-head match is considered, so a same-head proposition
+//!   that sorts earlier never hides the genuine exact match;
 //! * **same head** — `to` normalizes to an application of the same predicate
 //!   with the same number of arguments, but is a different proposition of the
 //!   same open concept (for example another individual). Enabling it does not
@@ -115,13 +117,37 @@ pub struct UnavailableBranch {
     pub reason: String,
 }
 
+/// An enabled interpretation whose `to` is kernel-equivalent to a blocked
+/// proposition.
+///
+/// A session that already enabled the exact reading does not need a branch: the
+/// concept is either licensed by that application (`applied = true`, the
+/// obligation is released) or the proposition was already established by a
+/// fact/rule, so the reasoner added no step and the obligation remains
+/// (`applied = false`). Reports use this to say which of the two happened
+/// instead of claiming that no related interpretation exists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnabledLicense {
+    /// The enabled declaration's id.
+    pub id: Name,
+    /// The proposition the interpretation consumes.
+    pub from: Expr,
+    /// The proposition it licenses.
+    pub to: Expr,
+    /// The blocked open-concept proposition the `to` is equivalent to.
+    pub blocked: Expr,
+    /// Whether the settled fact base carries this application step.
+    pub applied: bool,
+}
+
 /// The interpretations related to the blocked open concepts.
 ///
 /// `candidates` are the usable ones, `unavailable` the related ones that
-/// cannot be enabled; both are sorted by id and truncated to
-/// [`MAX_BRANCH_CANDIDATES`]. `truncated` and `unavailable_truncated` name what
-/// the bounds left out, so a reader never mistakes a built-in bound for
-/// "there are no more declarations".
+/// cannot be enabled, and `enabled` the already-enabled interpretations whose
+/// `to` is exactly one of the blocked propositions. All are sorted by id;
+/// `candidates` and `unavailable` are truncated to [`MAX_BRANCH_CANDIDATES`].
+/// `truncated` and `unavailable_truncated` name what the bounds left out, so a
+/// reader never mistakes a built-in bound for "there are no more declarations".
 #[derive(Debug, Clone, PartialEq)]
 pub struct BranchCandidateScan {
     /// The blocked open-concept propositions, deduplicated by structural key
@@ -136,12 +162,22 @@ pub struct BranchCandidateScan {
     pub unavailable: Vec<UnavailableBranch>,
     /// Unusable interpretations the bound left out, sorted by id.
     pub unavailable_truncated: Vec<Name>,
+    /// Already-enabled interpretations whose `to` is exactly a blocked
+    /// proposition, sorted by id. `applied` says whether that application is on
+    /// the settled proof graph.
+    pub enabled: Vec<EnabledLicense>,
 }
 
 impl BranchCandidateScan {
     /// Whether the scan found no related interpretation at all.
     pub fn is_empty(&self) -> bool {
-        self.candidates.is_empty() && self.unavailable.is_empty()
+        self.candidates.is_empty() && self.unavailable.is_empty() && self.enabled.is_empty()
+    }
+
+    /// Whether any endpoint is unusable because its `from` does not hold or
+    /// its `to` collides with an enabled declaration.
+    pub fn all_unavailable(&self) -> bool {
+        self.candidates.is_empty() && !self.unavailable.is_empty()
     }
 }
 
@@ -218,17 +254,33 @@ impl Reasoner<'_> {
         let records = self.interpretation_records();
         let mut candidates: Vec<BranchCandidate> = Vec::new();
         let mut unavailable: Vec<UnavailableBranch> = Vec::new();
+        let mut licensed: Vec<EnabledLicense> = Vec::new();
         for record in &records {
-            if enabled.contains(&record.id) {
-                // The session already enabled it: it is part of the baseline,
-                // not a branch of its own.
-                continue;
-            }
             let Some((relation, blocked_proposition)) =
                 relate(self.env(), &record.to, &open_blocked)?
             else {
                 continue;
             };
+            if enabled.contains(&record.id) {
+                // The session already enabled it: it is part of the baseline,
+                // not a branch of its own. Report whether that application is
+                // actually on the settled proof graph, because only an applied
+                // step releases the obligation.
+                if relation == CandidateRelation::Exact {
+                    let applied = fixed
+                        .applications
+                        .get(&self.key_of(&record.to))
+                        .is_some_and(|id| id.as_ref() == record.id.as_ref());
+                    licensed.push(EnabledLicense {
+                        id: record.id.clone(),
+                        from: record.from.clone(),
+                        to: record.to.clone(),
+                        blocked: blocked_proposition,
+                        applied,
+                    });
+                }
+                continue;
+            }
             let candidate = BranchCandidate {
                 id: record.id.clone(),
                 from: record.from.clone(),
@@ -279,6 +331,7 @@ impl Reasoner<'_> {
             truncated,
             unavailable,
             unavailable_truncated,
+            enabled: licensed,
         })
     }
 }
@@ -302,12 +355,15 @@ fn is_open_head(env: &Env, proposition: &Expr) -> Result<bool, String> {
     }))
 }
 
-/// The first blocked proposition a `to` relates to, if any.
+/// The blocked proposition a `to` relates to, if any.
 ///
-/// `None` means the interpretation is not about the blocked concept. A `to`
-/// that is equivalent to the blocked proposition is exact; a `to` whose
-/// normalized head and arity match its head states the same concept about
-/// something else.
+/// Exact matches are searched over the **whole** blocked set first: a `to` that
+/// is kernel-equivalent to any blocked proposition is an exact match for that
+/// proposition, even when the list also contains a same-head proposition that
+/// sorts earlier. Only when no exact match exists does the relation fall back
+/// to same-head (same normalized predicate head and arity, a different
+/// proposition). `None` means the interpretation is not about any blocked
+/// concept.
 fn relate(
     env: &Env,
     to: &Expr,
@@ -315,18 +371,25 @@ fn relate(
 ) -> Result<Option<(CandidateRelation, Expr)>, String> {
     let normalized_to = normalize(env, &Ctx::new(), to)
         .map_err(|error| format!("无法规范化解释的 to「{}」：{error}", print_expr(to)))?;
+    // Exact matches win over same-head matches, regardless of the blocked
+    // order: the candidate genuinely licenses that proposition.
     for proposition in blocked {
         if convertible(env, &Ctx::new(), to, proposition).map_err(|error| {
             format!(
-                "无法判定解释的 to「{}」与受阻命题「{}」是否内核等价：{error}",
+                "无法判定解释的 to「{}」与开放概念命题「{}」是否内核等价：{error}",
                 print_expr(to),
                 print_expr(proposition)
             )
         })? {
             return Ok(Some((CandidateRelation::Exact, proposition.clone())));
         }
+    }
+    for proposition in blocked {
         let normalized_blocked = normalize(env, &Ctx::new(), proposition).map_err(|error| {
-            format!("无法规范化受阻命题「{}」：{error}", print_expr(proposition))
+            format!(
+                "无法规范化开放概念命题「{}」：{error}",
+                print_expr(proposition)
+            )
         })?;
         if let (Some(left), Some(right)) = (
             head_and_arity(&normalized_to),

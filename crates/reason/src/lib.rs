@@ -188,7 +188,7 @@ mod applicability;
 mod branches;
 
 pub use branches::{
-    BranchCandidate, BranchCandidateScan, CandidateRelation, UnavailableBranch,
+    BranchCandidate, BranchCandidateScan, CandidateRelation, EnabledLicense, UnavailableBranch,
     MAX_BRANCH_CANDIDATES,
 };
 

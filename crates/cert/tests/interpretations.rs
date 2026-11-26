@@ -8,10 +8,10 @@
 
 use std_deduce_cert::{
     check, kernel_proof, ApplicabilityBasis, ApplicabilityReason, ApplicabilityReasonKind,
-    ApplicabilityVerdict, Assumption, CertExpr, Certificate, Conflict, EnvironmentIdentity,
-    Explicit, FactIdentity, FormatVersion, Interpretation, InterpretationDirection, Metadata, Node,
-    ObligationKind, OpenObligation, Provenance, Resolution, RuleApplicability, Source,
-    UnresolvedReason,
+    ApplicabilityVerdict, Assumption, Binding, CertExpr, Certificate, Conflict,
+    EnvironmentIdentity, Explicit, FactIdentity, FormatVersion, Interpretation,
+    InterpretationDirection, Metadata, Node, ObligationKind, OpenObligation, Provenance,
+    Resolution, RuleApplicability, Source, UnresolvedReason,
 };
 use std_deduce_kernel::env::DeclKind;
 use std_deduce_kernel::{name, Expr};
@@ -594,4 +594,125 @@ fn the_obligation_returns_when_the_interpretation_application_is_gone() {
     });
     let report = check(&lib.env, &asserted).expect("the obligation is the expected one");
     assert!(report.requires_human);
+}
+
+/// An environment where a rule and an interpretation can both conclude the
+/// open concept `重大 甲`.
+const OPEN_RULE_ENV: &str = r#"
+sort 人
+pred 损害 : 人 → Prop
+pred 重大 : 人 → Prop
+obj 甲 : 人
+open 重大
+axiom 损害事实 : 损害 甲
+  source text "案情" locator "一"
+rule 重大推定 :
+  params x : 人
+  premise 损害 x
+  conclude 重大 x
+  source text "规则" locator "三"
+interpret 重大解释 : 损害 甲 → 重大 甲
+  direction literal
+  source text "解释" locator "二" version "2020"
+"#;
+
+fn load_open_rule() -> Library {
+    let mut lib = Library::new();
+    lib.load("open-rule-interpret.std", OPEN_RULE_ENV)
+        .unwrap_or_else(|error| panic!("load: {error}"));
+    lib
+}
+
+/// A certificate whose root is the rule step and which also carries an
+/// unreachable interpretation application for the same open conclusion.
+fn rule_root_certificate(lib: &Library) -> Certificate {
+    let rule = lib.env.get(&name("重大推定")).expect("the rule exists");
+    Certificate {
+        format_version: FormatVersion::CURRENT,
+        environment: EnvironmentIdentity::none(),
+        assumptions: vec![fact_assumption(lib, "损害事实")],
+        interpretations: vec![interpretation(lib, "重大解释")],
+        nodes: vec![
+            Node::Assumption { assumption: 0 },
+            Node::RuleApplication {
+                rule: "重大推定".to_owned(),
+                conclusion: atom_expr("重大", "甲"),
+                premises: vec![0],
+                bindings: vec![
+                    // The rule's parameter `x` is bound to 甲.
+                    Binding {
+                        parameter: "x".to_owned(),
+                        value: CertExpr::Const {
+                            name: "甲".to_owned(),
+                        },
+                    },
+                ],
+                sources: rule.sources.iter().map(Source::from).collect(),
+                applicability: unscoped_applicability(),
+            },
+            // Unreachable from the rule root: the interpretation application
+            // exists in the node list but is not the proof's licence.
+            Node::InterpretationApplication {
+                interpretation: 0,
+                premise: 0,
+                conclusion: atom_expr("重大", "甲"),
+            },
+        ],
+        root: Some(1),
+        alternatives: Vec::new(),
+        conflicts: Vec::new(),
+        open_obligations: Vec::new(),
+        metadata: Metadata::default(),
+    }
+}
+
+fn rule_obligation(nodes: Vec<usize>) -> OpenObligation {
+    OpenObligation {
+        id: "open-concept".to_owned(),
+        kind: ObligationKind::OpenConcept,
+        description: "开放概念 `重大` 需要人判断，不得当作已证明".to_owned(),
+        nodes,
+    }
+}
+
+/// An interpretation application must be on the proof graph to release the
+/// obligation: an unreachable application node proves nothing, so the rule
+/// root still needs the obligation.
+#[test]
+fn an_unreachable_interpretation_application_does_not_release_the_obligation() {
+    let lib = load_open_rule();
+    let mut cert = rule_root_certificate(&lib);
+    cert.open_obligations.push(rule_obligation(vec![1]));
+    check(&lib.env, &cert).expect("the certificate itself is legal with the obligation");
+
+    let mut dropped = cert.clone();
+    dropped.open_obligations.clear();
+    let error = check(&lib.env, &dropped)
+        .expect_err("an unreachable application must not release the obligation")
+        .to_string();
+    assert!(
+        error.contains("没有记录开放概念义务"),
+        "the rule root still states the concept: {error}"
+    );
+}
+
+/// Deleting the interpretation application node (rather than making it
+/// unreachable) leaves the rule as the only proof of the open concept, so the
+/// obligation becomes required again.
+#[test]
+fn deleting_the_interpretation_application_puts_the_obligation_back() {
+    let lib = load_open_rule();
+    let mut cert = rule_root_certificate(&lib);
+    cert.nodes.truncate(2);
+    cert.interpretations.clear();
+    let error = check(&lib.env, &cert)
+        .expect_err("the rule root needs the obligation after the deletion")
+        .to_string();
+    assert!(
+        error.contains("没有记录开放概念义务"),
+        "the obligation must reappear: {error}"
+    );
+
+    cert.open_obligations.push(rule_obligation(vec![1]));
+    check(&lib.env, &cert).expect("the recovered obligation is accepted");
 }
