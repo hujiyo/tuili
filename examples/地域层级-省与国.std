@@ -4,7 +4,7 @@
 -- 运行：
 --   :load examples/地域层级-省与国.std
 --   :jurisdiction CN
---   :why 国家规定 甲
+--   :why 应适用 甲
 --   :gap 省级规定 乙
 --
 -- 层级是显式声明，不从 `CN-HN` 这种短横写法猜。声明 `territory CN-HN within CN`
