@@ -1668,11 +1668,14 @@ fn write_open_concepts_section(
         number += 1;
         wrote_any = true;
         out.push_str(&format!(
-            "{number}. 开放概念的候选解释（受阻的开放概念命题 {} 个）：\n",
+            "{number}. 开放概念的候选解释（证明图上的开放概念命题 {} 个）：\n",
             branch_scan.blocked.len()
         ));
         for proposition in &branch_scan.blocked {
-            out.push_str(&format!("   - 受阻命题「{}」。\n", expr_text(proposition)));
+            out.push_str(&format!(
+                "   - 开放概念命题「{}」。\n",
+                expr_text(proposition)
+            ));
         }
         if branch_scan.candidates.is_empty() {
             out.push_str(
@@ -1730,14 +1733,14 @@ fn write_open_concepts_section(
             .collect::<Vec<_>>();
         let text = if ids.is_empty() {
             format!(
-                "开放概念受阻的命题「{}」没有可用的候选解释；请确认应当由哪一份解释材料来理解该概念\
+                "开放概念命题「{}」没有可用的候选解释；请确认应当由哪一份解释材料来理解该概念\
                  （:branches {} 可复核当前候选范围）。",
                 root_proposition,
                 escape_control(root_proposition),
             )
         } else {
             format!(
-                "候选解释 {} 都可能影响对受阻开放概念命题「{}」的判断；请逐条确认应采用哪一条、\
+                "候选解释 {} 都可能影响对开放概念命题「{}」的判断；请逐条确认应采用哪一条、\
                  以及它单独启用后的后果（可用 `:branches {}` 单独查看，不自动启用）。",
                 ids.join("、"),
                 root_proposition,
@@ -2255,12 +2258,12 @@ fn node_list_text(nodes: &[NodeId]) -> String {
 fn candidate_relation_text(candidate: &std_deduce_reason::BranchCandidate) -> String {
     match candidate.relation {
         std_deduce_reason::CandidateRelation::Exact => format!(
-            "{}：与受阻命题「{}」内核等价，启用后许可该命题",
+            "{}：与开放概念命题「{}」内核等价，启用后许可该命题",
             candidate.relation.label_zh(),
             expr_text(&candidate.blocked)
         ),
         std_deduce_reason::CandidateRelation::SameHead => format!(
-            "{}：与受阻命题「{}」同谓词，但不是同一命题",
+            "{}：与开放概念命题「{}」同谓词，但不是同一命题",
             candidate.relation.label_zh(),
             expr_text(&candidate.blocked)
         ),

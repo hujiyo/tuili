@@ -79,10 +79,15 @@ pub enum CandidateRelation {
 
 impl CandidateRelation {
     /// The Chinese label the command layer prints.
+    ///
+    /// The two relations are deliberately kept apart: an exact candidate
+    /// licenses the blocked proposition, while a same-head candidate is the
+    /// same open concept stated about something else and still needs a human to
+    /// confirm that it applies. They are never merged into one "candidate" row.
     pub fn label_zh(self) -> &'static str {
         match self {
-            CandidateRelation::Exact => "内核等价",
-            CandidateRelation::SameHead => "同谓词",
+            CandidateRelation::Exact => "精确匹配",
+            CandidateRelation::SameHead => "同谓词候选（另一主体/同谓词，需人工确认是否适用）",
         }
     }
 }

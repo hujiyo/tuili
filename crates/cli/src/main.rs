@@ -418,16 +418,19 @@
 //! verified.
 //!
 //! `:why` and `:explain` also report the `open` concept marker. A rule step
-//! whose conclusion head is an open predicate, or a root that is one, makes the
-//! derivation depend on a human judgement: the certificate records one
-//! `open_concept` obligation (stable id `open-concept`, a description naming the
-//! concept, and the direct dependency nodes), `:why` prints
-//! `  此处需人判断：`<concept>`` after the derivation and `:explain` prints it
-//! after the conclusion. Such a query exits `1` and never prints
-//! `推导已通过独立校验。`. The judgement follows the root's proof graph only:
-//! an open concept derived on an unrelated branch, or one merely supplied as a
-//! fact, does not reach the root. The candidate interpretations and branch
-//! re-runs this marker will eventually drive are not implemented yet.
+//! whose conclusion head is an open predicate, a universal instance of it, or a
+//! root that is one, makes the derivation depend on a human judgement: the
+//! certificate records one `open_concept` obligation (stable id `open-concept`,
+//! a description naming the concept, and the direct dependency nodes), `:why`
+//! prints `  此处需人判断：`<concept>`` after the derivation and `:explain`
+//! prints it after the conclusion. Such a query exits `1` and never prints
+//! `推导已通过独立校验。`. An enabled interpretation whose application licenses
+//! the concept releases the obligation instead — the sourced interpretation is
+//! the human reading — so no `此处需人判断` line is printed and the trust label
+//! is `依赖假设`. The judgement follows the root's proof graph only: an open
+//! concept derived on an unrelated branch, or one merely supplied as a fact,
+//! does not reach the root. `:branches` runs the declared candidates for every
+//! open concept the proof states, including one already licensed.
 //!
 //! `:gap` prints a recursive gap tree: every candidate rule names the premises
 //! it is missing and the blocking conditions that already hold, and every
@@ -520,9 +523,11 @@
 //! environment adds one warning line after it; the warning changes no exit
 //! code. An `open_concept` obligation is recomputed from the environment's
 //! markers and the proof graph rather than trusted: a certificate that dropped,
-//! invented or edited it fails the logical layer (exit `2`). When it passes,
-//! one `  此处需人判断：`<concept>`` line names the concept after the
-//! `需人判断：` summary. A certificate that records a
+//! invented or edited it fails the logical layer (exit `2`). An interpretation
+//! application that licenses the concept releases the obligation, so the
+//! recomputation expects none there and a hand-added one is rejected. When the
+//! obligation passes, one `  此处需人判断：`<concept>`` line names the concept
+//! after the `需人判断：` summary. A certificate that records a
 //! `local-extension` obligation (its proof applied a rule the case file
 //! declared) gets one `  本地扩展：...` line after the four report lines and
 //! before any goal binding, and counts as an open obligation. The process exits
@@ -2537,10 +2542,10 @@ impl Session {
         // consequence.
         if cmd == "why" {
             let blocked = if reachable {
-                self.blocked_propositions_of(&r, &certificate, None)?
+                self.obstructed_propositions_of(&r, &certificate, None)?
             } else if !self.lib.env.open_predicates().is_empty() {
                 let tree = r.gap_tree_with(&goal, &GapLimits::default())?;
-                self.blocked_propositions_of(&r, &certificate, Some(&tree))?
+                self.obstructed_propositions_of(&r, &certificate, Some(&tree))?
             } else {
                 Vec::new()
             };
@@ -3079,7 +3084,7 @@ impl Session {
         // The declared interpretations that could license the obstructing
         // open concept. The report lists them by id; it does not run a branch,
         // so it never invents a consequence.
-        let blocked = self.blocked_propositions_of(&r, &certificate, root_gap.as_ref())?;
+        let blocked = self.branchable_propositions_of(&r, &certificate, root_gap.as_ref())?;
         let branch_scan = r.branch_candidates(&blocked)?;
         let open = crate::review::OpenConceptInputs {
             dependency: dependency.as_ref(),
@@ -3176,7 +3181,11 @@ impl Session {
         let mut baseline_reasoner = self.reasoner()?;
         saturate_with_goal(&mut baseline_reasoner, Some(&goal))?;
         let baseline = self.evaluate_goal(&mut baseline_reasoner, &goal, true)?;
-        let blocked = self.blocked_open_propositions(&baseline_reasoner, &baseline)?;
+        let blocked = self.branchable_propositions_of(
+            &baseline_reasoner,
+            &baseline.certificate,
+            baseline.gap_tree.as_ref(),
+        )?;
         let scan = baseline_reasoner.branch_candidates(&blocked)?;
 
         write_branch_header(out, &goal, &scan, &self.enabled_interpretations)?;
@@ -3253,7 +3262,8 @@ impl Session {
         .ok();
         writeln!(
             out,
-            "说明：每个分支的证书可单独导出与校验——先 `:interpret enable <id>`（会改变会话的启用状态），\
+            "说明：每个分支=会话已启用的解释之上再加一个候选；要单独评估某一条，可先 `:interpret disable` 其它解释。\
+             每个分支的证书可单独导出与校验——先 `:interpret enable <id>`（会改变会话的启用状态），\
              再 `:cert <目标>` 导出该分支，最后用 `:verify-cert <证书文件> <目标>` 复核。\
              本命令不自动启用任何解释，也不建议采用哪一个。"
         )
@@ -3330,29 +3340,16 @@ impl Session {
         })
     }
 
-    /// The open-concept propositions that obstruct this evaluation.
+    /// The open-concept propositions that still obstruct this evaluation.
     ///
     /// A proved root contributes the nodes `open_concept_dependency` names —
-    /// the same recomputation `cert::check` performs. A gap root contributes
-    /// every open-concept goal on its gap tree, which is where the rules-only
-    /// derivation is blocked. A goal with no open concept in the way yields an
-    /// empty list; `:branches` then says no candidate can be derived rather
-    /// than showing an empty table.
-    fn blocked_open_propositions(
-        &self,
-        reasoner: &Reasoner<'_>,
-        evaluation: &BranchEvaluation,
-    ) -> Result<Vec<Expr>, String> {
-        self.blocked_propositions_of(
-            reasoner,
-            &evaluation.certificate,
-            evaluation.gap_tree.as_ref(),
-        )
-    }
-
-    /// The blocked open-concept propositions of one certificate and its root
-    /// gap tree, if it has one.
-    fn blocked_propositions_of(
+    /// the same recomputation `cert::check` performs, which already excludes a
+    /// concept an enabled interpretation licensed. A gap root contributes every
+    /// open-concept goal on its gap tree, where the rules-only derivation is
+    /// blocked. This drives the `:why` / `:gap` / `:issues` hints: once an
+    /// interpretation releases the concept, the query no longer presents it as
+    /// needing a human.
+    fn obstructed_propositions_of(
         &self,
         reasoner: &Reasoner<'_>,
         certificate: &Certificate,
@@ -3370,6 +3367,34 @@ impl Session {
                     format!("无法读取开放概念依赖节点 `{node}` 的命题：{error}")
                 })?;
                 blocked.push(Expr::from(proposition));
+            }
+        }
+        Ok(blocked)
+    }
+
+    /// The open-concept propositions `:branches` can offer alternatives for.
+    ///
+    /// This is broader than [`Session::obstructed_propositions_of`]: every open
+    /// concept the root's proof graph states counts, including one an enabled
+    /// interpretation already licensed. The obligation is released in that
+    /// case, but the reader may still want to compare the current reading with
+    /// another declared interpretation, which is exactly what the session's
+    /// baseline asks. A gap root contributes its open-concept goals as well.
+    fn branchable_propositions_of(
+        &self,
+        reasoner: &Reasoner<'_>,
+        certificate: &Certificate,
+        gap_tree: Option<&GapTree>,
+    ) -> Result<Vec<Expr>, String> {
+        let statements = std_deduce_cert::open_concept_statements(&self.lib.env, certificate)
+            .map_err(|error| format!("无法重算开放概念陈述：{error}"))?;
+        let mut blocked = match gap_tree {
+            Some(tree) => reasoner.open_concept_goals(tree)?,
+            None => Vec::new(),
+        };
+        if let Some(statements) = statements {
+            for statement in statements {
+                blocked.push(Expr::from(&statement.proposition));
             }
         }
         Ok(blocked)
@@ -3419,13 +3444,15 @@ impl Session {
         });
     }
 
-    /// The concepts the certificate's root derivation turns into proved
-    /// propositions, recomputed from the loaded environment and the proof graph.
+    /// The concepts the certificate's root derivation still needs a human to
+    /// judge, recomputed from the loaded environment and the proof graph.
     ///
     /// This is the certificate layer's own recomputation
     /// ([`std_deduce_cert::open_concept_dependency`]), which `cert::check`
-    /// compares with the recorded `open_concept` obligation. Display never
-    /// parses an obligation's description to recover the concept names.
+    /// compares with the recorded `open_concept` obligation. A concept an
+    /// enabled interpretation licensed is not here, so `此处需人判断` is not
+    /// printed for it. Display never parses an obligation's description to
+    /// recover the concept names.
     fn open_concepts(&self, certificate: &Certificate) -> Result<Vec<String>, String> {
         let dependency = std_deduce_cert::open_concept_dependency(&self.lib.env, certificate)
             .map_err(|error| format!("无法重算开放概念义务：{error}"))?;
@@ -6193,14 +6220,14 @@ fn write_branch_header(
     if scan.blocked.is_empty() {
         writeln!(
             out,
-            "  受阻的开放概念命题：没有。基线结果没有开放概念受阻；:branches 只枚举与受阻开放概念相关的解释，因此没有可用的候选解释。"
+            "  开放概念命题：没有。基线结果没有开放概念需要比较解释；:branches 只枚举与开放概念命题相关的解释，因此没有可用的候选解释。"
         )
         .ok();
         return Ok(());
     }
     writeln!(
         out,
-        "  受阻的开放概念命题 {} 个：{}",
+        "  开放概念命题 {} 个（基线证明图上的，含已由已启用解释许可的）：{}",
         scan.blocked.len(),
         scan.blocked
             .iter()
@@ -6234,12 +6261,12 @@ fn write_branch_header(
             candidate.relation.label_zh(),
             if candidate.relation == std_deduce_reason::CandidateRelation::Exact {
                 format!(
-                    "与受阻命题「{}」内核等价，启用后许可该命题",
+                    "与开放概念命题「{}」内核等价，启用后许可该命题",
                     print_expr(&candidate.blocked)
                 )
             } else {
                 format!(
-                    "与受阻命题「{}」同谓词，但不是同一命题",
+                    "与开放概念命题「{}」同谓词，但不是同一命题",
                     print_expr(&candidate.blocked)
                 )
             }

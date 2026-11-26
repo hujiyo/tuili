@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std_deduce_cert::{Certificate, Node as CertNode, ObligationKind, OpenObligation};
+use std_deduce_cert::{
+    Assumption, Certificate, FactIdentity, Node as CertNode, ObligationKind, OpenObligation,
+};
 use std_deduce_lawpack::{build_lock, LOCK_FILE};
 
 const PROVED: i32 = 0;
@@ -914,11 +916,18 @@ interpret 重大解释 : 损害 甲 → 重大 甲
   source text "解释文本" locator "二" version "2020"
 "#;
 
-/// An interpretation that licenses an open concept is a dependency too: the
-/// certificate must record the obligation on its `interpretation_application`
-/// node, and the query must not read as an unconditional proof.
+/// An interpretation that licenses an open concept **is** the human reading:
+/// the certificate records no obligation for its application node, the query
+/// passes both layers, and the trust label is `依赖假设`. Without the enabled
+/// interpretation the same goal is a gap and exits `1`; a rule-proved variant
+/// of the same concept, which no interpretation licenses, keeps the notice and
+/// the obligation.
+///
+/// The last part removes the interpretation step by hand and re-points the root
+/// at an asserted fact stating the concept: the obligation reappears, so the
+/// release depends on the evidence on the proof graph, not on a flag.
 #[test]
-fn an_interpretation_that_concludes_an_open_concept_is_an_obligation() {
+fn an_interpretation_that_licenses_an_open_concept_releases_the_obligation() {
     let temp = TempDir::new("interpretation");
     let theory = temp.write("case.std", OPEN_CONCEPT_INTERPRETATION_CASE);
     let path = theory.display().to_string();
@@ -932,56 +941,82 @@ fn an_interpretation_that_concludes_an_open_concept_is_an_obligation() {
         ])
     };
 
+    // Without the interpretation the concept was never proved: gap, exit 1.
+    let without = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            path.clone(),
+            ":why 重大 甲".to_owned(),
+        ]),
+        GAP,
+        &["证书有效，但根为缺口，结论未被证明。"],
+    );
+    assert!(
+        !stdout(&without).contains("此处需人判断"),
+        "a gap root has no open-concept dependency to report:\n{}",
+        stdout(&without)
+    );
+
+    // A rule-proved open concept that no interpretation licenses is still a
+    // pending human judgement: the notice and the obligation remain.
+    let rule_case = temp.write("rule.std", OPEN_CONCEPT_CASE);
+    let still_pending = check(
+        run(&[
+            "--no-default-packs".to_owned(),
+            rule_case.display().to_string(),
+            ":why 重大 甲".to_owned(),
+        ]),
+        GAP,
+        &["此处需人判断：`重大`", "仍有未决义务"],
+    );
+    assert!(
+        !stdout(&still_pending).contains("推导已通过独立校验。"),
+        "a rule still states the concept and needs a human:\n{}",
+        stdout(&still_pending)
+    );
+
+    // Enabling a sourced interpretation is the human reading: no obligation.
     let why = check(
         query(":why 重大 甲"),
-        GAP,
+        PROVED,
         &[
             "▸ 重大 甲  〈解释 重大解释（literal）〉",
-            "此处需人判断：`重大`",
+            "推导已通过独立校验。",
+            "信任：依赖假设",
         ],
     );
     assert!(
-        !stdout(&why).contains("推导已通过独立校验。"),
-        "an interpretation over an open concept must not read as unconditional:\n{}",
+        !stdout(&why).contains("此处需人判断"),
+        "a licensed open concept is no longer a pending human judgement:\n{}",
         stdout(&why)
     );
     let explain = check(
         query(":explain 重大 甲"),
-        GAP,
-        &["此处需人判断：`重大`", "开放概念"],
+        PROVED,
+        &["根据解释「重大解释」", "依赖假设"],
     );
     assert!(
-        !stdout(&explain).contains("推导已通过独立校验。"),
-        "the narrative must not call an interpretation open concept checked:\n{}",
+        !stdout(&explain).contains("此处需人判断"),
+        "the narrative must not print the notice after the release:\n{}",
         stdout(&explain)
     );
 
-    let exported = check(query(":cert 重大 甲"), PROVED, &["open-concept"]);
+    let exported = check(query(":cert 重大 甲"), PROVED, &[]);
     let certificate = certificate_json(&exported);
-    assert_eq!(
-        certificate.open_obligations.len(),
-        1,
-        "{:?}",
+    assert!(
+        certificate.open_obligations.is_empty(),
+        "an interpretation-licensed open concept records no obligation: {:?}",
         certificate.open_obligations
     );
-    let obligation = &certificate.open_obligations[0];
-    assert_eq!(obligation.kind, ObligationKind::OpenConcept);
-    let dependency = certificate
+    let interpreted = certificate
         .nodes
         .iter()
         .position(|node| matches!(node, CertNode::InterpretationApplication { .. }))
         .expect("the interpretation step is a proof node");
     assert_eq!(
-        obligation.nodes,
-        vec![dependency],
-        "the interpretation_application node is the dependency node"
-    );
-    assert!(
-        matches!(
-            certificate.nodes[dependency],
-            CertNode::InterpretationApplication { .. }
-        ),
-        "the obligation must point at the interpretation step"
+        certificate.root,
+        Some(interpreted),
+        "the released concept is licensed by the interpretation application"
     );
 
     let file = temp.write("certificate.json", &certificate.to_json_pretty().unwrap());
@@ -993,35 +1028,65 @@ fn an_interpretation_that_concludes_an_open_concept_is_an_obligation() {
             path.clone(),
             format!(":verify-cert {}", file.display()),
         ]),
-        GAP,
-        &["逻辑校验：通过", "此处需人判断：`重大`"],
+        PROVED,
+        &[
+            "环境校验：通过",
+            "逻辑校验：通过",
+            "需人判断：否（无未决义务）",
+        ],
     );
     assert!(
-        !stdout(&verify).contains("推导已通过独立校验。"),
-        "verify-cert must report the interpretation obligation"
+        !stdout(&verify).contains("此处需人判断"),
+        "the released certificate must not report a pending concept:\n{}",
+        stdout(&verify)
     );
 
-    let mut dropped = certificate.clone();
-    dropped
-        .open_obligations
-        .retain(|obligation| obligation.kind != ObligationKind::OpenConcept);
-    let dropped_file = temp.write("dropped.json", &dropped.to_json_pretty().unwrap());
-    let rejected = check_stderr(
+    // Removing the interpretation step means the concept is no longer licensed
+    // by a sourced reading: the checker requires the obligation again.
+    let mut forged = certificate.clone();
+    forged.assumptions.push(Assumption {
+        proposition: cert_expr(&["重大", "甲"]),
+        identity: FactIdentity::UserAsserted,
+        sources: Vec::new(),
+        label: None,
+        occurred_at: std_deduce_cert::Explicit::none(),
+        occurred_in: std_deduce_cert::Explicit::none(),
+    });
+    forged.nodes = vec![CertNode::Assumption {
+        assumption: forged.assumptions.len() - 1,
+    }];
+    forged.interpretations.clear();
+    forged.root = Some(0);
+    forged.alternatives.clear();
+    forged.conflicts.clear();
+    forged.open_obligations.clear();
+    let forged_file = temp.write("forged.json", &forged.to_json_pretty().unwrap());
+    let rejected = check(
         run(&[
             "--no-default-packs".to_owned(),
             "--interpret".to_owned(),
             "重大解释".to_owned(),
             path,
-            format!(":verify-cert {}", dropped_file.display()),
+            format!(":verify-cert {}", forged_file.display()),
         ]),
         ERROR,
-        &["开放概念", "没有记录开放概念义务"],
+        &["逻辑校验：失败", "没有记录开放概念义务"],
     );
     assert!(
-        stdout(&rejected).contains("逻辑校验：失败"),
-        "a dropped obligation must fail the logical layer:\n{}",
-        stdout(&rejected)
+        stderr(&rejected).contains("开放概念"),
+        "the error must name what the missing obligation is about:\n{}",
+        stderr(&rejected)
     );
+}
+
+/// An application item such as `重大 甲`, as a certificate expression.
+fn cert_expr(parts: &[&str]) -> std_deduce_cert::CertExpr {
+    let mut expression = std_deduce_kernel::Expr::constant(parts[0]);
+    for part in &parts[1..] {
+        expression =
+            std_deduce_kernel::Expr::app(expression, std_deduce_kernel::Expr::constant(part));
+    }
+    std_deduce_cert::CertExpr::try_from(expression).expect("the expression is encodable")
 }
 
 /// Two open concepts on one root derivation: one obligation, both concepts

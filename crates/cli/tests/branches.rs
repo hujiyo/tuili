@@ -103,9 +103,9 @@ fn run_case(path: &Path, commands: &[&str]) -> Output {
 ///
 /// * `解释B` states the same open predicate about another individual — a
 ///   same-head candidate whose branch stays a gap;
-/// * `解释A` licenses exactly `情节严重 甲` — the branch's root is proved, but
-///   the open concept itself is still a human judgement, so the branch is
-///   classified `未决` and exits `1`.
+/// * `解释A` licenses exactly `情节严重 甲` — enabling a sourced interpretation
+///   is the explicit human reading, so the branch releases the open-concept
+///   obligation, labels as `依赖假设` and is classified `证明` with exit `0`.
 const TWO_CANDIDATES: &str = r#"sort 人
 pred 损害 : 人 → Prop
 pred 重大 : 人 → Prop
@@ -131,36 +131,36 @@ fn branches_report_each_candidate_with_its_own_result_and_check() {
     let case = temp.write("case.std", TWO_CANDIDATES);
     let output = check(
         run_case(&case, &[":branches 情节严重 甲"]),
-        GAP,
+        PROVED,
         &[
             "分支重跑 `情节严重 甲`",
-            "受阻的开放概念命题 1 个：`情节严重 甲`",
+            "开放概念命题 1 个（基线证明图上的，含已由已启用解释许可的）：`情节严重 甲`",
             "候选解释 2 个（上限 8 个，按 id 排序；一次只启用一个，可单独启用）",
             "基线（不启用任何解释）：",
-            "分支 1/2：`解释A`（损害 甲 → 情节严重 甲；内核等价）",
-            "分支 2/2：`解释B`（重大 乙 → 情节严重 乙；同谓词）",
+            "分支 1/2：`解释A`（损害 甲 → 情节严重 甲；精确匹配）",
+            "分支 2/2：`解释B`（重大 乙 → 情节严重 乙；同谓词候选（另一主体/同谓词，需人工确认是否适用））",
             "根：已证明（情节严重 甲）",
-            "开放概念：`情节严重`",
-            "归类：未决（退出码 1）",
+            "信任：依赖假设",
+            "归类：证明（退出码 0）",
             "证书校验：通过（逻辑层 cert::check + 内核层 kernel_proof）",
             "归类：缺口（退出码 1）",
             "与基线（不启用任何解释）对比：",
             "基线：缺口（1）",
-            "启用 `解释A` 后：未决（1）",
+            "启用 `解释A` 后：证明（0）",
             "启用 `解释B` 后：缺口（1）",
-            "汇总（含基线）：证明 0 个，未决 1 个，缺口 2 个，冲突 0 个。",
+            "汇总（含基线）：证明 1 个，未决 0 个，缺口 2 个，冲突 0 个。",
         ],
     );
     let out = stdout(&output);
-    // One branch's root is proved by the exact candidate; the same-head branch
+    // One branch is proved by the exact candidate; the same-head branch
     // licenses another individual and cannot prove this target.
     assert!(
         out.contains("分支 1/2：`解释A`"),
         "candidates are sorted by id:\n{out}"
     );
     assert!(
-        !out.contains("证明 1 个"),
-        "an open concept is never reported as an unconditional proof:\n{out}"
+        !out.contains("开放概念：`情节严重`"),
+        "the licensed concept is no longer reported as a pending judgement:\n{out}"
     );
 }
 
@@ -171,7 +171,7 @@ fn branches_do_not_change_the_sessions_enabled_set() {
     // `:interpret list` after `:branches` must still show both as unenabled,
     // and `:why` must be the same text as if `:branches` had never run.
     let with_branches = run_case(&case, &[":branches 情节严重 甲", ":interpret list"]);
-    assert_exit(&with_branches, GAP);
+    assert_exit(&with_branches, PROVED);
     let out = stdout(&with_branches);
     assert!(
         out.contains("[未启用] 解释A") && out.contains("[未启用] 解释B"),
@@ -252,14 +252,15 @@ fn unavailable_candidates_are_reported_with_reasons_and_reversed_ones_are_absent
 
 fn many_candidates(count: usize) -> String {
     let mut theory = String::from(
-        "sort 人\npred 情节严重 : 人 → Prop\nobj 甲 : 人\nopen 情节严重\n\
-         axiom 事实 : 情节严重 甲\n  source text \"案件\" locator \"一\"\n",
+        "sort 人\npred 情节严重 : 人 → Prop\npred 触发 : 人 → Prop\nobj 甲 : 人\nopen 情节严重\n\
+         axiom 事实 : 触发 甲\n  source text \"案件\" locator \"一\"\n",
     );
-    // All candidates are exact and usable; the cap must keep the first eight
-    // by id and name what it left out.
+    // All candidates exact and usable: the target is a gap until one is
+    // enabled, and every branch releases the open-concept obligation. The cap
+    // must keep the first eight by id and name what it left out.
     for index in 0..count {
         theory.push_str(&format!(
-            "interpret 解释{} : 情节严重 甲 → 情节严重 甲\n  direction literal\n  \
+            "interpret 解释{} : 触发 甲 → 情节严重 甲\n  direction literal\n  \
              source text \"解释{index}\" locator \"{index}\" version \"2020\"\n",
             (b'A' + index as u8) as char
         ));
@@ -273,7 +274,7 @@ fn more_than_eight_candidates_are_truncated_with_the_omitted_ids() {
     let case = temp.write("case.std", &many_candidates(10));
     let output = check(
         run_case(&case, &[":branches 情节严重 甲"]),
-        GAP,
+        PROVED,
         &[
             "候选解释 8 个（上限 8 个",
             "候选解释超过上限 8 个：已截断，未列出 ⟨解释I⟩、⟨解释J⟩",
@@ -303,7 +304,7 @@ fn the_baseline_is_the_sessions_enabled_set_and_a_duplicate_to_is_unavailable() 
     args.shrink_to_fit();
     let output = check(
         run(&args),
-        GAP,
+        PROVED,
         &[
             "基线（会话已启用的解释：`解释B`）",
             "分支 1/1：`解释A`",
@@ -335,7 +336,7 @@ fn a_duplicate_to_of_an_enabled_interpretation_is_unavailable() {
                 ":branches 情节严重 甲".to_owned(),
             ],
         ),
-        GAP,
+        PROVED,
         &[
             "相关但不可用 1 个（上限 8 个）：",
             "`解释C`：重大 乙 → 情节严重 乙（to 与已启用的解释 `解释B` 在内核下等价，两者不能同时启用）",
@@ -353,9 +354,9 @@ fn the_same_case_produces_byte_identical_branch_reports() {
     let temp = TempDir::new("determinism");
     let case = temp.write("case.std", TWO_CANDIDATES);
     let first = run_case(&case, &[":branches 情节严重 甲"]);
-    assert_exit(&first, GAP);
+    assert_exit(&first, PROVED);
     let second = run_case(&case, &[":branches 情节严重 甲"]);
-    assert_exit(&second, GAP);
+    assert_exit(&second, PROVED);
     assert_eq!(
         stdout(&first),
         stdout(&second),
@@ -434,7 +435,7 @@ fn an_open_concept_without_candidates_says_so_in_the_hint() {
         &[
             "没有可用的候选解释：当前环境没有与受阻的开放概念命题相关的 `interpret` 声明",
             "候选解释 0 个（上限 8 个",
-            "受阻的开放概念命题 1 个：`情节严重 甲`",
+            "开放概念命题 1 个（基线证明图上的，含已由已启用解释许可的）：`情节严重 甲`",
         ],
     );
     let out = stdout(&output);
@@ -457,12 +458,12 @@ fn review_lists_candidates_and_names_them_in_the_questions() {
         GAP,
         &[
             "## 七、需人判断",
-            "开放概念的候选解释（受阻的开放概念命题 1 个）：",
-            "`解释A`：损害 甲 → 情节严重 甲〔内核等价：与受阻命题「情节严重 甲」内核等价，启用后许可该命题〕",
-            "`解释B`：重大 乙 → 情节严重 乙〔同谓词：与受阻命题「情节严重 甲」同谓词，但不是同一命题〕",
+            "开放概念的候选解释（证明图上的开放概念命题 1 个）：",
+            "`解释A`：损害 甲 → 情节严重 甲〔精确匹配：与开放概念命题「情节严重 甲」内核等价，启用后许可该命题〕",
+            "`解释B`：重大 乙 → 情节严重 乙〔同谓词候选（另一主体/同谓词，需人工确认是否适用）：与开放概念命题「情节严重 甲」同谓词，但不是同一命题〕",
             "本报告只列当前环境声明的候选，不运行分支，也不建议采用某一条。",
             "## 八、建议向律师确认的问题",
-            "候选解释 `解释A`、`解释B` 都可能影响对受阻开放概念命题「情节严重 甲」的判断",
+            "候选解释 `解释A`、`解释B` 都可能影响对开放概念命题「情节严重 甲」的判断",
         ],
     );
     let out = stdout(&output);
