@@ -48,6 +48,7 @@ fn applicability() -> Box<RuleApplicability> {
 
 fn rule(conclusion: CertExpr, premises: Vec<usize>) -> Node {
     Node::RuleApplication {
+        guards: Vec::new(),
         computed: None,
         rule: "规则甲".to_owned(),
         conclusion,

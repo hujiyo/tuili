@@ -566,6 +566,7 @@ impl Library {
                     premises,
                     conclusion,
                     defeaters,
+                    guards,
                     sources,
                     scope: scope_spec,
                     burden,
@@ -699,11 +700,84 @@ impl Library {
                         )));
                     }
 
+                    // Guards are instance conditions over the parameter values.
+                    // Their checks run here, with the clause's own position, so
+                    // a rejection points at the `guard` line in the rule that
+                    // must be fixed; the kernel re-checks the same properties
+                    // for environments built without this loader.
+                    let mut rule_guards = Vec::new();
+                    for (i, guard) in guards.iter().enumerate() {
+                        let what = format!("`rule {n}` 的第 {} 条 guard 守卫", i + 1);
+                        let at = |msg: String| {
+                            LoadError::at(format!("{what}：{msg}"), guard.line, guard.col)
+                        };
+                        let mut free = Vec::new();
+                        collect_free_names(&guard.term, &mut Vec::new(), &mut free);
+                        for ident in &free {
+                            // Locals shadow environment constants, in this
+                            // order: a parameter is a value the instance binds.
+                            if params.iter().any(|(pn, _)| pn == ident) {
+                                // A parameter only used by a guard is never
+                                // bound by the instance; the premise check in
+                                // the kernel would report it later, without a
+                                // position, so it is caught here with one.
+                                let in_premise =
+                                    premises.iter().any(|p| term_mentions_ident(&p.ty, ident));
+                                if !in_premise {
+                                    return Err(at(format!(
+                                        "参数 `{ident}` 出现在守卫里，但没有出现在任何前提里：\
+                                         实例化时它的值无法被确定，守卫不能判定。\
+                                         请把它纳入某条前提（或把它从守卫里去掉）"
+                                    )));
+                                }
+                                continue;
+                            }
+                            let is_premise_binder =
+                                premises.iter().enumerate().any(|(j, p)| match &p.name {
+                                    Some(pn) => pn == ident,
+                                    None => format!("_p{j}") == *ident,
+                                });
+                            if is_premise_binder {
+                                return Err(at(format!(
+                                    "守卫引用了前提绑定 `{ident}`：守卫只能判定规则参数的值，\
+                                     不能判定前提的证明；请改用参数，或把该条件写成 premise"
+                                )));
+                            }
+                            if next.env.contains(ident)
+                                || std_deduce_kernel::builtin::type_of(ident).is_some()
+                            {
+                                continue;
+                            }
+                            return Err(at(format!(
+                                "守卫里有未绑定的自由变量 `{ident}`：守卫只能引用规则参数\
+                                 或已声明的项（闭项），不能引用既没有声明、也没有被规则绑定的名字"
+                            )));
+                        }
+                        let e =
+                            elab::elab(&next.env, &binds, &guard.term).map_err(|e| at(e.msg))?;
+                        if std_deduce_kernel::builtin::comparison_head(&e).is_none() {
+                            return Err(at(
+                                "守卫必须以比较 `less` / `le` 打头（例如 `(le a 5000)`）；\
+                                 `guard 3000` 这类表达式不是比较，既不产生真值，也不能决定规则是否触发"
+                                    .to_string(),
+                            ));
+                        }
+                        std_deduce_kernel::check::check(
+                            &next.env,
+                            &elab::ctx_of(&binds),
+                            &e,
+                            &Expr::Sort(0),
+                        )
+                        .map_err(|e| at(format!("守卫不是命题：{e}")))?;
+                        rule_guards.push(e);
+                    }
+
                     let rdecl = std_deduce_kernel::RuleDecl {
                         params: rule_params,
                         premises: rule_premises,
                         conclusion: concl,
                         unlesses,
+                        guards: rule_guards,
                         exceptions,
                         prefers,
                         sources: sources.iter().map(|s| to_source((*s).clone())).collect(),
@@ -1500,6 +1574,17 @@ fn check_definition_body(name: &str, body: &Term, env: &Env) -> Result<(), Strin
     Ok(())
 }
 
+/// Does this term mention `ident` outside its own `λ` / `∀` binders?
+///
+/// Used to decide whether a rule parameter that a guard reads is fixed by some
+/// premise: a name bound inside the term itself does not count as the rule
+/// parameter's occurrence.
+fn term_mentions_ident(term: &Term, ident: &str) -> bool {
+    let mut free = Vec::new();
+    collect_free_names(term, &mut Vec::new(), &mut free);
+    free.iter().any(|name| name == ident)
+}
+
 fn collect_free_names(term: &Term, bound: &mut Vec<String>, out: &mut Vec<String>) {
     match term {
         Term::Prop | Term::Type(_) | Term::Num(_) => {}
@@ -1542,6 +1627,7 @@ fn check_rule(
     premises: &[crate::ast::Premise],
     conclusion: &Term,
     defeaters: &[Defeater],
+    guards: &[crate::ast::Guard],
 ) -> Result<(), String> {
     let mut locals = Vec::new();
     for (param, ty) in params {
@@ -1564,6 +1650,10 @@ fn check_rule(
     }
     let what = format!("`rule {name}` 的结论");
     check_term(ns, &what, &locals, conclusion)?;
+    for (i, guard) in guards.iter().enumerate() {
+        let what = format!("`rule {name}` 的第 {} 条 guard 守卫", i + 1);
+        check_term(ns, &what, &locals, &guard.term)?;
+    }
     for defeater in defeaters {
         match defeater {
             Defeater::Unless(t) => {
@@ -1620,10 +1710,11 @@ fn check_module_names(ns: &str, items: &[Item]) -> Result<(), String> {
                 premises,
                 conclusion,
                 defeaters,
+                guards,
                 ..
             } => {
                 require_decl_name(ns, "rule", name)?;
-                check_rule(ns, name, params, premises, conclusion, defeaters)?;
+                check_rule(ns, name, params, premises, conclusion, defeaters, guards)?;
             }
             Item::Interpretation { name, from, to, .. } => {
                 require_decl_name(ns, "interpret", name)?;

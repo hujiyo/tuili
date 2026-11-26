@@ -110,6 +110,9 @@ pub enum Item {
         premises: Vec<Premise>,
         conclusion: Term,
         defeaters: Vec<Defeater>,
+        /// `guard (le a 5000)` clauses, in declaration order. Every guard must
+        /// hold for the instance to fire; see [`Guard`].
+        guards: Vec<Guard>,
         sources: Vec<SourceSpec>,
         /// The scope clauses written on this rule. Missing fields are filled
         /// from the containing pack's manifest by the loader; the parser only
@@ -203,6 +206,23 @@ pub enum Item {
 pub struct Premise {
     pub name: Option<String>,
     pub ty: Term,
+}
+
+/// One `guard` clause of a rule: a comparison that must hold for the instance.
+///
+/// A guard is an *instance condition*, not a premise: it is judged by
+/// evaluating the comparison against the values the instance binds, and all
+/// guards of one rule hold conjunctively. It may mention the rule's parameters
+/// or a closed term, never a premise binder or an unbound name.
+///
+/// The source position is recorded because those checks run after the rule
+/// block is parsed (the binders are only complete then) and the rejection must
+/// still point at the clause that has to be fixed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Guard {
+    pub term: Term,
+    pub line: usize,
+    pub col: usize,
 }
 
 /// The scope clauses written on one rule:

@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use std_deduce_kernel::env::escape_control;
-use std_deduce_kernel::pretty::print_expr;
+use std_deduce_kernel::pretty::{print_expr, print_parenthesized};
 use std_deduce_kernel::Expr;
 
 use crate::model::{Certificate, Node, NodeId};
@@ -261,6 +261,7 @@ fn render_node(
             computed,
             premises,
             bindings,
+            guards,
             sources,
             ..
         } => {
@@ -303,6 +304,17 @@ fn render_node(
                     "{pad}  计算：{} = {}\n",
                     print_expr(&Expr::from(computed)),
                     print_expr(&Expr::from(conclusion))
+                ));
+            }
+            // Guard judgements, one per declared guard: the substituted
+            // comparison and its truth value. They are printed only when the
+            // rule carries guards, so the form tree of an unguarded rule is
+            // byte-for-byte the same as before.
+            for guard in guards {
+                out.push_str(&format!(
+                    "{pad}  守卫：`{}` = {}\n",
+                    print_parenthesized(&Expr::from(&guard.instance)),
+                    guard_value_text(guard)
                 ));
             }
             for premise in premises {
@@ -453,8 +465,34 @@ fn render_node(
                         identity
                     ));
                 }
+                // Guards that did not let the candidate fire are the reason it
+                // is listed at all: print the substituted comparison and
+                // whether it was false or could not be decided. A guard that
+                // held is not repeated here — it is not what is missing.
+                for guard in &candidate.guards {
+                    match guard.holds.as_ref() {
+                        Some(true) => {}
+                        Some(false) => out.push_str(&format!(
+                            "{pad}    守卫：`{}` 不成立\n",
+                            print_parenthesized(&Expr::from(&guard.instance))
+                        )),
+                        None => out.push_str(&format!(
+                            "{pad}    守卫：`{}` 无法判定（守卫参数没有全部绑定，或操作数不是整数字面量）\n",
+                            print_parenthesized(&Expr::from(&guard.instance))
+                        )),
+                    }
+                }
             }
         }
     }
     Ok(())
+}
+
+/// The truth value of one guard record as the form tree prints it.
+fn guard_value_text(guard: &crate::model::GuardRecord) -> &'static str {
+    match guard.holds.as_ref() {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "无法判定",
+    }
 }

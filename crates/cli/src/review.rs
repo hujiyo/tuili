@@ -4,7 +4,7 @@
 //! practising lawyer can read. It is a **derived view**, not a new inference
 //! and not legal advice. Every sentence is read from one of four inputs:
 //!
-//! * the certificate v10 the query path produced (`:why` / `:cert` build the
+//! * the certificate v11 the query path produced (`:why` / `:cert` build the
 //!   same certificate),
 //! * the reasoner's gap trees (the root's tree and the `:issues` scan),
 //! * the rules' declared burden of proof (`RulePleading`, the same map
@@ -49,7 +49,7 @@ use std_deduce_cert::{
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, RulePleading};
 use std_deduce_kernel::norm::normalize;
-use std_deduce_kernel::pretty::print_expr;
+use std_deduce_kernel::pretty::{print_expr, print_parenthesized};
 use std_deduce_kernel::{Ctx, Env, Expr, Name};
 use std_deduce_reason::{BranchCandidateScan, GapLimit, GapStatus, GapTree, IssueScan};
 
@@ -1310,7 +1310,13 @@ fn write_gap_body(
                 "{indent}  - 提示：需要为该争点显式指定引用时间（尚未实现）。\n"
             ));
         }
-        if candidate.missing.is_empty() && candidate.blocked_by.is_empty() {
+        if candidate.missing.is_empty()
+            && candidate.blocked_by.is_empty()
+            && candidate
+                .guards
+                .iter()
+                .all(|guard| guard.holds == Some(true))
+        {
             if candidate.applicability.is_applicable() {
                 out.push_str(&format!("{indent}  - 这里没有记录它缺少什么。\n"));
             } else {
@@ -1377,6 +1383,26 @@ fn write_gap_body(
                     "{indent}  - 阻断条件：「{}」已成立。\n",
                     expr_text(blocker)
                 ));
+            }
+        }
+        // A guard is an instance condition: it must hold for the rule to fire.
+        // A false or undecided guard is the reason the candidate cannot supply
+        // the missing conclusion, so it is reported instead of omitted.
+        for guard in &candidate.guards {
+            match guard.holds {
+                Some(true) => {}
+                Some(false) => {
+                    out.push_str(&format!(
+                        "{indent}  - 守卫：`{}` 不成立，本规则不触发。\n",
+                        print_parenthesized(&guard.instance)
+                    ));
+                }
+                None => {
+                    out.push_str(&format!(
+                        "{indent}  - 守卫：`{}` 无法判定（守卫参数没有全部绑定，或操作数不是整数字面量），本规则不触发。\n",
+                        print_parenthesized(&guard.instance)
+                    ));
+                }
             }
         }
         if let Some(limit) = &candidate.limit {

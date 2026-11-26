@@ -203,16 +203,17 @@ rule r :
     // the premise is simply absent.
     let mut d = Derivation::default();
     d.nodes.push(Node::RuleApplication {
+        guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![],
         bindings: vec![],
         sources: vec![SourceRef::new("测试", "一")],
-        applicability: Applicability::Unchecked {
+        applicability: Box::new(Applicability::Unchecked {
             missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
-        },
+        }),
     });
     assert!(
         verify(&lib.env, &d).is_err(),
@@ -221,16 +222,17 @@ rule r :
     // A conclusion that is not even an instance of the rule's head must fail.
     let mut d2 = Derivation::default();
     d2.nodes.push(Node::RuleApplication {
+        guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("侵占"), p("张三")),
         premises: vec![],
         bindings: vec![],
         sources: vec![],
-        applicability: Applicability::Unchecked {
+        applicability: Box::new(Applicability::Unchecked {
             missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
-        },
+        }),
     });
     assert!(verify(&lib.env, &d2).is_err());
 }
@@ -264,16 +266,17 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
         bindings: vec![],
         sources: vec![],
-        applicability: Applicability::Unchecked {
+        applicability: Box::new(Applicability::Unchecked {
             missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
-        },
+        }),
     });
     assert!(
         verify(&lib.env, &d).is_err(),
@@ -309,16 +312,17 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("李四")),
         premises: vec![0],
         bindings: vec![],
         sources: vec![],
-        applicability: Applicability::Unchecked {
+        applicability: Box::new(Applicability::Unchecked {
             missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
-        },
+        }),
     });
     assert!(
         verify(&lib.env, &d).is_err(),
@@ -363,16 +367,17 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
         bindings: vec![],
         sources: vec![],
-        applicability: Applicability::Unchecked {
+        applicability: Box::new(Applicability::Unchecked {
             missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
-        },
+        }),
     });
     assert!(
         verify(&lib.env, &d).is_err(),
@@ -420,16 +425,17 @@ rule r :
         occurred_in: None,
     });
     d.nodes.push(Node::RuleApplication {
+        guard_judgements: Vec::new(),
         computed: None,
         rule: name("r"),
         conclusion: Expr::app(p("违法"), p("张三")),
         premises: vec![0],
         bindings: vec![(name("p"), p("张三"))],
         sources: vec![],
-        applicability: Applicability::Unchecked {
+        applicability: Box::new(Applicability::Unchecked {
             missing: MissingInput::RuleHasNoScope,
             basis: Default::default(),
-        },
+        }),
     });
     let err = verify(&lib.env, &d).expect_err("the alpha-variant blocker is proved");
     assert!(err.contains("阻断条件"), "got: {err}");
@@ -604,6 +610,7 @@ fn kernel_rejects_a_malformed_telescope() {
     )
     .unwrap();
     let rule = std_deduce_kernel::RuleDecl {
+        guards: Vec::new(),
         params: vec![(name("a"), Expr::Sort(0))],
         // `p a : Prop`, so the premise is a proposition.
         premises: vec![(None, Expr::app(Expr::constant("p"), Expr::Var(0)))],
@@ -622,6 +629,7 @@ fn kernel_rejects_a_malformed_telescope() {
     // A rule whose conclusion is a bare predicate symbol is not a proposition.
     // The valid shape is checked below; here we only assert the bad one fails.
     let bad = std_deduce_kernel::RuleDecl {
+        guards: Vec::new(),
         params: vec![(name("a"), Expr::Sort(0))],
         premises: vec![(None, Expr::app(Expr::constant("p"), Expr::Var(2)))],
         conclusion: Expr::Sort(0),
@@ -1858,6 +1866,7 @@ fn a_priority_self_loop_is_reported_as_a_cycle() {
     .unwrap();
     for rule_name in ["x.r", "x.s"] {
         let rule = std_deduce_kernel::RuleDecl {
+            guards: Vec::new(),
             params: vec![],
             premises: vec![],
             conclusion: Expr::constant("p"),

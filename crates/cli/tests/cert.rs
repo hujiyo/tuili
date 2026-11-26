@@ -419,6 +419,7 @@ fn tampered_conclusion_or_binding_is_rejected() {
         nodes: vec![
             Node::Assumption { assumption: 0 },
             Node::RuleApplication {
+                guards: Vec::new(),
                 computed: None,
                 rule: "恒真".to_owned(),
                 conclusion: truth,
@@ -511,7 +512,7 @@ fn verify_cert_escapes_a_read_failure_path_onto_one_line() {
 #[test]
 fn verify_cert_requires_a_loaded_environment() {
     let certificate = Certificate::from_json(
-        r#"{"format_version": 10, "environment": {"profile": null, "packs": [],
+        r#"{"format_version": 11, "environment": {"profile": null, "packs": [],
             "corpora": [], "as_of": null, "jurisdiction": null},
             "interpretations": [], "nodes": [], "root": null, "alternatives": []}"#,
     )

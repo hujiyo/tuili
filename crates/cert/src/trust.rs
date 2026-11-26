@@ -2,7 +2,7 @@
 //!
 //! The five labels are a **derived view**: they are computed from
 //! [`Certificate`] fields only and are never written into the certificate JSON.
-//! The labels do not add a certificate field: the format stays at v10, and the
+//! The labels do not add a certificate field: the format stays at v11, and the
 //! witness table is not read as a label source.
 //! No renderer guesses a label from printed text, and no label is read from an
 //! obligation's description; a rule here is a named condition over the fields

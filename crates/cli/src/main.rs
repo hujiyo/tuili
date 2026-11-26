@@ -53,7 +53,7 @@
 //! while a rule judged *unchecked* (no evidence at all) keeps firing and every
 //! conclusion line it produces carries `适用性未判定（…）`. The verdict and
 //! the event times/places it relied on are printed on the conclusion line; a
-//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v10
+//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v11
 //! records the verdict, its basis and its reason on every rule application and
 //! gap candidate, and `:verify-cert` recomputes it from the environment
 //! declaration and the certificate's own inputs.
@@ -98,7 +98,7 @@
 //! without affecting explicit imports; `--profile` selects a profile by name or
 //! alias. The preload lines are printed only after the whole load commits, so a
 //! failed file never claims that the environment loaded. The profile and the
-//! packs it loaded are session objects, but a certificate v10 records the
+//! packs it loaded are session objects, but a certificate v11 records the
 //! environment identity it was produced in: the profile, the as-of date, the
 //! jurisdiction code and the loaded packs/corpora. `:cert` stamps it before
 //! writing, and `:verify-cert` compares it with the current environment before
@@ -129,7 +129,7 @@
 //! be instantiated with closed values: a queried goal that no rule or fact
 //! proves demands one instance, and a rule premise that is already closed under
 //! the bindings collected so far demands one during saturation. Every instance
-//! is a derived `axiom_instance` step in certificate v10, never an assumption;
+//! is a derived `axiom_instance` step in certificate v11, never an assumption;
 //! `:why` prints the universal fact, its identity and the binding, and
 //! `:verify-cert` recomputes the conclusion from the declaration. `:gap` lists
 //! the universal facts that unify with a goal, with the values an instance
@@ -398,7 +398,7 @@
 //! certificate proves the root under strict facts and leaves no root-relevant
 //! obligation — it is not a claim that the conclusion is legally correct.
 //! `:cert` JSON has no label field; the five labels are a derived view of the
-//! recorded proof, and the v10 witness table does not change them.
+//! recorded proof, and the v11 witness table does not change them.
 //!
 //! A derived conclusion can have several independent witnesses. `:why` still
 //! expands one main tree, then prints `另有 N 条独立推导。` when the root's
@@ -624,7 +624,7 @@ use std_deduce_cert::{
 use std_deduce_kernel::conv::convertible;
 use std_deduce_kernel::env::{escape_control, Ctx, Decl, DeclKind, Env, FactIdentity, SourceRef};
 use std_deduce_kernel::meta::{validate_date, validate_jurisdiction_code, Scope, ScopeOrigin};
-use std_deduce_kernel::pretty::print_expr;
+use std_deduce_kernel::pretty::{print_expr, print_parenthesized};
 use std_deduce_kernel::{check, Expr, Name, RuleDecl};
 use std_deduce_lang::module::escape_path;
 use std_deduce_lang::{elab, Library, LoadOptions, LoadReport};
@@ -2534,7 +2534,7 @@ impl Session {
         // annotation is rendered from the derivation's judgement.
         let annotations = derivation_annotations(&d);
         // The burden/standard declarations the narrative prints come from the
-        // environment, not from the certificate: certificate v10 does not record
+        // environment, not from the certificate: certificate v11 does not record
         // them. The map is built once by the reasoner from the same rule
         // declarations the gap tree reads, so `:explain` and `:gap` report the
         // same values.
@@ -6780,6 +6780,30 @@ fn render_gap_body(out: &mut impl Write, tree: &GapTree, reasoner: &Reasoner<'_>
                 exception_burden_note(reasoner, candidate.rule.as_ref())
             )
             .ok();
+        }
+        // A guard that did not hold is an instance condition, not a missing
+        // premise: print the substituted comparison and why it did not let the
+        // rule fire instead of letting the candidate disappear.
+        for guard in &candidate.guards {
+            match guard.holds {
+                Some(true) => {}
+                Some(false) => {
+                    writeln!(
+                        out,
+                        "{pad}  守卫：`{}` 不成立，故本规则不触发",
+                        print_parenthesized(&guard.instance)
+                    )
+                    .ok();
+                }
+                None => {
+                    writeln!(
+                        out,
+                        "{pad}  守卫：`{}` 无法判定（守卫参数没有全部绑定，或操作数不是整数字面量），故本规则不触发",
+                        print_parenthesized(&guard.instance)
+                    )
+                    .ok();
+                }
+            }
         }
         if let Some(limit) = &candidate.limit {
             writeln!(

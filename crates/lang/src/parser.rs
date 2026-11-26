@@ -19,6 +19,7 @@
 //!           | 'premise' (binder ':')? term
 //!           | 'conclude' term
 //!           | 'unless' term
+//!           | 'guard' term
 //!           | 'defeated_by' IDENT
 //!           | 'prefer' IDENT
 //!           | 'burden' burden_value
@@ -63,6 +64,10 @@
 //! to `neg a`. `*` binds tighter than `+` / `-`, both associate to the left, a
 //! leading `-` binds tighter than `*`, and application binds tighter than all
 //! of them. Comparisons are written in prefix form: `(less a b)`, `(le a b)`.
+//! A rule may carry `guard` clauses, one per line, each a comparison over the
+//! rule's parameters or a closed term; all of them must hold for the instance
+//! to fire. A guard is not a premise: it is judged by evaluating the comparison,
+//! not by proving a proposition, and it is not part of the rule's telescope.
 //! A binary `-` must be separated from its operands by whitespace or brackets;
 //! `3000-2000` lexes as one identifier (as a date does), and the name is then
 //! reported as unknown rather than silently read as a subtraction. A numeric
@@ -994,6 +999,7 @@ impl Parser {
         let mut premises = Vec::new();
         let mut conclusion = None;
         let mut defeaters = Vec::new();
+        let mut guards = Vec::new();
         let mut sources = Vec::new();
         let mut scope = ScopeSpec::default();
         // The pleading clauses are optional and each may appear at most once.
@@ -1066,6 +1072,24 @@ impl Parser {
                 "unless" => {
                     self.bump();
                     defeaters.push(Defeater::Unless(self.term()?));
+                }
+                // A guard is an instance condition, one clause per line, and
+                // several guards are conjunctive. The position of the keyword
+                // is kept: the load-time checks (comparison shape, free names,
+                // premise binders, arithmetic without parameters) run once the
+                // whole rule is read and must still point at the clause that
+                // has to be fixed.
+                "guard" => {
+                    if !on_new_line {
+                        return self.err(format!(
+                            "`rule {name}` 的 `guard` 子句必须另起一行；每条守卫独占一行，\
+                             多条守卫竖直排列（全部成立规则才触发）"
+                        ));
+                    }
+                    let (line, col) = (self.here().line, self.here().col);
+                    self.bump();
+                    let term = self.term()?;
+                    guards.push(Guard { term, line, col });
                 }
                 "defeated_by" | "defeated" => {
                     self.bump();
@@ -1158,6 +1182,7 @@ impl Parser {
             premises,
             conclusion,
             defeaters,
+            guards,
             sources,
             scope,
             burden,

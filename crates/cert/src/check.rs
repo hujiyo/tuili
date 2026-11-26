@@ -277,9 +277,10 @@ use crate::environment::EnvironmentIdentity;
 use crate::expr::CertExpr;
 use crate::key::expression_key;
 use crate::model::{
-    Certificate, Conflict, Explicit, FactIdentity, InterpretationDirection, Node, NodeId,
-    ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin, Provenance,
-    Resolution, ResolutionBasis, Side, UnresolvedReason, MAX_CERT_WITNESSES_PER_CONCLUSION,
+    Certificate, Conflict, Explicit, FactIdentity, GuardRecord, InterpretationDirection, Node,
+    NodeId, ObligationKind, OpenObligation, PriorityClause, PriorityEdge, PriorityOrigin,
+    Provenance, Resolution, ResolutionBasis, Side, UnresolvedReason,
+    MAX_CERT_WITNESSES_PER_CONCLUSION,
 };
 use crate::source::Source;
 
@@ -761,6 +762,7 @@ fn check_with(
             computed,
             premises,
             bindings,
+            guards,
             applicability,
             ..
         } = node
@@ -937,6 +939,24 @@ fn check_with(
                 ));
             }
         }
+
+        // Every guard of this instance is re-judged here: the declared guard
+        // is rebuilt from the environment's rule, its instance form from the
+        // rule plus the recorded bindings, and the comparison is evaluated by
+        // the kernel. The recorded `expression`, `instance` and `holds` are
+        // compared with that result — the recorded boolean is never trusted.
+        // A guard that does not hold makes the step invalid: an instance
+        // condition that is false means the rule must not fire.
+        validate_guard_records(
+            env,
+            rule,
+            r,
+            &binding,
+            guards,
+            &format!("规则 `{rule}` 的实例"),
+            GuardMode::Fired,
+        )
+        .map_err(|message| CheckError::at(id, message))?;
 
         let actual = Expr::from(conclusion);
         let expected = close_pattern(&r.open_conclusion(), &binding);
@@ -2375,6 +2395,20 @@ fn validate_candidate_applicability(
         ));
     }
 
+    // A candidate's guard records are re-judged from its own bindings, so the
+    // display of a guard that did not hold (or could not be decided) is itself
+    // checkable: flipping it, editing the expression or dropping a record
+    // fails here instead of leaving an unverified explanation in the gap.
+    validate_guard_records(
+        env,
+        &candidate.rule,
+        declared,
+        &binding,
+        &candidate.guards,
+        &place,
+        GuardMode::Candidate,
+    )?;
+
     // Merge the held and missing lists against the rule's premise order. Both
     // lists are subsequences of the instantiated premise list; a premise in
     // neither list, a duplicate, or an unrelated proposition breaks the merge
@@ -2426,6 +2460,136 @@ fn validate_candidate_applicability(
     }
     let expected = crate::applicability::judge(&declaration.scope, &anchor);
     compare_applicability_record(&place, recorded, &expected)
+}
+
+/// How strictly a rule instance's guard records are judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardMode {
+    /// A rule application that fired: every guard must be recorded, decided
+    /// and true.
+    Fired,
+    /// A gap candidate: a guard whose parameter the candidate's bindings leave
+    /// open is recorded as undecided (`holds: null`); every other record must
+    /// match the recomputed verdict exactly.
+    Candidate,
+}
+
+/// Rebuild and re-evaluate every guard of one rule instance.
+///
+/// The three recorded pieces are each checked against an independent
+/// reconstruction:
+///
+/// * `expression` must be the environment rule's declared guard with its
+///   parameters opened (`open_guard`), compared structurally, so an edited
+///   guard is refused;
+/// * `instance` must be that guard closed by the certificate's own bindings,
+///   compared structurally, so changing an operand or an operator is refused;
+/// * `holds` must be what the kernel's arithmetic evaluation of the instance
+///   yields (`True` or `False`), so flipping the recorded boolean is refused.
+///
+/// The number of records must equal the number of declared guards and their
+/// `index` fields must be the declaration order, so dropping a record, reordering
+/// them or inventing an extra one is refused. Unlike an `unless`, a guard is an
+/// instance condition: a `false` guard means the instance does not fire, and a
+/// guard that cannot be decided is an error, never `false`.
+fn validate_guard_records(
+    env: &Env,
+    rule: &str,
+    declared: &RuleDecl,
+    binding: &BTreeMap<&str, Expr>,
+    records: &[GuardRecord],
+    place: &str,
+    mode: GuardMode,
+) -> Result<(), String> {
+    if records.len() != declared.guards.len() {
+        return Err(format!(
+            "{place}：规则 `{rule}` 声明了 {declared_count} 条守卫，证书记录了 {recorded} 条；\
+             守卫判定必须逐条记录，不能缺少、删掉或凭空添加",
+            rule = escape_control(rule),
+            declared_count = declared.guards.len(),
+            recorded = records.len()
+        ));
+    }
+    for (position, record) in records.iter().enumerate() {
+        if record.index != position {
+            return Err(format!(
+                "{place}：第 {} 条守卫记录的序号是 {}；守卫记录必须按声明顺序逐条记录",
+                position + 1,
+                record.index
+            ));
+        }
+        let expected_expression = declared.open_guard(position);
+        let recorded_expression = Expr::from(&record.expression);
+        if expression_key(&recorded_expression) != expression_key(&expected_expression) {
+            return Err(format!(
+                "{place}：第 {} 条守卫的声明形式记录为 `{}`，而环境规则声明的是 `{}`",
+                position + 1,
+                print_expr(&recorded_expression),
+                print_expr(&expected_expression)
+            ));
+        }
+        let expected_instance = close_pattern(&declared.open_guard(position), binding);
+        let recorded_instance = Expr::from(&record.instance);
+        if expression_key(&recorded_instance) != expression_key(&expected_instance) {
+            return Err(format!(
+                "{place}：第 {} 条守卫按绑定得到的形态是 `{}`，而证书记录的是 `{}`",
+                position + 1,
+                print_expr(&expected_instance),
+                print_expr(&recorded_instance)
+            ));
+        }
+        // The comparison is evaluated by the kernel here, from the rebuilt
+        // instance. An overflow keeps its own diagnostic; a comparison that
+        // stays neutral (a guard parameter the bindings leave open) has no
+        // truth value and is never read as `false`.
+        let evaluated = evaluate_arithmetic(env, &expected_instance).map_err(|error| {
+            format!(
+                "{place}：第 {} 条守卫无法重算：{error}（守卫形态是「{}」）",
+                position + 1,
+                print_expr(&expected_instance)
+            )
+        })?;
+        let expected = std_deduce_kernel::builtin::truth_value(&evaluated);
+        match (mode, expected) {
+            (GuardMode::Fired, None) => {
+                return Err(format!(
+                    "{place}：第 {} 条守卫「{}」无法判定成布尔（求值结果是「{}」）；\
+                     触发中的实例必须判定每条守卫",
+                    position + 1,
+                    print_expr(&expected_instance),
+                    print_expr(&evaluated)
+                ));
+            }
+            (GuardMode::Fired, Some(false)) => {
+                return Err(format!(
+                    "{place}：第 {} 条守卫「{}」不成立；守卫不成立的实例不触发",
+                    position + 1,
+                    print_expr(&expected_instance)
+                ));
+            }
+            _ => {}
+        }
+        let recorded_value = record.holds.as_ref().copied();
+        if recorded_value != expected {
+            return Err(format!(
+                "{place}：第 {} 条守卫「{}」记录的是 {}，而重算结果是 {}",
+                position + 1,
+                print_expr(&expected_instance),
+                guard_value_text(recorded_value),
+                guard_value_text(expected)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A guard's recorded/recomputed truth value as a diagnostic word.
+fn guard_value_text(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "成立（true）",
+        Some(false) => "不成立（false）",
+        None => "无法判定（null）",
+    }
 }
 
 /// Compare a rule application's applicability record, reporting the node and
