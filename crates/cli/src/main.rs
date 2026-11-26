@@ -53,7 +53,7 @@
 //! while a rule judged *unchecked* (no evidence at all) keeps firing and every
 //! conclusion line it produces carries `适用性未判定（…）`. The verdict and
 //! the event times/places it relied on are printed on the conclusion line; a
-//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v11
+//! gap's candidates are listed by `:gap` and `:applicability`. Certificate v12
 //! records the verdict, its basis and its reason on every rule application and
 //! gap candidate, and `:verify-cert` recomputes it from the environment
 //! declaration and the certificate's own inputs.
@@ -98,7 +98,7 @@
 //! without affecting explicit imports; `--profile` selects a profile by name or
 //! alias. The preload lines are printed only after the whole load commits, so a
 //! failed file never claims that the environment loaded. The profile and the
-//! packs it loaded are session objects, but a certificate v11 records the
+//! packs it loaded are session objects, but a certificate v12 records the
 //! environment identity it was produced in: the profile, the as-of date, the
 //! jurisdiction code and the loaded packs/corpora. `:cert` stamps it before
 //! writing, and `:verify-cert` compares it with the current environment before
@@ -129,7 +129,7 @@
 //! be instantiated with closed values: a queried goal that no rule or fact
 //! proves demands one instance, and a rule premise that is already closed under
 //! the bindings collected so far demands one during saturation. Every instance
-//! is a derived `axiom_instance` step in certificate v11, never an assumption;
+//! is a derived `axiom_instance` step in certificate v12, never an assumption;
 //! `:why` prints the universal fact, its identity and the binding, and
 //! `:verify-cert` recomputes the conclusion from the declaration. `:gap` lists
 //! the universal facts that unify with a goal, with the values an instance
@@ -2584,7 +2584,7 @@ impl Session {
         // annotation is rendered from the derivation's judgement.
         let annotations = derivation_annotations(&d);
         // The burden/standard declarations the narrative prints come from the
-        // environment, not from the certificate: certificate v11 does not record
+        // environment, not from the certificate: certificate v12 does not record
         // them. The map is built once by the reasoner from the same rule
         // declarations the gap tree reads, so `:explain` and `:gap` report the
         // same values.

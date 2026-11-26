@@ -377,7 +377,7 @@ fn a_literal_key_is_distinct_from_a_same_named_constant() {
 #[test]
 fn a_rule_step_without_arithmetic_records_no_computed_field() {
     // A non-arithmetic certificate keeps exactly its old JSON shape: the field
-    // is omitted rather than written as `null`, so v11 output stays stable for
+    // is omitted rather than written as `null`, so v12 output stays stable for
     // cases that compute nothing.
     let cert = certificate(Node::RuleApplication {
         choices: Vec::new(),

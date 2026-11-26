@@ -149,7 +149,7 @@
 //! function over the rule's [`Scope`](std_deduce_kernel::meta::Scope) and
 //! the instance's anchor (the premise facts' occurrence records plus the
 //! session fallback values). The reasoner only supplies those records; the
-//! CLI only renders the recorded verdict. Certificate v11 records the verdict,
+//! CLI only renders the recorded verdict. Certificate v12 records the verdict,
 //! basis, declared scope and reason on every rule application and gap
 //! candidate, and `:verify-cert` recomputes them independently.
 //!
@@ -3644,7 +3644,7 @@ impl<'a> Reasoner<'a> {
 
     /// Every declared rule's burden/standard, keyed by rule name.
     ///
-    /// Certificate v11 does not record these declarations (adding them would
+    /// Certificate v12 does not record these declarations (adding them would
     /// change the format), so `:explain` supplies this map when it narrates a
     /// certificate gap. The values come from the environment declaration, the
     /// same one the derivation used.

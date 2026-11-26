@@ -373,7 +373,7 @@ fn gap_and_cert_do_not_apply_a_loaded_interpretation() {
         "the interpretation must not be applied:\n{out}"
     );
 
-    // `:cert` records the gap root. Its v11 interpretations table is empty:
+    // `:cert` records the gap root. Its v12 interpretations table is empty:
     // the declaration is not an assumption, a rule step, or a candidate.
     let output = run(&[
         "--no-default-packs".to_owned(),

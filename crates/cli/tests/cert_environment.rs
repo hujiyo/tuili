@@ -324,7 +324,7 @@ fn reject_certificate(root: &TempRoot, tag: &str, json: &str, stderr_needle: &st
 }
 
 #[test]
-fn a_valid_v11_certificate_records_and_checks_the_same_environment() {
+fn a_valid_v12_certificate_records_and_checks_the_same_environment() {
     let root = TempRoot::new("valid");
     root.install_pack(VERSION);
 

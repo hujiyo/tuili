@@ -1,4 +1,4 @@
-//! End-to-end tests for universal elimination (certificate v11).
+//! End-to-end tests for universal elimination (certificate v12).
 //!
 //! A `axiom … : ∀ (x : T), P x` declaration is a universal fact. The reasoner
 //! instantiates it on demand: a goal or a rule premise whose predicate matches

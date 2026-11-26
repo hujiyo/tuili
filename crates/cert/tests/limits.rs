@@ -95,7 +95,7 @@ fn application_tree(leaves: usize) -> Value {
 
 #[test]
 fn the_reference_certificate_still_parses() {
-    Certificate::from_json(FIXTURE).expect("the v11 fixture must remain valid");
+    Certificate::from_json(FIXTURE).expect("the v12 fixture must remain valid");
 }
 
 #[test]

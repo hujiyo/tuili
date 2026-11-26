@@ -226,7 +226,7 @@
 //! five labels are `已验证`, `依赖假设`, `事实待举证`, `争点未决` and
 //! `需律师判断`; [`trust`](mod@trust) documents the exact field-to-label
 //! mapping. The labels are a derived view: they are never serialized into the
-//! certificate, and the v11 witness table does not change them. `:why`,
+//! certificate, and the v12 witness table does not change them. `:why`,
 //! `:explain` and `:labels` all print the same [`TrustReport::summary`] and the
 //! same evidence, so a conclusion cannot be labelled differently by different
 //! renderers. A label never asserts legal correctness: `已验证` means the

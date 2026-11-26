@@ -1,4 +1,4 @@
-//! End-to-end tests for enabling `interpret` declarations and for the v11
+//! End-to-end tests for enabling `interpret` declarations and for the v12
 //! certificate that records an interpretation application.
 //!
 //! The default session must stay byte-for-byte identical: an interpretation is
@@ -387,7 +387,7 @@ fn two_enabled_interpretations_are_listed_by_id_in_the_certificate() {
     assert_eq!(value["format_version"], 12);
     let interpretations = value["interpretations"]
         .as_array()
-        .expect("v11 records an interpretations array");
+        .expect("v12 records an interpretations array");
     assert_eq!(interpretations.len(), 2);
     assert_eq!(interpretations[0]["id"], "iA");
     assert_eq!(interpretations[1]["id"], "iB");
@@ -552,7 +552,7 @@ fn a_conflict_witness_can_be_an_interpretation() {
     );
 }
 
-/// Generate a valid v11 certificate for `Q 张三` and then hand-edit it.
+/// Generate a valid v12 certificate for `Q 张三` and then hand-edit it.
 fn forged_certificate(
     edit: impl FnOnce(&mut serde_json::Value),
     tag: &str,
@@ -872,7 +872,7 @@ fn a_chained_certificate_is_rejected_by_verify_cert() {
     // chain" invariant rejects the graph.
     value["interpretations"]
         .as_array_mut()
-        .expect("the v11 table is an array")
+        .expect("the v12 table is an array")
         .push(serde_json::json!({
             "id": "i2",
             "direction": "analogy",

@@ -1,4 +1,4 @@
-//! End-to-end tests for certificate v11's multiple-witness table.
+//! End-to-end tests for certificate v12's multiple-witness table.
 //!
 //! A conclusion derived by two rules keeps both derivations: `:why` says how
 //! many other independent arguments exist, `:cert` records every witness node,
@@ -88,7 +88,7 @@ rule 规则C :
 "#;
 
 /// A universal fact breaks the rule cycle: v8 proved `Q 甲` through the
-/// universal instance and must keep doing so in v11.
+/// universal instance and must keep doing so in v12.
 const CYCLE: &str = r#"
 sort 人
 pred P : 人 → Prop

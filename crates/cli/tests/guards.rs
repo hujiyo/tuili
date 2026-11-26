@@ -1,4 +1,4 @@
-//! End-to-end tests for rule guards (certificate v11).
+//! End-to-end tests for rule guards (certificate v12).
 //!
 //! A guard is an instance condition: a comparison over the values a rule
 //! instance binds that must hold for the rule to fire. These tests exercise the
@@ -523,10 +523,10 @@ rule 重大认定 :
     assert!(err.contains("守卫求值失败不当作 false"), "{err}");
 }
 
-// --------------------------------------------------------- certificate v11
+// --------------------------------------------------------- certificate v12
 
 #[test]
-fn the_certificate_is_v11_and_records_each_guard() {
+fn the_certificate_is_v12_and_records_each_guard() {
     let theory = TempFile::new("guard-cert", "std", GUARD_THEORY);
     let output = session_with(&theory, &[":cert 重大 乙 3000".into()]);
     assert_exit(&output, PROVED);
